@@ -1,0 +1,120 @@
+name: build
+
+# Continuous integration and release-artifact builds across platforms.
+#
+# STATUS (2026-07): the xhdfe C++ core is developed and validated on
+# Linux x86-64 + GCC. The Linux job below is the reference and is expected
+# to pass. The Windows and macOS (Apple Silicon) jobs are the path to
+# trustworthy prebuilt binaries for those platforms — they build on REAL
+# runners so the artifacts are testable, not blind cross-compilations — but
+# they will need portability work (Windows: MSVC/MinGW flags, no -march=native;
+# macOS: libomp, clang, Eigen NEON) before they go green. Treat a red
+# Windows/macOS job as "not ported yet", not a regression of the Linux build.
+#
+# GPU note: these jobs build the CPU reference only. CUDA/Metal binaries are
+# intentionally NOT distributed — GPU users build from source with
+# XHDFE_ENABLE_CUDA=ON and their card's compute capability.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+jobs:
+  # ---- Reference build: Linux x86-64, CPU, GCC ---------------------------
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libomp-dev
+
+      - name: Build C++ core + Python module (CMake, CPU)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DXHDFE_ENABLE_CUDA=OFF -DXHDFE_ENABLE_MARCH_NATIVE=OFF
+          cmake --build build -j
+
+      - name: Set up Python and build the wheel
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip build (source install, portable -march)
+        env:
+          XHDFE_ENABLE_MARCH_NATIVE: "OFF"
+        run: |
+          python -m pip install --upgrade pip build numpy
+          python -m pip install .
+          python -c "import xhdfe; print('python import OK', xhdfe.__version__)"
+
+      - name: Build the Stata plugin (Linux, OpenMP, CPU)
+        run: bash stata/tools/build-plugin.sh --linux --openmp
+
+      - name: R package check
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+      - name: R CMD INSTALL + tests
+        env:
+          XHDFE_MARCH: "x86-64-v2"
+        run: |
+          Rscript -e 'install.packages(c("Rcpp","testthat"), repos="https://cloud.r-project.org")'
+          R CMD INSTALL r/xhdfe
+          Rscript -e 'testthat::test_local("r/xhdfe", stop_on_failure = TRUE)'
+
+      - name: Package Linux CPU release bundle
+        if: github.event_name == 'release'
+        run: |
+          mkdir -p dist/stata
+          cp stata/xhdfe.ado stata/xhdfe_estat.ado stata/xhdfe_p.ado stata/xhdfe.sthlp \
+             stata/xhdfe.pkg stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg stata/stata.toc \
+             stata/xhdfe.plugin dist/stata/ 2>/dev/null || true
+          bash stata/tools/build-xfe-plugin.sh --linux --openmp || true
+          cp stata/xfe.plugin dist/stata/ 2>/dev/null || true
+          (cd dist && zip -r ../xhdfe-stata-linux-x86_64-cpu.zip stata)
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: xhdfe-stata-linux-x86_64-cpu.zip
+
+  # ---- Windows (Stata plugin via MinGW; needs portability work) ----------
+  windows:
+    runs-on: windows-latest
+    continue-on-error: true          # not ported yet; do not fail the run
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Stata plugin (Windows, MinGW, CPU)
+        shell: bash
+        run: bash stata/tools/build-plugin.sh --windows --no-openmp
+      - name: Upload Windows plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhdfe-plugin-windows-x86_64-cpu
+          path: stata/xhdfe.plugin
+          if-no-files-found: warn
+
+  # ---- macOS Apple Silicon (needs portability work) ----------------------
+  macos-arm64:
+    runs-on: macos-14              # Apple Silicon (arm64)
+    continue-on-error: true          # not ported yet; do not fail the run
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: brew install cmake libomp
+      - name: Build C++ core + Python module (CPU)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DXHDFE_ENABLE_CUDA=OFF -DXHDFE_ENABLE_MARCH_NATIVE=OFF
+          cmake --build build -j
+      - name: Upload macOS arm64 module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xhdfe-module-macos-arm64-cpu
+          path: build/*.so
+          if-no-files-found: warn
