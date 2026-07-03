@@ -1,0 +1,4 @@
+v 3
+d xhdfe: High-dimensional fixed effects regression via a C++ plugin
+p xhdfe High-dimensional fixed effects regression via a C++ plugin
+p xfe Partial-out variables with multiple fixed effects via a C++ plugin

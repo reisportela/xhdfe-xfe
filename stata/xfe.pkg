@@ -1,0 +1,9 @@
+v 1.10.0
+d xfe: Partial-out variables with multiple fixed effects via a C++ plugin
+d
+d This package ships the `xfe` command plus a platform-specific plugin binary.
+d If the bundled plugin is not compatible with your platform, build it from source in the repo:
+d   `bash stata/tools/build-xfe-plugin.sh`
+f xfe.ado
+f xfe.sthlp
+f xfe.plugin

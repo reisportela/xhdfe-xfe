@@ -1,0 +1,20 @@
+xhdfe
+Copyright (c) 2025-2026 Miguel Portela and Tiago Tavares
+
+This product is licensed under the MIT License (see LICENSE).
+
+--------------------------------------------------------------------------
+Bundled third-party components
+--------------------------------------------------------------------------
+
+Eigen 3.4.0 (third_party/eigen-3.4.0/ and, mirrored, r/xhdfe/src/eigen/)
+  A C++ template library for linear algebra, bundled unmodified and used
+  header-only.
+  Copyright (c) the Eigen authors.
+  License: primarily MPL-2.0, with parts under BSD-3-Clause and Apache-2.0.
+  Full license texts ship with the headers:
+    third_party/eigen-3.4.0/COPYING.{MPL2,BSD,APACHE,MINPACK,README}
+    r/xhdfe/src/eigen/COPYING.*
+  The default configuration used here relies only on the MPL-2.0 / BSD /
+  Apache-2.0 parts of Eigen.
+  Homepage: https://eigen.tuxfamily.org

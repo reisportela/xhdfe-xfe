@@ -1,0 +1,910 @@
+---
+title: "xhdfe for R — feature tour and the core23 benchmark suite"
+author: "xhdfe development team"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    code-fold: false
+    number-sections: true
+execute:
+  warning: true
+  message: true
+---
+
+# Introduction
+
+`xhdfe` is an R package for linear regression with many high-dimensional
+fixed effects, backed by the same C++ core that powers the `xhdfe` Stata
+command and the `py_hdfe` Python binding. This document has two parts:
+
+- **Part A** tours every feature of the R interface on a seeded synthetic
+  worker–firm panel: formula grammar, variance estimators, weights,
+  heterogeneous slopes, combined fixed effects, instrumental variables,
+  fixed-effect recovery, prediction, the within transform, group/individual
+  fixed effects, mobility groups, tolerance modes, absorption methods,
+  thread control, and a numerical cross-check against `fixest`.
+- **Part B** programs all 23 specifications of the *core23 encompassing
+  benchmark* (the registry used to compare xhdfe against pyfixest, fixest,
+  FixedEffectModels.jl, and reghdfe). The 15 small specifications run
+  unconditionally; the 8 heavy ones are programmed but only executed when
+  the environment variable `XHDFE_QMD_HEAVY=TRUE` is set.
+
+```{r setup}
+# Library resolution, in order: XHDFE_R_LIBS (colon-separated), then the
+# repository-local dev libraries relative to this file (Rlib_cuda preferred:
+# identical estimator, GPU still opt-in per call), then the default paths.
+repo_r <- normalizePath(file.path(dirname(
+  knitr::current_input(dir = TRUE)), ".."), mustWork = FALSE)
+env_libs <- strsplit(Sys.getenv("XHDFE_R_LIBS", ""), ":", fixed = TRUE)[[1]]
+.libPaths(c(env_libs[nzchar(env_libs)],
+            file.path(repo_r, c("Rlib_cuda", "Rlib")), .libPaths()))
+library(xhdfe)
+print(xhdfe_info())
+
+# Heavy benchmark specs (hundreds of MB to GBs of data) only run on request:
+run_heavy <- isTRUE(as.logical(Sys.getenv("XHDFE_QMD_HEAVY", "FALSE")))
+# GPU sections only run when the loaded build was compiled with CUDA:
+has_gpu <- isTRUE(xhdfe_info()$cuda_enabled)
+cat("run_heavy =", run_heavy, "| has_gpu =", has_gpu, "\n")
+```
+
+# Part A — feature tour
+
+## A synthetic worker–firm panel
+
+We simulate a matched employer–employee panel with roughly 200,000
+observations, 20,000 workers, 2,000 firms and 10 years. Workers mostly stay
+with a "home" firm but move with 15% probability, which produces a
+well-connected mobility graph — the classic setting for two-way (AKM-style)
+fixed-effect models. The data-generating process includes an endogenous
+regressor with two valid instruments, which we use in the IV section.
+
+```{r simulate-panel}
+set.seed(20260703)
+n         <- 200000
+n_workers <- 20000
+n_firms   <- 2000
+years     <- 2010:2019
+
+worker    <- sample.int(n_workers, n, replace = TRUE)
+home_firm <- sample.int(n_firms, n_workers, replace = TRUE)
+firm      <- ifelse(runif(n) < 0.15,
+                    sample.int(n_firms, n, replace = TRUE),
+                    home_firm[worker])
+year      <- sample(years, n, replace = TRUE)
+
+worker_fe <- rnorm(n_workers, sd = 0.5)
+firm_fe   <- rnorm(n_firms,   sd = 0.3)
+year_fe   <- seq(-0.10, 0.10, length.out = length(years))
+
+tenure <- pmax(0, round(rnorm(n, mean = 6, sd = 3), 1))
+x1     <- rnorm(n) + 0.3 * worker_fe[worker]      # correlated with worker FE
+x2     <- rnorm(n) + 0.2 * firm_fe[firm]          # correlated with firm FE
+z1     <- rnorm(n)                                 # instruments
+z2     <- rnorm(n)
+u      <- rnorm(n, sd = 0.4)                       # structural error
+d_endo <- 0.6 * z1 - 0.4 * z2 + 0.5 * u + rnorm(n, sd = 0.3)  # endogenous
+
+y <- 0.5 * x1 - 0.3 * x2 + 0.8 * d_endo +
+  worker_fe[worker] + firm_fe[firm] + year_fe[match(year, years)] + u
+
+panel <- data.frame(y, x1, x2, d_endo, z1, z2,
+                    worker, firm, year, tenure,
+                    w  = runif(n, 0.5, 2),          # analytic weights
+                    fw = sample(1:3, n, TRUE))      # frequency weights
+str(panel)
+```
+
+## Baseline estimation and the methods surface
+
+The formula grammar follows `fixest`: regressors before the first `|`,
+absorbed fixed effects after it. `print()` reports the sample, the absorbed
+dimensions with their level counts, convergence diagnostics, and the
+coefficient table; `summary()` adds sums of squares, degrees-of-freedom
+accounting, and backend diagnostics.
+
+```{r baseline}
+m_base <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel)
+print(m_base)
+```
+
+```{r baseline-summary}
+summary(m_base)
+```
+
+The standard generic surface is fully implemented:
+
+```{r methods-surface}
+coef(m_base)
+head(coeftable(m_base))
+confint(m_base)                 # at the fit's confidence level (95 by default)
+confint(m_base, level = 0.99)   # re-derived on demand at another level
+vcov(m_base)
+c(nobs = nobs(m_base), df.residual = df.residual(m_base))
+logLik(m_base)
+c(AIC = AIC(m_base), BIC = BIC(m_base), deviance = deviance(m_base))
+formula(m_base)
+head(residuals(m_base))
+head(fitted(m_base))            # xb by default; fitted(., type = "xbd") adds the FEs
+```
+
+## Variance estimators
+
+Four inference flavors: homoskedastic (`vcov = "iid"`), heteroskedasticity
+robust HC1 (`vcov = "robust"`), one-way clustered, and multiway clustered
+(Cameron–Gelbach–Miller). Clusters can be given through `cluster = ~ id`
+or by passing a formula directly as `vcov`. Small-sample conventions follow
+reghdfe by default. Note that the two-way fit emits the same
+positive-semi-definiteness (CGM) adjustment warning that reghdfe applies.
+
+```{r vcov-variants}
+m_iid <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel, vcov = "iid")
+m_rob <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel, vcov = "robust")
+m_cl1 <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel, cluster = ~firm)
+m_cl2 <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+               cluster = ~worker + firm)   # two-way (CGM)
+
+vc_tab <- data.frame(
+  estimator = c("iid", "robust (HC1)", "cluster(firm)", "cluster(worker+firm)"),
+  se_x1 = sapply(list(m_iid, m_rob, m_cl1, m_cl2), function(m) m$se[["x1"]]),
+  se_x2 = sapply(list(m_iid, m_rob, m_cl1, m_cl2), function(m) m$se[["x2"]]),
+  clusters = c(NA, NA, m_cl1$num_clusters, m_cl2$num_clusters))
+knitr::kable(vc_tab, digits = 6,
+             caption = "Standard errors of x1/x2 under the four vcov variants")
+```
+
+## Weights
+
+Analytic weights (`weights_type = "analytic"`, the default) reweight the
+objective; frequency weights (`weights_type = "frequency"`) additionally
+count duplicated observations in the degrees of freedom, exactly like
+Stata's `aweight`/`fweight` distinction.
+
+```{r weights}
+m_aw <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel, weights = ~w)
+m_fw <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+              weights = ~fw, weights_type = "frequency")
+knitr::kable(data.frame(
+  weights   = c("analytic (w)", "frequency (fw)"),
+  b_x1      = c(coef(m_aw)[["x1"]], coef(m_fw)[["x1"]]),
+  se_x1     = c(m_aw$se[["x1"]], m_fw$se[["x1"]]),
+  nobs      = c(nobs(m_aw), nobs(m_fw)),
+  sum_weights = c(m_aw$sumweights, m_fw$sumweights)),
+  digits = 6, caption = "Analytic vs frequency weights")
+```
+
+## Heterogeneous (group-specific) slopes
+
+The bracket grammar mirrors `fixest` and maps one-to-one onto Stata's
+factorial `absorb()` syntax:
+
+- `firm[tenure]` — firm intercepts **and** firm-specific tenure slopes
+  (Stata: `NPC##c.tenure`);
+- `firm[[tenure]]` — firm-specific slopes **only**, no firm intercepts
+  (Stata: `NPC#c.tenure`).
+
+```{r het-slopes}
+m_sl <- xhdfe(y ~ x1 + x2 | worker + firm[tenure] + year,
+              data = panel, cluster = ~worker)
+print(m_sl)
+```
+
+```{r het-slopes-slope-only}
+m_so <- xhdfe(y ~ x1 + x2 | worker + firm[[tenure]] + year,
+              data = panel, cluster = ~worker)
+knitr::kable(data.frame(
+  model      = c("firm[tenure] (## intercept+slope)", "firm[[tenure]] (# slope only)"),
+  fe_labels  = c(paste(m_sl$fe_labels, collapse = ", "),
+                 paste(m_so$fe_labels, collapse = ", ")),
+  b_x1       = c(coef(m_sl)[["x1"]], coef(m_so)[["x1"]]),
+  iterations = c(m_sl$iterations, m_so$iterations)),
+  digits = 6, caption = "Slope-carrying absorbed dimensions")
+```
+
+## Combined fixed effects
+
+`f1^f2` absorbs the interaction of two (or more) id variables as a single
+dimension — Stata's `absorb(f1#f2)`.
+
+```{r combined-fe}
+m_comb <- xhdfe(y ~ x1 + x2 | worker^year + firm, data = panel)
+knitr::kable(data.frame(
+  dimension = m_comb$fe_labels,
+  levels    = m_comb$fe_num_levels),
+  caption = "worker^year is absorbed as one combined dimension")
+print(m_comb)
+```
+
+## Instrumental variables (2SLS)
+
+The IV part goes after a second `|`, written `endogenous ~ instruments`.
+Here `d_endo` is endogenous by construction (it loads on the structural
+error `u`) and `z1`, `z2` are valid instruments; 2SLS recovers the true
+coefficient of 0.8 while OLS is biased upward.
+
+```{r iv}
+m_ols_endo <- xhdfe(y ~ x1 + x2 + d_endo | worker + firm + year,
+                    data = panel, cluster = ~worker)
+m_iv <- xhdfe(y ~ x1 + x2 | worker + firm + year | d_endo ~ z1 + z2,
+              data = panel, cluster = ~worker)
+knitr::kable(data.frame(
+  estimator = c("OLS (endogenous ignored)", "2SLS"),
+  b_d_endo  = c(coef(m_ols_endo)[["d_endo"]], coef(m_iv)[["d_endo"]]),
+  se_d_endo = c(m_ols_endo$se[["d_endo"]], m_iv$se[["d_endo"]])),
+  digits = 6, caption = "True coefficient on d_endo is 0.8")
+coeftable(m_iv)
+```
+
+Note the `(Intercept)` row under IV + fixed effects: it is reported as a
+degenerate 0 with SE 0 (t = NaN). This is deliberate — it is exact parity
+with the upstream Stata implementation, which reports the same degenerate
+constant in this configuration.
+
+## Saving and recovering fixed effects
+
+`save_fe = TRUE` retains the estimated fixed-effect contributions
+(reghdfe's `savefe`). `fixef()` returns one full-length vector per absorbed
+dimension (NA off the estimation sample) with recovery diagnostics
+attached. Together with `predict()`, the decomposition
+`y = xb + d + e` holds to machine precision on the estimation sample.
+
+```{r save-fe}
+m_fe <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+              save_fe = TRUE)
+fe <- fixef(m_fe)
+print(fe)
+lapply(fe, function(v) head(v, 3))
+```
+
+```{r save-fe-reconstruction}
+smp <- m_fe$sample                     # rows of `panel` in the estimation sample
+xb  <- predict(m_fe, type = "xb")      # linear index
+d   <- predict(m_fe, type = "d")       # sum of absorbed FE contributions
+e   <- residuals(m_fe)
+
+recon_gap <- max(abs(panel$y[smp] - (xb[smp] + d[smp] + e[smp])))
+fixef_gap <- max(abs(Reduce(`+`, fe)[smp] - d[smp]))
+cat(sprintf("max |y - (xb + d + e)|          = %.3e\n", recon_gap))
+cat(sprintf("max |sum(fixef) - predict(d)|   = %.3e\n", fixef_gap))
+stopifnot(recon_gap < 1e-8, fixef_gap < 1e-8)
+```
+
+## Prediction
+
+`predict()` implements the full set of Stata post-estimation statistics:
+`xb` (linear index), `xbd` (index plus absorbed effects), `d` (absorbed
+effects), `residuals`, `dresiduals` (`y - xb`), `score`, and `stdp` (the
+standard error of the linear prediction). Out-of-sample prediction with
+`newdata` is available for `type = "xb"` (the absorbed effects of unseen
+observations are unknown by definition).
+
+```{r predict-types}
+pred_tab <- data.frame(
+  y          = panel$y[smp][1:6],
+  xb         = predict(m_fe, type = "xb")[smp][1:6],
+  xbd        = predict(m_fe, type = "xbd")[smp][1:6],
+  d          = predict(m_fe, type = "d")[smp][1:6],
+  residuals  = predict(m_fe, type = "residuals")[smp][1:6],
+  dresiduals = predict(m_fe, type = "dresiduals")[smp][1:6],
+  stdp       = predict(m_fe, type = "stdp")[smp][1:6])
+knitr::kable(pred_tab, digits = 5, caption = "predict() types, first 6 sample rows")
+
+newdata <- data.frame(x1 = c(0, 1, -1), x2 = c(0, 0, 1))
+predict(m_fe, newdata = newdata, type = "xb")
+```
+
+## The within transform: `xhdfe_demean()`
+
+`xhdfe_demean()` partials the fixed effects out of a set of variables
+without running the regression — the analogue of `fixest::demean()`.
+Regressing the demeaned outcome on the demeaned regressors (no intercept)
+reproduces the xhdfe coefficients by the Frisch–Waugh–Lovell theorem.
+
+```{r demean}
+dm <- xhdfe_demean(y ~ x1 + x2 | worker + firm + year, data = panel)
+print(dm)
+Zd <- as.data.frame(dm$demeaned)
+b_manual <- coef(lm(y ~ x1 + x2 - 1, data = Zd))
+fwl_gap <- max(abs(b_manual - coef(m_base)[c("x1", "x2")]))
+cat(sprintf("max |FWL manual - xhdfe| = %.3e\n", fwl_gap))
+stopifnot(fwl_gap < 1e-8)
+```
+
+```{r demean-vs-fixest}
+if (requireNamespace("fixest", quietly = TRUE)) {
+  fd <- fixest::demean(X = panel[, c("y", "x1", "x2")],
+                       f = panel[, c("worker", "firm", "year")])
+  cat(sprintf("max |xhdfe_demean - fixest::demean| = %.3e\n",
+              max(abs(as.matrix(Zd) - as.matrix(fd)))))
+} else {
+  cat("fixest not installed; skipping the demean cross-check\n")
+}
+```
+
+## Group and individual fixed effects
+
+When one observation belongs to a *group* (a patent) that pools several
+*individuals* (its inventors), `group()`/`individual()` estimate the model
+at the group level while absorbing individual fixed effects, aggregating
+individual contributions within each group by `aggregation` (mean or sum).
+This is the R translation of the patents/inventors example in the Stata
+help file.
+
+```{r group-individual}
+tn <- 40
+patent_id   <- ceiling(seq_len(tn) / 2)                    # 2 inventors/patent
+within_n    <- ave(seq_len(tn), patent_id, FUN = seq_along)
+inventor_id <- (patent_id + within_n) %% 10 + 1
+toy <- data.frame(
+  patent_id, inventor_id,
+  year      = 2020 + patent_id %% 3,
+  funding   = patent_id %% 2,
+  citations = 5 + 0.4 * (patent_id %% 2) + patent_id / 10)
+
+# absorb(inventor_id) group(patent_id) individual(inventor_id)
+m_gi <- xhdfe(citations ~ funding | inventor_id, data = toy,
+              group = ~patent_id, individual = ~inventor_id)
+print(m_gi)
+
+# aggregation(sum) instead of the default mean
+m_gi_sum <- xhdfe(citations ~ funding | inventor_id, data = toy,
+                  group = ~patent_id, individual = ~inventor_id,
+                  aggregation = "sum")
+coef(m_gi_sum)
+
+# group-level estimation without individual fixed effects
+m_g <- xhdfe(citations ~ funding | year, data = toy, group = ~patent_id)
+coef(m_g)
+```
+
+The standalone helper `xhdfe_group_fes()` exposes the underlying
+group/individual FE decomposition (Stata's `extractfes`), returning the
+per-individual effects and the solver diagnostics.
+
+```{r group-fes}
+gf <- xhdfe_group_fes(toy$citations,
+                      as.matrix(toy$funding),
+                      fes = list(toy$inventor_id),
+                      group = toy$patent_id,
+                      individual = toy$inventor_id)
+print(gf)
+head(data.frame(individual = gf$individual_ids,
+                effect     = gf$individual_effects))
+```
+
+## Mobility groups
+
+With two or more absorbed dimensions, one absorbed intercept is redundant
+per connected component of the worker–firm mobility graph. `groupvar = TRUE`
+returns the connected-component id of every observation (reghdfe's
+`groupvar()`), which drives the exact degrees-of-freedom accounting. We
+build a deliberately disconnected two-block labor market to show it.
+
+```{r mobility-groups}
+mob <- data.frame(
+  worker = c(1, 1, 2, 2, 3, 3,   4, 4, 5, 5, 6, 6),
+  firm   = c(1, 2, 1, 2, 2, 1,   3, 4, 3, 4, 4, 3))
+set.seed(1)
+mob$x <- rnorm(nrow(mob))
+mob$y <- mob$x + rnorm(nrow(mob))
+
+m_mob <- xhdfe(y ~ x | worker + firm, data = mob, groupvar = TRUE)
+table(m_mob$groupvar)          # two disconnected mobility groups
+c(df_a = m_mob$df_a, redundant = m_mob$df_a_redundant)
+```
+
+The large synthetic panel is fully connected (a single mobility group):
+
+```{r mobility-groups-panel}
+m_gv <- xhdfe(y ~ x1 + x2 | worker + firm, data = panel, groupvar = TRUE)
+cat("connected components in the worker-firm graph:",
+    length(unique(m_gv$groupvar)), "\n")
+```
+
+## Subsets and missing data
+
+`subset` restricts estimation without touching the data; `na.action`
+chooses between listwise deletion (`"omit"`, default) and hard failure
+(`"fail"`).
+
+```{r subset-na}
+m_sub <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+               subset = year >= 2015)
+nobs(m_sub)
+
+panel_na <- panel
+panel_na$x1[c(10, 20, 30)] <- NA
+m_na <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel_na)
+c(input_rows = m_na$n_input, used = nobs(m_na))
+res <- tryCatch(
+  xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel_na, na.action = "fail"),
+  error = function(e) conditionMessage(e))
+res
+```
+
+## Tolerance modes and absorption methods
+
+Three stopping criteria are available through `tolerance_mode`:
+
+- `"xhdfe-fast"` — the historical xhdfe criterion (fewest iterations);
+- `"reghdfe-comparable"` — the package default since 2.7.0, calibrated so
+  a nominal tolerance is comparable with reghdfe's;
+- `"strict-residual"` — a residual-certificate criterion (most iterations).
+
+The absorption solver is chosen adaptively by `absorption_method = "auto"`,
+but every solver can be forced explicitly: `"gs"` (Gauss–Seidel MAP),
+`"sym"` (symmetric Gauss–Seidel), `"lsmr"`, `"mlsmr"` (modified/within
+LSMR), and `"schwarz"` (Schwarz-preconditioned PCG). All converge to the
+same solution; they differ in iteration counts and per-iteration cost.
+
+```{r tolerance-modes}
+tol_rows <- lapply(c("xhdfe-fast", "reghdfe-comparable", "strict-residual"),
+                   function(tm) {
+  fit <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+               tolerance_mode = tm)
+  data.frame(tolerance_mode = tm, iterations = fit$iterations,
+             method = fit$absorption_method_used,
+             converged = fit$converged, b_x1 = coef(fit)[["x1"]])
+})
+knitr::kable(do.call(rbind, tol_rows), digits = 8,
+             caption = "Stopping criteria: same estimates, different iteration counts")
+```
+
+```{r absorption-methods}
+am_rows <- lapply(c("auto", "gs", "sym", "lsmr", "mlsmr", "schwarz"),
+                  function(am) {
+  fit <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+               absorption_method = am)
+  data.frame(requested = am, used = fit$absorption_method_used,
+             iterations = fit$iterations, b_x1 = coef(fit)[["x1"]])
+})
+knitr::kable(do.call(rbind, am_rows), digits = 8,
+             caption = "Absorption solvers: identical coefficients")
+```
+
+## Thread control
+
+`threads = 0` (default) sizes the OpenMP team from the data
+(`target_rows_per_thread`, `min_parallel_rows`); a positive value forces
+the team size. `threads_used` reports what the core actually used.
+
+```{r threads}
+t1 <- system.time(m_thr1 <- xhdfe(y ~ x1 + x2 | worker + firm + year,
+                                  data = panel, threads = 1))
+t8 <- system.time(m_thr8 <- xhdfe(y ~ x1 + x2 | worker + firm + year,
+                                  data = panel, threads = 8))
+knitr::kable(data.frame(
+  requested = c(1, 8),
+  threads_used = c(m_thr1$threads_used, m_thr8$threads_used),
+  elapsed_s = round(c(t1[["elapsed"]], t8[["elapsed"]]), 3)),
+  caption = "Explicit thread-team control (timings on a shared server are indicative)")
+```
+
+## Cross-check against fixest
+
+xhdfe's default small-sample conventions follow reghdfe. In `fixest`
+language they correspond to
+`ssc(fixef.K = "nested", cluster.df = "min", t.df = "min")`. With that
+correction, coefficients and clustered standard errors agree to high
+precision.
+
+```{r fixest-crosscheck}
+if (requireNamespace("fixest", quietly = TRUE)) {
+  fx <- fixest::feols(y ~ x1 + x2 | worker + firm + year, data = panel,
+                      cluster = ~worker,
+                      ssc = fixest::ssc(fixef.K = "nested",
+                                        cluster.df = "min", t.df = "min"))
+  mx <- xhdfe(y ~ x1 + x2 | worker + firm + year, data = panel,
+              cluster = ~worker)
+  common <- names(coef(fx))
+  coef_gap <- max(abs(coef(fx)[common] - coef(mx)[common]))
+  se_gap   <- max(abs(fixest::se(fx)[common] - mx$se[common]))
+  knitr::kable(data.frame(
+    term = common,
+    fixest_coef = coef(fx)[common], xhdfe_coef = coef(mx)[common],
+    fixest_se = fixest::se(fx)[common], xhdfe_se = mx$se[common]),
+    digits = 8, caption = "fixest vs xhdfe under matched ssc conventions")
+  cat(sprintf("max |coef gap| = %.3e ; max |se gap| = %.3e\n", coef_gap, se_gap))
+  stopifnot(coef_gap < 1e-7)
+} else {
+  cat("fixest not installed; skipping the cross-check\n")
+}
+```
+
+# Part B — the core23 encompassing-benchmark suite
+
+The *core23* group of `benchmarks/encompassing/registry.json` is the
+canonical grid used to compare xhdfe against pyfixest, fixest, Julia's
+FixedEffectModels, and reghdfe. It contains 23 dataset-specifications:
+15 small real/synthetic networks (the "Sergio" suite), two large
+Portuguese-registry style panels, two AKM co-authorship regressions
+(including one with firm-specific heterogeneous slopes and two-way
+clustering), and four pyfixest 10-million-row DGPs.
+
+## The registry, expressed in R
+
+```{r core23-registry}
+# Dataset roots follow benchmarks/encompassing/registry.json (path_vars);
+# override any of them by environment variable when running elsewhere.
+env_or <- function(var, default) {
+  v <- Sys.getenv(var, "")
+  if (nzchar(v)) v else default
+}
+SERGIO <- env_or("XHDFE_QMD_SERGIO", "/PATH/TO/sergio-datasets")
+READY  <- env_or("XHDFE_QMD_READY", "/PATH/TO/main_95_21_ready.parquet")
+SIM    <- env_or("XHDFE_QMD_SIM", "/PATH/TO/simulated_panel.parquet")
+AKM    <- env_or("XHDFE_QMD_AKM", "/PATH/TO/akm_v02_firstreg_common.parquet")
+AKM2   <- env_or("XHDFE_QMD_AKM2", "/PATH/TO/akm_v02_r_julia.parquet")
+PF     <- env_or("XHDFE_QMD_PF", "/PATH/TO/pyfixest-benchmarks")
+if (!dir.exists(SERGIO)) {
+  stop("core23 datasets not found at ", SERGIO,
+       "; set the XHDFE_QMD_* environment variables (see this chunk) to your ",
+       "local copies of the encompassing-benchmark data")
+}
+
+spec <- function(name, path, y, x, fe, cluster, slopes = NULL, heavy = FALSE) {
+  list(name = name, path = path, y = y, x = x, fe = fe,
+       cluster = cluster, slopes = slopes, heavy = heavy)
+}
+sergio <- function(name, fe = c("id1", "id2")) {
+  spec(name, file.path(SERGIO, paste0(name, ".parquet")),
+       y = "y", x = c("x1", "x2"), fe = fe, cluster = "id1")
+}
+k10 <- paste0("x", 1:10)
+
+core23 <- list(
+  # -- core18: the 15 small Sergio network datasets ------------------------
+  sergio("credit"),
+  sergio("credit2"),
+  sergio("directors"),
+  sergio("enron"),
+  sergio("github", fe = c("id1", "id2", "id3")),
+  sergio("patents"),
+  sergio("schools", fe = c("id1", "id2", "id3")),
+  sergio("soccer"),
+  sergio("synthetic-assortative", fe = c("id1", "id2", "year")),
+  sergio("synthetic-complete"),
+  sergio("synthetic-uniform-easy"),
+  sergio("synthetic-uniform-hard"),
+  sergio("synthetic-uniform-harder"),
+  sergio("synthetic-zigzag"),
+  sergio("workers", fe = c("id1", "id2", "id3", "id4")),
+  # -- core18: the 3 heavy panels ------------------------------------------
+  spec("main_95_21_ready", READY, y = "log_rhwage",
+       x = c("age_sq", "tenure", "tenure_sq", "educ"),
+       fe = c("w_id", "f_id", "year"), cluster = "w_id", heavy = TRUE),
+  spec("simulated_panel", SIM, y = "ln_wage",
+       x = c("education", "experience", "experience_sq", "union"),
+       fe = c("worker_id", "firm_id", "occupation_id", "year"),
+       cluster = "worker_id", heavy = TRUE),
+  spec("akm_v02_firstreg", AKM, y = "ln_wgain_hour_wz",
+       x = c("exp_akm", "exp_akm_sq_100", "exp_akm_cu_1000",
+             "exp_akm_qt_10000", "firm_seniority_obs",
+             "firm_seniority_spline10"),
+       fe = c("idtrab", "ano", "NPC_FIC"), cluster = "idtrab", heavy = TRUE),
+  # -- core22 additions: the 4 pyfixest 10M-row DGPs -----------------------
+  spec("pf_difficult_10m_3fe",
+       file.path(PF, "benchmark_difficult_n10000000_k10.parquet"),
+       y = "y", x = k10, fe = c("indiv_id", "firm_id", "year"),
+       cluster = "indiv_id", heavy = TRUE),
+  spec("pf_simple_10m_2fe",
+       file.path(PF, "benchmark_simple_n10000000_k10.parquet"),
+       y = "y", x = k10, fe = c("indiv_id", "year"),
+       cluster = "indiv_id", heavy = TRUE),
+  spec("pf_simple_10m_3fe",
+       file.path(PF, "benchmark_simple_n10000000_k10.parquet"),
+       y = "y", x = k10, fe = c("indiv_id", "firm_id", "year"),
+       cluster = "indiv_id", heavy = TRUE),
+  spec("pf_difficult_10m_2fe",
+       file.path(PF, "benchmark_difficult_n10000000_k10.parquet"),
+       y = "y", x = k10, fe = c("indiv_id", "year"),
+       cluster = "indiv_id", heavy = TRUE),
+  # -- core23 addition: Tiago's AKM second regression (Table 7) ------------
+  # Canonical Stata command (registry comment):
+  #   xhdfe ln_wgain_hour_wz c.exp_akm c.exp_akm_sq_100 c.exp_akm_cu_1000
+  #         c.exp_akm_qt_10000,
+  #         absorb(idtrab ano NPC_FIC##c.firm_seniority_obs
+  #                NPC_FIC#c.firm_seniority_spline10)
+  #         vce(cluster idtrab NPC_FIC)
+  spec("akm_v02_secondreg", AKM2, y = "ln_wgain_hour_wz",
+       x = c("exp_akm", "exp_akm_sq_100", "exp_akm_cu_1000",
+             "exp_akm_qt_10000"),
+       fe = c("idtrab", "ano"),
+       slopes = list(
+         list(fe = "NPC_FIC", var = "firm_seniority_obs",      intercept = TRUE),
+         list(fe = "NPC_FIC", var = "firm_seniority_spline10", intercept = FALSE)),
+       cluster = c("idtrab", "NPC_FIC"), heavy = TRUE)
+)
+names(core23) <- vapply(core23, `[[`, "", "name")
+spec_by_name <- function(nm) core23[[nm]]
+
+spec_df <- do.call(rbind, lapply(core23, function(s) data.frame(
+  name    = s$name,
+  file    = basename(s$path),
+  y       = s$y,
+  k       = length(s$x),
+  fe      = paste(s$fe, collapse = "+"),
+  cluster = paste(s$cluster, collapse = "+"),
+  slopes  = if (is.null(s$slopes)) "" else
+    paste(vapply(s$slopes, function(sl)
+      paste0(sl$fe, if (sl$intercept) "##c." else "#c.", sl$var), ""),
+      collapse = " "),
+  heavy   = s$heavy, row.names = NULL)))
+knitr::kable(spec_df, caption = "The 23 core23 dataset-specifications")
+stopifnot(length(core23) == 23L, sum(spec_df$heavy) == 8L)
+```
+
+## Column-pruned parquet loading
+
+Benchmarks should never pay for columns they do not use. `read_cols()`
+pulls only the required columns through DuckDB's parquet reader (with a
+`nanoparquet` fallback when DuckDB is unavailable).
+
+```{r read-cols}
+read_cols <- function(path, cols) {
+  if (requireNamespace("duckdb", quietly = TRUE)) {
+    con <- DBI::dbConnect(duckdb::duckdb())
+    on.exit(DBI::dbDisconnect(con, shutdown = TRUE), add = TRUE)
+    sql <- sprintf("SELECT %s FROM read_parquet('%s')",
+                   paste(sprintf('"%s"', cols), collapse = ", "), path)
+    DBI::dbGetQuery(con, sql)
+  } else {
+    as.data.frame(nanoparquet::read_parquet(path))[, cols, drop = FALSE]
+  }
+}
+```
+
+## The spec runner
+
+`run_spec()` loads a specification's columns, encodes every id column to
+integer codes, translates the registry's `slopes` semantics into
+`xhdfe_fit()` slope entries — each slope variable rides on a **fresh copy
+of its carrier FE appended to `fes`**, with `include_intercept = TRUE`
+matching Stata's `fe##c.var` and `FALSE` matching `fe#c.var` — sets the
+(possibly multiway) cluster list, and returns one summary row.
+
+```{r run-spec}
+as_codes <- function(v) {
+  if (is.integer(v)) return(v)
+  if (is.numeric(v) && all(v == trunc(v), na.rm = TRUE) &&
+      min(v, na.rm = TRUE) >= -.Machine$integer.max &&
+      max(v, na.rm = TRUE) <= .Machine$integer.max) return(as.integer(v))
+  as.integer(factor(v))          # non-integer ids -> codes by level
+}
+
+run_spec <- function(s, backend = "default",
+                     tolerance_mode = "reghdfe-comparable", threads = 0) {
+  slope_cols <- if (is.null(s$slopes)) character(0) else
+    unlist(lapply(s$slopes, function(sl) c(sl$fe, sl$var)))
+  cols <- unique(c(s$y, s$x, s$fe, s$cluster, slope_cols))
+  df <- read_cols(s$path, cols)
+  df <- df[stats::complete.cases(df), , drop = FALSE]   # matrix API takes no NAs
+
+  fes <- lapply(s$fe, function(v) as_codes(df[[v]]))
+  names(fes) <- s$fe
+  slopes <- NULL
+  if (!is.null(s$slopes)) {
+    slopes <- list()
+    for (sl in s$slopes) {
+      # fresh carrier-FE dimension per slope variable
+      fes[[length(fes) + 1L]] <- as_codes(df[[sl$fe]])
+      names(fes)[length(fes)] <- paste0(sl$fe,
+                                        if (sl$intercept) "[" else "[[",
+                                        sl$var,
+                                        if (sl$intercept) "]" else "]]")
+      slopes[[length(slopes) + 1L]] <- list(
+        fe = length(fes),                       # 1-based index into fes
+        values = as.numeric(df[[sl$var]]),
+        include_intercept = isTRUE(sl$intercept))
+    }
+  }
+  cl <- lapply(s$cluster, function(v) as_codes(df[[v]]))
+  names(cl) <- s$cluster
+  X <- as.matrix(df[s$x])
+  yv <- as.numeric(df[[s$y]])
+  rm(df)
+
+  t0 <- Sys.time()
+  fit <- xhdfe_fit(yv, X, fes = fes, cluster = cl, slopes = slopes,
+                   tolerance_mode = tolerance_mode,
+                   backend = backend, threads = threads)
+  elapsed <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+
+  b <- coef(fit)
+  data.frame(dataset = s$name,
+             n = nobs(fit),
+             coef1 = unname(b[[1L]]),
+             coef2 = unname(b[[2L]]),
+             elapsed_s = round(elapsed, 3),
+             iterations = fit$iterations,
+             converged = fit$converged,
+             method = fit$absorption_method_used,
+             gpu_used = isTRUE(fit$gpu_used),
+             gpu_iter = fit$gpu_absorption_iterations,
+             mode = tolerance_mode,
+             row.names = NULL)
+}
+```
+
+## The 15 small specifications (Sergio suite)
+
+Each parquet is under 20 MB, so these run unconditionally, in
+`"reghdfe-comparable"` mode (the package default). Two footnotes from the
+benchmark history: `synthetic-zigzag` is a *saturated* design (the absorbed
+model fits perfectly, so the core prints a perfect-fit note and standard
+errors are not identified), and `github` is the pathological
+ill-conditioned graph that drives the largest iteration counts.
+
+```{r core23-small}
+small_names <- names(core23)[!vapply(core23, `[[`, TRUE, "heavy")]
+stopifnot(length(small_names) == 15L)
+small_results <- do.call(rbind, lapply(small_names, function(nm)
+  run_spec(spec_by_name(nm))))
+knitr::kable(small_results, digits = 6,
+             caption = "core23 small specifications, reghdfe-comparable mode (single-run timings on a shared server)")
+```
+
+## The 8 heavy specifications
+
+Each heavy spec sits in its own chunk, executed only when `run_heavy` is
+`TRUE` (`XHDFE_QMD_HEAVY=TRUE quarto render ...`). Timings quoted in the
+comments are single-run orders of magnitude from the encompassing-benchmark
+campaign on this shared 48-core server.
+
+```{r heavy-init}
+heavy_results <- list()
+skip_note <- function(nm, scale) {
+  cat(sprintf("[skipped] %s -- set XHDFE_QMD_HEAVY=TRUE to run. Expected scale: %s\n",
+              nm, scale))
+}
+```
+
+```{r heavy-ready}
+# main_95_21_ready: 355 MB parquet, worker+firm+year FEs, cluster(w_id).
+# Expected scale: tens of seconds to ~2 minutes CPU in comparable mode
+# (~77 absorber iterations on the reference runs).
+if (run_heavy) {
+  heavy_results[["main_95_21_ready"]] <- run_spec(spec_by_name("main_95_21_ready"))
+  knitr::kable(heavy_results[["main_95_21_ready"]], digits = 6)
+  invisible(gc())
+} else skip_note("main_95_21_ready", "O(1-2 min) CPU, 355 MB parquet")
+```
+
+```{r heavy-sim}
+# simulated_panel: 2.1 GB parquet, 4 absorbed dimensions
+# (worker/firm/occupation/year), cluster(worker_id).
+# Expected scale: several minutes CPU and tens of GB of RAM.
+if (run_heavy) {
+  heavy_results[["simulated_panel"]] <- run_spec(spec_by_name("simulated_panel"))
+  knitr::kable(heavy_results[["simulated_panel"]], digits = 6)
+  invisible(gc())
+} else skip_note("simulated_panel", "O(minutes) CPU, 2.1 GB parquet, high RAM")
+```
+
+```{r heavy-akm1}
+# akm_v02_firstreg: 786 MB parquet, ~56M rows, worker+year+firm FEs,
+# cluster(idtrab). The auto selector promotes this AKM-class graph to MLSMR.
+# Expected scale: ~2-3 minutes CPU in comparable mode.
+if (run_heavy) {
+  heavy_results[["akm_v02_firstreg"]] <- run_spec(spec_by_name("akm_v02_firstreg"))
+  knitr::kable(heavy_results[["akm_v02_firstreg"]], digits = 6)
+  invisible(gc())
+} else skip_note("akm_v02_firstreg", "O(2-3 min) CPU, 786 MB parquet, ~56M rows")
+```
+
+```{r heavy-pf-difficult-3fe}
+# pf_difficult_10m_3fe: ~1 GB parquet, 10M rows, k=10, 3 FEs, hard graph.
+# Expected scale: O(1-2 min) CPU comparable.
+if (run_heavy) {
+  heavy_results[["pf_difficult_10m_3fe"]] <- run_spec(spec_by_name("pf_difficult_10m_3fe"))
+  knitr::kable(heavy_results[["pf_difficult_10m_3fe"]], digits = 6)
+  invisible(gc())
+} else skip_note("pf_difficult_10m_3fe", "O(1-2 min) CPU, 10M rows, k=10")
+```
+
+```{r heavy-pf-simple-2fe}
+# pf_simple_10m_2fe: ~1 GB parquet, 10M rows, k=10, 2 easy FEs.
+# Expected scale: O(10-30 s) CPU (the Jacobi-PCG gate makes this corner fast).
+if (run_heavy) {
+  heavy_results[["pf_simple_10m_2fe"]] <- run_spec(spec_by_name("pf_simple_10m_2fe"))
+  knitr::kable(heavy_results[["pf_simple_10m_2fe"]], digits = 6)
+  invisible(gc())
+} else skip_note("pf_simple_10m_2fe", "O(10-30 s) CPU, 10M rows, k=10")
+```
+
+```{r heavy-pf-simple-3fe}
+# pf_simple_10m_3fe: same file as the 2FE spec, third dimension added.
+# Expected scale: O(10-60 s) CPU.
+if (run_heavy) {
+  heavy_results[["pf_simple_10m_3fe"]] <- run_spec(spec_by_name("pf_simple_10m_3fe"))
+  knitr::kable(heavy_results[["pf_simple_10m_3fe"]], digits = 6)
+  invisible(gc())
+} else skip_note("pf_simple_10m_3fe", "O(10-60 s) CPU, 10M rows, k=10")
+```
+
+```{r heavy-pf-difficult-2fe}
+# pf_difficult_10m_2fe: hard 10M-row graph, 2 FEs.
+# Expected scale: O(1-2 min) CPU comparable.
+if (run_heavy) {
+  heavy_results[["pf_difficult_10m_2fe"]] <- run_spec(spec_by_name("pf_difficult_10m_2fe"))
+  knitr::kable(heavy_results[["pf_difficult_10m_2fe"]], digits = 6)
+  invisible(gc())
+} else skip_note("pf_difficult_10m_2fe", "O(1-2 min) CPU, 10M rows, k=10")
+```
+
+```{r heavy-akm2}
+# akm_v02_secondreg: the heaviest and most feature-rich spec. 792 MB parquet
+# on /srv, ~56M rows. Reproduces the canonical Stata command
+#   xhdfe ln_wgain_hour_wz c.exp_akm c.exp_akm_sq_100 c.exp_akm_cu_1000
+#         c.exp_akm_qt_10000,
+#         absorb(idtrab ano NPC_FIC##c.firm_seniority_obs
+#                NPC_FIC#c.firm_seniority_spline10) vce(cluster idtrab NPC_FIC)
+# i.e. two heterogeneous-slope dimensions on carrier NPC_FIC (one with the
+# firm intercept, one slope-only) plus 2-way clustering. Only xhdfe absorbs
+# these slopes among the benchmark engines (pyfixest 0.60 silently mis-fits).
+# Expected scale: several minutes CPU; GPU comparable runs in ~1.5-2 minutes.
+if (run_heavy) {
+  heavy_results[["akm_v02_secondreg"]] <- run_spec(spec_by_name("akm_v02_secondreg"))
+  knitr::kable(heavy_results[["akm_v02_secondreg"]], digits = 6)
+  invisible(gc())
+} else skip_note("akm_v02_secondreg", "O(minutes) CPU, ~56M rows, het-slopes + 2-way cluster")
+```
+
+## GPU backend
+
+`backend = "cuda"` is *fail-closed*: if the GPU is not actually used the
+call errors rather than silently falling back to the CPU (the same contract
+as the Stata plugin's `gpubackend(cuda)`). The build loaded here reports
+`cuda_enabled = ` `r xhdfe_info()$cuda_enabled`.
+
+```{r gpu-section}
+if (has_gpu) {
+  gpu_results <- do.call(rbind, lapply(c("soccer", "workers"), function(nm) {
+    tryCatch(run_spec(spec_by_name(nm), backend = "cuda"),
+             error = function(e) {
+               cat("GPU run failed for", nm, ":", conditionMessage(e), "\n")
+               NULL
+             })
+  }))
+  if (!is.null(gpu_results)) {
+    knitr::kable(gpu_results, digits = 6,
+                 caption = "CUDA re-runs: gpu_used and GPU absorber iterations")
+  }
+} else {
+  cat("This xhdfe build was compiled without CUDA, so the GPU section is\n",
+      "informational only. To enable it, rebuild/install the package with\n",
+      "  XHDFE_ENABLE_CUDA=ON R CMD INSTALL r/xhdfe -l <lib>\n",
+      "(on this workstation target the H100 with XHDFE_CUDA_ARCH=90) and\n",
+      "point .libPaths() at that library. With a CUDA build, has_gpu becomes\n",
+      "TRUE and this chunk re-runs benchmark specs with backend = \"cuda\",\n",
+      "reporting gpu_used and gpu_absorption_iterations per fit.\n", sep = "")
+}
+```
+
+## Wrap-up
+
+```{r wrapup}
+all_results <- rbind(small_results,
+                     if (length(heavy_results)) do.call(rbind, heavy_results))
+knitr::kable(all_results, digits = 6,
+             caption = sprintf("core23 results collected in this render (%d of 23 specs executed)",
+                               nrow(all_results)))
+```
+
+This document demonstrated, in Part A, the complete feature surface of the
+xhdfe R package — formula and matrix interfaces, four variance estimators,
+analytic and frequency weights, heterogeneous slopes (`fe[x]`/`fe[[x]]`),
+combined fixed effects (`f1^f2`), 2SLS, fixed-effect recovery with exact
+`y = xb + d + e` reconstruction, the seven `predict()` types, the within
+transform, group/individual estimation, mobility groups, the three
+tolerance modes, six absorption solvers, thread control, and numerical
+agreement with `fixest` under matched small-sample conventions.
+
+Part B expressed the entire core23 encompassing-benchmark grid as R code:
+the 15 small specifications ran end-to-end above, and the 8 heavy
+specifications (up to 56M rows, heterogeneous slopes, multiway clustering)
+are fully programmed and reproducible with `XHDFE_QMD_HEAVY=TRUE`, on CPU
+or — with a CUDA-enabled build — on GPU.

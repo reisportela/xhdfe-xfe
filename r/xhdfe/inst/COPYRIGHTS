@@ -1,0 +1,23 @@
+Copyright and licensing of bundled components
+==============================================
+
+xhdfe R package code (R/, src/rcpp_xhdfe.cpp, documentation)
+  Copyright (c) 2025-2026 Miguel Portela and Tiago Tavares
+  License: MIT (see the LICENSE file)
+
+xhdfe C++ core (src/*.cpp except rcpp_xhdfe.cpp, src/include/, src/*.cu,
+src/*.hpp) -- byte-for-byte mirror of the canonical core at the repository
+root (https://github.com/reisportela/xhdfe-xfe)
+  Copyright (c) 2025-2026 Miguel Portela and Tiago Tavares
+  License: MIT (see the LICENSE file)
+
+Eigen 3.4.0 (src/eigen/Eigen/, header-only, bundled unmodified)
+  Copyright (c) the Eigen authors
+  License: primarily MPL-2.0; parts under BSD-3-Clause and Apache-2.0.
+  The complete license texts ship alongside the headers:
+    src/eigen/COPYING.MPL2, COPYING.BSD, COPYING.APACHE, COPYING.MINPACK,
+    COPYING.README (COPYING.GPL/COPYING.LGPL are included for completeness;
+    Eigen's default build, used here, relies only on the MPL-2.0/BSD/Apache
+    parts).
+  Source: https://eigen.tuxfamily.org (bundled from the repository's
+  third_party/eigen-3.4.0 tree).

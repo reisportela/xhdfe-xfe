@@ -1,0 +1,36 @@
+Package: xhdfe
+Type: Package
+Title: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend
+Version: 2.11.0.20260616
+Authors@R: c(
+    person("Miguel", "Portela", email = "miguel.portela@eeg.uminho.pt", role = c("aut", "cre")),
+    person("Tiago", "Tavares", email = "tgstavares@eeg.uminho.pt", role = "aut"))
+Description: Estimates linear models with multiple high-dimensional fixed
+    effects using the xhdfe C++ backend -- the same compiled estimator behind
+    the Stata 'xhdfe' command and the Python 'xhdfe' package. Supports multiway
+    fixed effects, heterogeneous (group-specific) slopes, instrumental
+    variables (2SLS), analytic and frequency weights, robust and multiway
+    clustered standard errors, 'reghdfe'-style singleton dropping and
+    degrees-of-freedom adjustments, 'fixest'-style small-sample corrections,
+    fixed-effect recovery, group-level outcomes with individual fixed effects,
+    and an optional CUDA GPU absorber. CPU behavior is the reference; results
+    mirror 'reghdfe' (Correia, 2016) at the same nominal tolerance under the
+    default 'reghdfe-comparable' tolerance mode.
+License: MIT + file LICENSE
+Copyright: The package bundles the Eigen 3.4.0 headers (MPL-2.0, with parts
+    under BSD-3-Clause and Apache-2.0); see inst/COPYRIGHTS and the license
+    texts under src/eigen/.
+URL: https://github.com/reisportela/xhdfe-xfe
+BugReports: https://github.com/reisportela/xhdfe-xfe/issues
+Encoding: UTF-8
+NeedsCompilation: yes
+OS_type: unix
+SystemRequirements: Linux x86-64 with GCC (macOS/Windows not supported yet),
+    C++17, GNU make, OpenMP; optionally the NVIDIA CUDA toolkit for the GPU
+    absorber (build with XHDFE_ENABLE_CUDA=ON).
+Depends: R (>= 4.0.0)
+Imports: Rcpp (>= 1.0.0), stats, utils
+LinkingTo: Rcpp
+Suggests: testthat (>= 3.0.0), fixest, jsonlite, haven, nanoparquet, knitr
+Config/testthat/edition: 3
+RoxygenNote: 8.0.0

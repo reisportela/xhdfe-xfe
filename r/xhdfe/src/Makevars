@@ -1,0 +1,82 @@
+# xhdfe R package build configuration.
+#
+# SUPPORTED PLATFORM: Linux x86-64 with GCC and GNU make (the same platform
+# class as the reference CMake build and the Stata plugin). macOS and Windows
+# are not supported yet; see the README.
+#
+# The optimization flags below replicate the reference CMake Release build of
+# the xhdfe C++ core (see CMakeLists.txt at the repository root). The core is
+# written and validated under fast-math semantics; building without
+# -ffast-math (or at -O2 with a generic -march) is NOT the reference numerical
+# behavior, so these are deliberate defaults, not oversights. The resulting
+# binary is machine-specific by default (-march=native); set XHDFE_MARCH to a
+# portable psABI level (e.g. x86-64-v3) for a shareable build.
+#
+# `override CXX17FLAGS` is required: R includes this file BEFORE etc/Makeconf,
+# whose own CXX17FLAGS (-O2 -march=x86-64-v2 -flto=auto ...) would otherwise
+# win and silently drop the reference flags.
+#
+# OBJECTS is defined unconditionally: R only passes its own OBJECTS to make
+# when the Makevars does not mention the variable, and it does not parse make
+# conditionals when checking.
+#
+# Tunables (environment variables at install time):
+#   XHDFE_MARCH        target architecture for -march (default: native)
+#   XHDFE_ENABLE_CUDA  ON to compile the optional CUDA absorber (default: OFF)
+#   XHDFE_CUDA_ARCH    CUDA compute capability, single target (default: 90)
+#   CUDA_HOME          CUDA toolkit root (default: nvcc found on PATH)
+
+CXX_STD = CXX17
+
+XHDFE_MARCH ?= native
+
+# No explicit -mtune: GCC's -march=X already implies -mtune=X for CPU names
+# (including native), and psABI levels (x86-64-v3, ...) are not valid -mtune
+# values. No -g: the reference Release build carries no debug info and the
+# core objects are large.
+XHDFE_OPTFLAGS = -O3 -Wall -march=$(XHDFE_MARCH) \
+    -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer \
+    -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math
+
+override CXX17FLAGS = $(XHDFE_OPTFLAGS)
+
+# OpenMP is required for the reference threading behavior, but only define
+# HDFE_USE_OPENMP when R actually provides OpenMP flags for this toolchain
+# (SHLIB_OPENMP_CXXFLAGS is empty on OpenMP-less builds, e.g. stock macOS
+# clang); the core has a serial fallback.
+XHDFE_OMP_DEF = $(if $(SHLIB_OPENMP_CXXFLAGS),-DHDFE_USE_OPENMP,)
+
+PKG_CPPFLAGS = -I. -Iinclude -Ieigen -DNDEBUG $(XHDFE_OMP_DEF) \
+    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+    -DXHDFE_R_MARCH='"$(XHDFE_MARCH)"' \
+    -DXHDFE_R_CUDA_ARCH='"$(if $(filter ON,$(XHDFE_ENABLE_CUDA)),sm_$(XHDFE_CUDA_ARCH),)"'
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
+PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
+
+CUDA_OBJECTS =
+OBJECTS = $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(CUDA_OBJECTS)
+
+# Keep the shared library as make's default goal: any explicit rule below
+# (the CUDA one) would otherwise become the default target and the install
+# would silently reuse a stale xhdfe.so.
+.PHONY: all
+all: $(SHLIB)
+
+ifeq ($(XHDFE_ENABLE_CUDA),ON)
+XHDFE_CUDA_ARCH ?= 90
+# Default to the nvcc found on PATH (works for both /usr/local/cuda and the
+# NVIDIA HPC SDK layouts); set CUDA_HOME/XHDFE_CUDA_LIB to override.
+NVCC ?= $(if $(CUDA_HOME),$(CUDA_HOME)/bin/nvcc,nvcc)
+XHDFE_CUDA_LIB ?= $(if $(CUDA_HOME),$(CUDA_HOME)/lib64,$(dir $(shell $(NVCC) --version > /dev/null 2>&1 && command -v $(NVCC)))../../cuda/lib64)
+PKG_CPPFLAGS += -DHDFE_USE_CUDA
+PKG_LIBS += -L$(XHDFE_CUDA_LIB) -Wl,-rpath,$(XHDFE_CUDA_LIB) -lcudart
+CUDA_OBJECTS = fe_absorption_cuda.o
+
+fe_absorption_cuda.o: fe_absorption_cuda.cu
+	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
+	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH),code=[compute_$(XHDFE_CUDA_ARCH),sm_$(XHDFE_CUDA_ARCH)] \
+	    --expt-relaxed-constexpr \
+	    -Xcompiler -fPIC,-fopenmp,-O3,-march=$(XHDFE_MARCH),-ffast-math \
+	    -I. -Iinclude -Ieigen -c $< -o $@
+endif

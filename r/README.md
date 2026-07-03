@@ -1,0 +1,117 @@
+# xhdfe for R
+
+R package exposing the xhdfe C++ backend — the same compiled estimator behind
+the Stata `xhdfe` command and the Python `xhdfe` package. The full estimator
+surface is exposed to R: multiway high-dimensional fixed effects,
+heterogeneous (group-specific) slopes, IV/2SLS, analytic and frequency
+weights, robust and multiway-clustered inference with reghdfe/fixest-style
+small-sample controls, singleton dropping and DoF adjustments, fixed-effect
+recovery, group-level outcomes with individual fixed effects, mobility
+groups, and the optional CUDA GPU absorber with fail-closed semantics.
+
+**Supported platform: Linux x86-64 with GCC** (the platform class of the
+reference CMake build and the Stata plugin). macOS and Windows are not
+supported yet (`OS_type: unix`, no `configure`/`Makevars.win`).
+
+**Stata options without a dedicated R argument.** The Stata command's
+diagnostic/cache options — `mobilityprofile`, `mobfile()`,
+`absorptioncache()`, `absorptioncachemode()`, `festructurecache`,
+`fescache()`, `fescachemode()` — have no R arguments, but the underlying
+machinery lives in the shared C++ core and is driven by environment
+variables that work identically from R (set before the fit):
+`XHDFE_MOBILITY_PROFILE` / `XHDFE_MOBILITY_MODE`, `XHDFE_ABSORPTION_CACHE` /
+`XHDFE_ABSORPTION_CACHE_MODE`, `XHDFE_FE_STRUCTURE_CACHE` /
+`XHDFE_FE_STRUCTURE_MODE`. Stata's display-only options (`noheader`,
+`cformat()`, ...) have no R counterpart by design (use R's own printing).
+
+## Layout
+
+- `xhdfe/` — the R package source.
+  - `xhdfe/src/` — Rcpp binding (`rcpp_xhdfe.cpp`) plus a **byte-for-byte
+    mirror** of the canonical C++ core (`src/`, `include/` at the repo root)
+    and the vendored Eigen 3.4.0 headers. Do not edit the mirrored files
+    here; edit the canonical core and run `tools/refresh_r_core.sh`.
+- `tools/refresh_r_core.sh` — refreshes and verifies the core mirror.
+- `tools/gen_parity_data.R` + `tools/gen_parity_fixture.py` — regenerate the
+  R↔Python parity fixture used by the test suite (requires the reference
+  `build/` Python module).
+- `examples/xhdfe_r_showcase.qmd` — executable feature tour + the complete
+  core23 benchmark-suite examples.
+- `Rlib/`, `Rlib_cuda/` — local install libraries used during development and
+  validation (CPU and CUDA builds respectively); not part of the package.
+
+## Install (CPU)
+
+From this directory:
+
+```bash
+R CMD INSTALL xhdfe
+```
+
+The build replicates the reference CMake Release flags of the C++ core
+(`-O3 -march=native -ffast-math -fopenmp`, see `xhdfe/src/Makevars`). These
+are deliberate defaults: the core is written and validated under fast-math
+semantics, and a plain `-O2` build is **not** the reference numerical
+behavior of the Stata/Python packages. The resulting binary is
+machine-specific; set `XHDFE_MARCH=x86-64-v3` (or another GCC `-march`
+target) for a build shareable across machines of the same class. Verify any
+install with `xhdfe_info()` (reports compiler, `-march`, fast-math and CUDA
+arch).
+
+Known `R CMD check` results on the supported platform: 1 WARNING (the
+`.cu`/`.hpp` sources in `src/` — kept intentionally so tarball installs can
+rebuild the CUDA absorber) and 1 NOTE (`std::cout`/`std::cerr` in the core —
+opt-in, env-gated diagnostics that are silent by default).
+
+## Install (CUDA, optional)
+
+Requires the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set). On this
+workstation (H100) the local policy is `sm_90`:
+
+```bash
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL xhdfe
+```
+
+GPU use is opt-in per call (`backend = "cuda"`) and fail-closed: if the GPU
+is unavailable or absorption does not complete on it, the call errors instead
+of silently returning CPU results — mirroring the Stata command's error 498
+contract. CPU remains the reference backend.
+
+## Quick start
+
+```r
+library(xhdfe)
+m <- xhdfe(y ~ x1 + x2 | firm + year, data, cluster = ~firm)
+summary(m)
+fixef(xhdfe(y ~ x1 | firm + year, data, save_fe = TRUE))
+# heterogeneous slopes (Stata: absorb(firm##c.tenure)):
+xhdfe(y ~ x1 | worker + firm[tenure], data)
+# IV (fixest-style):
+xhdfe(y ~ exo | firm + year | endo ~ instr, data)
+```
+
+See `?xhdfe` for the full documentation (it mirrors the Stata help file
+section by section) and `examples/xhdfe_r_showcase.qmd` for a complete tour.
+
+## Validation
+
+`xhdfe/tests/testthat/` contains:
+
+- `test-parity-python.R` — the R binding must reproduce the reference Python
+  module (same core, same flags) across 24 spec entries: OLS, 2/3-way FEs,
+  robust/one-way/multiway cluster, analytic weights, IV, heterogeneous
+  slopes, singleton handling, DoF/SSC controls, all three tolerance modes,
+  no-constant, confidence levels, FE recovery, mobility groups, MLSMR and
+  symmetric-GS overrides, and group()/individual() fits — coefficients at
+  1e-9, inference at 1e-7, iteration counts and dof exactly.
+- `test-interface.R` — exact agreement with `lm()` on dummy-expanded designs,
+  `fixest::feols` agreement (coefficients and cluster SEs under
+  `ssc(fixef.K = "nested", cluster.df = "min", t.df = "min")`), frequency
+  weights vs exact replicated-rows equivalence, formula grammar, S3 methods,
+  prediction identities (y = xb + d + e), and fail-closed GPU behavior.
+
+Run with:
+
+```bash
+Rscript -e '.libPaths(c("Rlib", .libPaths())); testthat::test_local("xhdfe")'
+```

@@ -1,0 +1,110 @@
+[31m
+
+processing file: xhdfe_r_showcase.qmd
+[39m1/81                         
+2/81 [setup]                 
+3/81                         
+4/81 [simulate-panel]        
+5/81                         
+6/81 [baseline]              
+7/81                         
+8/81 [baseline-summary]      
+9/81                         
+10/81 [methods-surface]       
+11/81                         
+12/81 [vcov-variants]         
+13/81                         
+14/81 [weights]               
+15/81                         
+16/81 [het-slopes]            
+17/81                         
+18/81 [het-slopes-slope-only] 
+19/81                         
+20/81 [combined-fe]           
+21/81                         
+22/81 [iv]                    
+23/81                         
+24/81 [save-fe]               
+25/81                         
+26/81 [save-fe-reconstruction]
+27/81                         
+28/81 [predict-types]         
+29/81                         
+30/81 [demean]                
+31/81                         
+32/81 [demean-vs-fixest]      
+33/81                         
+34/81 [group-individual]      
+35/81                         
+36/81 [group-fes]             
+37/81                         
+38/81 [mobility-groups]       
+39/81                         
+40/81 [mobility-groups-panel] 
+41/81                         
+42/81 [subset-na]             
+43/81                         
+44/81 [tolerance-modes]       
+45/81                         
+46/81 [absorption-methods]    
+47/81                         
+48/81 [threads]               
+49/81                         
+50/81 [fixest-crosscheck]     
+51/81                         
+52/81 [core23-registry]       
+53/81                         
+54/81 [read-cols]             
+55/81                         
+56/81 [run-spec]              
+57/81                         
+58/81 [core23-small]          
+59/81                         
+60/81 [heavy-init]            
+61/81                         
+62/81 [heavy-ready]           
+63/81                         
+64/81 [heavy-sim]             
+65/81                         
+66/81 [heavy-akm1]            
+67/81                         
+68/81 [heavy-pf-difficult-3fe]
+69/81                         
+70/81 [heavy-pf-simple-2fe]   
+71/81                         
+72/81 [heavy-pf-simple-3fe]   
+73/81                         
+74/81 [heavy-pf-difficult-2fe]
+75/81                         
+76/81 [heavy-akm2]            
+77/81                         
+78/81 [gpu-section]           
+79/81                         
+80/81 [wrapup]                
+81/81                         
+[31moutput file: xhdfe_r_showcase.knit.md
+
+[39m[1mpandoc --output xhdfe_r_showcase_heavy.html[22m
+  to: html
+  standalone: true
+  embed-resources: true
+  section-divs: true
+  html-math-method: mathjax
+  wrap: none
+  default-image-extension: png
+  toc: true
+  toc-depth: 3
+  number-sections: true
+  variables: {}
+  
+[1mmetadata[22m
+  document-css: false
+  link-citations: true
+  date-format: long
+  lang: en
+  title: xhdfe for R — feature tour and the core23 benchmark suite
+  author: xhdfe development team
+  date: today
+  
+Output created: xhdfe_r_showcase_heavy.html
+

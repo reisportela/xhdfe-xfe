@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as follows:"
+title: "xhdfe"
+authors:
+  - family-names: "Portela"
+    given-names: "Miguel"
+    affiliation: "NIPE / Universidade do Minho and BPLIM / Banco de Portugal"
+    email: "miguel.portela@eeg.uminho.pt"
+    website: "https://reisportela.github.io"
+  - family-names: "Tavares"
+    given-names: "Tiago"
+    affiliation: "NIPE / Universidade do Minho"
+    email: "tgstavares@eeg.uminho.pt"
+    website: "https://www.tgstavares.com"
+version: "2.11.0"
+date-released: 2026-06-16
+url: "https://github.com/reisportela/xhdfe-xfe"
+license: MIT

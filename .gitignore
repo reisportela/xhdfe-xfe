@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+build_*/
+_verify_*/
+*.o
+*.so
+*.a
+*.dylib
+CMakeCache.txt
+CMakeFiles/
+
+# Python
+__pycache__/
+*.egg-info/
+dist/
+*.whl
+
+# R
+*.Rcheck/
+.Rhistory
+.RData
+00LOCK-*/
+r/xhdfe/src/*.o
+r/xhdfe/src/*.so
+r/xhdfe.Rcheck/
+r/Rlib/
+r/**/*_files/
+r/**/*.html
+
+# Prebuilt binaries and distribution archives are published via GitHub
+# Releases, not committed to the repository.
+*.plugin
+release_assets/
+*.zip
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
