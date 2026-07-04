@@ -47,10 +47,11 @@ jobs:
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "release"
+          use-public-rspm: true          # install binary packages (no source compilation)
       - name: R CMD INSTALL + tests
         env:
           XHDFE_MARCH: "x86-64-v2"
         run: |
-          Rscript -e 'install.packages(c("Rcpp","testthat"), repos="https://cloud.r-project.org")'
+          Rscript -e 'install.packages(c("Rcpp","testthat","jsonlite"))'
           R CMD INSTALL r/xhdfe
           Rscript -e 'testthat::test_local("r/xhdfe", stop_on_failure = TRUE)'

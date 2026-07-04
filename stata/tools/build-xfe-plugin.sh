@@ -206,6 +206,7 @@ if [[ "${TARGET}" != "windows" ]]; then
   pthread_flag=( -pthread )
 else
   common_compile_flags+=( -static-libgcc -static-libstdc++ )
+  common_compile_flags+=( -include stdio.h )
   pthread_flag=()
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )

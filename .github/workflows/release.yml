@@ -3,13 +3,14 @@ name: release-binaries
 # Builds the prebuilt Stata plugin bundles for Linux, Windows and macOS
 # (Apple Silicon) on real GitHub-hosted runners and attaches them to the
 # release. Triggered when a release is published, or manually via
-# workflow_dispatch (pass the tag).
+# workflow_dispatch (pass the tag). Each platform is an INDEPENDENT job so a
+# failure on one does not block the others' uploads.
 #
 # CPU only, by design: CUDA/Metal binaries are not distributed — GPU is an
 # opt-in optimization built from source. The plugins are COMPILED on each
-# platform's runner (so they are real, native artifacts), but Stata itself
-# cannot run on GitHub runners, so they are not runtime-tested here; the
-# Linux CPU build is additionally validated against reghdfe in build.yml.
+# platform's runner (real native artifacts), but Stata itself cannot run on
+# GitHub runners, so they are not runtime-tested here; the Linux CPU build is
+# additionally validated against reghdfe in build.yml.
 
 on:
   release:
@@ -24,72 +25,62 @@ on:
 permissions:
   contents: write
 
+env:
+  TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+
 jobs:
-  # ---- Linux x86-64 (native) + Windows x86-64 (MinGW cross-compile) ------
-  linux-and-windows:
+  # ---- Linux x86-64 (native, OpenMP) -------------------------------------
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install toolchains
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ zip g++-mingw-w64-x86-64
-
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++ zip
       - name: Build Linux plugins (CPU, OpenMP)
         run: |
           bash stata/tools/build-plugin.sh --linux --openmp
           bash stata/tools/build-xfe-plugin.sh --linux --openmp
-
-      - name: Package Linux bundle
+      - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh linux-x86_64-cpu
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
+  # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MinGW toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 zip
       - name: Build Windows plugins (CPU, MinGW)
         run: |
           bash stata/tools/build-plugin.sh --windows --no-openmp
           bash stata/tools/build-xfe-plugin.sh --windows --no-openmp
-
-      - name: Package Windows bundle
+      - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh windows-x86_64-cpu
-
-      - name: Resolve tag
-        id: tag
-        run: echo "tag=${{ github.event.release.tag_name || github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-
-      - name: Attach bundles to release
+      - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" \
-            xhdfe-stata-linux-x86_64-cpu.zip \
-            xhdfe-stata-windows-x86_64-cpu.zip \
-            --clobber --repo "${{ github.repository }}"
+        run: gh release upload "$TAG" xhdfe-stata-windows-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
   # ---- macOS universal (x86-64 + Apple Silicon arm64) --------------------
   macos:
     runs-on: macos-14           # Apple Silicon
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install toolchains
-        run: brew install libomp zip || true
-
-      - name: Build macOS universal plugins (CPU)
+      - name: Install zip
+        run: brew install zip || true
+      - name: Build macOS universal plugins (CPU, serial)
+        # Apple clang does not accept plain -fopenmp; ship a serial macOS
+        # binary for now. OpenMP on macOS (libomp) is a follow-up.
         run: |
-          bash stata/tools/build-plugin.sh --openmp
-          bash stata/tools/build-xfe-plugin.sh --openmp
-
-      - name: Package macOS bundle
+          bash stata/tools/build-plugin.sh --no-openmp
+          bash stata/tools/build-xfe-plugin.sh --no-openmp
+      - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh macos-universal-cpu
-
-      - name: Resolve tag
-        id: tag
-        run: echo "tag=${{ github.event.release.tag_name || github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-
-      - name: Attach bundle to release
+      - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" \
-            xhdfe-stata-macos-universal-cpu.zip \
-            --clobber --repo "${{ github.repository }}"
+        run: gh release upload "$TAG" xhdfe-stata-macos-universal-cpu.zip --clobber --repo "${{ github.repository }}"
