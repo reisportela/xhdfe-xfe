@@ -40,7 +40,19 @@ languages. Pick your front-end below.
 
 ### Stata
 
-**Option A — install a prebuilt release.** Download the distribution ZIP from the
+**Option A — install online from the release net-install site.** The release
+workflow publishes a Stata site whose `.pkg` files select the plugin for the
+current OS:
+
+```stata
+net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+```
+
+The online package uses Stata platform-specific `g` lines for Linux, macOS
+Apple Silicon/Intel, and Windows when a Windows plugin artifact exists.
+
+**Option B — install a prebuilt release ZIP.** Download the distribution ZIP from the
 [Releases](https://github.com/reisportela/xhdfe-xfe/releases) page and unzip it. It
 bundles the platform plugin. In Stata, point `net install` at the unzipped
 folder that contains `xhdfe.pkg` and `stata.toc`:
@@ -50,7 +62,7 @@ net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
 net install xfe,   from("/path/to/unzipped/xhdfe/stata") replace
 ```
 
-**Option B — build the plugin from source.** Clone the repo and build the
+**Option C — build the plugin from source.** Clone the repo and build the
 plugin (Linux + GCC; OpenMP recommended), then add the folder to your `adopath`:
 
 ```bash
@@ -167,6 +179,7 @@ interaction FE, and `| endo ~ inst` for IV. See
 ## Documentation
 
 - **Quickstart & overview:** [`docs/quickstart.md`](docs/quickstart.md), [`docs/overview.md`](docs/overview.md).
+- **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
 - **Stata:** `help xhdfe`, `help xfe`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.
@@ -208,6 +221,21 @@ MIT — see [`LICENSE`](LICENSE). `xhdfe` bundles the Eigen 3.4.0 headers
 listed humans are authors; no software tool or AI system is credited as an
 author or co-author.
 
+## Acknowledgements
+
+`xhdfe` validates against and interoperates with prior HDFE software. Full
+credit goes to [`reghdfe`](https://github.com/sergiocorreia/reghdfe) by Sergio
+Correia (Stata), [`fixest`](https://github.com/lrberge/fixest) by Laurent
+Berge (R), [`pyfixest`](https://github.com/py-econometrics/pyfixest) by
+Alexander Fischer and collaborators (Python), and
+[`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl)
+by Matthieu Gomez and collaborators (Julia).
+
+We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
+workshop collaboration around earlier versions of the project. We especially
+thank Sergio Correia for feedback on benchmarking, tolerances, and
+`reghdfe`-comparable validation. All remaining errors are ours.
+
 ## Contributing
 
 Contributions, bug reports, and validation cases are welcome — see
@@ -215,6 +243,9 @@ Contributions, bug reports, and validation cases are welcome — see
 
 ## Platform support
 
-The C++ core, Python bindings, and R package target **Linux x86-64 with GCC**.
-CUDA GPU acceleration is optional (requires the NVIDIA toolkit, e.g. `sm_90`).
-macOS and Windows are not supported yet.
+The C++ core, Python bindings, and R package target Linux x86-64, Windows
+x86-64, and macOS Apple Silicon/Intel source builds with the local platform
+toolchain. CUDA GPU acceleration is optional on Linux with the NVIDIA toolkit.
+Prebuilt Stata release assets include Linux CPU/OpenMP, Linux CUDA, and macOS
+universal plugins; the Windows CPU plugin is included when the release build
+produces the artifact, otherwise Windows users build from the bundled sources.

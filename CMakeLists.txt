@@ -6,14 +6,41 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(FetchContent)
+include(CheckCXXCompilerFlag)
 
 set(XHDFE_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
-option(XHDFE_ENABLE_MARCH_NATIVE "Enable -march=native optimizations (GCC/Clang only)." ON)
+set(XHDFE_ENABLE_MARCH_NATIVE_DEFAULT ON)
+if(APPLE)
+    set(XHDFE_ENABLE_MARCH_NATIVE_DEFAULT OFF)
+endif()
+option(XHDFE_ENABLE_MARCH_NATIVE "Enable -march=native optimizations when supported by the active target compiler." ${XHDFE_ENABLE_MARCH_NATIVE_DEFAULT})
 option(XHDFE_BUILD_PYTHON "Build the Python bindings (pybind11)." ON)
 option(XHDFE_ENABLE_CUDA "Enable CUDA backend for GPU acceleration." OFF)
 option(XHDFE_ENABLE_METAL "Enable Metal backend for GPU acceleration." OFF)
 set(XHDFE_GPU_BACKEND_DEFAULT "cpu" CACHE STRING "Default GPU backend (cpu|cuda|metal).")
+
+function(xhdfe_enable_native_tuning target_name)
+    if(NOT XHDFE_ENABLE_MARCH_NATIVE)
+        return()
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        return()
+    endif()
+
+    check_cxx_compiler_flag("-march=native" XHDFE_CXX_HAS_MARCH_NATIVE)
+    check_cxx_compiler_flag("-mtune=native" XHDFE_CXX_HAS_MTUNE_NATIVE)
+
+    if(XHDFE_CXX_HAS_MARCH_NATIVE)
+        target_compile_options(${target_name} PRIVATE -march=native)
+    else()
+        message(WARNING "XHDFE_ENABLE_MARCH_NATIVE=ON, but ${CMAKE_CXX_COMPILER_ID} rejects -march=native for the active target; skipping it.")
+    endif()
+
+    if(XHDFE_CXX_HAS_MTUNE_NATIVE)
+        target_compile_options(${target_name} PRIVATE -mtune=native)
+    endif()
+endfunction()
 
 if(XHDFE_ENABLE_CUDA)
     find_package(CUDAToolkit REQUIRED)
@@ -128,9 +155,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(XHDFE_ENABLE_MARCH_NATIVE)
-        target_compile_options(xhdfe PRIVATE -march=native -mtune=native)
-    endif()
+    xhdfe_enable_native_tuning(xhdfe)
     target_compile_options(xhdfe PRIVATE
         -O3
         -ffast-math
@@ -161,9 +186,7 @@ if(XHDFE_BUILD_PYTHON)
     endif()
 
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        if(XHDFE_ENABLE_MARCH_NATIVE)
-            target_compile_options(py_hdfe_v11 PRIVATE -march=native -mtune=native)
-        endif()
+        xhdfe_enable_native_tuning(py_hdfe_v11)
         target_compile_options(py_hdfe_v11 PRIVATE
             -O3
             -ffast-math

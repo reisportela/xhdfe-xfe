@@ -24,10 +24,9 @@ URL: https://github.com/reisportela/xhdfe-xfe
 BugReports: https://github.com/reisportela/xhdfe-xfe/issues
 Encoding: UTF-8
 NeedsCompilation: yes
-OS_type: unix
-SystemRequirements: Linux x86-64 with GCC (macOS/Windows not supported yet),
-    C++17, GNU make, OpenMP; optionally the NVIDIA CUDA toolkit for the GPU
-    absorber (build with XHDFE_ENABLE_CUDA=ON).
+SystemRequirements: C++17 compiler (GCC, Clang/AppleClang, or Rtools/MinGW),
+    GNU make or Rtools make, optional OpenMP; optionally the NVIDIA CUDA
+    toolkit for the Linux GPU absorber (build with XHDFE_ENABLE_CUDA=ON).
 Depends: R (>= 4.0.0)
 Imports: Rcpp (>= 1.0.0), stats, utils
 LinkingTo: Rcpp

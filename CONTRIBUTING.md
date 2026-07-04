@@ -9,9 +9,9 @@ to Stata, Python, and R on one compiled C++ core. CPU is the reference backend;
 the CUDA GPU absorber is optional. Results mirror `reghdfe` (Correia, 2016) at
 the same nominal tolerance under the default `reghdfe-comparable` tolerance mode.
 
-**Supported platform: Linux x86-64 with GCC.** macOS and Windows are not
-supported yet (the R package declares `OS_type: unix`; there is no
-`Makevars.win` or `configure`). Develop and validate on that platform class.
+**Supported CPU source-install platforms:** Linux, Windows with Rtools/MinGW,
+and macOS Apple Silicon/Intel where a C++17 toolchain is available. CUDA builds
+are currently Linux-only and require the NVIDIA toolkit.
 
 ## Repository layout and the one-core rule
 

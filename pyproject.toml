@@ -8,7 +8,7 @@ version = "2.11.0.20260704"
 description = "High-dimensional fixed effects regression backed by the xhdfe C++ core"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 authors = [
   { name = "Miguel Portela", email = "miguel.portela@eeg.uminho.pt" },
   { name = "Tiago Tavares", email = "tgstavares@eeg.uminho.pt" }
@@ -20,7 +20,6 @@ keywords = ["econometrics", "fixed effects", "HDFE", "regression", "reghdfe"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",

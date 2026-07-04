@@ -47,6 +47,8 @@ class CMakeBuild(build_ext):
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             "-DXHDFE_BUILD_PYTHON=ON",
         ]
+        if sys.platform == "darwin" and not os.environ.get("XHDFE_ENABLE_MARCH_NATIVE"):
+            cmake_args.append("-DXHDFE_ENABLE_MARCH_NATIVE=OFF")
         if sys.platform.startswith("win"):
             cmake_args.append(f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}")
 
@@ -56,6 +58,7 @@ class CMakeBuild(build_ext):
             "XHDFE_ENABLE_MARCH_NATIVE",
             "XHDFE_GPU_BACKEND_DEFAULT",
             "CMAKE_CUDA_ARCHITECTURES",
+            "CMAKE_OSX_ARCHITECTURES",
         ):
             if os.environ.get(name):
                 define = f"-D{name}="

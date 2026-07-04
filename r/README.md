@@ -9,9 +9,9 @@ small-sample controls, singleton dropping and DoF adjustments, fixed-effect
 recovery, group-level outcomes with individual fixed effects, mobility
 groups, and the optional CUDA GPU absorber with fail-closed semantics.
 
-**Supported platform: Linux x86-64 with GCC** (the platform class of the
-reference CMake build and the Stata plugin). macOS and Windows are not
-supported yet (`OS_type: unix`, no `configure`/`Makevars.win`).
+**Supported CPU source-install platforms:** Linux, macOS (Apple Silicon and
+Intel where an R C++17 toolchain is available), and Windows with Rtools. CUDA
+builds are currently Linux-only.
 
 **Stata options without a dedicated R argument.** The Stata command's
 diagnostic/cache options — `mobilityprofile`, `mobfile()`,
@@ -49,14 +49,12 @@ R CMD INSTALL xhdfe
 ```
 
 The build replicates the reference CMake Release flags of the C++ core
-(`-O3 -march=native -ffast-math -fopenmp`, see `xhdfe/src/Makevars`). These
-are deliberate defaults: the core is written and validated under fast-math
-semantics, and a plain `-O2` build is **not** the reference numerical
-behavior of the Stata/Python packages. The resulting binary is
-machine-specific; set `XHDFE_MARCH=x86-64-v3` (or another GCC `-march`
-target) for a build shareable across machines of the same class. Verify any
-install with `xhdfe_info()` (reports compiler, `-march`, fast-math and CUDA
-arch).
+(`-O3 -ffast-math` plus the platform's available OpenMP flags; see
+`xhdfe/src/Makevars` and `xhdfe/src/Makevars.win`). The default build is
+portable for the architecture selected by R. For a local machine-specific
+benchmark build, set `XHDFE_MARCH=native`; for a shareable Linux x86-64 build,
+set a portable psABI level such as `XHDFE_MARCH=x86-64-v3`. Verify any install
+with `xhdfe_info()` (reports compiler, `-march`, fast-math and CUDA arch).
 
 Known `R CMD check` results on the supported platform: 1 WARNING (the
 `.cu`/`.hpp` sources in `src/` — kept intentionally so tarball installs can
@@ -65,8 +63,8 @@ opt-in, env-gated diagnostics that are silent by default).
 
 ## Install (CUDA, optional)
 
-Requires the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set). On this
-workstation (H100) the local policy is `sm_90`:
+Requires Linux and the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set).
+On this workstation (H100) the local policy is `sm_90`:
 
 ```bash
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL xhdfe

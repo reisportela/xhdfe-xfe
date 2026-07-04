@@ -28,6 +28,14 @@ python -m pip install -e .
 The build uses CMake and compiles the existing `py_hdfe_v11` extension into the
 `xhdfe` package. CPU is the default backend.
 
+Portable source installs do not require `-march=native`. On Apple platforms,
+native tuning defaults to off so Apple Silicon hosts can also build x86_64
+Python environments under Rosetta. The explicit safe-path workaround is:
+
+```bash
+XHDFE_ENABLE_MARCH_NATIVE=OFF python -m pip install .
+```
+
 CUDA builds can be requested with environment variables:
 
 ```bash

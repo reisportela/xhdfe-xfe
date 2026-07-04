@@ -12,9 +12,9 @@ nominal tolerance its coefficients match
 exposes `fixest`/`pyfixest`-style small-sample corrections. See
 [comparison.md](comparison.md) for a command/option map across the ecosystem.
 
-> **Platform.** The C++ core and the Python/R packages target **Linux x86-64
-> with GCC**. macOS and Windows are not supported yet. CUDA is optional (NVIDIA
-> toolkit, compute capability `sm_75` or newer).
+> **Platform.** Source installs target Linux, Windows with Rtools/MinGW, and
+> macOS Apple Silicon/Intel where a C++17 toolchain is available. CUDA builds
+> are currently Linux-only and require the NVIDIA toolkit.
 
 ---
 
@@ -24,8 +24,17 @@ The repository ships source. Prebuilt Stata plugins and distribution ZIPs are
 attached to GitHub **Releases**, not stored in the tree. See the top-level
 `README.md` for full instructions; in brief:
 
-**Stata.** Download a Release and `net install` from the folder that contains
-`xhdfe.pkg` and `stata.toc`, or point Stata at the repository's `stata/` folder:
+**Stata.** Install online from the release net-install site:
+
+```stata
+net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+```
+
+The online package uses Stata platform-specific `g` lines to select the plugin
+for the user's OS. You can also download a Release and `net install` from the
+folder that contains `xhdfe.pkg` and `stata.toc`, or point Stata at the
+repository's `stata/` folder:
 
 ```stata
 net install xhdfe, from("/path/to/xhdfe/stata") replace

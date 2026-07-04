@@ -40,6 +40,16 @@ jobs:
         run: |
           bash stata/tools/build-plugin.sh --linux --openmp
           bash stata/tools/build-xfe-plugin.sh --linux --openmp
+      - name: Save Linux plugin artifacts
+        run: |
+          mkdir -p artifacts
+          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cpu
+          cp stata/xfe.plugin artifacts/xfe.plugin.linux-cpu
+      - name: Upload Linux plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-linux
+          path: artifacts/*
       - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh linux-x86_64-cpu
       - name: Attach to release
@@ -50,6 +60,7 @@ jobs:
   # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
   windows:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW toolchain
@@ -58,6 +69,16 @@ jobs:
         run: |
           bash stata/tools/build-plugin.sh --windows --no-openmp
           bash stata/tools/build-xfe-plugin.sh --windows --no-openmp
+      - name: Save Windows plugin artifacts
+        run: |
+          mkdir -p artifacts
+          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
+          cp stata/xfe.plugin artifacts/xfe.plugin.windows
+      - name: Upload Windows plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-windows
+          path: artifacts/*
       - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh windows-x86_64-cpu
       - name: Attach to release
@@ -78,9 +99,63 @@ jobs:
         run: |
           bash stata/tools/build-plugin.sh --no-openmp
           bash stata/tools/build-xfe-plugin.sh --no-openmp
+      - name: Save macOS plugin artifacts
+        run: |
+          mkdir -p artifacts
+          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.macos
+          cp stata/xfe.plugin artifacts/xfe.plugin.macos
+      - name: Upload macOS plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-macos
+          path: artifacts/*
       - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh macos-universal-cpu
       - name: Attach to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" xhdfe-stata-macos-universal-cpu.zip --clobber --repo "${{ github.repository }}"
+
+  # ---- Online Stata net-install site ------------------------------------
+  publish-netinstall:
+    runs-on: ubuntu-latest
+    needs: [linux, windows, macos]
+    if: ${{ always() && needs.linux.result == 'success' && needs.macos.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
+      - name: Download plugin artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+          pattern: plugins-*
+          merge-multiple: true
+      - name: Stage Stata net-install site
+        run: |
+          set -euo pipefail
+          ls -la dl
+          WIN_ARGS=()
+          if [ -f dl/xhdfe.plugin.windows ] && [ -f dl/xfe.plugin.windows ]; then
+            WIN_ARGS=(--windows-xhdfe dl/xhdfe.plugin.windows --windows-xfe dl/xfe.plugin.windows)
+          else
+            echo "NOTE: Windows plugin artifacts are absent; publishing Linux/macOS net-install site."
+          fi
+          bash tools/stage_stata_netinstall_site.sh netinstall_site/stata \
+            --linux-xhdfe dl/xhdfe.plugin.linux-cpu \
+            --linux-xfe   dl/xfe.plugin.linux-cpu \
+            --macos-xhdfe dl/xhdfe.plugin.macos \
+            --macos-xfe   dl/xfe.plugin.macos \
+            "${WIN_ARGS[@]}"
+          ( cd netinstall_site && zip -q -r -X ../xhdfe-stata-netinstall-site.zip . )
+      - name: Attach net-install site snapshot to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" xhdfe-stata-netinstall-site.zip --clobber --repo "${{ github.repository }}"
+      - name: Publish Stata net-install site to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./netinstall_site
+          commit_message: Publish Stata net-install site for ${{ env.TAG }}

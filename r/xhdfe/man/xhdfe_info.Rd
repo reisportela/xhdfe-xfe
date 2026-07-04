@@ -10,10 +10,10 @@ xhdfe_info()
 An object of class \code{xhdfe_info}: a list with
   \code{version}, \code{cuda_enabled}, \code{openmp_enabled},
   \code{default_backend}, \code{compiler}, \code{march} (the
-  \code{-march} target the binary was compiled for; \code{"native"} means
+  \code{-march} target the binary was compiled for; \code{"portable"} means
+  no package-level \code{-march} override and \code{"native"} means
   machine-specific), \code{cuda_arch} (e.g. \code{"sm_90"}, empty on CPU
-  builds), \code{optimized}, \code{fast_math} (both must be \code{TRUE}
-  for a reference-grade build) and \code{gpu_backend_env}.
+  builds), \code{optimized}, \code{fast_math}, and \code{gpu_backend_env}.
 }
 \description{
 Reports the package version and how the compiled backend was built:

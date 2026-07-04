@@ -1,0 +1,31 @@
+# xhdfe R package build configuration for Windows/Rtools.
+#
+# The default build is portable for the architecture selected by Rtools. Set
+# XHDFE_MARCH explicitly only for local machine-specific builds.
+
+CXX_STD = CXX17
+
+XHDFE_MARCH ?=
+XHDFE_MARCH_LABEL = $(if $(strip $(XHDFE_MARCH)),$(strip $(XHDFE_MARCH)),portable)
+XHDFE_MARCH_FLAG = $(if $(strip $(XHDFE_MARCH)),-march=$(strip $(XHDFE_MARCH)),)
+
+XHDFE_OPTFLAGS = -O3 -Wall $(XHDFE_MARCH_FLAG) \
+    -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer \
+    -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math
+
+override CXX17FLAGS += $(XHDFE_OPTFLAGS)
+
+XHDFE_OMP_DEF = $(if $(SHLIB_OPENMP_CXXFLAGS),-DHDFE_USE_OPENMP,)
+
+PKG_CPPFLAGS = -I. -Iinclude -Ieigen -DNDEBUG $(XHDFE_OMP_DEF) \
+    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+    -DXHDFE_R_MARCH='"$(XHDFE_MARCH_LABEL)"' \
+    -DXHDFE_R_CUDA_ARCH='""'
+PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
+PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
+
+OBJECTS = $(patsubst %.cpp,%.o,$(wildcard *.cpp))
+
+ifeq ($(XHDFE_ENABLE_CUDA),ON)
+$(error XHDFE_ENABLE_CUDA=ON is not supported by the Windows R Makevars yet; install a CPU build)
+endif

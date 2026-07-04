@@ -991,7 +991,8 @@ Website: {browse "https://www.tgstavares.com":https://www.tgstavares.com}{p_end}
 {marker support}{...}
 {title:Support and updates}
 
-{pstd}xhdfe is installed via {cmd:net install} from the {cmd:stata/} folder in the repository.{p_end}
+{pstd}Released builds of {cmd:xhdfe} are installed via {cmd:net install} from the online Stata site published by {cmd:xhdfe-xfe}: {browse "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata":https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata}.{p_end}
+{pstd}For local development checkouts or unzipped release bundles, {cmd:net install} can also point at the local {cmd:stata/} folder that contains {cmd:stata.toc}, {cmd:xhdfe.pkg}, and the platform plugin.{p_end}
 {pstd}For building the plugin or running validation tests, see the repository README.{p_end}
 
 
@@ -1009,7 +1010,8 @@ xhdfe is a reimplementation built to validate against and interoperate with prio
 {pstd}
 We thank Paulo Guimaraes (Banco de Portugal), Marta Silva
 (Banco de Portugal), and Nelson Areal (EEG / UMinho) for valuable interactions across
-different parts of the project. Nelson Areal and Miguel Portela presented
+different parts of the project. We especially thank Sergio Correia for feedback on
+benchmarking, tolerances, and {cmd:reghdfe}-comparable validation. Nelson Areal and Miguel Portela presented
 "Parallel and Cross-Language Computing: A Hands-On Workshop for Empirical Researchers" at BPLIM's Workshop on
 {it:Speeding Up Empirical Research: Tools and Techniques for Fast Computing}
 ({browse "https://github.com/BPLIM/Workshops/tree/master/BPLIM2025":BPLIM2025}), where we

@@ -51,7 +51,26 @@ For a more detailed local build checklist, see `BUILD_CUDA.md` in this folder.
 
 ## Install / use in Stata
 
-Make sure this folder is on your Stata `adopath` (or copy `xhdfe.ado`, `xhdfe.sthlp`, and `xhdfe.plugin` to your personal ado folder).
+For a released online install from `xhdfe-xfe`, use the generated Stata
+net-install site:
+
+```stata
+net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+```
+
+That site uses Stata platform-specific `g` lines so Linux, macOS, and Windows
+users receive the matching plugin binary when it exists in the release. For a
+local development checkout or an unzipped release bundle, point `net install`
+at the folder containing `stata.toc` and the `.pkg` files:
+
+```stata
+net install xhdfe, from("/path/to/xhdfe/stata") replace
+net install xfe,   from("/path/to/xhdfe/stata") replace
+```
+
+Alternatively, make sure this folder is on your Stata `adopath` (or copy
+`xhdfe.ado`, `xhdfe.sthlp`, and `xhdfe.plugin` to your personal ado folder).
 
 Example (reghdfe-style):
 
