@@ -1,4 +1,4 @@
-*! version 2.11.0 16jun2026
+*! version 2.11.0 04jul2026
 program xhdfe_estat, rclass
     version `=cond(c(version)<14, c(version), 13)'
     if ("`e(cmd)'" != "xhdfe") {
