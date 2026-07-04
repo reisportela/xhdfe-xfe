@@ -6181,7 +6181,7 @@ void mark_invalid_inference_for_saturated(hdfe::HdfeResults& results) {
 }
 
 void recompute_inference(Eigen::VectorXd& coefficients,
-                         Eigen::VectorXd& stderr,
+                         Eigen::VectorXd& std_errors,
                          Eigen::VectorXd& tvalues,
                          Eigen::VectorXd& pvalues,
                          Eigen::MatrixXd& conf_int,
@@ -6195,7 +6195,7 @@ void recompute_inference(Eigen::VectorXd& coefficients,
     const bool df_ok = (df_resid > 0.0) && std::isfinite(df_resid);
     const double crit = df_ok ? student_t_critical_value(level_percent, df_resid) : nan;
     for (int j = 0; j < p; ++j) {
-        const double se = stderr(j);
+        const double se = std_errors(j);
         if (!std::isfinite(se) || se <= 0.0) {
             tvalues(j) = nan;
             pvalues(j) = nan;
