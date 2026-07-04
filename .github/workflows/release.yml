@@ -48,16 +48,24 @@ jobs:
         run: gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
   # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
+  # Work in progress: not yet green, so it does not block the release; the
+  # other platforms still upload. Runs with `bash -x` to capture the exact
+  # compiler invocation for debugging.
   windows:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW toolchain
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 zip
+      - name: Diagnostics
+        run: |
+          echo "shim head:"; head -14 stata/tools/mingw_stdio_shim.h
+          echo "build-plugin include line:"; grep -n "mingw_stdio_shim" stata/tools/build-plugin.sh
       - name: Build Windows plugins (CPU, MinGW)
         run: |
-          bash stata/tools/build-plugin.sh --windows --no-openmp
-          bash stata/tools/build-xfe-plugin.sh --windows --no-openmp
+          bash -x stata/tools/build-plugin.sh --windows --no-openmp
+          bash -x stata/tools/build-xfe-plugin.sh --windows --no-openmp
       - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh windows-x86_64-cpu
       - name: Attach to release
