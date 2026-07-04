@@ -34,12 +34,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++ zip
-      - name: Build Linux plugins (CPU, OpenMP)
+      - name: Build Linux plugins (manylinux2014, CPU, OpenMP)
         run: |
-          bash stata/tools/build-plugin.sh --linux --openmp
-          bash stata/tools/build-xfe-plugin.sh --linux --openmp
+          docker run --rm \
+            -v "$PWD":/io \
+            -w /io \
+            -e XHDFE_STATIC_GNU_LIBS=ON \
+            quay.io/pypa/manylinux2014_x86_64 \
+            /bin/bash -lc '
+              set -euo pipefail
+              yum install -y zip curl tar gzip libstdc++-static
+              g++ --version
+              bash stata/tools/build-plugin.sh --linux --openmp
+              bash stata/tools/build-xfe-plugin.sh --linux --openmp
+            '
+      - name: Check Linux binary compatibility
+        run: |
+          set -euo pipefail
+          ldd stata/xhdfe.plugin || true
+          ldd stata/xfe.plugin || true
+          if readelf -Ws stata/xhdfe.plugin stata/xfe.plugin | grep -E 'GLIBC_(2\.(1[89]|[2-9][0-9])|[3-9])'; then
+            echo "Linux plugin requires glibc newer than manylinux2014 (2.17)." >&2
+            exit 1
+          fi
+          if readelf -Ws stata/xhdfe.plugin stata/xfe.plugin | grep -E 'GLIBCXX_'; then
+            echo "Linux plugin still has a dynamic libstdc++/GLIBCXX dependency." >&2
+            exit 1
+          fi
       - name: Save Linux plugin artifacts
         run: |
           mkdir -p artifacts
@@ -50,12 +71,6 @@ jobs:
         with:
           name: plugins-linux
           path: artifacts/*
-      - name: Package bundle
-        run: bash .github/scripts/make_stata_bundle.sh linux-x86_64-cpu
-      - name: Attach to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
   # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
   windows:
@@ -131,6 +146,14 @@ jobs:
           path: dl
           pattern: plugins-*
           merge-multiple: true
+      - name: Package and attach Linux bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp dl/xhdfe.plugin.linux-cpu stata/xhdfe.plugin
+          cp dl/xfe.plugin.linux-cpu stata/xfe.plugin
+          bash .github/scripts/make_stata_bundle.sh linux-x86_64-cpu
+          gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
       - name: Stage Stata net-install site
         run: |
           set -euo pipefail

@@ -12,7 +12,10 @@ when a version is ready to publish.
 4. Create or publish the GitHub release.
 
 The release workflow builds native Stata plugin bundles for Linux, Windows, and
-macOS.  It also publishes an online Stata net-install site to:
+macOS. Linux release plugins are compiled inside a `manylinux2014` container
+with static GNU C++ runtime libraries so the online install remains compatible
+with older enterprise Linux systems. It also publishes an online Stata
+net-install site to:
 
 ```text
 https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata

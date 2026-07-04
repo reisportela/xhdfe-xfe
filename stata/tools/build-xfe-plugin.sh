@@ -221,6 +221,15 @@ if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" 
   fi
 fi
 common_link_flags=( "${link_flag}" )
+static_gnu_link_flags=()
+if [[ "${TARGET}" != "windows" && "${UNAME_S}" != "Darwin" && "${XHDFE_STATIC_GNU_LIBS:-}" =~ ^(1|ON|on|true|yes)$ ]]; then
+  static_libstdcxx="$("${CXX}" -print-file-name=libstdc++.a)"
+  if [[ "${static_libstdcxx}" == "libstdc++.a" || ! -f "${static_libstdcxx}" ]]; then
+    echo "Error: XHDFE_STATIC_GNU_LIBS=ON requires libstdc++.a. Install libstdc++-static for this compiler." >&2
+    exit 1
+  fi
+  static_gnu_link_flags=( -static-libstdc++ -static-libgcc )
+fi
 
 stplugin_src="${STPLUGIN_C}"
 srcs=( "${STATA_DIR}/src/xfe_plugin.cpp" )
@@ -384,20 +393,20 @@ compile_plugin() {
     "${NVCC}" "${link_flags[@]}" "${objs[@]}" -o "${out}"
   else
     if [[ "${OPENMP_MODE}" == "on" ]]; then
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
         -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
     elif [[ "${OPENMP_MODE}" == "off" ]]; then
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
         -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
     else
       set +e
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
         -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
       rc=$?
       set -e
       if [[ $rc -ne 0 ]]; then
         echo "OpenMP build failed; retrying without OpenMP..."
-        "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+        "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
           -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
       fi
     fi
