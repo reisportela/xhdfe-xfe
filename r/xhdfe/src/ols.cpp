@@ -231,27 +231,27 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
         covariance = xtx_inv * meat * xtx_inv;
     }
 
-    Eigen::VectorXd stderr = covariance.diagonal().array().cwiseMax(0.0).sqrt();
+    Eigen::VectorXd std_errors = covariance.diagonal().array().cwiseMax(0.0).sqrt();
     Eigen::VectorXd tvalues = Eigen::VectorXd::Zero(P);
     Eigen::VectorXd pvalues = Eigen::VectorXd::Zero(P);
     Eigen::MatrixXd conf_int(P, 2);
     constexpr double kZ = 1.959963984540054;
     for (int j = 0; j < P; ++j) {
-        if (stderr(j) > 0) {
-            tvalues(j) = beta(j) / stderr(j);
+        if (std_errors(j) > 0) {
+            tvalues(j) = beta(j) / std_errors(j);
             const double tail = 1.0 - normal_cdf(std::abs(tvalues(j)));
             pvalues(j) = 2.0 * tail;
         } else {
             tvalues(j) = 0.0;
             pvalues(j) = 1.0;
         }
-        conf_int(j, 0) = beta(j) - kZ * stderr(j);
-        conf_int(j, 1) = beta(j) + kZ * stderr(j);
+        conf_int(j, 0) = beta(j) - kZ * std_errors(j);
+        conf_int(j, 1) = beta(j) + kZ * std_errors(j);
     }
 
     OlsResult result;
     result.coefficients = Eigen::VectorXd(beta);
-    result.stderr = std::move(stderr);
+    result.std_errors = std::move(std_errors);
     result.tvalues = std::move(tvalues);
     result.pvalues = std::move(pvalues);
     result.conf_int = std::move(conf_int);
@@ -398,27 +398,27 @@ OlsResult run_ols_fast_from_xtx_impl(const Eigen::VectorXd& y,
         covariance = xtx_inv * meat * xtx_inv;
     }
 
-    Eigen::VectorXd stderr = covariance.diagonal().array().cwiseMax(0.0).sqrt();
+    Eigen::VectorXd std_errors = covariance.diagonal().array().cwiseMax(0.0).sqrt();
     Eigen::VectorXd tvalues = Eigen::VectorXd::Zero(P);
     Eigen::VectorXd pvalues = Eigen::VectorXd::Zero(P);
     Eigen::MatrixXd conf_int(P, 2);
     constexpr double kZ = 1.959963984540054;
     for (int j = 0; j < P; ++j) {
-        if (stderr(j) > 0) {
-            tvalues(j) = beta(j) / stderr(j);
+        if (std_errors(j) > 0) {
+            tvalues(j) = beta(j) / std_errors(j);
             const double tail = 1.0 - normal_cdf(std::abs(tvalues(j)));
             pvalues(j) = 2.0 * tail;
         } else {
             tvalues(j) = 0.0;
             pvalues(j) = 1.0;
         }
-        conf_int(j, 0) = beta(j) - kZ * stderr(j);
-        conf_int(j, 1) = beta(j) + kZ * stderr(j);
+        conf_int(j, 0) = beta(j) - kZ * std_errors(j);
+        conf_int(j, 1) = beta(j) + kZ * std_errors(j);
     }
 
     OlsResult result;
     result.coefficients = Eigen::VectorXd(beta);
-    result.stderr = std::move(stderr);
+    result.std_errors = std::move(std_errors);
     result.tvalues = std::move(tvalues);
     result.pvalues = std::move(pvalues);
     result.conf_int = std::move(conf_int);
@@ -1360,27 +1360,27 @@ OlsResult run_ols(const Eigen::VectorXd& y,
         }
     }
 
-    Eigen::VectorXd stderr = covariance.diagonal().array().cwiseMax(0.0).sqrt();
+    Eigen::VectorXd std_errors = covariance.diagonal().array().cwiseMax(0.0).sqrt();
     Eigen::VectorXd tvalues = Eigen::VectorXd::Zero(p);
     Eigen::VectorXd pvalues = Eigen::VectorXd::Zero(p);
     Eigen::MatrixXd conf_int(p, 2);
     constexpr double kZ = 1.959963984540054;
     for (int j = 0; j < p; ++j) {
-        if (stderr(j) > 0) {
-            tvalues(j) = beta(j) / stderr(j);
+        if (std_errors(j) > 0) {
+            tvalues(j) = beta(j) / std_errors(j);
             const double tail = 1.0 - normal_cdf(std::abs(tvalues(j)));
             pvalues(j) = 2.0 * tail;
         } else {
             tvalues(j) = 0.0;
             pvalues(j) = 1.0;
         }
-        conf_int(j, 0) = beta(j) - kZ * stderr(j);
-        conf_int(j, 1) = beta(j) + kZ * stderr(j);
+        conf_int(j, 0) = beta(j) - kZ * std_errors(j);
+        conf_int(j, 1) = beta(j) + kZ * std_errors(j);
     }
 
     OlsResult result;
     result.coefficients = std::move(beta);
-    result.stderr = std::move(stderr);
+    result.std_errors = std::move(std_errors);
     result.tvalues = std::move(tvalues);
     result.pvalues = std::move(pvalues);
     result.conf_int = std::move(conf_int);
@@ -1517,27 +1517,27 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
     Eigen::MatrixXd covariance = compute_covariance_multiway(
         xtx_inv, WX, residuals, sqrt_ptr, *clusters, df_resid, n_eff, &min_clusters, g_df, g_adj);
 
-    Eigen::VectorXd stderr = covariance.diagonal().array().cwiseMax(0.0).sqrt();
+    Eigen::VectorXd std_errors = covariance.diagonal().array().cwiseMax(0.0).sqrt();
     Eigen::VectorXd tvalues = Eigen::VectorXd::Zero(p);
     Eigen::VectorXd pvalues = Eigen::VectorXd::Zero(p);
     Eigen::MatrixXd conf_int(p, 2);
     constexpr double kZ = 1.959963984540054;
     for (int j = 0; j < p; ++j) {
-        if (stderr(j) > 0) {
-            tvalues(j) = beta(j) / stderr(j);
+        if (std_errors(j) > 0) {
+            tvalues(j) = beta(j) / std_errors(j);
             const double tail = 1.0 - normal_cdf(std::abs(tvalues(j)));
             pvalues(j) = 2.0 * tail;
         } else {
             tvalues(j) = 0.0;
             pvalues(j) = 1.0;
         }
-        conf_int(j, 0) = beta(j) - kZ * stderr(j);
-        conf_int(j, 1) = beta(j) + kZ * stderr(j);
+        conf_int(j, 0) = beta(j) - kZ * std_errors(j);
+        conf_int(j, 1) = beta(j) + kZ * std_errors(j);
     }
 
     OlsResult result;
     result.coefficients = std::move(beta);
-    result.stderr = std::move(stderr);
+    result.std_errors = std::move(std_errors);
     result.tvalues = std::move(tvalues);
     result.pvalues = std::move(pvalues);
     result.conf_int = std::move(conf_int);

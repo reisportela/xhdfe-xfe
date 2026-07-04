@@ -422,7 +422,7 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     Rcpp::List out;
 
     out["coefficients"] = wrap_vector(res.coefficients);
-    out["se"] = wrap_vector(res.stderr);
+    out["se"] = wrap_vector(res.std_errors);
     out["tvalues"] = wrap_vector(res.tvalues);
     out["pvalues"] = wrap_vector(res.pvalues);
     out["conf_int"] = wrap_matrix(res.conf_int);

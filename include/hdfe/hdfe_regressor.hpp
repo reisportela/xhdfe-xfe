@@ -5,12 +5,6 @@
 
 #include <vector>
 
-#ifdef _WIN32
-#ifdef stderr
-#undef stderr
-#endif
-#endif
-
 namespace hdfe {
 
 /** \brief Supported covariance estimators for coefficient inference. */
@@ -98,7 +92,7 @@ struct HdfeOptions {
  */
 struct HdfeResults {
     Eigen::VectorXd coefficients;  //!< Estimated regression coefficients in the order passed to X (including intercept when active).
-    Eigen::VectorXd stderr;        //!< Standard errors corresponding to each coefficient.
+    Eigen::VectorXd std_errors;        //!< Standard errors corresponding to each coefficient.
     Eigen::VectorXd tvalues;       //!< t-statistics computed from coefficients and the chosen covariance estimator.
     Eigen::VectorXd pvalues;       //!< Two-sided p-values based on the normal approximation.
     Eigen::MatrixXd conf_int;      //!< Column-wise confidence intervals (p x 2) for the requested confidence level (default 95%).

@@ -525,7 +525,7 @@ std::string summarize(const hdfe::HdfeResults& res,
         << std::setw(14) << "CI Low" << std::setw(14) << "CI High" << "\n";
     for (int j = 0; j < res.coefficients.size(); ++j) {
         oss << std::left << std::setw(12) << ("b" + std::to_string(j)) << std::right
-            << std::setw(14) << res.coefficients(j) << std::setw(14) << res.stderr(j)
+            << std::setw(14) << res.coefficients(j) << std::setw(14) << res.std_errors(j)
             << std::setw(10) << res.tvalues(j) << std::setw(10) << res.pvalues(j)
             << std::setw(14) << res.conf_int(j, 0) << std::setw(14) << res.conf_int(j, 1) << "\n";
     }
@@ -1047,7 +1047,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             return self.results().coefficients;
         })
         .def_property_readonly("stderr_", [](const HdfeRegressorV11& self) {
-            return self.results().stderr;
+            return self.results().std_errors;
         })
         .def_property_readonly("tvalues_", [](const HdfeRegressorV11& self) {
             return self.results().tvalues;

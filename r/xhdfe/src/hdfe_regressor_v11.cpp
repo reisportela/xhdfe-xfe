@@ -689,7 +689,7 @@ bool update_intercept_covariance(
     }
     const int slope_cols_full = intercept_idx;
     if (slope_cols_full < 0 ||
-        results.stderr.size() != results.coefficients.size() ||
+        results.std_errors.size() != results.coefficients.size() ||
         results.covariance.rows() != results.covariance.cols() ||
         results.covariance.rows() != results.coefficients.size()) {
         return false;
@@ -931,7 +931,7 @@ bool update_intercept_covariance(
             results.covariance(col, intercept_idx) = cov_beta_alpha(pos);
         }
     }
-    results.stderr(intercept_idx) =
+    results.std_errors(intercept_idx) =
         (var_alpha_d >= 0.0)
             ? std::sqrt(var_alpha_d)
             : std::numeric_limits<double>::quiet_NaN();
@@ -6157,8 +6157,8 @@ void mark_invalid_inference_for_saturated(hdfe::HdfeResults& results) {
         if (!(std::isfinite(vjj) && vjj <= kVDiagSentinel)) {
             results.covariance(j, j) = kVDiagSentinel;
         }
-        if (j < results.stderr.size()) {
-            results.stderr(j) = nan;
+        if (j < results.std_errors.size()) {
+            results.std_errors(j) = nan;
         }
         if (j < results.tvalues.size()) {
             results.tvalues(j) = nan;
@@ -6312,7 +6312,7 @@ void HdfeRegressorV11::apply_common_postprocessing(const Eigen::Ref<const Eigen:
                                                   const std::vector<int>& fe_levels,
                                                   const detail::OlsResult& ols_result) {
     results_.coefficients = ols_result.coefficients;
-    results_.stderr = ols_result.stderr;
+    results_.std_errors = ols_result.std_errors;
     results_.tvalues = ols_result.tvalues;
     results_.pvalues = ols_result.pvalues;
     results_.conf_int = ols_result.conf_int;
@@ -7243,7 +7243,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 // Return an intercept-only fit downstream (intercept computed later when drop_intercept=true).
                 detail::OlsResult empty;
                 empty.coefficients.resize(0);
-                empty.stderr.resize(0);
+                empty.std_errors.resize(0);
                 empty.tvalues.resize(0);
                 empty.pvalues.resize(0);
                 empty.conf_int.resize(0, 2);
@@ -7406,7 +7406,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             for (int pos = 0; pos < static_cast<int>(kept_slope_cols.size()); ++pos) {
                 const int j = kept_slope_cols[static_cast<std::size_t>(pos)];
                 coef_full(j) = results_.coefficients(pos);
-                se_full(j) = results_.stderr(pos);
+                se_full(j) = results_.std_errors(pos);
                 t_full(j) = results_.tvalues(pos);
                 p_full(j) = results_.pvalues(pos);
                 ci_full(j, 0) = results_.conf_int(pos, 0);
@@ -7424,7 +7424,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 const int intercept_full_idx = full_cols - 1;
                 const int intercept_pos = static_cast<int>(kept_slope_cols.size());
                 coef_full(intercept_full_idx) = results_.coefficients(intercept_pos);
-                se_full(intercept_full_idx) = results_.stderr(intercept_pos);
+                se_full(intercept_full_idx) = results_.std_errors(intercept_pos);
                 t_full(intercept_full_idx) = results_.tvalues(intercept_pos);
                 p_full(intercept_full_idx) = results_.pvalues(intercept_pos);
                 ci_full(intercept_full_idx, 0) = results_.conf_int(intercept_pos, 0);
@@ -7446,7 +7446,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
 
             results_.coefficients = std::move(coef_full);
-            results_.stderr = std::move(se_full);
+            results_.std_errors = std::move(se_full);
             results_.tvalues = std::move(t_full);
             results_.pvalues = std::move(p_full);
             results_.conf_int = std::move(ci_full);
@@ -7476,8 +7476,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             results_.coefficients(out_cols - 1) = intercept;
 
             const double nan = std::numeric_limits<double>::quiet_NaN();
-            results_.stderr.conservativeResize(out_cols);
-            results_.stderr(out_cols - 1) = nan;
+            results_.std_errors.conservativeResize(out_cols);
+            results_.std_errors(out_cols - 1) = nan;
             results_.tvalues.conservativeResize(out_cols);
             results_.tvalues(out_cols - 1) = nan;
             results_.pvalues.conservativeResize(out_cols);
@@ -8135,7 +8135,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (tuned.se_type == StandardErrorType::Homoskedastic && sigma2_old > 0.0) {
                 const double ratio = sigma2_new / sigma2_old;
                 results_.covariance *= ratio;
-                results_.stderr *= std::sqrt(ratio);
+                results_.std_errors *= std::sqrt(ratio);
             }
         } else {
             results_.sigma2 = 0.0;
@@ -8171,7 +8171,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (tuned.ssc_k_adj) {
                 robust_scale = nobs / df_r_model;
                 const double scale = std::sqrt(robust_scale);
-                results_.stderr *= scale;
+                results_.std_errors *= scale;
                 results_.covariance *= robust_scale;
             }
             results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : df_r_model;
@@ -8198,7 +8198,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
                 if (ratio > 0.0 && std::isfinite(ratio)) {
                     const double scale = std::sqrt(ratio);
-                    results_.stderr *= scale;
+                    results_.std_errors *= scale;
                     results_.covariance *= ratio;
                     cluster_ratio = ratio;
                 }
@@ -8225,7 +8225,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
                 if (ratio > 0.0 && std::isfinite(ratio)) {
                     const double scale = std::sqrt(ratio);
-                    results_.stderr *= scale;
+                    results_.std_errors *= scale;
                     results_.covariance *= ratio;
                     cluster_ratio = ratio;
                 }
@@ -8304,7 +8304,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     const double rescale = (den > 0.0) ? (num / den) : 0.0;
                     if (rescale > 0.0 && std::isfinite(rescale) && cov_aug.allFinite()) {
                         results_.covariance = cov_aug * rescale;
-                        results_.stderr =
+                        results_.std_errors =
                             results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
                         intercept_cov_updated = true;
                     }
@@ -8363,7 +8363,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
                     }
                     results_.covariance = cov_full;
-                    results_.stderr = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
+                    results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
                     results_.vcv_psd_fixed = true;
                 }
             } else if (slope_cols > 0) {
@@ -8371,7 +8371,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     results_.covariance.topLeftCorner(slope_cols, slope_cols);
                 if (fix_psd_scaled(cov_block, psd_scale.head(slope_cols))) {
                     results_.covariance.topLeftCorner(slope_cols, slope_cols) = cov_block;
-                    results_.stderr.head(slope_cols) =
+                    results_.std_errors.head(slope_cols) =
                         cov_block.diagonal().cwiseMax(0.0).cwiseSqrt();
                     results_.vcv_psd_fixed = true;
                 }
@@ -8379,7 +8379,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
 
         post_phase_t0 = std::chrono::steady_clock::now();
-        recompute_inference(results_.coefficients, results_.stderr, results_.tvalues,
+        recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
                             results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
         normalize_nonfrequency_weighted_fit_stats(
             results_, tuned.weights_are_frequencies, w_ptr, sum_weights_for_stats);
@@ -8701,7 +8701,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         // Populate a minimal results_ object for Stata/Python consumers that expect e(df_a),
         // singleton counts, and convergence diagnostics.
         results_.coefficients.resize(0);
-        results_.stderr.resize(0);
+        results_.std_errors.resize(0);
         results_.tvalues.resize(0);
         results_.pvalues.resize(0);
         results_.conf_int.resize(0, 0);
@@ -9434,7 +9434,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     if (transformed_X_used.cols() == 0) {
         detail::OlsResult empty;
         empty.coefficients.resize(0);
-        empty.stderr.resize(0);
+        empty.std_errors.resize(0);
         empty.tvalues.resize(0);
         empty.pvalues.resize(0);
         empty.conf_int.resize(0, 2);
@@ -9526,7 +9526,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         for (int pos = 0; pos < static_cast<int>(kept_slope_cols.size()); ++pos) {
             const int j = kept_slope_cols[static_cast<std::size_t>(pos)];
             coef_full(j) = results_.coefficients(pos);
-            se_full(j) = results_.stderr(pos);
+            se_full(j) = results_.std_errors(pos);
             t_full(j) = results_.tvalues(pos);
             p_full(j) = results_.pvalues(pos);
             ci_full(j, 0) = results_.conf_int(pos, 0);
@@ -9543,7 +9543,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             const int intercept_full_idx = full_cols - 1;
             const int intercept_pos = static_cast<int>(kept_slope_cols.size());
             coef_full(intercept_full_idx) = results_.coefficients(intercept_pos);
-            se_full(intercept_full_idx) = results_.stderr(intercept_pos);
+            se_full(intercept_full_idx) = results_.std_errors(intercept_pos);
             t_full(intercept_full_idx) = results_.tvalues(intercept_pos);
             p_full(intercept_full_idx) = results_.pvalues(intercept_pos);
             ci_full(intercept_full_idx, 0) = results_.conf_int(intercept_pos, 0);
@@ -9565,7 +9565,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
 
         results_.coefficients = std::move(coef_full);
-        results_.stderr = std::move(se_full);
+        results_.std_errors = std::move(se_full);
         results_.tvalues = std::move(t_full);
         results_.pvalues = std::move(p_full);
         results_.conf_int = std::move(ci_full);
@@ -9595,8 +9595,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         results_.coefficients(out_cols - 1) = intercept;
 
         const double nan = std::numeric_limits<double>::quiet_NaN();
-        results_.stderr.conservativeResize(out_cols);
-        results_.stderr(out_cols - 1) = nan;
+        results_.std_errors.conservativeResize(out_cols);
+        results_.std_errors(out_cols - 1) = nan;
         results_.tvalues.conservativeResize(out_cols);
         results_.tvalues(out_cols - 1) = nan;
         results_.pvalues.conservativeResize(out_cols);
@@ -9848,7 +9848,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (tuned.se_type == StandardErrorType::Homoskedastic && sigma2_old > 0.0) {
             const double ratio = sigma2_new / sigma2_old;
             results_.covariance *= ratio;
-            results_.stderr *= std::sqrt(ratio);
+            results_.std_errors *= std::sqrt(ratio);
         }
     } else {
         results_.sigma2 = 0.0;
@@ -9878,7 +9878,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (tuned.ssc_k_adj) {
             robust_scale = static_cast<double>(nobs) / static_cast<double>(df_r_model);
             const double scale = std::sqrt(robust_scale);
-            results_.stderr *= scale;
+            results_.std_errors *= scale;
             results_.covariance *= robust_scale;
         }
         results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : static_cast<double>(df_r_model);
@@ -9903,7 +9903,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             if (ratio > 0.0 && std::isfinite(ratio)) {
                 const double scale = std::sqrt(ratio);
-                results_.stderr *= scale;
+                results_.std_errors *= scale;
                 results_.covariance *= ratio;
                 cluster_ratio = ratio;
             }
@@ -9928,7 +9928,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             if (ratio > 0.0 && std::isfinite(ratio)) {
                 const double scale = std::sqrt(ratio);
-                results_.stderr *= scale;
+                results_.std_errors *= scale;
                 results_.covariance *= ratio;
                 cluster_ratio = ratio;
             }
@@ -9999,7 +9999,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 const double rescale = (den > 0.0) ? (num / den) : 0.0;
                 if (rescale > 0.0 && std::isfinite(rescale) && cov_aug.allFinite()) {
                     results_.covariance = cov_aug * rescale;
-                    results_.stderr =
+                    results_.std_errors =
                         results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
                     intercept_cov_updated = true;
                 }
@@ -10053,7 +10053,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                     cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
                 }
                 results_.covariance = cov_full;
-                results_.stderr = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
+                results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
                 results_.vcv_psd_fixed = true;
             }
         } else if (slope_cols > 0) {
@@ -10061,14 +10061,14 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 results_.covariance.topLeftCorner(slope_cols, slope_cols);
             if (fix_psd_scaled(cov_block, psd_scale.head(slope_cols))) {
                 results_.covariance.topLeftCorner(slope_cols, slope_cols) = cov_block;
-                results_.stderr.head(slope_cols) =
+                results_.std_errors.head(slope_cols) =
                     cov_block.diagonal().cwiseMax(0.0).cwiseSqrt();
                 results_.vcv_psd_fixed = true;
             }
         }
     }
 
-    recompute_inference(results_.coefficients, results_.stderr, results_.tvalues,
+    recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
                         results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
     normalize_nonfrequency_weighted_fit_stats(
         results_, tuned.weights_are_frequencies, w_ptr, sum_weights_for_stats);

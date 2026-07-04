@@ -48,13 +48,9 @@ jobs:
         run: gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
   # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
-  # WORK IN PROGRESS (non-blocking): the MinGW build currently fails because
-  # the core header undefs the `stderr` macro (HdfeResults has a member named
-  # `stderr`) while later code calls std::fprintf(stderr, ...); on MinGW
-  # `stderr` is macro-only, so it is undeclared after the undef. This needs a
-  # core portability patch (rename the member or save/restore the macro),
-  # done in the canonical sources and validated on all platforms. Tracked as
-  # a GitHub issue. Until then, Windows users build from source.
+  # The core `stderr`-member/macro conflict (issue #1) is fixed: the member
+  # was renamed to `std_errors` and the `#undef stderr` removed, so the MinGW
+  # build should now succeed. Kept non-blocking for one validation cycle.
   windows:
     runs-on: ubuntu-latest
     continue-on-error: true

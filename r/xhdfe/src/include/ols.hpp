@@ -12,7 +12,7 @@ namespace detail {
 
 struct OlsResult {
     Eigen::VectorXd coefficients;
-    Eigen::VectorXd stderr;
+    Eigen::VectorXd std_errors;
     Eigen::VectorXd tvalues;
     Eigen::VectorXd pvalues;
     Eigen::MatrixXd conf_int;
