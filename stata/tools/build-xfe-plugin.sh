@@ -206,7 +206,7 @@ if [[ "${TARGET}" != "windows" ]]; then
   pthread_flag=( -pthread )
 else
   common_compile_flags+=( -static-libgcc -static-libstdc++ )
-  common_compile_flags+=( -include stdio.h )
+  common_compile_flags+=( -include "${SCRIPT_DIR}/mingw_stdio_shim.h" )
   pthread_flag=()
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
@@ -408,12 +408,12 @@ if [[ "${UNAME_S}" == "Darwin" && "${TARGET}" != "windows" ]]; then
   echo "Building ${OUT_PLUGIN} (universal: x86_64 + arm64)"
   tmp_x86="${BUILD_DIR}/xfe.plugin.x86_64"
   tmp_arm="${BUILD_DIR}/xfe.plugin.arm64"
-  compile_plugin "${tmp_x86}" -target x86_64-apple-macos10.12 "${metal_flags[@]}"
-  compile_plugin "${tmp_arm}" -target arm64-apple-macos11 "${metal_flags[@]}"
+  compile_plugin "${tmp_x86}" -target x86_64-apple-macos10.12 "${metal_flags[@]+${metal_flags[@]}}"
+  compile_plugin "${tmp_arm}" -target arm64-apple-macos11 "${metal_flags[@]+${metal_flags[@]}}"
   lipo -create -output "${OUT_PLUGIN}" "${tmp_x86}" "${tmp_arm}"
 else
   echo "Building ${OUT_PLUGIN}"
-  compile_plugin "${OUT_PLUGIN}" "${metal_flags[@]}"
+  compile_plugin "${OUT_PLUGIN}" "${metal_flags[@]+${metal_flags[@]}}"
 fi
 
 if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
