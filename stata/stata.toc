@@ -1,0 +1,6 @@
+v 3
+d xhdfe / xfe: High-dimensional fixed effects via a C++ plugin
+d
+d Online install site with platform-specific Stata plugins.
+p xhdfe High-dimensional fixed effects regression via a C++ plugin
+p xfe Partial-out variables with multiple fixed effects via a C++ plugin

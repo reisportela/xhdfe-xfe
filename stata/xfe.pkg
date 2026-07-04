@@ -1,0 +1,15 @@
+v 1.10.0
+d xfe: Partial-out variables with multiple fixed effects via a C++ plugin
+d
+d Online Stata package with a platform-specific plugin selected by Stata g lines.
+d The installed runtime plugin is always named xfe.plugin.
+f xfe.ado
+f xfe.sthlp
+g LINUX64 xfe.linux64.plugin xfe.plugin
+g LINUX64P xfe.linux64.plugin xfe.plugin
+g MACARM64 xfe.macos-universal.plugin xfe.plugin
+g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
+g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
+g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
+g WIN64 xfe.win64.plugin xfe.plugin
+h xfe.plugin
