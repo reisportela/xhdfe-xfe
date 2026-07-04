@@ -48,9 +48,13 @@ jobs:
         run: gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
 
   # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
-  # Work in progress: not yet green, so it does not block the release; the
-  # other platforms still upload. Runs with `bash -x` to capture the exact
-  # compiler invocation for debugging.
+  # WORK IN PROGRESS (non-blocking): the MinGW build currently fails because
+  # the core header undefs the `stderr` macro (HdfeResults has a member named
+  # `stderr`) while later code calls std::fprintf(stderr, ...); on MinGW
+  # `stderr` is macro-only, so it is undeclared after the undef. This needs a
+  # core portability patch (rename the member or save/restore the macro),
+  # done in the canonical sources and validated on all platforms. Tracked as
+  # a GitHub issue. Until then, Windows users build from source.
   windows:
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -58,14 +62,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install MinGW toolchain
         run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 zip
-      - name: Diagnostics
-        run: |
-          echo "shim head:"; head -14 stata/tools/mingw_stdio_shim.h
-          echo "build-plugin include line:"; grep -n "mingw_stdio_shim" stata/tools/build-plugin.sh
       - name: Build Windows plugins (CPU, MinGW)
         run: |
-          bash -x stata/tools/build-plugin.sh --windows --no-openmp
-          bash -x stata/tools/build-xfe-plugin.sh --windows --no-openmp
+          bash stata/tools/build-plugin.sh --windows --no-openmp
+          bash stata/tools/build-xfe-plugin.sh --windows --no-openmp
       - name: Package bundle
         run: bash .github/scripts/make_stata_bundle.sh windows-x86_64-cpu
       - name: Attach to release
