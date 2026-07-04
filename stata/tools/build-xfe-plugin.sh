@@ -393,20 +393,20 @@ compile_plugin() {
     "${NVCC}" "${link_flags[@]}" "${objs[@]}" -o "${out}"
   else
     if [[ "${OPENMP_MODE}" == "on" ]]; then
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
         -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
     elif [[ "${OPENMP_MODE}" == "off" ]]; then
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
         -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
     else
       set +e
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
         -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
       rc=$?
       set -e
       if [[ $rc -ne 0 ]]; then
         echo "OpenMP build failed; retrying without OpenMP..."
-        "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" "${static_gnu_link_flags[@]}" "${extra_flags[@]}" "${pthread_flag[@]}" \
+        "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
           -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
       fi
     fi
