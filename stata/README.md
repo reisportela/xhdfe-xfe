@@ -12,10 +12,13 @@ bash tools/build-plugin.sh
 
 This produces `xhdfe.plugin` in the same directory.
 
-To build with CUDA support (GPU backend), set `XHDFE_ENABLE_CUDA=1` and ensure `nvcc` is on PATH:
+To build with CUDA support (GPU backend), set `XHDFE_ENABLE_CUDA=ON`, ensure `nvcc`
+is on PATH, and target your GPU's compute capability — read it with
+`nvidia-smi --query-gpu=compute_cap --format=csv,noheader` and drop the dot
+(`9.0` → `90`, `8.6` → `86`; minimum `75`):
 
 ```bash
-# This workstation (H100 / sm_90)
+# example: compute capability 9.0 (H100 -> sm_90); use your own value
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash tools/build-plugin.sh --linux --openmp
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash tools/build-xfe-plugin.sh --linux --openmp
 
@@ -60,7 +63,9 @@ net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe
 ```
 
 That site uses Stata platform-specific `g` lines so Linux, macOS, and Windows
-users receive the matching plugin binary when it exists in the release. For a
+users receive the matching plugin binary when it exists in the release. These
+online plugins are **CPU-only** — the GPU backend is not distributed and must be
+built from source with `XHDFE_ENABLE_CUDA=ON` as shown above. For a
 local development checkout or an unzipped release bundle, point `net install`
 at the folder containing `stata.toc` and the `.pkg` files:
 

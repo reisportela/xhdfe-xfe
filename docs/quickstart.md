@@ -41,10 +41,17 @@ net install xhdfe, from("/path/to/xhdfe/stata") replace
 net install xfe,   from("/path/to/xhdfe/stata") replace
 ```
 
-To build the plugin from source (OpenMP recommended):
+The online plugins and release ZIPs are **CPU-only**. Building from source is
+**required for NVIDIA GPU (CUDA)** — the online material ships no source. Clone
+the repo, then:
 
 ```bash
+# CPU (OpenMP recommended)
 bash stata/tools/build-plugin.sh --linux --openmp     # produces stata/xhdfe.plugin
+
+# GPU (Linux + NVIDIA only): set XHDFE_CUDA_ARCH to your GPU's compute capability
+#   nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0 -> 90, 8.6 -> 86
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp
 ```
 
 **Python** (requires Python >= 3.9), from the repository root:

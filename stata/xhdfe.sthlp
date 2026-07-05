@@ -211,15 +211,24 @@ otherwise xhdfe stops with an error instead of silently falling back to CPU.
 stops with an error instead of silently falling back to CPU.
 
 {phang}
-To build a CUDA-enabled plugin (Linux only), from the xhdfe repository root:
+The online net-install and the release ZIPs ship {bf:CPU-only} plugins; the GPU cannot be obtained from the
+online material. To use CUDA you must build the plugin from source (Linux + NVIDIA only). First read your GPU's
+compute capability:
+
+{phang2}
+{cmd:. nvidia-smi --query-gpu=compute_cap --format=csv,noheader}
+
+{phang}
+Drop the dot to get {cmd:XHDFE_CUDA_ARCH} (for example {cmd:9.0} maps to {cmd:90}, {cmd:8.6} to {cmd:86}; minimum
+{it:75}). Then, from the xhdfe repository root:
 
 {phang2}
 {cmd:. XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp}
 
 {phang}
 CUDA builds require NVCC and compute capability {it:sm_75} or newer. Use {cmd:XHDFE_CUDA_ARCH} to set a single
-target SM (default: 75; minimum: 75), or {cmd:XHDFE_CUDA_ARCHS} to set a multi-target list (comma/space/semicolon
-separated), for example {cmd:"75,80,86,89,90"}. On this workstation (H100), use {cmd:XHDFE_CUDA_ARCH=90}.
+target SM for your card (minimum: 75), or {cmd:XHDFE_CUDA_ARCHS} to set a multi-target list (comma/space/semicolon
+separated), for example {cmd:"75,80,86,89,90"} for a shareable multi-GPU binary.
 
 {phang}
 After estimation, check {cmd:e(gpu_used)}, {cmd:e(gpu_backend)}, and {cmd:e(gpu_status)} to confirm whether CUDA
