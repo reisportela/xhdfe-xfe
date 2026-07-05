@@ -63,8 +63,10 @@ opt-in, env-gated diagnostics that are silent by default).
 
 ## Install (CUDA, optional)
 
-Requires Linux and the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set).
-On this workstation (H100) the local policy is `sm_90`:
+Requires Linux, the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set), and
+the package source (a clone or source tarball — a CPU install has no GPU). Set
+`XHDFE_CUDA_ARCH` to your GPU's compute capability
+(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`):
 
 ```bash
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL xhdfe

@@ -2,7 +2,18 @@
 
 This note is for the Stata plugins in this folder: `xhdfe.plugin` and `xfe.plugin`.
 
-On this workstation the GPU is an `H100`, so the local CUDA target should be `sm_90`.
+GPU support is not available from the online net-install or the release ZIPs
+(those ship CPU-only plugins). It must be built from source, as below.
+
+Pick the CUDA target from *your* GPU's compute capability:
+
+```bash
+nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0, 8.6, 7.5
+```
+
+Drop the dot to get `XHDFE_CUDA_ARCH` (`9.0` → `90`, `8.6` → `86`; minimum `75`).
+On this workstation the GPU is an `H100` (compute capability 9.0), so the local
+CUDA target is `sm_90` (`XHDFE_CUDA_ARCH=90`).
 
 ## Build commands
 

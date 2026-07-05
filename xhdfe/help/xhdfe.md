@@ -36,7 +36,9 @@ Python environments under Rosetta. The explicit safe-path workaround is:
 XHDFE_ENABLE_MARCH_NATIVE=OFF python -m pip install .
 ```
 
-CUDA builds can be requested with environment variables:
+CUDA builds require the source (build from a clone or `git+` URL, not a prebuilt
+wheel) and the NVIDIA toolkit. Set the arch to your GPU's compute capability
+(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` maps to `90`):
 
 ```bash
 XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .

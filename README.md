@@ -52,6 +52,12 @@ net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe
 The online package uses Stata platform-specific `g` lines for Linux, macOS
 Apple Silicon/Intel, and Windows when a Windows plugin artifact exists.
 
+> **These prebuilt plugins are CPU-only** (OpenMP, no CUDA). The online
+> net-install and the release ZIPs never ship a GPU plugin. For NVIDIA GPU
+> acceleration you must build from source with the CUDA flag — see **Option C**
+> below. There is no way to obtain a GPU plugin from the online material alone,
+> because it contains no source, only the compiled CPU binaries.
+
 **Option B — install a prebuilt release ZIP.** Download the distribution ZIP from the
 [Releases](https://github.com/reisportela/xhdfe-xfe/releases) page and unzip it. It
 bundles the platform plugin. In Stata, point `net install` at the unzipped
@@ -62,14 +68,39 @@ net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
 net install xfe,   from("/path/to/unzipped/xhdfe/stata") replace
 ```
 
-**Option C — build the plugin from source.** Clone the repo and build the
-plugin (Linux + GCC; OpenMP recommended), then add the folder to your `adopath`:
+**Option C — build the plugin from source (required for GPU).** Get the source
+(clone the repo, or download a *source* release ZIP that bundles the C++ backend
+and build scripts) and build the plugin, then add the folder to your `adopath`:
 
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git
 cd xhdfe-xfe
-bash stata/tools/build-plugin.sh --linux --openmp     # produces stata/xhdfe.plugin
+
+# CPU build (Linux + GCC; OpenMP recommended)
+bash stata/tools/build-plugin.sh --linux --openmp        # produces stata/xhdfe.plugin
+bash stata/tools/build-xfe-plugin.sh --linux --openmp    # produces stata/xfe.plugin
 ```
+
+For **NVIDIA GPU (CUDA)**, add `XHDFE_ENABLE_CUDA=ON` and target *your* GPU's
+compute capability. Find it once with:
+
+```bash
+nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0 (H100), 8.6 (RTX 30xx), 7.5 (T4)
+```
+
+Drop the dot to get the arch value (`9.0` → `90`, `8.6` → `86`; minimum `75`),
+then build with it:
+
+```bash
+# example for compute capability 9.0 (H100 -> sm_90); use your own value
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-xfe-plugin.sh --linux --openmp
+```
+
+CUDA builds are **Linux + NVIDIA only** and require the CUDA toolkit (`nvcc`).
+`XHDFE_CUDA_ARCH` sets a single target for your card; for a shareable multi-GPU
+binary use e.g. `XHDFE_CUDA_ARCHS="75,80,86,89,90"`. See `stata/BUILD_CUDA.md`
+for verification. Then point Stata at the folder:
 
 ```stata
 adopath + "/path/to/xhdfe/stata"
@@ -105,7 +136,10 @@ python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python -m pip install .
 ```
 
-Optional CUDA build (NVIDIA toolkit required; set the arch for your GPU):
+Optional CUDA build (NVIDIA toolkit required; requires the source, so build
+from a clone or `git+` URL — not from a wheel). Set the arch to your GPU's
+compute capability (`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`,
+e.g. `9.0` → `90`):
 
 ```bash
 XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
