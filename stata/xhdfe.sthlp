@@ -790,6 +790,12 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {phang2}{cmd:. xhdfe price weight length, absorb(rep78) vce(cluster rep78)}{p_end}
 {hline}
 
+{pstd}CUDA backend (requires a CUDA-enabled plugin){p_end}
+{phang2}{cmd:. xhdfe price weight length, absorb(rep78) gpubackend(cuda)}{p_end}
+{phang2}{cmd:. display e(gpu_used)}{p_end}
+{phang2}{cmd:. display "`e(gpu_backend)'"}{p_end}
+{hline}
+
 {pstd}Two and three sets of fixed effects{p_end}
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
 {phang2}{cmd:. xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)}{p_end}

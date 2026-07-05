@@ -65,6 +65,7 @@ reg = py_hdfe_v11.HdfeRegressor()
 ## Minimal example
 
 ```python
+import os
 import numpy as np
 import xhdfe
 
@@ -80,6 +81,14 @@ reg.fit(y, X, fes=[firm_id, year_id])
 
 print(reg.coef_)
 print(reg.summary())
+
+# Optional: request CUDA after installing a CUDA-enabled build
+os.environ["XHDFE_GPU_BACKEND"] = "cuda"
+reg_gpu = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
+reg_gpu.fit(y, X, fes=[firm_id, year_id])
+assert reg_gpu.gpu_used_ == 1
+assert reg_gpu.gpu_status_code_ == 1
+os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
 ## Constructor

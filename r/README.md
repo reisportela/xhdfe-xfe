@@ -86,6 +86,9 @@ fixef(xhdfe(y ~ x1 | firm + year, data, save_fe = TRUE))
 xhdfe(y ~ x1 | worker + firm[tenure], data)
 # IV (fixest-style):
 xhdfe(y ~ exo | firm + year | endo ~ instr, data)
+# CUDA build only:
+m_gpu <- xhdfe(y ~ x1 + x2 | firm + year, data, backend = "cuda")
+stopifnot(m_gpu$gpu_used == 1, m_gpu$gpu_status == "used")
 ```
 
 See `?xhdfe` for the full documentation (it mirrors the Stata help file

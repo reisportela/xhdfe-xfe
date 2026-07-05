@@ -82,6 +82,11 @@ sysuse auto, clear
 xhdfe price weight length, absorb(rep78)
 xhdfe price weight length, absorb(rep78) vce(cluster rep78)
 
+* Optional: request CUDA after installing a CUDA-enabled plugin
+xhdfe price weight length, absorb(rep78) vce(cluster rep78) gpubackend(cuda)
+display e(gpu_used)                 // must be 1
+display "`e(gpu_backend)'"          // must be "cuda"
+
 webuse nlswork, clear
 xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)
 xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)
@@ -109,6 +114,7 @@ XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
 Minimal example:
 
 ```python
+import os
 import numpy as np
 import xhdfe
 
@@ -124,6 +130,14 @@ reg.fit(y, X, fes=[firm_id, year_id])
 
 print(reg.coef_)
 print(reg.summary())
+
+# Optional: request CUDA after installing a CUDA-enabled build
+os.environ["XHDFE_GPU_BACKEND"] = "cuda"
+reg_gpu = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
+reg_gpu.fit(y, X, fes=[firm_id, year_id])
+assert reg_gpu.gpu_used_ == 1
+assert reg_gpu.gpu_status_code_ == 1
+os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
 ### R
@@ -153,6 +167,11 @@ d$y <- 0.5 * d$x1 - 0.2 * d$x2 + 0.05 * d$worker + 0.03 * d$firm + rnorm(n)
 # Two-way fixed effects (worker + firm), clustered by firm
 m <- xhdfe(y ~ x1 + x2 | worker + firm, data = d, cluster = ~ firm)
 summary(m)
+
+# Optional: request CUDA after installing a CUDA-enabled build
+m_gpu <- xhdfe(y ~ x1 + x2 | worker + firm, data = d,
+               cluster = ~ firm, backend = "cuda")
+stopifnot(m_gpu$gpu_used == 1, m_gpu$gpu_status == "used")
 ```
 
 The R formula grammar is fixest-style: `y ~ x | fe1 + fe2` for absorbed FEs,

@@ -129,6 +129,11 @@ d$y  <- 1 + 0.5 * d$x1 - 0.2 * d$x2 + 0.7 * d$xe + rnorm(n)
 
 ```stata
 xhdfe ln_wage grade ttl_exp tenure, absorb(idcode year)
+
+* CUDA build only: request GPU absorption and verify it was used
+xhdfe ln_wage grade ttl_exp tenure, absorb(idcode year) gpubackend(cuda)
+display e(gpu_used)
+display "`e(gpu_backend)'"
 ```
 
 **Python**
@@ -137,6 +142,15 @@ xhdfe ln_wage grade ttl_exp tenure, absorb(idcode year)
 reg = xhdfe.HdfeRegressor()
 reg.fit(y, X, fes=[firm_id, year_id])
 print(reg.summary())
+
+# CUDA build only: request GPU absorption and verify it was used
+import os
+os.environ["XHDFE_GPU_BACKEND"] = "cuda"
+reg_gpu = xhdfe.HdfeRegressor()
+reg_gpu.fit(y, X, fes=[firm_id, year_id])
+assert reg_gpu.gpu_used_ == 1
+assert reg_gpu.gpu_status_code_ == 1
+os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
 **R**
@@ -144,6 +158,10 @@ print(reg.summary())
 ```r
 m <- xhdfe(y ~ x1 + x2 | firm + year, data = d)
 summary(m)
+
+# CUDA build only: request GPU absorption and verify it was used
+m_gpu <- xhdfe(y ~ x1 + x2 | firm + year, data = d, backend = "cuda")
+stopifnot(m_gpu$gpu_used == 1, m_gpu$gpu_status == "used")
 ```
 
 ### (b) Clustered standard errors (one-way and multiway)
