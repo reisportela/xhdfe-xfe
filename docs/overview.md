@@ -34,15 +34,18 @@ estimation, and the degrees-of-freedom accounting all live in the same core.
 | Fixed-effect recovery | Per-observation FE contributions (`savefe` / `fixef()` / `retain_fes`). |
 | Group / individual FEs | Group-level outcomes with absorbed individual effects. |
 | Mobility groups | Connected-component identification across FE dimensions. |
-| GPU (optional) | CUDA absorber, opt-in per call, fail-closed (no silent CPU fallback). |
+| GPU (optional) | CUDA absorber, opt-in per call; fail-closed in Stata/R, check `gpu_used_` in Python. See the [GPU guide](gpu.md). |
 
 ## Backends
 
 CPU is the reference backend and defines the numerical results. The optional
 CUDA backend accelerates the fixed-effect absorber on large problems; it is
 requested explicitly (`gpubackend(cuda)` in Stata, `backend = "cuda"` in R,
-`XHDFE_GPU_BACKEND=cuda` in Python) and errors rather than silently returning
-CPU results if the GPU path is unavailable or fails to converge.
+`XHDFE_GPU_BACKEND=cuda` in Python). Stata and R are fail-closed — they error
+rather than silently returning CPU results if the GPU path is unavailable or
+fails; in Python, `.fit()` falls back to CPU instead, so check
+`reg.gpu_used_ == 1`. See the [GPU (CUDA) guide](gpu.md) for how to install with
+the GPU feature in every version of the package.
 
 ## Tolerance modes
 

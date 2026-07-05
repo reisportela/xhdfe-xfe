@@ -1,6 +1,8 @@
 # Stata CUDA Build Instructions
 
 This note is for the Stata plugins in this folder: `xhdfe.plugin` and `xfe.plugin`.
+For the cross-language walkthrough (Stata, Python, and R), see
+[`../docs/gpu.md`](../docs/gpu.md).
 
 GPU support is not available from the online net-install or the release ZIPs
 (those ship CPU-only plugins). It must be built from source, as below.

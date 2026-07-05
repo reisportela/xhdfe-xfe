@@ -390,10 +390,13 @@ m$iterations; m$converged
 
 CPU is the **reference** backend and the default everywhere. The optional CUDA
 backend accelerates only the fixed-effect absorber and is most useful on large
-problems. It is opt-in per call and **fail-closed** — if a GPU backend is
-requested but is unavailable, fails, or does not converge on the device, the
-call stops with an error instead of silently returning CPU results. Always
-confirm real GPU use with the diagnostics below.
+problems. It is opt-in per call. In **Stata and R it is fail-closed** — if a GPU
+backend is requested but is unavailable, fails, or does not converge on the
+device, the call stops with an error instead of silently returning CPU results.
+In **Python**, `.fit()` falls back to CPU instead of erroring, so always check
+`reg.gpu_used_`. Confirm real GPU use with the diagnostics below. For the full
+install-with-GPU walkthrough in every language, see the
+[GPU (CUDA) guide](gpu.md).
 
 **Stata** — request CUDA and verify:
 

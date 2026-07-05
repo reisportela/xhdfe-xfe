@@ -72,6 +72,15 @@ the package source (a clone or source tarball — a CPU install has no GPU). Set
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL xhdfe
 ```
 
+To install straight from GitHub with GPU support, set the same variables in R
+first (they are read at build time):
+
+```r
+Sys.setenv(XHDFE_ENABLE_CUDA = "ON", XHDFE_CUDA_ARCH = "90")   # use your own arch
+remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
+```
+
+Verify the build with `xhdfe_info()` (its `cuda_arch` field shows e.g. `sm_90`).
 GPU use is opt-in per call (`backend = "cuda"`) and fail-closed: if the GPU
 is unavailable or absorption does not complete on it, the call errors instead
 of silently returning CPU results — mirroring the Stata command's error 498
