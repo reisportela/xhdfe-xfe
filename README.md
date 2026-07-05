@@ -36,7 +36,9 @@ is available for large problems.
 ## Choose your language
 
 The three packages call the same C++ estimator, so results agree across
-languages. Pick your front-end below.
+languages. Pick your front-end below. **For GPU (CUDA) acceleration in any of
+them, see the [GPU (CUDA) guide](docs/gpu.md)** — it walks through installing
+with the GPU feature, requesting it, and verifying it in Stata, Python, and R.
 
 ### Stata
 
@@ -136,14 +138,20 @@ python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python -m pip install .
 ```
 
-Optional CUDA build (NVIDIA toolkit required; requires the source, so build
-from a clone or `git+` URL — not from a wheel). Set the arch to your GPU's
-compute capability (`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`,
-e.g. `9.0` → `90`):
+**With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
+`nvcc` and always builds from source — never a prebuilt wheel). Set the arch to
+your GPU's compute capability
+(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`):
 
 ```bash
+# from a clone:
 XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
+# or straight from GitHub:
+XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 ```
+
+At runtime request the GPU with `os.environ["XHDFE_GPU_BACKEND"] = "cuda"` (see
+the example below) and confirm with `reg.gpu_used_ == 1`.
 
 Minimal example:
 
@@ -176,12 +184,27 @@ os.environ.pop("XHDFE_GPU_BACKEND", None)
 
 ### R
 
-Install from GitHub (the package lives in the `r/xhdfe` subdirectory):
+Install from GitHub (the package lives in the `r/xhdfe` subdirectory). This
+gives you the **CPU** build:
 
 ```r
 # install.packages("remotes")
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
+
+**With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
+`nvcc` and always builds from source). Read your GPU's compute capability
+(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`)
+and pass it through the environment before installing:
+
+```r
+Sys.setenv(XHDFE_ENABLE_CUDA = "ON", XHDFE_CUDA_ARCH = "90")   # use your own arch
+remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
+```
+
+or, from a clone: `XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL r/xhdfe`.
+GPU use is then per call via `backend = "cuda"` (fail-closed if unavailable);
+`xhdfe_info()` reports the CUDA arch the package was built for.
 
 Minimal example (a small simulated worker–firm panel):
 
@@ -232,6 +255,7 @@ interaction FE, and `| endo ~ inst` for IV. See
 ## Documentation
 
 - **Quickstart & overview:** [`docs/quickstart.md`](docs/quickstart.md), [`docs/overview.md`](docs/overview.md).
+- **GPU (CUDA):** [`docs/gpu.md`](docs/gpu.md) — install-with-GPU, request, and verify in Stata/Python/R.
 - **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
 - **Stata:** `help xhdfe`, `help xfe`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
