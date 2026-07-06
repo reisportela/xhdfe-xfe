@@ -85,7 +85,7 @@ estimation path. To only build the leave-out sample without estimating, use
 
 {pstd}
 {cmd:xhdfe} is, by design, primarily a high-performance replica of
-{helpb reghdfe}; from {cmd:pytwoway} (Lamadon and collaborators' reference
+{helpb reghdfe}; from {cmd:pytwoway} (Lamadon and Oppenheimer's reference
 Python toolkit for two-way worker-firm models) and the related AKM literature
 it adopts {it:only} what adds value inside that reghdfe universe -- this
 leave-out decomposition, the connected set and the Gelbach companion -- rather

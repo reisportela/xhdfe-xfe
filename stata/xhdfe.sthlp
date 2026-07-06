@@ -1096,11 +1096,11 @@ Worker-firm (AKM) leave-out layer (see {helpb xhdfeakm} and {helpb xhdfegelbach}
 
 {phang}
 Saggio, Raffaele. "{cmd:LeaveOutTwoWay}: Leave-out estimation of variance components."
-MATLAB package (the canonical Kline-Saggio-Solvsten implementation).
+MATLAB package (the canonical Kline-Saggio-Soelvsten implementation).
 {browse "https://github.com/rsaggio87/LeaveOutTwoWay":https://github.com/rsaggio87/LeaveOutTwoWay}.{p_end}
 
 {phang}
-Lamadon, Thibaut, and collaborators. "{cmd:pytwoway}: Two-way fixed-effect models for
+Lamadon, Thibaut, and Adam A. Oppenheimer. "{cmd:pytwoway}: Two-way fixed-effect models for
 worker-firm data in Python."
 {browse "https://github.com/tlamadon/pytwoway":https://github.com/tlamadon/pytwoway}.{p_end}
 
@@ -1114,11 +1114,11 @@ and low wage firms: negative assortative matching or limited mobility bias?"
 {it:Journal of the Royal Statistical Society A} 171(3): 673-697.{p_end}
 
 {phang}
-Kline, Patrick, Raffaele Saggio, and Mikkel Solvsten. 2020. "Leave-out estimation of variance
+Kline, Patrick, Raffaele Saggio, and Mikkel Soelvsten. 2020. "Leave-out estimation of variance
 components." {it:Econometrica} 88(5): 1859-1898.{p_end}
 
 {phang}
-Andrews, Donald W. K., and Anna Mikusheva. 2016. "Conditional inference with a functional
+Andrews, Isaiah, and Anna Mikusheva. 2016. "Conditional inference with a functional
 nuisance parameter." {it:Econometrica} 84(4): 1571-1612.{p_end}
 
 {phang}
