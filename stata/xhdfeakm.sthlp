@@ -21,35 +21,35 @@
 {synopthdr}
 {synoptline}
 {syntab:Model}
-{p2coltm 5 28 32 2: {opth work:er(varname)}}worker (person) identifier, integer-valued; {bf:required}{p_end}
-{p2coltm 5 28 32 2: {opth firm(varname)}}firm (establishment) identifier, integer-valued; {bf:required}{p_end}
-{p2coltm 5 28 32 2: {opth control:s(varlist)}}covariates partialled out (FWL) before the two-way step{p_end}
-{p2coltm 5 28 32 2: {opt leaveout:level(unit)}}leave-out unit: {cmd:match} (default) or {cmd:obs}{p_end}
-{p2coltm 5 28 32 2: {opt noprune}}skip the leave-out connected-set pruning{p_end}
+{synopt :{opth work:er(varname)}}worker (person) identifier, integer-valued; {bf:required}{p_end}
+{synopt :{opth firm(varname)}}firm (establishment) identifier, integer-valued; {bf:required}{p_end}
+{synopt :{opth control:s(varlist)}}covariates partialled out (FWL) before the two-way step{p_end}
+{synopt :{opt leaveout:level(unit)}}leave-out unit: {cmd:match} (default) or {cmd:obs}{p_end}
+{synopt :{opt noprune}}skip the leave-out connected-set pruning{p_end}
 
-{syntab:Leverages (P{sub:ii}, B{sub:ii})}
-{p2coltm 5 28 32 2: {opt lev:erages(method)}}{cmd:auto} (default), {cmd:exact}, or {cmd:jla}{p_end}
-{p2coltm 5 28 32 2: {opt draws(#)}}JLA random projections (default 200){p_end}
-{p2coltm 5 28 32 2: {opt seed(#)}}seed for the JLA draws (default 20260705){p_end}
-{p2coltm 5 28 32 2: {opt exactmax:rows(#)}}row cap for {cmd:auto} to pick the exact path (default 10000){p_end}
+{syntab:Leverages (Pii, Bii)}
+{synopt :{opt lev:erages(method)}}{cmd:auto} (default), {cmd:exact}, or {cmd:jla}{p_end}
+{synopt :{opt draws(#)}}JLA random projections (default 200){p_end}
+{synopt :{opt seed(#)}}seed for the JLA draws (default 20260705){p_end}
+{synopt :{opt exactmax:rows(#)}}row cap for {cmd:auto} to pick the exact path (default 10000){p_end}
 
 {syntab:Inference}
-{p2coltm 5 28 32 2: {opt se}}component standard errors (KSS leave-out inference){p_end}
-{p2coltm 5 28 32 2: {opt sensim(#)}}simulation draws for the SE quadratic part (default 1000){p_end}
-{p2coltm 5 28 32 2: {opt ci}}weak-id diagnostics + Andrews-Mikusheva q=1 CIs; implies {opt se}{p_end}
-{p2coltm 5 28 32 2: {opt eigtracensim(#)}}Hutchinson draws for tr(Atilde{sup:2}) (default 100){p_end}
-{p2coltm 5 28 32 2: {opt sigmalow:ess}}lowess sigma-tilde fit instead of the binned default{p_end}
+{synopt :{opt se}}component standard errors (KSS leave-out inference){p_end}
+{synopt :{opt sensim(#)}}simulation draws for the SE quadratic part (default 1000){p_end}
+{synopt :{opt ci}}weak-id diagnostics + Andrews-Mikusheva q=1 CIs; implies {opt se}{p_end}
+{synopt :{opt eigtracensim(#)}}Hutchinson draws for tr(Atilde^2) (default 100){p_end}
+{synopt :{opt sigmalow:ess}}lowess sigma-tilde fit instead of the binned default{p_end}
 
 {syntab:Solver / technical}
-{p2coltm 5 28 32 2: {opt gpu}}solve the two-way systems on the CUDA backend{p_end}
-{p2coltm 5 28 32 2: {opt threads(#)}}OpenMP threads (0 = library default){p_end}
-{p2coltm 5 28 32 2: {opt directmax:firms(#)}}firm cap for the direct sparse solve (default 50000){p_end}
-{p2coltm 5 28 32 2: {opt cgtol(#)}}two-way solver tolerance (default 1e-10){p_end}
-{p2coltm 5 28 32 2: {opt fwltol(#)}}absorber tolerance for the control step (default 1e-10){p_end}
+{synopt :{opt gpu}}solve the two-way systems on the CUDA backend{p_end}
+{synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
+{synopt :{opt directmax:firms(#)}}firm cap for the direct sparse solve (default 50000){p_end}
+{synopt :{opt cgtol(#)}}two-way solver tolerance (default 1e-10){p_end}
+{synopt :{opt fwltol(#)}}absorber tolerance for the control step (default 1e-10){p_end}
 
 {syntab:Output}
-{p2coltm 5 28 32 2: {opth gen:erate(stub)}}save {it:stub}{cmd:_alpha}, {it:stub}{cmd:_psi}, {it:stub}{cmd:_keep}{p_end}
-{p2coltm 5 28 32 2: {opt replace}}overwrite existing {opt generate()} variables{p_end}
+{synopt :{opth gen:erate(stub)}}save {it:stub}{cmd:_alpha}, {it:stub}{cmd:_psi}, {it:stub}{cmd:_keep}{p_end}
+{synopt :{opt replace}}overwrite existing {opt generate()} variables{p_end}
 {synoptline}
 {p2colreset}{...}
 {p 4 6 2}{cmd:fweight}s are allowed (match-level point decomposition only; a
@@ -133,13 +133,13 @@ q=1 confidence intervals for each component (the LeaveOutTwoWay
 sum of squared eigenvalues, the weak-Lindeberg condition, gamma-squared, the
 F statistic, the curvature-adjusted point estimate {it:theta_1}, the AM
 confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
-sets the Hutchinson draws for tr(Atilde{sup:2}) (default 100, the oracle
+sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
 
 {phang}{opt sigmalowess} uses the LeaveOutTwoWay mode-0 lowess surface fit of
 sigma-i on ({it:P_ii}, {it:B_ii}) for the SE quadratic part instead of the
 binned default. Intended for small/medium-sample sensitivity analysis
-(O({it:n}{sup:2})); the binned fit is the validated default.
+(O(n^2)); the binned fit is the validated default.
 
 {dlgtab:Solver / technical}
 
