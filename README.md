@@ -359,13 +359,30 @@ Alexander Fischer and collaborators (Python), and
 [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl)
 by Matthieu Gomez and collaborators (Julia).
 
-The worker-firm (AKM) leave-out layer follows, and is validated at machine
-precision against, [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay)
-by Raffaele Saggio (MATLAB) — the canonical Kline-Saggio-Solvsten (2020)
-implementation — and interoperates with, and is cross-checked against,
-[`pytwoway`](https://github.com/tlamadon/pytwoway) by Thibaut Lamadon and
-collaborators (Python). The Gelbach decomposition is validated against
-`b1x2` by Jonah Gelbach (Stata). Full credit to their authors.
+By design, `xhdfe` is first and foremost a high-performance replica of
+`reghdfe`: it mirrors reghdfe's estimator, defaults, and reporting, and
+reghdfe-comparable results are its reference. From the worker-firm (AKM)
+literature and from [`pytwoway`](https://github.com/tlamadon/pytwoway) — Thibaut
+Lamadon and collaborators' reference Python toolkit for two-way worker-firm
+models (AKM and the leave-out, CRE and BLM estimators) — `xhdfe` adopts *only*
+what adds value inside that reghdfe universe: the leave-out (KSS) bias-corrected
+variance decomposition, the leave-out connected set, and the Gelbach
+decomposition, implemented natively on the same C++ core. It does not attempt to
+reproduce `pytwoway`.
+
+`xhdfe` links to `pytwoway` in two concrete ways. First, **validation**: its
+leave-out decomposition is checked at machine precision against `pytwoway` and
+against [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay) by
+Raffaele Saggio, the canonical Kline-Saggio-Solvsten (2020) implementation.
+Second, **interoperability**: `xhdfe` exports the leave-out sample to the
+`pytwoway` / `bipartitepandas` format, so a cleaned two-way sample moves between
+the two tools. The combination is most useful in labour economics with large
+linked employer-employee data: run the fast HDFE regression and the leave-out
+variance decomposition (variance of worker and firm effects, their covariance,
+and worker-firm sorting) inside a familiar `reghdfe` workflow with `xhdfe`, and
+reach for `pytwoway` when you need its broader structural models (CRE, BLM) that
+are deliberately outside `xhdfe`'s scope. The Gelbach decomposition is validated
+against `b1x2` by Jonah Gelbach. Full credit to their authors.
 
 We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
 workshop collaboration around earlier versions of the project. We especially
@@ -374,7 +391,21 @@ thank Sergio Correia for feedback on benchmarking, tolerances, and
 
 ## References
 
-Methods implemented by `xhdfe`'s worker-firm post-estimation layer:
+High-dimensional fixed effects — the `reghdfe` universe `xhdfe` replicates:
+
+- Cornelissen, T. 2008. The Stata command `felsdvreg` to fit a linear model
+  with two high-dimensional fixed effects. *Stata Journal* 8(2): 170-189.
+- Guimaraes, P., and P. Portugal. 2010. A simple feasible procedure to fit
+  models with high-dimensional fixed effects. *Stata Journal* 10(4): 628-649.
+- Gaure, S. 2013. OLS with multiple high dimensional category variables.
+  *Computational Statistics & Data Analysis* 66: 8-18.
+- Correia, S. 2016. `reghdfe`: Estimating linear models with multi-way fixed
+  effects. Stata Conference, Stata Users Group.
+- Correia, S., P. Guimaraes, and T. Zylkin. 2020. Fast Poisson estimation with
+  high-dimensional fixed effects. *Stata Journal* 20(1): 95-115.
+
+Worker-firm (AKM) leave-out layer — what `xhdfe` borrows from the `pytwoway`
+literature (see [Acknowledgements](#acknowledgements)):
 
 - Abowd, J. M., F. Kramarz, and D. N. Margolis. 1999. High wage workers and
   high wage firms. *Econometrica* 67(2): 251-333. (AKM two-way model.)
