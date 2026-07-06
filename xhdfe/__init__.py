@@ -38,4 +38,12 @@ def _load_core():
 def __getattr__(name: str):
     if name in _CORE_EXPORTS:
         return getattr(_load_core(), name)
+    if name == "akm":
+        from . import akm
+
+        return akm
+    if name == "gelbach":
+        from . import gelbach
+
+        return gelbach
     raise AttributeError(f"module 'xhdfe' has no attribute {name!r}")

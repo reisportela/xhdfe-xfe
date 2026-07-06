@@ -19,11 +19,13 @@
 #include <cctype>
 #include <cstring>
 #include <stdexcept>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <Eigen/Dense>
 
+#include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 namespace {
@@ -766,5 +768,359 @@ Rcpp::List xhdfe_cpp_build_info() {
 #else
     out["fast_math"] = false;
 #endif
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// AKM + leave-out (KSS) variance decomposition (opt-in module; mirrors the
+// Python free functions py_hdfe_v11.akm_leave_out_set / akm_kss).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+Eigen::VectorXi as_vector_xi(const Rcpp::IntegerVector& v) {
+    Eigen::VectorXi out(v.size());
+    for (R_xlen_t k = 0; k < v.size(); ++k) {
+        out[static_cast<int>(k)] = v[k];
+    }
+    return out;
+}
+
+hdfe::akm::LeaveOutLevel parse_leave_out_level(const std::string& name) {
+    const std::string lower = to_lower(name);
+    if (lower == "match" || lower == "matches") return hdfe::akm::LeaveOutLevel::Match;
+    if (lower == "obs" || lower == "observation" || lower == "observations") {
+        return hdfe::akm::LeaveOutLevel::Observation;
+    }
+    throw std::runtime_error("Unknown leave_out_level: " + name + " (use 'match' or 'obs')");
+}
+
+hdfe::akm::LeverageMethod parse_leverage_method(const std::string& name) {
+    const std::string lower = to_lower(name);
+    if (lower == "auto") return hdfe::akm::LeverageMethod::Auto;
+    if (lower == "exact") return hdfe::akm::LeverageMethod::Exact;
+    if (lower == "jla" || lower == "jl") return hdfe::akm::LeverageMethod::Jla;
+    throw std::runtime_error("Unknown leverages method: " + name +
+                             " (use 'auto', 'exact' or 'jla')");
+}
+
+Rcpp::List akm_set_to_list(const hdfe::akm::LeaveOutSetResult& s) {
+    Rcpp::LogicalVector keep(static_cast<R_xlen_t>(s.keep.size()));
+    for (R_xlen_t k = 0; k < keep.size(); ++k) {
+        keep[k] = s.keep[static_cast<std::size_t>(k)] != 0;
+    }
+    Rcpp::List out;
+    out["keep"] = keep;
+    out["n_obs_input"] = static_cast<double>(s.n_obs_input);
+    out["n_obs_connected"] = static_cast<double>(s.n_obs_connected);
+    out["n_obs"] = static_cast<double>(s.n_obs);
+    out["n_workers"] = s.n_workers;
+    out["n_firms"] = s.n_firms;
+    out["n_matches"] = static_cast<double>(s.n_matches);
+    out["n_movers"] = s.n_movers;
+    out["n_stayers"] = s.n_stayers;
+    out["prune_iterations"] = s.prune_iterations;
+    return out;
+}
+
+Rcpp::List akm_components_to_list(const hdfe::akm::AkmComponents& c,
+                                  double var_y) {
+    Rcpp::List out;
+    out["var_alpha"] = c.var_alpha;
+    out["var_psi"] = c.var_psi;
+    out["cov_alpha_psi"] = c.cov_alpha_psi;
+    // derived summary (pytwoway-style at-a-glance quantities)
+    out["corr_alpha_psi"] =
+        c.cov_alpha_psi / std::sqrt(c.var_alpha * c.var_psi);
+    out["var_alpha_plus_psi"] =
+        c.var_alpha + c.var_psi + 2.0 * c.cov_alpha_psi;
+    if (var_y > 0.0) {
+        out["share_var_alpha"] = c.var_alpha / var_y;
+        out["share_var_psi"] = c.var_psi / var_y;
+        out["share_2cov"] = 2.0 * c.cov_alpha_psi / var_y;
+    }
+    return out;
+}
+
+}  // namespace
+
+// [[Rcpp::export(name = ".xhdfe_cpp_akm_leave_out_set")]]
+Rcpp::List xhdfe_cpp_akm_leave_out_set(Rcpp::IntegerVector worker, Rcpp::IntegerVector firm) {
+    if (worker.size() != firm.size()) {
+        throw std::runtime_error("worker and firm must have the same length");
+    }
+    const Eigen::VectorXi w = as_vector_xi(worker);
+    const Eigen::VectorXi f = as_vector_xi(firm);
+    return akm_set_to_list(hdfe::akm::leave_out_connected_set(w, f));
+}
+
+// [[Rcpp::export(name = ".xhdfe_cpp_akm_kss")]]
+Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
+                             Rcpp::IntegerVector worker,
+                             Rcpp::IntegerVector firm,
+                             SEXP X,
+                             Rcpp::List opts,
+                             SEXP fweights = R_NilValue) {
+    const R_xlen_t n = y.size();
+    if (worker.size() != n || firm.size() != n) {
+        throw std::runtime_error("y, worker and firm must have the same length");
+    }
+    Eigen::Map<const Eigen::VectorXd> y_map(&y[0], n);
+    const Eigen::VectorXd y_vec = y_map;
+    const Eigen::VectorXi w = as_vector_xi(worker);
+    const Eigen::VectorXi f = as_vector_xi(firm);
+
+    Eigen::MatrixXd X_mat;
+    const Eigen::MatrixXd* X_ptr = nullptr;
+    if (!Rf_isNull(X)) {
+        Rcpp::NumericMatrix Xm(X);
+        if (Xm.nrow() != n) {
+            throw std::runtime_error("X must have the same number of rows as y");
+        }
+        if (Xm.ncol() > 0) {
+            Eigen::Map<const Eigen::MatrixXd> X_map(&Xm[0], n, Xm.ncol());
+            X_mat = X_map;
+            X_ptr = &X_mat;
+        }
+    }
+
+    hdfe::akm::AkmOptions options;
+    if (opts.containsElementNamed("leave_out_level")) {
+        options.leave_out_level =
+            parse_leave_out_level(Rcpp::as<std::string>(opts["leave_out_level"]));
+    }
+    if (opts.containsElementNamed("leverages")) {
+        options.leverage_method =
+            parse_leverage_method(Rcpp::as<std::string>(opts["leverages"]));
+    }
+    if (opts.containsElementNamed("jla_draws")) {
+        options.jla_draws = Rcpp::as<int>(opts["jla_draws"]);
+    }
+    if (opts.containsElementNamed("seed")) {
+        options.seed = static_cast<std::uint64_t>(Rcpp::as<double>(opts["seed"]));
+    }
+    if (opts.containsElementNamed("prune")) {
+        options.prune = Rcpp::as<bool>(opts["prune"]);
+    }
+    if (opts.containsElementNamed("exact_max_rows")) {
+        options.exact_max_rows = Rcpp::as<int>(opts["exact_max_rows"]);
+    }
+    if (opts.containsElementNamed("direct_max_firms")) {
+        options.direct_max_firms = Rcpp::as<int>(opts["direct_max_firms"]);
+    }
+    if (opts.containsElementNamed("direct_max_nnz")) {
+        options.direct_max_nnz =
+            static_cast<long long>(Rcpp::as<double>(opts["direct_max_nnz"]));
+    }
+    if (opts.containsElementNamed("cg_tol")) {
+        options.cg_tol = Rcpp::as<double>(opts["cg_tol"]);
+    }
+    if (opts.containsElementNamed("cg_max_iter")) {
+        options.cg_max_iter = Rcpp::as<int>(opts["cg_max_iter"]);
+    }
+    if (opts.containsElementNamed("num_threads")) {
+        options.num_threads = Rcpp::as<int>(opts["num_threads"]);
+    }
+    if (opts.containsElementNamed("fwl_tol")) {
+        options.fwl_tol = Rcpp::as<double>(opts["fwl_tol"]);
+    }
+    if (opts.containsElementNamed("fwl_max_iter")) {
+        options.fwl_max_iter = Rcpp::as<int>(opts["fwl_max_iter"]);
+    }
+    if (opts.containsElementNamed("compute_se")) {
+        options.compute_se = Rcpp::as<bool>(opts["compute_se"]);
+    }
+    if (opts.containsElementNamed("se_nsim")) {
+        options.se_nsim = Rcpp::as<int>(opts["se_nsim"]);
+    }
+    if (opts.containsElementNamed("gpu")) {
+        options.use_gpu = Rcpp::as<bool>(opts["gpu"]);
+    }
+    if (opts.containsElementNamed("eigen_diagnostics")) {
+        options.eigen_diagnostics = Rcpp::as<bool>(opts["eigen_diagnostics"]);
+        if (options.eigen_diagnostics) {
+            options.compute_se = true;
+        }
+    }
+    if (opts.containsElementNamed("eig_trace_nsim")) {
+        options.eig_trace_nsim = Rcpp::as<int>(opts["eig_trace_nsim"]);
+    }
+    if (opts.containsElementNamed("se_sigma_lowess")) {
+        options.se_sigma_lowess = Rcpp::as<bool>(opts["se_sigma_lowess"]);
+    }
+
+    std::optional<Eigen::VectorXd> fw_vec;
+    if (fweights != R_NilValue) {
+        Rcpp::NumericVector fwv(fweights);
+        if (fwv.size() != n) {
+            Rcpp::stop("fweights must have the same length as y");
+        }
+        fw_vec = Eigen::VectorXd(n);
+        for (R_xlen_t i2 = 0; i2 < n; ++i2) (*fw_vec)[i2] = fwv[i2];
+    }
+    const hdfe::akm::AkmKssResult res = hdfe::akm::akm_kss_decompose(
+        y_vec, w, f, X_ptr, options, nullptr, fw_vec ? &(*fw_vec) : nullptr);
+
+    Rcpp::List out;
+    out["sample"] = akm_set_to_list(res.sample);
+    out["alpha"] = Rcpp::NumericVector(res.alpha.data(), res.alpha.data() + res.alpha.size());
+    out["psi"] = Rcpp::NumericVector(res.psi.data(), res.psi.data() + res.psi.size());
+    out["beta"] = Rcpp::NumericVector(res.beta.data(), res.beta.data() + res.beta.size());
+    out["plugin"] = akm_components_to_list(res.plugin, res.var_y);
+    out["agsu"] = akm_components_to_list(res.agsu, res.var_y);
+    out["kss"] = akm_components_to_list(res.kss, res.var_y);
+    out["var_y"] = res.var_y;
+    out["sigma2_ho"] = res.sigma2_ho;
+    out["pii"] = Rcpp::NumericVector(res.pii.data(), res.pii.data() + res.pii.size());
+    out["sigma_i"] =
+        Rcpp::NumericVector(res.sigma_i.data(), res.sigma_i.data() + res.sigma_i.size());
+    out["row_worker"] = Rcpp::IntegerVector(res.row_worker.data(),
+                                            res.row_worker.data() + res.row_worker.size());
+    out["row_firm"] = Rcpp::IntegerVector(res.row_firm.data(),
+                                          res.row_firm.data() + res.row_firm.size());
+    out["row_weight"] = Rcpp::NumericVector(res.row_weight.data(),
+                                            res.row_weight.data() + res.row_weight.size());
+    if (options.compute_se) {
+        Rcpp::List cse;
+        cse["se_var_psi"] = res.se_var_psi;
+        cse["se_cov_alpha_psi"] = res.se_cov_alpha_psi;
+        cse["se_var_alpha"] = res.se_var_alpha;
+        cse["theta_var_psi"] = res.theta_c_var_psi;
+        cse["theta_cov_alpha_psi"] = res.theta_c_cov_alpha_psi;
+        cse["theta_var_alpha"] = res.theta_c_var_alpha;
+        out["component_se"] = cse;
+    }
+    if (options.eigen_diagnostics) {
+        const char* comps[3] = {"var_psi", "cov_alpha_psi", "var_alpha"};
+        Rcpp::List wk;
+        for (int c = 0; c < 3; ++c) {
+            Rcpp::List cd;
+            cd["lambda1"] = res.eig_lambda1[c];
+            cd["eig_share1"] = res.eig_share1[c];
+            cd["eig_share2"] = res.eig_share2[c];
+            cd["eig_share3"] = res.eig_share3[c];
+            cd["lindeberg_max_x1bar_sq"] = res.lindeberg_max_x1bar_sq[c];
+            cd["gamma_sq"] = res.gamma_sq[c];
+            cd["f_stat"] = res.f_stat[c];
+            cd["theta_1"] = res.theta_1[c];
+            cd["ci_lb"] = res.ci_lb[c];
+            cd["ci_ub"] = res.ci_ub[c];
+            cd["curvature"] = res.curvature[c];
+            cd["b_1"] = res.b_1[c];
+            cd["cov_r1_11"] = res.cov_r1_11[c];
+            cd["cov_r1_12"] = res.cov_r1_12[c];
+            cd["cov_r1_22"] = res.cov_r1_22[c];
+            wk[comps[c]] = cd;
+        }
+        out["weak_id"] = wk;
+    }
+    out["max_pii"] = res.max_pii;
+    out["mean_pii"] = res.mean_pii;
+    out["n_rows"] = static_cast<double>(res.n_rows);
+    out["leverages_exact"] = res.leverages_exact;
+    out["gpu_used"] = res.gpu_used;
+    out["solver_direct"] = res.solver_direct;
+    out["jla_draws_used"] = res.jla_draws_used;
+    out["seed"] = static_cast<double>(res.seed_used);
+    out["solver_iterations"] = static_cast<double>(res.solver_iterations);
+    out["converged"] = res.converged;
+    out["notes"] = res.notes;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Gelbach (2016) conditional decomposition, HDFE-aware (M9B). Mirrors the
+// Python py_hdfe_v11.gelbach_decompose free function.
+// ---------------------------------------------------------------------------
+
+// [[Rcpp::export(name = ".xhdfe_cpp_gelbach")]]
+Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
+                             Rcpp::NumericMatrix X1,
+                             SEXP X2,
+                             Rcpp::IntegerVector x2_group_sizes,
+                             Rcpp::List fes,
+                             SEXP cluster,
+                             std::string vce,
+                             bool gamma0,
+                             bool cov0,
+                             int num_threads,
+                             SEXP weights,
+                             bool fweights) {
+    const R_xlen_t n = y.size();
+    if (X1.nrow() != n) {
+        throw std::runtime_error("x1 must have the same number of rows as y");
+    }
+    Eigen::Map<const Eigen::VectorXd> y_map(&y[0], n);
+    const Eigen::VectorXd y_vec = y_map;
+    Eigen::Map<const Eigen::MatrixXd> X1_map(X1.size() > 0 ? &X1[0] : nullptr, n, X1.ncol());
+    const Eigen::MatrixXd X1_mat = X1_map;
+    Eigen::MatrixXd X2_mat(n, 0);
+    if (!Rf_isNull(X2)) {
+        Rcpp::NumericMatrix X2m(X2);
+        if (X2m.nrow() != n) {
+            throw std::runtime_error("x2 must have the same number of rows as y");
+        }
+        if (X2m.ncol() > 0) {
+            Eigen::Map<const Eigen::MatrixXd> X2_map(&X2m[0], n, X2m.ncol());
+            X2_mat = X2_map;
+        }
+    }
+    std::vector<int> sizes(x2_group_sizes.begin(), x2_group_sizes.end());
+    std::vector<Eigen::VectorXi> fe_list;
+    fe_list.reserve(static_cast<std::size_t>(fes.size()));
+    for (R_xlen_t d = 0; d < fes.size(); ++d) {
+        fe_list.push_back(as_vector_xi(Rcpp::IntegerVector(fes[d])));
+    }
+    Eigen::VectorXi cl;
+    const Eigen::VectorXi* cl_ptr = nullptr;
+    if (!Rf_isNull(cluster)) {
+        cl = as_vector_xi(Rcpp::IntegerVector(cluster));
+        cl_ptr = &cl;
+    }
+    hdfe::gelbach::GelbachOptions opt;
+    {
+        const std::string lower = to_lower(vce);
+        if (lower == "unadjusted" || lower == "homoskedastic" || lower == "iid") {
+            opt.vce = hdfe::gelbach::GelbachVce::Unadjusted;
+        } else if (lower == "robust") {
+            opt.vce = hdfe::gelbach::GelbachVce::Robust;
+        } else if (lower == "cluster") {
+            opt.vce = hdfe::gelbach::GelbachVce::Cluster;
+        } else {
+            throw std::runtime_error("unknown vce: " + vce);
+        }
+    }
+    opt.gamma0 = gamma0;
+    opt.cov0 = cov0;
+    opt.num_threads = num_threads;
+    Eigen::VectorXd w_vec;
+    const Eigen::VectorXd* w_ptr = nullptr;
+    if (!Rf_isNull(weights)) {
+        Rcpp::NumericVector wv(weights);
+        if (wv.size() != n) throw std::runtime_error("weights length mismatch");
+        Eigen::Map<const Eigen::VectorXd> w_map(&wv[0], n);
+        w_vec = w_map;
+        w_ptr = &w_vec;
+    }
+    const hdfe::gelbach::GelbachResult r =
+        hdfe::gelbach::decompose(y_vec, X1_mat, X2_mat, sizes, fe_list, cl_ptr, opt,
+                                 w_ptr, fweights);
+    const auto to_rmat = [](const Eigen::MatrixXd& m) {
+        Rcpp::NumericMatrix out(static_cast<int>(m.rows()), static_cast<int>(m.cols()));
+        std::copy(m.data(), m.data() + m.size(), out.begin());
+        return out;
+    };
+    Rcpp::List out;
+    out["b_base"] = Rcpp::NumericVector(r.b_base.data(), r.b_base.data() + r.b_base.size());
+    out["b_full"] = Rcpp::NumericVector(r.b_full.data(), r.b_full.data() + r.b_full.size());
+    out["delta"] = to_rmat(r.delta);
+    out["cov"] = to_rmat(r.cov);
+    out["total"] = Rcpp::NumericVector(r.total.data(), r.total.data() + r.total.size());
+    out["total_cov"] = to_rmat(r.total_cov);
+    out["identity_gap"] = r.identity_gap;
+    out["n_obs"] = static_cast<double>(r.n_obs);
+    out["df_full"] = r.df_full;
+    out["converged"] = r.converged;
+    out["notes"] = r.notes;
     return out;
 }

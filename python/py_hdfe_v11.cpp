@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <unordered_map>
 
+#include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 namespace py = pybind11;
@@ -1178,4 +1179,384 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         .def_property_readonly("absorption_method_used", [](const HdfeRegressorV11& self) {
             return self.absorption_method_used();
         });
+
+    // ---- AKM + leave-out (KSS) variance decomposition (opt-in module) ----
+    // Free functions; nothing in the HdfeRegressor paths references them.
+    const auto parse_leave_out_level = [](const std::string& name) {
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (lower == "match" || lower == "matches") {
+            return hdfe::akm::LeaveOutLevel::Match;
+        }
+        if (lower == "obs" || lower == "observation" || lower == "observations") {
+            return hdfe::akm::LeaveOutLevel::Observation;
+        }
+        throw std::runtime_error("Unknown leave_out_level: " + name +
+                                 " (use 'match' or 'obs')");
+    };
+    const auto parse_leverage_method = [](const std::string& name) {
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (lower == "auto") {
+            return hdfe::akm::LeverageMethod::Auto;
+        }
+        if (lower == "exact") {
+            return hdfe::akm::LeverageMethod::Exact;
+        }
+        if (lower == "jla" || lower == "jl") {
+            return hdfe::akm::LeverageMethod::Jla;
+        }
+        throw std::runtime_error("Unknown leverages method: " + name +
+                                 " (use 'auto', 'exact' or 'jla')");
+    };
+    const auto set_to_dict = [](const hdfe::akm::LeaveOutSetResult& s) {
+        py::dict d;
+        const std::vector<py::ssize_t> keep_shape{static_cast<py::ssize_t>(s.keep.size())};
+        py::array_t<bool> keep(keep_shape);
+        bool* keep_ptr = static_cast<bool*>(keep.request().ptr);
+        for (std::size_t i = 0; i < s.keep.size(); ++i) {
+            keep_ptr[i] = s.keep[i] != 0;
+        }
+        d["keep"] = keep;
+        d["n_obs_input"] = s.n_obs_input;
+        d["n_obs_connected"] = s.n_obs_connected;
+        d["n_obs"] = s.n_obs;
+        d["n_workers"] = s.n_workers;
+        d["n_firms"] = s.n_firms;
+        d["n_matches"] = s.n_matches;
+        d["n_movers"] = s.n_movers;
+        d["n_stayers"] = s.n_stayers;
+        d["prune_iterations"] = s.prune_iterations;
+        return d;
+    };
+
+    m.def(
+        "akm_leave_out_set",
+        [set_to_dict](py::object worker_obj, py::object firm_obj,
+                      py::object fweights_obj) {
+            py::array w_arr = py::array(worker_obj);
+            py::array f_arr = py::array(firm_obj);
+            if (w_arr.ndim() != 1 || f_arr.ndim() != 1 || w_arr.shape(0) != f_arr.shape(0)) {
+                throw std::runtime_error("worker and firm must be 1-D arrays of equal length");
+            }
+            const ssize_t n = w_arr.shape(0);
+            Eigen::VectorXi w = parse_index_vector(w_arr, "worker", n);
+            Eigen::VectorXi f = parse_index_vector(f_arr, "firm", n);
+            std::optional<Eigen::VectorXd> fw_vec;
+            if (!fweights_obj.is_none()) {
+                auto fw_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(
+                    fweights_obj);
+                if (fw_arr.ndim() != 1 || fw_arr.shape(0) != n) {
+                    throw std::runtime_error("fweights must be a 1-D array of length n");
+                }
+                fw_vec = Eigen::Map<const Eigen::VectorXd>(fw_arr.data(), n);
+            }
+            hdfe::akm::LeaveOutSetResult s;
+            {
+                py::gil_scoped_release release;
+                s = hdfe::akm::leave_out_connected_set(w, f, fw_vec ? &(*fw_vec) : nullptr);
+            }
+            return set_to_dict(s);
+        },
+        py::arg("worker"), py::arg("firm"), py::arg("fweights") = py::none(),
+        "Largest leave-one-out connected set of the worker-firm bipartite graph "
+        "(LeaveOutTwoWay / KSS semantics). Returns a dict with a boolean 'keep' "
+        "mask over the input rows plus sample counts.");
+
+    m.def(
+        "akm_kss",
+        [set_to_dict, parse_leave_out_level, parse_leverage_method](
+            py::object y_obj, py::object worker_obj, py::object firm_obj, py::object X_obj,
+            py::object Z_obj,
+            const std::string& leave_out_level, const std::string& leverages, int jla_draws,
+            std::uint64_t seed, bool prune, long long exact_max_rows, int direct_max_firms,
+            long long direct_max_nnz, double cg_tol, int cg_max_iter, int num_threads,
+            double fwl_tol, int fwl_max_iter, bool compute_se, int se_nsim,
+            bool eigen_diagnostics, int eig_trace_nsim, bool gpu,
+            py::object fweights_obj, bool se_sigma_lowess) {
+            auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
+            if (y_arr.ndim() != 1) {
+                throw std::runtime_error("y must be a 1-D array");
+            }
+            const ssize_t n = y_arr.shape(0);
+            Eigen::Map<const Eigen::VectorXd> y_vec(y_arr.data(), n);
+            py::array w_raw = py::array(worker_obj);
+            py::array f_raw = py::array(firm_obj);
+            if (w_raw.ndim() != 1 || w_raw.shape(0) != n || f_raw.ndim() != 1 ||
+                f_raw.shape(0) != n) {
+                throw std::runtime_error("worker and firm must be 1-D arrays of length n");
+            }
+            Eigen::VectorXi w = parse_index_vector(w_raw, "worker", n);
+            Eigen::VectorXi f = parse_index_vector(f_raw, "firm", n);
+            std::optional<Eigen::MatrixXd> X_mat;
+            if (!X_obj.is_none()) {
+                auto X_arr =
+                    py::array_t<double, py::array::c_style | py::array::forcecast>(X_obj);
+                if (X_arr.ndim() != 2 || X_arr.shape(0) != n) {
+                    throw std::runtime_error("X must be a 2-D array with n rows");
+                }
+                using RowMajor =
+                    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+                Eigen::Map<const RowMajor> X_map(X_arr.data(), n, X_arr.shape(1));
+                X_mat = Eigen::MatrixXd(X_map);
+            }
+
+            hdfe::akm::AkmOptions opt;
+            opt.leave_out_level = parse_leave_out_level(leave_out_level);
+            opt.leverage_method = parse_leverage_method(leverages);
+            opt.jla_draws = jla_draws;
+            opt.seed = seed;
+            opt.prune = prune;
+            opt.exact_max_rows = static_cast<int>(exact_max_rows);
+            opt.direct_max_firms = direct_max_firms;
+            opt.direct_max_nnz = direct_max_nnz;
+            opt.cg_tol = cg_tol;
+            opt.cg_max_iter = cg_max_iter;
+            opt.num_threads = num_threads;
+            opt.fwl_tol = fwl_tol;
+            opt.fwl_max_iter = fwl_max_iter;
+            opt.compute_se = compute_se || eigen_diagnostics;
+            opt.se_nsim = se_nsim;
+            opt.eigen_diagnostics = eigen_diagnostics;
+            opt.eig_trace_nsim = eig_trace_nsim;
+            opt.se_sigma_lowess = se_sigma_lowess;
+            opt.use_gpu = gpu;
+
+            std::optional<Eigen::MatrixXd> Z_mat;
+            if (!Z_obj.is_none()) {
+                auto Z_arr =
+                    py::array_t<double, py::array::c_style | py::array::forcecast>(Z_obj);
+                if (Z_arr.ndim() != 2 || Z_arr.shape(0) != n) {
+                    throw std::runtime_error("Z must be a 2-D array with n rows");
+                }
+                using RowMajorZ =
+                    Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+                Eigen::Map<const RowMajorZ> Z_map(Z_arr.data(), n, Z_arr.shape(1));
+                Z_mat = Eigen::MatrixXd(Z_map);
+            }
+
+            std::optional<Eigen::VectorXd> fw_vec;
+            if (!fweights_obj.is_none()) {
+                auto fw_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(
+                    fweights_obj);
+                if (fw_arr.ndim() != 1 || fw_arr.shape(0) != n) {
+                    throw std::runtime_error("fweights must be a 1-D array of length n");
+                }
+                fw_vec = Eigen::Map<const Eigen::VectorXd>(fw_arr.data(), n);
+            }
+
+            hdfe::akm::AkmKssResult r;
+            {
+                py::gil_scoped_release release;
+                r = hdfe::akm::akm_kss_decompose(y_vec, w, f,
+                                                 X_mat ? &(*X_mat) : nullptr, opt,
+                                                 Z_mat ? &(*Z_mat) : nullptr,
+                                                 fw_vec ? &(*fw_vec) : nullptr);
+            }
+
+            py::dict d;
+            d["sample"] = set_to_dict(r.sample);
+            d["alpha"] = r.alpha;
+            d["psi"] = r.psi;
+            d["beta"] = r.beta;
+            const auto comp_to_dict = [&r](const hdfe::akm::AkmComponents& c) {
+                py::dict cd;
+                cd["var_alpha"] = c.var_alpha;
+                cd["var_psi"] = c.var_psi;
+                cd["cov_alpha_psi"] = c.cov_alpha_psi;
+                // derived summary (pytwoway-style at-a-glance quantities)
+                cd["corr_alpha_psi"] =
+                    c.cov_alpha_psi / std::sqrt(c.var_alpha * c.var_psi);
+                cd["var_alpha_plus_psi"] =
+                    c.var_alpha + c.var_psi + 2.0 * c.cov_alpha_psi;
+                if (r.var_y > 0.0) {
+                    cd["share_var_alpha"] = c.var_alpha / r.var_y;
+                    cd["share_var_psi"] = c.var_psi / r.var_y;
+                    cd["share_2cov"] = 2.0 * c.cov_alpha_psi / r.var_y;
+                }
+                return cd;
+            };
+            d["plugin"] = comp_to_dict(r.plugin);
+            d["agsu"] = comp_to_dict(r.agsu);
+            d["kss"] = comp_to_dict(r.kss);
+            d["var_y"] = r.var_y;
+            d["sigma2_ho"] = r.sigma2_ho;
+            d["pii"] = r.pii;
+            d["sigma_i"] = r.sigma_i;
+            d["row_worker"] = r.row_worker;
+            d["row_firm"] = r.row_firm;
+            d["row_weight"] = r.row_weight;
+            if (compute_se || eigen_diagnostics) {
+                py::dict se;
+                se["se_var_psi"] = r.se_var_psi;
+                se["se_cov_alpha_psi"] = r.se_cov_alpha_psi;
+                se["se_var_alpha"] = r.se_var_alpha;
+                se["theta_var_psi"] = r.theta_c_var_psi;
+                se["theta_cov_alpha_psi"] = r.theta_c_cov_alpha_psi;
+                se["theta_var_alpha"] = r.theta_c_var_alpha;
+                d["component_se"] = se;
+            }
+            if (eigen_diagnostics) {
+                py::dict wk;
+                const char* names[3] = {"var_psi", "cov_alpha_psi", "var_alpha"};
+                for (int c = 0; c < 3; ++c) {
+                    py::dict cd;
+                    cd["lambda1"] = r.eig_lambda1[c];
+                    cd["eig_share1"] = r.eig_share1[c];
+                    cd["eig_share2"] = r.eig_share2[c];
+                    cd["eig_share3"] = r.eig_share3[c];
+                    cd["lindeberg_max_x1bar_sq"] = r.lindeberg_max_x1bar_sq[c];
+                    cd["gamma_sq"] = r.gamma_sq[c];
+                    cd["f_stat"] = r.f_stat[c];
+                    cd["theta_1"] = r.theta_1[c];
+                    cd["ci_lb"] = r.ci_lb[c];
+                    cd["ci_ub"] = r.ci_ub[c];
+                    cd["curvature"] = r.curvature[c];
+                    cd["b_1"] = r.b_1[c];
+                    cd["cov_r1_11"] = r.cov_r1_11[c];
+                    cd["cov_r1_12"] = r.cov_r1_12[c];
+                    cd["cov_r1_22"] = r.cov_r1_22[c];
+                    wk[names[c]] = cd;
+                }
+                d["weak_id"] = wk;
+            }
+            if (r.lincom_coef.size() > 0) {
+                py::dict lc;
+                lc["coef"] = r.lincom_coef;
+                lc["se_kss"] = r.lincom_se_kss;
+                lc["se_white"] = r.lincom_se_white;
+                lc["t"] = r.lincom_t;
+                d["lincom"] = lc;
+            }
+            d["max_pii"] = r.max_pii;
+            d["mean_pii"] = r.mean_pii;
+            d["n_rows"] = r.n_rows;
+            d["leverages_exact"] = r.leverages_exact;
+            d["gpu_used"] = r.gpu_used;
+            d["solver_direct"] = r.solver_direct;
+            d["jla_draws_used"] = r.jla_draws_used;
+            d["seed"] = r.seed_used;
+            d["solver_iterations"] = r.solver_iterations;
+            d["converged"] = r.converged;
+            d["notes"] = r.notes;
+            return d;
+        },
+        py::arg("y"), py::arg("worker"), py::arg("firm"), py::arg("X") = py::none(),
+        py::arg("Z") = py::none(),
+        py::arg("leave_out_level") = "match", py::arg("leverages") = "auto",
+        py::arg("jla_draws") = 200, py::arg("seed") = 20260705ULL, py::arg("prune") = true,
+        py::arg("exact_max_rows") = 10000, py::arg("direct_max_firms") = 50000,
+        py::arg("direct_max_nnz") = 40000000LL, py::arg("cg_tol") = 1e-10,
+        py::arg("cg_max_iter") = 0, py::arg("num_threads") = 0, py::arg("fwl_tol") = 1e-10,
+        py::arg("fwl_max_iter") = 100000, py::arg("compute_se") = false,
+        py::arg("se_nsim") = 1000, py::arg("eigen_diagnostics") = false,
+        py::arg("eig_trace_nsim") = 100, py::arg("gpu") = false,
+        py::arg("fweights") = py::none(), py::arg("se_sigma_lowess") = false,
+        "AKM two-way estimation with plug-in / AGSU (homoskedastic) / KSS "
+        "(heteroskedastic leave-out) variance decomposition on the leave-out "
+        "connected set, following LeaveOutTwoWay (KSS 2020) semantics. Controls "
+        "in X are partialled out with the xhdfe absorber (FWL). Opt-in: does "
+        "not affect any existing estimation path.");    m.def(
+        "gelbach_decompose",
+        [](py::object y_obj, py::object X1_obj, py::object X2_obj,
+           std::vector<int> x2_group_sizes, py::object fes_obj,
+           py::object cluster_obj, const std::string& vce, bool gamma0,
+           bool cov0, int num_threads, py::object weights_obj,
+           bool fweights) {
+            auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
+            if (y_arr.ndim() != 1) {
+                throw std::runtime_error("y must be a 1-D array");
+            }
+            const ssize_t n = y_arr.shape(0);
+            Eigen::Map<const Eigen::VectorXd> y_vec(y_arr.data(), n);
+            using RowMajor =
+                Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+            auto to_mat = [n](py::object obj, const char* label) {
+                auto arr = py::array_t<double, py::array::c_style | py::array::forcecast>(obj);
+                if (arr.ndim() != 2 || arr.shape(0) != n) {
+                    throw std::runtime_error(std::string(label) + " must be 2-D with n rows");
+                }
+                Eigen::Map<const RowMajor> mp(arr.data(), n, arr.shape(1));
+                return Eigen::MatrixXd(mp);
+            };
+            Eigen::MatrixXd X1 = to_mat(X1_obj, "x1");
+            Eigen::MatrixXd X2(n, 0);
+            if (!X2_obj.is_none()) {
+                X2 = to_mat(X2_obj, "x2");
+            }
+            std::vector<Eigen::VectorXi> fes;
+            if (!fes_obj.is_none()) {
+                py::sequence seq = py::reinterpret_borrow<py::sequence>(fes_obj);
+                fes.reserve(seq.size());
+                for (auto item : seq) {
+                    fes.push_back(parse_index_vector(item, "Each fixed-effect vector", n));
+                }
+            }
+            std::optional<Eigen::VectorXi> cl;
+            if (!cluster_obj.is_none()) {
+                py::array cl_raw = py::array(cluster_obj);
+                cl = parse_index_vector(cl_raw, "cluster", n);
+            }
+            hdfe::gelbach::GelbachOptions opt;
+            {
+                std::string lower = vce;
+                std::transform(lower.begin(), lower.end(), lower.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (lower == "unadjusted" || lower == "homoskedastic" || lower == "iid") {
+                    opt.vce = hdfe::gelbach::GelbachVce::Unadjusted;
+                } else if (lower == "robust") {
+                    opt.vce = hdfe::gelbach::GelbachVce::Robust;
+                } else if (lower == "cluster") {
+                    opt.vce = hdfe::gelbach::GelbachVce::Cluster;
+                } else {
+                    throw std::runtime_error("Unknown vce: " + vce);
+                }
+            }
+            opt.gamma0 = gamma0;
+            opt.cov0 = cov0;
+            opt.num_threads = num_threads;
+            std::optional<Eigen::VectorXd> w_vec;
+            if (!weights_obj.is_none()) {
+                auto w_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(
+                    weights_obj);
+                if (w_arr.ndim() != 1 || w_arr.shape(0) != n) {
+                    throw std::runtime_error("weights must be a 1-D array of length n");
+                }
+                Eigen::Map<const Eigen::VectorXd> w_map(w_arr.data(), n);
+                w_vec = Eigen::VectorXd(w_map);
+            }
+            hdfe::gelbach::GelbachResult r;
+            {
+                py::gil_scoped_release release;
+                r = hdfe::gelbach::decompose(y_vec, X1, X2, x2_group_sizes, fes,
+                                             cl ? &(*cl) : nullptr, opt,
+                                             w_vec ? &(*w_vec) : nullptr, fweights);
+            }
+            py::dict d;
+            d["b_base"] = r.b_base;
+            d["b_full"] = r.b_full;
+            d["delta"] = r.delta;
+            d["cov"] = r.cov;
+            d["total"] = r.total;
+            d["total_cov"] = r.total_cov;
+            d["identity_gap"] = r.identity_gap;
+            d["n_obs"] = r.n_obs;
+            d["df_full"] = r.df_full;
+            d["converged"] = r.converged;
+            d["notes"] = r.notes;
+            return d;
+        },
+        py::arg("y"), py::arg("x1"), py::arg("x2") = py::none(),
+        py::arg("x2_group_sizes") = std::vector<int>{}, py::arg("fes") = py::none(),
+        py::arg("cluster") = py::none(), py::arg("vce") = "unadjusted",
+        py::arg("gamma0") = false, py::arg("cov0") = false,
+        py::arg("num_threads") = 0, py::arg("weights") = py::none(),
+        py::arg("fweights") = false,
+        "Gelbach (2016) conditional decomposition, HDFE-aware (see "
+        "xhdfe.gelbach for the friendly wrapper). Opt-in; does not affect "
+        "any existing estimation path.");
 }

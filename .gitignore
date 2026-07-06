@@ -37,3 +37,4 @@ release_assets/
 .DS_Store
 .idea/
 .vscode/
+stata/tools/_build/

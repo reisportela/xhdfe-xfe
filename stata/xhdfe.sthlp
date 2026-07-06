@@ -1085,3 +1085,13 @@ regression in Python." Python package.
 FixedEffects.jl contributors. 2025. "{cmd:FixedEffectModels.jl}: Fast Estimation of Linear
 Models with IV and High Dimensional Categorical Variables." Julia package.
 {browse "https://github.com/FixedEffects/FixedEffectModels.jl":https://github.com/FixedEffects/FixedEffectModels.jl}.{p_end}
+
+
+{title:Also see}
+
+{psee}
+Worker-firm (AKM) post-estimation on the same backend: {helpb xhdfeakm}
+(leave-out KSS variance decomposition, component standard errors,
+weak-identification confidence intervals), {helpb xhdfeconnected}
+(leave-one-out connected set as a sample-preparation utility) and
+{helpb xhdfegelbach} (Gelbach decomposition).{p_end}

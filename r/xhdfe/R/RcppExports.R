@@ -17,3 +17,15 @@
     .Call(`_xhdfe_xhdfe_cpp_build_info`)
 }
 
+.xhdfe_cpp_akm_leave_out_set <- function(worker, firm) {
+    .Call(`_xhdfe_xhdfe_cpp_akm_leave_out_set`, worker, firm)
+}
+
+.xhdfe_cpp_akm_kss <- function(y, worker, firm, X, opts, fweights = NULL) {
+    .Call(`_xhdfe_xhdfe_cpp_akm_kss`, y, worker, firm, X, opts, fweights)
+}
+
+.xhdfe_cpp_gelbach <- function(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, num_threads, weights, fweights) {
+    .Call(`_xhdfe_xhdfe_cpp_gelbach`, y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, num_threads, weights, fweights)
+}
+
