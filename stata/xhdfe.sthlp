@@ -283,10 +283,10 @@ Additional features include:{p_end}
 
 {pstd}
 {cmd:xhdfe} was developed through an AI-assisted optimization workflow. The
-project used AI coding tools, mainly Codex and Claude Code, and to a lesser
-extent Gemini Code Assist, to study existing HDFE packages, review relevant
+project used AI coding tools to study existing HDFE packages, review relevant
 literature, inspect the mixed Stata/C++/Python codebase, draft and revise
-patches, instrument slow paths, and improve performance.{p_end}
+patches, instrument slow paths, and improve performance. No AI tool or system
+is named or credited as a contributor.{p_end}
 
 {pstd}
 The listed human authors did not write the package line by line. Their role was
@@ -1048,7 +1048,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.11.0.
+regression via a C++ backend." Version 2.12.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
@@ -1090,6 +1090,40 @@ regression in Python." Python package.
 FixedEffects.jl contributors. 2025. "{cmd:FixedEffectModels.jl}: Fast Estimation of Linear
 Models with IV and High Dimensional Categorical Variables." Julia package.
 {browse "https://github.com/FixedEffects/FixedEffectModels.jl":https://github.com/FixedEffects/FixedEffectModels.jl}.{p_end}
+
+{pstd}
+Worker-firm (AKM) leave-out layer (see {helpb xhdfeakm} and {helpb xhdfegelbach}):{p_end}
+
+{phang}
+Saggio, Raffaele. "{cmd:LeaveOutTwoWay}: Leave-out estimation of variance components."
+MATLAB package (the canonical Kline-Saggio-Solvsten implementation).
+{browse "https://github.com/rsaggio87/LeaveOutTwoWay":https://github.com/rsaggio87/LeaveOutTwoWay}.{p_end}
+
+{phang}
+Lamadon, Thibaut, and collaborators. "{cmd:pytwoway}: Two-way fixed-effect models for
+worker-firm data in Python."
+{browse "https://github.com/tlamadon/pytwoway":https://github.com/tlamadon/pytwoway}.{p_end}
+
+{phang}
+Abowd, John M., Francis Kramarz, and David N. Margolis. 1999. "High wage workers and high
+wage firms." {it:Econometrica} 67(2): 251-333.{p_end}
+
+{phang}
+Andrews, Martyn J., Len Gill, Thorsten Schank, and Richard Upward. 2008. "High wage workers
+and low wage firms: negative assortative matching or limited mobility bias?"
+{it:Journal of the Royal Statistical Society A} 171(3): 673-697.{p_end}
+
+{phang}
+Kline, Patrick, Raffaele Saggio, and Mikkel Solvsten. 2020. "Leave-out estimation of variance
+components." {it:Econometrica} 88(5): 1859-1898.{p_end}
+
+{phang}
+Andrews, Donald W. K., and Anna Mikusheva. 2016. "Conditional inference with a functional
+nuisance parameter." {it:Econometrica} 84(4): 1571-1612.{p_end}
+
+{phang}
+Gelbach, Jonah B. 2016. "When do covariates matter? And which ones, and how much?"
+{it:Journal of Labor Economics} 34(2): 509-543. (Also the {cmd:b1x2} Stata package.){p_end}
 
 
 {title:Also see}
