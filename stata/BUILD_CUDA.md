@@ -7,15 +7,15 @@ For the cross-language walkthrough (Stata, Python, and R), see
 GPU support is not available from the online net-install or the release ZIPs
 (those ship CPU-only plugins). It must be built from source, as below.
 
-Pick the CUDA target from *your* GPU's compute capability:
+The recommended build uses `--cuda auto`, which detects the local NVIDIA GPU
+architecture with `nvidia-smi`. To inspect the value yourself:
 
 ```bash
 nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0, 8.6, 7.5
 ```
 
 Drop the dot to get `XHDFE_CUDA_ARCH` (`9.0` → `90`, `8.6` → `86`; minimum `75`).
-On this workstation the GPU is an `H100` (compute capability 9.0), so the local
-CUDA target is `sm_90` (`XHDFE_CUDA_ARCH=90`).
+You only need this manual value when passing an explicit `--cuda 90` target.
 
 ## Build commands
 
@@ -24,13 +24,17 @@ From the repository root:
 ```bash
 cd stata/tools
 
-# Local H100 build
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash build-plugin.sh --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash build-xfe-plugin.sh --linux --openmp
+# Local build: auto-detect the GPU architecture
+bash build-plugin.sh --linux --openmp --cuda auto
+bash build-xfe-plugin.sh --linux --openmp --cuda auto
+
+# Explicit single-architecture build, e.g. H100 / sm_90
+bash build-plugin.sh --linux --openmp --cuda 90
+bash build-xfe-plugin.sh --linux --openmp --cuda 90
 
 # Multi-architecture distribution build
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCHS="75,80,86,89,90" bash build-plugin.sh --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCHS="75,80,86,89,90" bash build-xfe-plugin.sh --linux --openmp
+bash build-plugin.sh --linux --openmp --cuda-archs "75,80,86,89,90"
+bash build-xfe-plugin.sh --linux --openmp --cuda-archs "75,80,86,89,90"
 ```
 
 Outputs:
@@ -86,7 +90,7 @@ silently returning CPU output.
 
 Typical causes:
 
-- the plugin was rebuilt without `XHDFE_ENABLE_CUDA=ON`
+- the plugin was rebuilt without `--cuda auto` or another CUDA enable flag
 - the wrong plugin is being picked up on the `adopath`
 - Stata is still holding an older plugin in memory after a rebuild or plugin-path switch; run `discard` with no arguments
 - CUDA is unavailable at runtime
@@ -94,5 +98,6 @@ Typical causes:
 ## Notes
 
 - `xhdfe` and `xfe` have separate plugin binaries; rebuild both if you want both commands to use CUDA.
-- For local H100-only use, prefer `XHDFE_CUDA_ARCH=90`.
-- For shared distribution bundles, prefer `XHDFE_CUDA_ARCHS="75,80,86,89,90"`.
+- For local use, prefer `--cuda auto`.
+- For explicit H100-only use, pass `--cuda 90`.
+- For shared distribution bundles, prefer `--cuda-archs "75,80,86,89,90"`.

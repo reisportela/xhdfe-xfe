@@ -25,9 +25,11 @@ Key facts, true for all three versions:
 - The **CUDA toolkit** (`nvcc`) and a working driver. Check with
   `nvcc --version` and `nvidia-smi`.
 
-## Step 1 — find your GPU's compute capability
+## Step 1 — let the installer detect your GPU
 
-The build must target *your* card. Read its compute capability:
+The CUDA build must target your card. The recommended commands below use
+`auto` mode, which calls `nvidia-smi` and selects the local compute capability.
+If you need to set the target manually, read it with:
 
 ```bash
 nvidia-smi --query-gpu=compute_cap --format=csv,noheader
@@ -39,7 +41,8 @@ Drop the dot to get the **arch value** used below: `9.0 → 90`, `8.6 → 86`,
 
 ## Step 2 — install/build with CUDA
 
-Use *your* arch value from Step 1 in place of `90` (H100) below.
+Use `auto` unless you are cross-compiling or building a multi-architecture
+binary.
 
 ### Stata
 
@@ -47,8 +50,8 @@ The net-install site ships CPU-only plugins, so build from a clone:
 
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh     --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-xfe-plugin.sh --linux --openmp
+bash stata/tools/build-plugin.sh     --linux --openmp --cuda auto
+bash stata/tools/build-xfe-plugin.sh --linux --openmp --cuda auto
 ```
 
 Then add the folder to your adopath (this writes nothing outside it):
@@ -57,30 +60,38 @@ Then add the folder to your adopath (this writes nothing outside it):
 adopath + "/path/to/xhdfe-xfe/stata"
 ```
 
-For a single binary that runs on several GPU generations, use
-`XHDFE_CUDA_ARCHS="75,80,86,89,90"` instead of `XHDFE_CUDA_ARCH`.
+For an explicit target, use `--cuda 90`. For a single binary that runs on
+several GPU generations, use `--cuda-archs "75,80,86,89,90"`.
 
 ### Python
 
-Always builds from source; pass the arch as `CMAKE_CUDA_ARCHITECTURES`:
+Always builds from source; `XHDFE_ENABLE_CUDA=auto` detects the local GPU
+architecture. The build also needs Python development headers for the active
+Python interpreter (`Python.h`). Install `python3-dev` on Debian/Ubuntu or
+`python3-devel` on Fedora/RHEL/Rocky; on clusters without sudo, use a
+conda/mamba environment or a Python module that includes headers.
 
 ```bash
 # from a clone:
-XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
+XHDFE_ENABLE_CUDA=auto python -m pip install .
 # or straight from GitHub:
-XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
+XHDFE_ENABLE_CUDA=auto python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 ```
+
+For an explicit target, set `XHDFE_CUDA_ARCH=90` or
+`CMAKE_CUDA_ARCHITECTURES=90`.
 
 ### R
 
-Set the build variables in R, then install from GitHub:
+Set the build variable in R, then install from GitHub:
 
 ```r
-Sys.setenv(XHDFE_ENABLE_CUDA = "ON", XHDFE_CUDA_ARCH = "90")   # use your own arch
+Sys.setenv(XHDFE_ENABLE_CUDA = "auto")
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
-or, from a clone: `XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL r/xhdfe`.
+or, from a clone: `XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`.
+For an explicit target, set `XHDFE_CUDA_ARCH=90`.
 
 ## Step 3 — request the GPU on a call
 
@@ -148,7 +159,7 @@ device is present, or the GPU path fails), the behavior differs by version:
 
 - **"backend cuda was requested but the GPU was not used"** (R / Stata error) —
   you installed a CPU build or no device is available. Rebuild with
-  `XHDFE_ENABLE_CUDA=ON` and the arch from Step 1.
+  `--cuda auto` for Stata or `XHDFE_ENABLE_CUDA=auto` for Python/R.
 - **Wrong architecture / no kernels run** — the build arch must match your card;
   below `sm_75` is unsupported. Re-check Step 1 and rebuild.
 - **Stata still runs on CPU after a rebuild** — run `discard` (no argument) so

@@ -64,22 +64,22 @@ opt-in, env-gated diagnostics that are silent by default).
 ## Install (CUDA, optional)
 
 Requires Linux, the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set), and
-the package source (a clone or source tarball — a CPU install has no GPU). Set
-`XHDFE_CUDA_ARCH` to your GPU's compute capability
-(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`):
+the package source (a clone or source tarball — a CPU install has no GPU). Use
+`XHDFE_ENABLE_CUDA=auto` to detect the local GPU architecture:
 
 ```bash
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL xhdfe
+XHDFE_ENABLE_CUDA=auto R CMD INSTALL xhdfe
 ```
 
-To install straight from GitHub with GPU support, set the same variables in R
-first (they are read at build time):
+To install straight from GitHub with GPU support, set the same variable in R
+first:
 
 ```r
-Sys.setenv(XHDFE_ENABLE_CUDA = "ON", XHDFE_CUDA_ARCH = "90")   # use your own arch
+Sys.setenv(XHDFE_ENABLE_CUDA = "auto")
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
+For an explicit target, set `XHDFE_CUDA_ARCH=90`.
 Verify the build with `xhdfe_info()` (its `cuda_arch` field shows e.g. `sm_90`).
 GPU use is opt-in per call (`backend = "cuda"`) and fail-closed: if the GPU
 is unavailable or absorption does not complete on it, the call errors instead

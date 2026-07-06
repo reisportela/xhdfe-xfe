@@ -83,26 +83,18 @@ bash stata/tools/build-plugin.sh --linux --openmp        # produces stata/xhdfe.
 bash stata/tools/build-xfe-plugin.sh --linux --openmp    # produces stata/xfe.plugin
 ```
 
-For **NVIDIA GPU (CUDA)**, add `XHDFE_ENABLE_CUDA=ON` and target *your* GPU's
-compute capability. Find it once with:
+For **NVIDIA GPU (CUDA)**, use `--cuda auto`. The build script checks
+`nvidia-smi`, selects the local GPU architecture, and enables CUDA:
 
 ```bash
-nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0 (H100), 8.6 (RTX 30xx), 7.5 (T4)
-```
-
-Drop the dot to get the arch value (`9.0` → `90`, `8.6` → `86`; minimum `75`),
-then build with it:
-
-```bash
-# example for compute capability 9.0 (H100 -> sm_90); use your own value
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-xfe-plugin.sh --linux --openmp
+bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
+bash stata/tools/build-xfe-plugin.sh --linux --openmp --cuda auto
 ```
 
 CUDA builds are **Linux + NVIDIA only** and require the CUDA toolkit (`nvcc`).
-`XHDFE_CUDA_ARCH` sets a single target for your card; for a shareable multi-GPU
-binary use e.g. `XHDFE_CUDA_ARCHS="75,80,86,89,90"`. See `stata/BUILD_CUDA.md`
-for verification. Then point Stata at the folder:
+For an explicit target, use `--cuda 90`; for a shareable multi-GPU binary, use
+`--cuda-archs "75,80,86,89,90"`. See `stata/BUILD_CUDA.md` for verification.
+Then point Stata at the folder:
 
 ```stata
 adopath + "/path/to/xhdfe/stata"
@@ -130,7 +122,12 @@ absorbed fixed effects) using the same core. See `help xhdfe` and `help xfe`.
 
 ### Python
 
-Install from the repository (needs CMake and a C++ compiler):
+Install from the repository. Python source builds require CMake, a C++ compiler,
+and the Python development headers for the Python you are using (`Python.h`).
+On Linux, install the matching system package first, for example
+`python3-dev` on Debian/Ubuntu or `python3-devel` on Fedora/RHEL/Rocky. On
+clusters without sudo, use a conda/mamba environment or a Python module that
+includes development headers.
 
 ```bash
 python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
@@ -139,17 +136,18 @@ git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python
 ```
 
 **With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source — never a prebuilt wheel). Set the arch to
-your GPU's compute capability
-(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`):
+`nvcc` and always builds from source — never a prebuilt wheel). Use
+`XHDFE_ENABLE_CUDA=auto` to detect the local GPU architecture:
 
 ```bash
 # from a clone:
-XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
+XHDFE_ENABLE_CUDA=auto python -m pip install .
 # or straight from GitHub:
-XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
+XHDFE_ENABLE_CUDA=auto python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 ```
 
+For an explicit target, set `XHDFE_CUDA_ARCH=90` or
+`CMAKE_CUDA_ARCHITECTURES=90`.
 At runtime request the GPU with `os.environ["XHDFE_GPU_BACKEND"] = "cuda"` (see
 the example below) and confirm with `reg.gpu_used_ == 1`.
 
@@ -193,16 +191,16 @@ remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
 **With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source). Read your GPU's compute capability
-(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` → `90`)
-and pass it through the environment before installing:
+`nvcc` and always builds from source). Use `XHDFE_ENABLE_CUDA=auto` to detect
+the local GPU architecture:
 
 ```r
-Sys.setenv(XHDFE_ENABLE_CUDA = "ON", XHDFE_CUDA_ARCH = "90")   # use your own arch
+Sys.setenv(XHDFE_ENABLE_CUDA = "auto")
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
-or, from a clone: `XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL r/xhdfe`.
+or, from a clone: `XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`. For an
+explicit target, set `XHDFE_CUDA_ARCH=90`.
 GPU use is then per call via `backend = "cuda"` (fail-closed if unavailable);
 `xhdfe_info()` reports the CUDA arch the package was built for.
 
