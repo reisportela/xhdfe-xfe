@@ -247,7 +247,7 @@ interaction FE, and `| endo ~ inst` for IV. See
 ## Worker-firm (AKM) and Gelbach post-estimation
 
 Beyond general-purpose HDFE regression, `xhdfe` ships a worker-firm layer that
-follows the Kline-Saggio-Solvsten (2020) leave-out methodology (validated
+follows the Kline-Saggio-Sølvsten (2020) leave-out methodology (validated
 against Saggio's LeaveOutTwoWay and `pytwoway`) and a Gelbach (2016)
 decomposition — all on the same compiled backend, in Stata, Python and R.
 Installation is the same as the core (they are part of the one package).
@@ -363,7 +363,7 @@ By design, `xhdfe` is first and foremost a high-performance replica of
 `reghdfe`: it mirrors reghdfe's estimator, defaults, and reporting, and
 reghdfe-comparable results are its reference. From the worker-firm (AKM)
 literature and from [`pytwoway`](https://github.com/tlamadon/pytwoway) — Thibaut
-Lamadon and collaborators' reference Python toolkit for two-way worker-firm
+Lamadon and Adam A. Oppenheimer's reference Python toolkit for two-way worker-firm
 models (AKM and the leave-out, CRE and BLM estimators) — `xhdfe` adopts *only*
 what adds value inside that reghdfe universe: the leave-out (KSS) bias-corrected
 variance decomposition, the leave-out connected set, and the Gelbach
@@ -373,7 +373,7 @@ reproduce `pytwoway`.
 `xhdfe` links to `pytwoway` in two concrete ways. First, **validation**: its
 leave-out decomposition is checked at machine precision against `pytwoway` and
 against [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay) by
-Raffaele Saggio, the canonical Kline-Saggio-Solvsten (2020) implementation.
+Raffaele Saggio, the canonical Kline-Saggio-Sølvsten (2020) implementation.
 Second, **interoperability**: `xhdfe` exports the leave-out sample to the
 `pytwoway` / `bipartitepandas` format, so a cleaned two-way sample moves between
 the two tools. The combination is most useful in labour economics with large
@@ -413,10 +413,10 @@ literature (see [Acknowledgements](#acknowledgements)):
   and low wage firms: negative assortative matching or limited mobility bias?
   *Journal of the Royal Statistical Society A* 171(3): 673-697. (AGSU
   homoskedastic correction.)
-- Kline, P., R. Saggio, and M. Solvsten. 2020. Leave-out estimation of
+- Kline, P., R. Saggio, and M. Sølvsten. 2020. Leave-out estimation of
   variance components. *Econometrica* 88(5): 1859-1898. (KSS leave-out
   heteroskedasticity-robust correction and inference.)
-- Andrews, D. W. K., and A. Mikusheva. 2016. Conditional inference with a
+- Andrews, I., and A. Mikusheva. 2016. Conditional inference with a
   functional nuisance parameter. *Econometrica* 84(4): 1571-1612.
   (Weak-identification q=1 confidence intervals used by KSS.)
 - Gelbach, J. B. 2016. When do covariates matter? And which ones, and how

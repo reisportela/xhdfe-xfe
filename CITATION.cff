@@ -55,7 +55,7 @@ references:
         given-names: "Patrick"
       - family-names: "Saggio"
         given-names: "Raffaele"
-      - family-names: "Solvsten"
+      - family-names: "Sølvsten"
         given-names: "Mikkel"
     title: "Leave-out estimation of variance components"
     journal: "Econometrica"
@@ -67,7 +67,7 @@ references:
   - type: article
     authors:
       - family-names: "Andrews"
-        given-names: "Donald W. K."
+        given-names: "Isaiah"
       - family-names: "Mikusheva"
         given-names: "Anna"
     title: "Conditional inference with a functional nuisance parameter"
@@ -98,5 +98,7 @@ references:
     authors:
       - family-names: "Lamadon"
         given-names: "Thibaut"
+      - family-names: "Oppenheimer"
+        given-names: "Adam A."
     title: "pytwoway: two-way fixed effect models in Python"
     url: "https://github.com/tlamadon/pytwoway"
