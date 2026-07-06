@@ -7,6 +7,11 @@
 {vieweralsosee "ivreghdfe" "help ivreghdfe"}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "" "--"}{...}
+{vieweralsosee "xfe" "help xfe"}{...}
+{vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
+{vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
+{vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
+{vieweralsosee "" "--"}{...}
 {viewerjumpto "Syntax" "xhdfe##syntax"}{...}
 {viewerjumpto "Absorb syntax" "xhdfe##absorb"}{...}
 {viewerjumpto "Description" "xhdfe##description"}{...}
@@ -1088,6 +1093,11 @@ Models with IV and High Dimensional Categorical Variables." Julia package.
 
 
 {title:Also see}
+
+{psee}
+Companion command in the same package: {helpb xfe} (partials out / residualizes
+variables against multiple high-dimensional fixed effects on the same C++ core;
+no coefficient table).{p_end}
 
 {psee}
 Worker-firm (AKM) post-estimation on the same backend: {helpb xhdfeakm}
