@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.11.0` · `License: MIT` · `Platform: Linux x86-64 + GCC` · `Optional CUDA GPU`
+`Version 2.11.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -29,7 +29,7 @@ is available for large problems.
 - **Fixed-effect recovery** — `savefe` / `savefes` (Stata), `fixef()` (R), `retain_fes` (Python).
 - **Group-level outcomes with individual fixed effects** — the `group()` / `individual()` machinery.
 - **Mobility groups** and connected-component diagnostics.
-- **Optional GPU** — CUDA absorber with fail-closed semantics (never a silent CPU fallback).
+- **Optional GPU** — CUDA absorber with explicit request and status reporting.
 
 ---
 
@@ -323,6 +323,7 @@ Contributions, bug reports, and validation cases are welcome — see
 The C++ core, Python bindings, and R package target Linux x86-64, Windows
 x86-64, and macOS Apple Silicon/Intel source builds with the local platform
 toolchain. CUDA GPU acceleration is optional on Linux with the NVIDIA toolkit.
-Prebuilt Stata release assets include Linux CPU/OpenMP, Linux CUDA, and macOS
-universal plugins; the Windows CPU plugin is included when the release build
-produces the artifact, otherwise Windows users build from the bundled sources.
+Prebuilt Stata release assets are CPU-only: Linux CPU/OpenMP and macOS
+universal plugins are published, and the Windows CPU plugin is included when
+the release build produces the artifact. CUDA GPU builds are source builds on
+Linux with the NVIDIA toolkit.
