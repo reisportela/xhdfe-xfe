@@ -211,15 +211,24 @@ otherwise xhdfe stops with an error instead of silently falling back to CPU.
 stops with an error instead of silently falling back to CPU.
 
 {phang}
-To build a CUDA-enabled plugin (Linux only), from the xhdfe repository root:
+The online net-install and the release ZIPs ship {bf:CPU-only} plugins; the GPU cannot be obtained from the
+online material. To use CUDA you must build the plugin from source (Linux + NVIDIA only). First read your GPU's
+compute capability:
+
+{phang2}
+{cmd:. nvidia-smi --query-gpu=compute_cap --format=csv,noheader}
+
+{phang}
+Drop the dot to get {cmd:XHDFE_CUDA_ARCH} (for example {cmd:9.0} maps to {cmd:90}, {cmd:8.6} to {cmd:86}; minimum
+{it:75}). Then, from the xhdfe repository root:
 
 {phang2}
 {cmd:. XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp}
 
 {phang}
 CUDA builds require NVCC and compute capability {it:sm_75} or newer. Use {cmd:XHDFE_CUDA_ARCH} to set a single
-target SM (default: 75; minimum: 75), or {cmd:XHDFE_CUDA_ARCHS} to set a multi-target list (comma/space/semicolon
-separated), for example {cmd:"75,80,86,89,90"}. On this workstation (H100), use {cmd:XHDFE_CUDA_ARCH=90}.
+target SM for your card (minimum: 75), or {cmd:XHDFE_CUDA_ARCHS} to set a multi-target list (comma/space/semicolon
+separated), for example {cmd:"75,80,86,89,90"} for a shareable multi-GPU binary.
 
 {phang}
 After estimation, check {cmd:e(gpu_used)}, {cmd:e(gpu_backend)}, and {cmd:e(gpu_status)} to confirm whether CUDA
@@ -790,6 +799,12 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {phang2}{cmd:. xhdfe price weight length, absorb(rep78) vce(cluster rep78)}{p_end}
 {hline}
 
+{pstd}CUDA backend (requires a CUDA-enabled plugin){p_end}
+{phang2}{cmd:. xhdfe price weight length, absorb(rep78) gpubackend(cuda)}{p_end}
+{phang2}{cmd:. display e(gpu_used)}{p_end}
+{phang2}{cmd:. display "`e(gpu_backend)'"}{p_end}
+{hline}
+
 {pstd}Two and three sets of fixed effects{p_end}
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
 {phang2}{cmd:. xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)}{p_end}
@@ -1070,3 +1085,13 @@ regression in Python." Python package.
 FixedEffects.jl contributors. 2025. "{cmd:FixedEffectModels.jl}: Fast Estimation of Linear
 Models with IV and High Dimensional Categorical Variables." Julia package.
 {browse "https://github.com/FixedEffects/FixedEffectModels.jl":https://github.com/FixedEffects/FixedEffectModels.jl}.{p_end}
+
+
+{title:Also see}
+
+{psee}
+Worker-firm (AKM) post-estimation on the same backend: {helpb xhdfeakm}
+(leave-out KSS variance decomposition, component standard errors,
+weak-identification confidence intervals), {helpb xhdfeconnected}
+(leave-one-out connected set as a sample-preparation utility) and
+{helpb xhdfegelbach} (Gelbach decomposition).{p_end}
