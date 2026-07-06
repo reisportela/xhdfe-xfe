@@ -8,6 +8,8 @@ CXX_STD = CXX17
 XHDFE_MARCH ?=
 XHDFE_MARCH_LABEL = $(if $(strip $(XHDFE_MARCH)),$(strip $(XHDFE_MARCH)),portable)
 XHDFE_MARCH_FLAG = $(if $(strip $(XHDFE_MARCH)),-march=$(strip $(XHDFE_MARCH)),)
+XHDFE_ENABLE_CUDA_CANON := $(shell printf '%s' '$(XHDFE_ENABLE_CUDA)' | tr '[:lower:]' '[:upper:]')
+XHDFE_CUDA_REQUESTED := $(filter ON 1 TRUE YES AUTO,$(XHDFE_ENABLE_CUDA_CANON))
 
 XHDFE_OPTFLAGS = -O3 -Wall $(XHDFE_MARCH_FLAG) \
     -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer \
@@ -26,6 +28,6 @@ PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
 
 OBJECTS = $(patsubst %.cpp,%.o,$(wildcard *.cpp))
 
-ifeq ($(XHDFE_ENABLE_CUDA),ON)
-$(error XHDFE_ENABLE_CUDA=ON is not supported by the Windows R Makevars yet; install a CPU build)
+ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
+$(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported by the Windows R Makevars yet; install a CPU build)
 endif

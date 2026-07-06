@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 STATA_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/cuda-common.sh"
 
 BUILD_DIR="${SCRIPT_DIR}/_build"
 DEPS_DIR="${SCRIPT_DIR}/_deps"
@@ -64,7 +65,7 @@ OUT_PLUGIN="${STATA_DIR}/xfe.plugin"
 
 usage() {
   cat <<'EOF'
-Usage: build-xfe-plugin.sh [--windows|--linux] [--openmp|--no-openmp]
+Usage: build-xfe-plugin.sh [--windows|--linux] [--openmp|--no-openmp] [--cuda [auto|ARCH]|--cuda-arch ARCH|--cuda-archs LIST]
 
 Builds the Stata plugin `xfe.plugin` in the repository root.
 
@@ -76,8 +77,20 @@ OpenMP:
   --openmp     Enable OpenMP (may require shipping libgomp on Windows).
   --no-openmp  Disable OpenMP (default on Windows).
 
-GPU (environment variables):
+GPU:
+  --cuda [auto|ARCH]
+               Enable CUDA. With no value, or with 'auto', detect the local
+               NVIDIA GPU architecture with nvidia-smi. ARCH may be 90, 9.0,
+               sm_90, or a comma/space list.
+  --cuda-arch ARCH
+               Enable CUDA for one architecture.
+  --cuda-archs LIST
+               Enable CUDA for several architectures, e.g. "75,80,86,89,90".
+  --no-cuda    Disable CUDA even if CUDA environment variables are set.
+
+GPU (environment variables, still supported):
   XHDFE_ENABLE_CUDA=ON   Enable CUDA (Linux native builds only).
+  XHDFE_ENABLE_CUDA=auto Auto-detect CUDA architecture with nvidia-smi.
   XHDFE_CUDA_ARCH=75     Single CUDA SM target (default: 75, minimum: 75).
   XHDFE_CUDA_ARCHS=...   CUDA SM targets for fatbin builds (comma/space/semicolon list).
                          Example: "75,80,86,89". Overrides XHDFE_CUDA_ARCH when set.
@@ -88,35 +101,83 @@ EOF
 TARGET="${XHDFE_TARGET:-}"
 OPENMP_MODE="${XHDFE_OPENMP:-}"
 MARCH_NATIVE_MODE="${XHDFE_ENABLE_MARCH_NATIVE:-}"
+CUDA_MODE="${XHDFE_CUDA_MODE:-}"
+CUDA_ARCH_CLI=""
+CUDA_ARCHS_CLI=""
 USE_METAL=0
 USE_CUDA=0
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --windows|--win|--win64)
       TARGET="windows"
+      shift
       ;;
     --linux)
       TARGET="linux"
+      shift
       ;;
     --openmp)
       OPENMP_MODE="on"
+      shift
       ;;
     --no-openmp)
       OPENMP_MODE="off"
+      shift
       ;;
     --march-native|--native)
       MARCH_NATIVE_MODE="on"
+      shift
       ;;
     --no-march-native)
       MARCH_NATIVE_MODE="off"
+      shift
+      ;;
+    --cuda)
+      CUDA_MODE="auto"
+      if [[ $# -gt 1 && "$2" != --* ]]; then
+        CUDA_MODE="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --cuda=*)
+      CUDA_MODE="${1#*=}"
+      shift
+      ;;
+    --cuda-arch)
+      [[ $# -gt 1 ]] || { echo "Error: --cuda-arch requires a value" >&2; exit 2; }
+      CUDA_MODE="on"
+      CUDA_ARCH_CLI="$2"
+      shift 2
+      ;;
+    --cuda-arch=*)
+      CUDA_MODE="on"
+      CUDA_ARCH_CLI="${1#*=}"
+      shift
+      ;;
+    --cuda-archs)
+      [[ $# -gt 1 ]] || { echo "Error: --cuda-archs requires a value" >&2; exit 2; }
+      CUDA_MODE="on"
+      CUDA_ARCHS_CLI="$2"
+      shift 2
+      ;;
+    --cuda-archs=*)
+      CUDA_MODE="on"
+      CUDA_ARCHS_CLI="${1#*=}"
+      shift
+      ;;
+    --no-cuda)
+      CUDA_MODE="off"
+      shift
       ;;
     -h|--help)
       usage
       exit 0
       ;;
     *)
-      echo "Unknown argument: $arg" >&2
+      echo "Unknown argument: $1" >&2
       usage >&2
       exit 2
       ;;
@@ -144,6 +205,8 @@ if [[ -z "${TARGET}" ]]; then
       ;;
   esac
 fi
+
+xhdfe_configure_cuda "${CUDA_MODE}" "${CUDA_ARCH_CLI}" "${CUDA_ARCHS_CLI}" "${TARGET}" "${UNAME_S}"
 
 SYSTEM_DEF="OPUNIX"
 if [[ "${UNAME_S}" == "Darwin" ]]; then
