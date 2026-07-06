@@ -18,6 +18,11 @@ a Stata command, a Python package, and an R package — all sitting on a **singl
 compiled C++ core**. CPU is the reference backend; an optional CUDA GPU absorber
 is available for large problems.
 
+The package also ships **`xfe`** (hence the repository name *xhdfe-xfe*), a
+companion Stata command that partials out — residualizes — variables against
+multiple high-dimensional fixed effects on the same core, without fitting a
+regression. See [Stata](#stata) below and `help xfe`.
+
 ## Features
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
