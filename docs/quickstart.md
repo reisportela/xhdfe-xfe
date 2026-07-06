@@ -49,18 +49,22 @@ the repo, then:
 # CPU (OpenMP recommended)
 bash stata/tools/build-plugin.sh --linux --openmp     # produces stata/xhdfe.plugin
 
-# GPU (Linux + NVIDIA only): set XHDFE_CUDA_ARCH to your GPU's compute capability
-#   nvidia-smi --query-gpu=compute_cap --format=csv,noheader   # e.g. 9.0 -> 90, 8.6 -> 86
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp
+# GPU (Linux + NVIDIA only): auto-detect the local GPU architecture
+bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
 ```
 
-**Python** (requires Python >= 3.9), from the repository root:
+**Python** (requires Python >= 3.9, CMake, a C++ compiler, and Python
+development headers), from the repository root:
 
 ```bash
 python -m pip install .
 # CUDA build (optional):
-XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
+XHDFE_ENABLE_CUDA=auto python -m pip install .
 ```
+
+On Linux, install the headers for your active Python first (`python3-dev` on
+Debian/Ubuntu or `python3-devel` on Fedora/RHEL/Rocky). On clusters without
+sudo, use conda/mamba or a Python module that includes `Python.h`.
 
 **R** (Linux x86-64 + GCC):
 
@@ -69,7 +73,7 @@ remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
 or, from a clone, `R CMD INSTALL r/xhdfe` (CUDA:
-`XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 R CMD INSTALL r/xhdfe`).
+`XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`).
 
 ---
 

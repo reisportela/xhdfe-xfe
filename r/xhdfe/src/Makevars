@@ -11,8 +11,8 @@
 #
 # Tunables (environment variables at install time):
 #   XHDFE_MARCH        optional target architecture for -march (default: empty)
-#   XHDFE_ENABLE_CUDA  ON to compile the optional CUDA absorber (Linux only)
-#   XHDFE_CUDA_ARCH    CUDA compute capability, single target (default: 90)
+#   XHDFE_ENABLE_CUDA  auto/ON to compile the optional CUDA absorber (Linux only)
+#   XHDFE_CUDA_ARCH    CUDA compute capability, single target (default: auto)
 #   CUDA_HOME          CUDA toolkit root (default: nvcc found on PATH)
 
 CXX_STD = CXX17
@@ -21,6 +21,8 @@ UNAME_S := $(shell uname -s 2>/dev/null)
 XHDFE_MARCH ?=
 XHDFE_MARCH_LABEL = $(if $(strip $(XHDFE_MARCH)),$(strip $(XHDFE_MARCH)),portable)
 XHDFE_MARCH_FLAG = $(if $(strip $(XHDFE_MARCH)),-march=$(strip $(XHDFE_MARCH)),)
+XHDFE_ENABLE_CUDA_CANON := $(shell printf '%s' '$(XHDFE_ENABLE_CUDA)' | tr '[:lower:]' '[:upper:]')
+XHDFE_CUDA_REQUESTED := $(filter ON 1 TRUE YES AUTO,$(XHDFE_ENABLE_CUDA_CANON))
 
 # No explicit -mtune: GCC's -march=X already implies -mtune=X for CPU names,
 # and psABI levels (x86-64-v3, ...) are not valid -mtune values.
@@ -42,7 +44,7 @@ XHDFE_OMP_DEF = $(if $(SHLIB_OPENMP_CXXFLAGS),-DHDFE_USE_OPENMP,)
 PKG_CPPFLAGS = -I. -Iinclude -Ieigen -DNDEBUG $(XHDFE_OMP_DEF) \
     -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
     -DXHDFE_R_MARCH='"$(XHDFE_MARCH_LABEL)"' \
-    -DXHDFE_R_CUDA_ARCH='"$(if $(filter ON,$(XHDFE_ENABLE_CUDA)),sm_$(XHDFE_CUDA_ARCH),)"'
+    -DXHDFE_R_CUDA_ARCH='"$(if $(XHDFE_CUDA_REQUESTED),sm_$(XHDFE_CUDA_ARCH_SELECTED),)"'
 PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
 
@@ -55,11 +57,24 @@ OBJECTS = $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(CUDA_OBJECTS)
 .PHONY: all
 all: $(SHLIB)
 
-ifeq ($(XHDFE_ENABLE_CUDA),ON)
+ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 ifeq ($(UNAME_S),Darwin)
-$(error XHDFE_ENABLE_CUDA=ON is not supported for macOS R builds; install a CPU build)
+$(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported for macOS R builds; install a CPU build)
 endif
-XHDFE_CUDA_ARCH ?= 90
+XHDFE_CUDA_ARCH_INPUT := $(if $(strip $(XHDFE_CUDA_ARCH)),$(strip $(XHDFE_CUDA_ARCH)),auto)
+XHDFE_CUDA_ARCH_CANON := $(shell printf '%s' '$(XHDFE_CUDA_ARCH_INPUT)' | tr '[:upper:]' '[:lower:]')
+ifeq ($(XHDFE_CUDA_ARCH_CANON),auto)
+XHDFE_CUDA_ARCH_SELECTED := $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | sed -E 's/.*([0-9]+)\.([0-9]+).*/\1\2/')
+else
+XHDFE_CUDA_ARCH_SELECTED := $(shell printf '%s' '$(XHDFE_CUDA_ARCH_INPUT)' | sed -E 's/^[sS][mM]_//; s/\.//')
+endif
+ifeq ($(strip $(XHDFE_CUDA_ARCH_SELECTED)),)
+$(error CUDA architecture could not be detected; set XHDFE_CUDA_ARCH=90 or install nvidia-smi)
+endif
+XHDFE_CUDA_ARCH_VALID := $(shell arch='$(XHDFE_CUDA_ARCH_SELECTED)'; if printf '%s' "$$arch" | grep -Eq '^[0-9]+$$'; then if [ "$$arch" -lt 75 ]; then echo too-low; else echo yes; fi; else echo invalid; fi)
+ifneq ($(XHDFE_CUDA_ARCH_VALID),yes)
+$(error CUDA architecture $(XHDFE_CUDA_ARCH_SELECTED) is invalid or below the minimum supported sm_75)
+endif
 XHDFE_NVCC_HOST_FLAGS = -fPIC,-fopenmp,-O3,-ffast-math
 ifneq ($(strip $(XHDFE_MARCH)),)
 XHDFE_NVCC_HOST_FLAGS = -fPIC,-fopenmp,-O3,$(XHDFE_MARCH_FLAG),-ffast-math
@@ -83,7 +98,7 @@ akm_kss_cuda.o: akm_kss_cuda.cu
 fe_absorption_cuda.o: fe_absorption_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
 	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
-	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH),code=[compute_$(XHDFE_CUDA_ARCH),sm_$(XHDFE_CUDA_ARCH)] \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
 	    --expt-relaxed-constexpr \
 	    -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
 	    -I. -Iinclude -Ieigen -c $< -o $@
