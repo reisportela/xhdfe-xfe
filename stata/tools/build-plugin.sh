@@ -242,6 +242,7 @@ srcs=( "${STATA_DIR}/src/xhdfe_plugin.cpp" )
 srcs+=( "${STATA_DIR}/src/hdfe_regressor_v11.cpp" )
 srcs+=( "${STATA_DIR}/src/fe_absorption.cpp" )
 srcs+=( "${STATA_DIR}/src/schwarz_demean.cpp" )
+srcs+=( "${STATA_DIR}/src/akm_kss.cpp" )
 srcs+=( "${STATA_DIR}/src/ols.cpp" )
 srcs+=( "${STATA_DIR}/src/iv.cpp" )
 
@@ -386,6 +387,12 @@ compile_plugin() {
         rc=$?
         if [[ $rc -eq 0 ]]; then
           objs+=( "${cuda_obj}" )
+          akm_cuda_obj="${OBJ_DIR}/akm_kss_cuda.o"
+          "${NVCC}" "${nvcc_flags[@]}" -c "${STATA_DIR}/src/akm_kss_cuda.cu" -o "${akm_cuda_obj}"
+          rc=$?
+        fi
+        if [[ $rc -eq 0 ]]; then
+          objs+=( "${akm_cuda_obj}" )
           set -e
           break
         fi

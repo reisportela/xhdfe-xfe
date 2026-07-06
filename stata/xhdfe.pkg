@@ -1,4 +1,4 @@
-v 2.11.0
+v 2.12.0
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d This package ships the `xhdfe` estimation command plus a platform-specific plugin binary.
@@ -8,4 +8,10 @@ f xhdfe.ado
 f xhdfe_p.ado
 f xhdfe_estat.ado
 f xhdfe.sthlp
+f xhdfeakm.ado
+f xhdfeakm.sthlp
+f xhdfeconnected.ado
+f xhdfeconnected.sthlp
+f xhdfegelbach.ado
+f xhdfegelbach.sthlp
 f xhdfe.plugin

@@ -70,7 +70,15 @@ NVCC ?= $(if $(CUDA_HOME),$(CUDA_HOME)/bin/nvcc,nvcc)
 XHDFE_CUDA_LIB ?= $(if $(CUDA_HOME),$(CUDA_HOME)/lib64,$(dir $(shell $(NVCC) --version > /dev/null 2>&1 && command -v $(NVCC)))../../cuda/lib64)
 PKG_CPPFLAGS += -DHDFE_USE_CUDA
 PKG_LIBS += -L$(XHDFE_CUDA_LIB) -Wl,-rpath,$(XHDFE_CUDA_LIB) -lcudart
-CUDA_OBJECTS = fe_absorption_cuda.o
+CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o
+
+akm_kss_cuda.o: akm_kss_cuda.cu
+	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
+	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH),code=[compute_$(XHDFE_CUDA_ARCH),sm_$(XHDFE_CUDA_ARCH)] \
+	    --expt-relaxed-constexpr \
+	    -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
+	    -I. -Iinclude -Ieigen -c $< -o $@
 
 fe_absorption_cuda.o: fe_absorption_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \

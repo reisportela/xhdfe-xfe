@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <iostream>
@@ -21,6 +22,7 @@
 #include <utility>
 #include <vector>
 
+#include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
@@ -1146,10 +1148,496 @@ hdfe::detail::GroupIndividualStructure build_group_individual_structure(
 
 }  // namespace
 
+
+// ---------------------------------------------------------------------------
+// AKM + leave-out (KSS) variance decomposition (opt-in task; mirrors the
+// Python py_hdfe_v11.akm_kss free function). Reached only when the caller
+// passes task=akm_kss (the xhdfeakm ado); the standard xhdfe fit path below
+// is untouched.
+// ---------------------------------------------------------------------------
+
+hdfe::akm::LeaveOutLevel parse_akm_leave_out_level(const std::string& name) {
+    const std::string lower = to_lower(name);
+    if (lower == "match" || lower == "matches") {
+        return hdfe::akm::LeaveOutLevel::Match;
+    }
+    if (lower == "obs" || lower == "observation" || lower == "observations") {
+        return hdfe::akm::LeaveOutLevel::Observation;
+    }
+    throw_with_prefix("xhdfe plugin: ", "unknown leave-out level: " + name);
+}
+
+hdfe::akm::LeverageMethod parse_akm_leverage_method(const std::string& name) {
+    const std::string lower = to_lower(name);
+    if (lower == "auto") {
+        return hdfe::akm::LeverageMethod::Auto;
+    }
+    if (lower == "exact") {
+        return hdfe::akm::LeverageMethod::Exact;
+    }
+    if (lower == "jla" || lower == "jl") {
+        return hdfe::akm::LeverageMethod::Jla;
+    }
+    throw_with_prefix("xhdfe plugin: ", "unknown leverages method: " + name);
+}
+
+void akm_save_scalar(const char* name, double value) {
+    const ST_retcode rc = SF_scal_save(const_cast<char*>(name), value);
+    if (rc) {
+        throw_with_prefix("xhdfe plugin: ", std::string("failed to save scalar: ") + name);
+    }
+}
+
+// Leave-out connected set only (task=akm_leave_out_set; the xhdfeconnected
+// ado): computes the KSS leave-one-out sample flag and counts without
+// running the decomposition.
+ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
+    bool has_fweight = false;
+    if (auto val = args.get_optional("has_fweight")) {
+        has_fweight = parse_bool(*val, "has_fweight");
+    }
+    // varlist: worker firm [fweight] keep
+    const int expected_vars = 2 + (has_fweight ? 1 : 0) + 1;
+    if (SF_nvars() != expected_vars) {
+        throw_with_prefix("xhdfe plugin: ",
+                          "varlist has wrong length (have " + std::to_string(SF_nvars()) +
+                              ", want " + std::to_string(expected_vars) + ")");
+    }
+    const int idx_worker = 1;
+    const int idx_firm = 2;
+    const int idx_fw = has_fweight ? 3 : -1;
+    const int idx_keep = has_fweight ? 4 : 3;
+
+    const ObservationMap obs = selected_observations();
+    const int n = obs.n;
+    if (n <= 0) {
+        return static_cast<ST_retcode>(2000);
+    }
+    const ST_double missval = SV_missval;
+    Eigen::VectorXi worker(n);
+    Eigen::VectorXi firm(n);
+    Eigen::VectorXd fw;
+    if (has_fweight) {
+        fw.resize(n);
+    }
+    for (int i = 0; i < n; ++i) {
+        const int row = obs.obs_no(i);
+        ST_double z = 0.0;
+        if (SF_vdata(idx_worker, row, &z) || !(z < missval)) {
+            throw_with_prefix("xhdfe plugin: ", "failed to read worker id");
+        }
+        worker[i] = static_cast<int>(std::floor(z + 0.5));
+        if (SF_vdata(idx_firm, row, &z) || !(z < missval)) {
+            throw_with_prefix("xhdfe plugin: ", "failed to read firm id");
+        }
+        firm[i] = static_cast<int>(std::floor(z + 0.5));
+        if (has_fweight) {
+            if (SF_vdata(idx_fw, row, &z) || !(z < missval)) {
+                throw_with_prefix("xhdfe plugin: ", "failed to read fweight");
+            }
+            fw[i] = z;
+        }
+    }
+
+    const hdfe::akm::LeaveOutSetResult set = hdfe::akm::leave_out_connected_set(
+        worker, firm, has_fweight ? &fw : nullptr);
+
+    for (int i = 0; i < n; ++i) {
+        const int row = obs.obs_no(i);
+        SF_vstore(idx_keep, row,
+                  set.keep[static_cast<std::size_t>(i)] != 0 ? 1.0 : 0.0);
+    }
+    akm_save_scalar("__xakm_n_obs", static_cast<double>(set.n_obs));
+    akm_save_scalar("__xakm_n_obs_input", static_cast<double>(set.n_obs_input));
+    akm_save_scalar("__xakm_n_obs_connected",
+                    static_cast<double>(set.n_obs_connected));
+    akm_save_scalar("__xakm_n_workers", static_cast<double>(set.n_workers));
+    akm_save_scalar("__xakm_n_firms", static_cast<double>(set.n_firms));
+    akm_save_scalar("__xakm_n_matches", static_cast<double>(set.n_matches));
+    akm_save_scalar("__xakm_n_movers", static_cast<double>(set.n_movers));
+    akm_save_scalar("__xakm_n_stayers", static_cast<double>(set.n_stayers));
+    akm_save_scalar("__xakm_prune_iterations",
+                    static_cast<double>(set.prune_iterations));
+    return 0;
+}
+
+ST_retcode run_akm_kss(const ParsedArgs& args) {
+    const int ncontrols = parse_int(args.get_required("ncontrols"), "ncontrols");
+    const bool store_effects = parse_bool(args.get_required("store_effects"), "store_effects");
+    bool has_fweight = false;
+    if (auto val = args.get_optional("has_fweight")) {
+        has_fweight = parse_bool(*val, "has_fweight");
+    }
+
+    // varlist: y worker firm [fweight] [controls...] [alpha psi] keep
+    const int expected_vars =
+        3 + (has_fweight ? 1 : 0) + ncontrols + (store_effects ? 2 : 0) + 1;
+    if (SF_nvars() != expected_vars) {
+        throw_with_prefix("xhdfe plugin: ",
+                          "varlist has wrong length (have " + std::to_string(SF_nvars()) +
+                              ", want " + std::to_string(expected_vars) + ")");
+    }
+    const int idx_y = 1;
+    const int idx_worker = 2;
+    const int idx_firm = 3;
+    const int idx_fw = has_fweight ? 4 : -1;
+    const int idx_x_start = has_fweight ? 5 : 4;
+    const int idx_alpha = store_effects ? idx_x_start + ncontrols : -1;
+    const int idx_psi = store_effects ? idx_alpha + 1 : -1;
+    const int idx_keep = idx_x_start + ncontrols + (store_effects ? 2 : 0);
+
+    const ObservationMap obs = selected_observations();
+    const int n = obs.n;
+    if (n <= 0) {
+        return static_cast<ST_retcode>(2000);
+    }
+
+    const ST_double missval = SV_missval;
+    auto read_numeric = [&](int var_idx, int obs_no) {
+        ST_double z = 0.0;
+        const ST_retcode rc = SF_vdata(var_idx, obs_no, &z);
+        if (rc) {
+            throw_with_prefix("xhdfe plugin: ",
+                              "failed to read data (rc=" + std::to_string(rc) + ")");
+        }
+        if (!(z < missval)) {
+            throw_with_prefix("xhdfe plugin: ",
+                              "unexpected missing value; make sure the sample excludes missings");
+        }
+        return z;
+    };
+    auto read_id = [&](int var_idx, int obs_no, const char* label) {
+        const double z = read_numeric(var_idx, obs_no);
+        const double r = std::floor(z + 0.5);
+        if (std::abs(z - r) > 1e-6 ||
+            r < static_cast<double>(std::numeric_limits<int>::min()) ||
+            r > static_cast<double>(std::numeric_limits<int>::max())) {
+            throw_with_prefix("xhdfe plugin: ",
+                              std::string(label) + " must contain int32-range integer ids");
+        }
+        return static_cast<int>(r);
+    };
+
+    Eigen::VectorXd y(n);
+    Eigen::VectorXi worker(n);
+    Eigen::VectorXi firm(n);
+    Eigen::VectorXd fw;
+    if (has_fweight) {
+        fw.resize(n);
+    }
+    Eigen::MatrixXd X;
+    if (ncontrols > 0) {
+        X.resize(n, ncontrols);
+    }
+    for (int i = 0; i < n; ++i) {
+        const int row = obs.obs_no(i);
+        y[i] = read_numeric(idx_y, row);
+        worker[i] = read_id(idx_worker, row, "worker");
+        firm[i] = read_id(idx_firm, row, "firm");
+        if (has_fweight) {
+            fw[i] = read_numeric(idx_fw, row);
+        }
+        for (int j = 0; j < ncontrols; ++j) {
+            X(i, j) = read_numeric(idx_x_start + j, row);
+        }
+    }
+
+    hdfe::akm::AkmOptions options;
+    if (auto val = args.get_optional("leave_out_level")) {
+        options.leave_out_level = parse_akm_leave_out_level(*val);
+    }
+    if (auto val = args.get_optional("leverages")) {
+        options.leverage_method = parse_akm_leverage_method(*val);
+    }
+    if (auto val = args.get_optional("jla_draws")) {
+        options.jla_draws = parse_int(*val, "jla_draws");
+    }
+    if (auto val = args.get_optional("seed")) {
+        options.seed = static_cast<std::uint64_t>(parse_double(*val, "seed"));
+    }
+    if (auto val = args.get_optional("prune")) {
+        options.prune = parse_bool(*val, "prune");
+    }
+    if (auto val = args.get_optional("exact_max_rows")) {
+        options.exact_max_rows = parse_int(*val, "exact_max_rows");
+    }
+    if (auto val = args.get_optional("direct_max_firms")) {
+        options.direct_max_firms = parse_int(*val, "direct_max_firms");
+    }
+    if (auto val = args.get_optional("direct_max_nnz")) {
+        options.direct_max_nnz = static_cast<long long>(parse_double(*val, "direct_max_nnz"));
+    }
+    if (auto val = args.get_optional("cg_tol")) {
+        options.cg_tol = parse_double(*val, "cg_tol");
+    }
+    if (auto val = args.get_optional("cg_max_iter")) {
+        options.cg_max_iter = parse_int(*val, "cg_max_iter");
+    }
+    if (auto val = args.get_optional("num_threads")) {
+        options.num_threads = parse_int(*val, "num_threads");
+    }
+    if (auto val = args.get_optional("fwl_tol")) {
+        options.fwl_tol = parse_double(*val, "fwl_tol");
+    }
+    if (auto val = args.get_optional("fwl_max_iter")) {
+        options.fwl_max_iter = parse_int(*val, "fwl_max_iter");
+    }
+    if (auto val = args.get_optional("compute_se")) {
+        options.compute_se = parse_bool(*val, "compute_se");
+    }
+    if (auto val = args.get_optional("se_nsim")) {
+        options.se_nsim = parse_int(*val, "se_nsim");
+    }
+    if (auto val = args.get_optional("eigen_diagnostics")) {
+        options.eigen_diagnostics = parse_bool(*val, "eigen_diagnostics");
+        if (options.eigen_diagnostics) {
+            options.compute_se = true;
+        }
+    }
+    if (auto val = args.get_optional("eig_trace_nsim")) {
+        options.eig_trace_nsim = parse_int(*val, "eig_trace_nsim");
+    }
+    if (auto val = args.get_optional("se_sigma_lowess")) {
+        options.se_sigma_lowess = parse_bool(*val, "se_sigma_lowess");
+    }
+    if (auto val = args.get_optional("use_gpu")) {
+        options.use_gpu = parse_bool(*val, "use_gpu");
+    }
+
+    const hdfe::akm::AkmKssResult res = hdfe::akm::akm_kss_decompose(
+        y, worker, firm, ncontrols > 0 ? &X : nullptr, options, nullptr,
+        has_fweight ? &fw : nullptr);
+
+    // Scalars under fixed hidden names; the ado copies them into r().
+    akm_save_scalar("__xakm_plugin_var_alpha", res.plugin.var_alpha);
+    akm_save_scalar("__xakm_plugin_var_psi", res.plugin.var_psi);
+    akm_save_scalar("__xakm_plugin_cov", res.plugin.cov_alpha_psi);
+    akm_save_scalar("__xakm_agsu_var_alpha", res.agsu.var_alpha);
+    akm_save_scalar("__xakm_agsu_var_psi", res.agsu.var_psi);
+    akm_save_scalar("__xakm_agsu_cov", res.agsu.cov_alpha_psi);
+    akm_save_scalar("__xakm_kss_var_alpha", res.kss.var_alpha);
+    akm_save_scalar("__xakm_kss_var_psi", res.kss.var_psi);
+    akm_save_scalar("__xakm_kss_cov", res.kss.cov_alpha_psi);
+    akm_save_scalar("__xakm_var_y", res.var_y);
+    akm_save_scalar("__xakm_sigma2_ho", res.sigma2_ho);
+    akm_save_scalar("__xakm_n_obs", static_cast<double>(res.sample.n_obs));
+    akm_save_scalar("__xakm_n_obs_input", static_cast<double>(res.sample.n_obs_input));
+    akm_save_scalar("__xakm_n_obs_connected",
+                    static_cast<double>(res.sample.n_obs_connected));
+    akm_save_scalar("__xakm_n_workers", static_cast<double>(res.sample.n_workers));
+    akm_save_scalar("__xakm_n_firms", static_cast<double>(res.sample.n_firms));
+    akm_save_scalar("__xakm_n_matches", static_cast<double>(res.sample.n_matches));
+    akm_save_scalar("__xakm_n_movers", static_cast<double>(res.sample.n_movers));
+    akm_save_scalar("__xakm_n_stayers", static_cast<double>(res.sample.n_stayers));
+    akm_save_scalar("__xakm_n_rows", static_cast<double>(res.n_rows));
+    akm_save_scalar("__xakm_max_pii", res.max_pii);
+    akm_save_scalar("__xakm_mean_pii", res.mean_pii);
+    akm_save_scalar("__xakm_leverages_exact", res.leverages_exact ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_solver_direct", res.solver_direct ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_jla_draws", static_cast<double>(res.jla_draws_used));
+    akm_save_scalar("__xakm_seed", static_cast<double>(res.seed_used));
+    akm_save_scalar("__xakm_solver_iterations", static_cast<double>(res.solver_iterations));
+    akm_save_scalar("__xakm_converged", res.converged ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_gpu_used", res.gpu_used ? 1.0 : 0.0);
+    if (options.compute_se) {
+        akm_save_scalar("__xakm_se_var_psi", res.se_var_psi);
+        akm_save_scalar("__xakm_se_cov", res.se_cov_alpha_psi);
+        akm_save_scalar("__xakm_se_var_alpha", res.se_var_alpha);
+        akm_save_scalar("__xakm_theta_var_psi", res.theta_c_var_psi);
+        akm_save_scalar("__xakm_theta_cov", res.theta_c_cov_alpha_psi);
+        akm_save_scalar("__xakm_theta_var_alpha", res.theta_c_var_alpha);
+    }
+    if (options.eigen_diagnostics) {
+        static const char* comp_tag[3] = {"psi", "cov", "alpha"};
+        char nm[48];
+        for (int c = 0; c < 3; ++c) {
+            std::snprintf(nm, sizeof(nm), "__xakm_lambda1_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.eig_lambda1[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_eigshare1_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.eig_share1[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_lindeberg_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.lindeberg_max_x1bar_sq[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_gammasq_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.gamma_sq[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_fstat_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.f_stat[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_theta1_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.theta_1[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_ci_lb_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.ci_lb[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_ci_ub_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.ci_ub[c]);
+            std::snprintf(nm, sizeof(nm), "__xakm_curvature_%s", comp_tag[c]);
+            akm_save_scalar(nm, res.curvature[c]);
+        }
+    }
+    if (!res.notes.empty()) {
+        SF_macro_save(const_cast<char*>("_xakm_notes"), const_cast<char*>(res.notes.c_str()));
+    }
+
+    // Control coefficients into the caller-supplied matrix (1 x k).
+    if (ncontrols > 0) {
+        if (auto bname = args.get_optional("b")) {
+            for (int j = 0; j < res.beta.size(); ++j) {
+                SF_mat_store(const_cast<char*>(bname->c_str()), 1, j + 1, res.beta[j]);
+            }
+        }
+    }
+
+    // keep flag over the sample rows; alpha/psi on kept rows, missing elsewhere.
+    std::size_t kept_cursor = 0;
+    for (int i = 0; i < n; ++i) {
+        const int row = obs.obs_no(i);
+        const bool kept = res.sample.keep[static_cast<std::size_t>(i)] != 0;
+        SF_vstore(idx_keep, row, kept ? 1.0 : 0.0);
+        if (store_effects) {
+            if (kept) {
+                SF_vstore(idx_alpha, row, res.alpha[static_cast<Eigen::Index>(kept_cursor)]);
+                SF_vstore(idx_psi, row, res.psi[static_cast<Eigen::Index>(kept_cursor)]);
+            } else {
+                SF_vstore(idx_alpha, row, missval);
+                SF_vstore(idx_psi, row, missval);
+            }
+        }
+        if (kept) {
+            ++kept_cursor;
+        }
+    }
+    return 0;
+}
+
+
+ST_retcode run_gelbach(const ParsedArgs& args) {
+    const int p = parse_int(args.get_required("p"), "p");
+    const int q = parse_int(args.get_required("q"), "q");
+    const int nfe = parse_int(args.get_required("nfe"), "nfe");
+    const bool has_cluster = parse_bool(args.get_required("has_cluster"), "has_cluster");
+    const bool has_weight = parse_bool(args.get_required("has_weight"), "has_weight");
+    const bool freq_weights = has_weight &&
+        to_lower(args.get_required("weight_type")).rfind("fw", 0) == 0;
+
+    std::vector<int> sizes;
+    {
+        const std::string raw = args.get_required("group_sizes");
+        std::string buf;
+        for (char c : raw) {
+            if (c == ',') { if (!buf.empty()) sizes.push_back(std::stoi(buf)); buf.clear(); }
+            else buf.push_back(c);
+        }
+        if (!buf.empty()) sizes.push_back(std::stoi(buf));
+    }
+
+    const int expected_vars = 1 + p + q + nfe + (has_cluster ? 1 : 0) + (has_weight ? 1 : 0);
+    if (SF_nvars() != expected_vars) {
+        throw_with_prefix("xhdfe plugin: ",
+                          "varlist has wrong length (have " + std::to_string(SF_nvars()) +
+                              ", want " + std::to_string(expected_vars) + ")");
+    }
+    const ObservationMap obs = selected_observations();
+    const int n = obs.n;
+    if (n <= 0) return static_cast<ST_retcode>(2000);
+
+    const ST_double missval = SV_missval;
+    auto read_numeric = [&](int var_idx, int obs_no) {
+        ST_double z = 0.0;
+        if (SF_vdata(var_idx, obs_no, &z)) {
+            throw_with_prefix("xhdfe plugin: ", "failed to read data");
+        }
+        if (!(z < missval)) {
+            throw_with_prefix("xhdfe plugin: ", "unexpected missing value");
+        }
+        return z;
+    };
+    auto read_id = [&](int var_idx, int obs_no) {
+        const double z = read_numeric(var_idx, obs_no);
+        const double r = std::floor(z + 0.5);
+        if (std::abs(z - r) > 1e-6) {
+            throw_with_prefix("xhdfe plugin: ", "ids must be integers");
+        }
+        return static_cast<int>(r);
+    };
+
+    Eigen::VectorXd y(n);
+    Eigen::MatrixXd X1(n, p);
+    Eigen::MatrixXd X2(n, q);
+    std::vector<Eigen::VectorXi> fes(static_cast<std::size_t>(nfe));
+    for (auto& f : fes) f.resize(n);
+    Eigen::VectorXi cl;
+    if (has_cluster) cl.resize(n);
+    Eigen::VectorXd wvec;
+    if (has_weight) wvec.resize(n);
+    for (int i = 0; i < n; ++i) {
+        const int row = obs.obs_no(i);
+        y[i] = read_numeric(1, row);
+        for (int c = 0; c < p; ++c) X1(i, c) = read_numeric(2 + c, row);
+        for (int c = 0; c < q; ++c) X2(i, c) = read_numeric(2 + p + c, row);
+        for (int d = 0; d < nfe; ++d) fes[static_cast<std::size_t>(d)][i] = read_id(2 + p + q + d, row);
+        if (has_cluster) cl[i] = read_id(2 + p + q + nfe, row);
+        if (has_weight) wvec[i] = read_numeric(2 + p + q + nfe + (has_cluster ? 1 : 0), row);
+    }
+
+    hdfe::gelbach::GelbachOptions options;
+    {
+        const std::string v = to_lower(args.get_required("vce"));
+        if (v == "unadjusted") options.vce = hdfe::gelbach::GelbachVce::Unadjusted;
+        else if (v == "robust") options.vce = hdfe::gelbach::GelbachVce::Robust;
+        else if (v == "cluster") options.vce = hdfe::gelbach::GelbachVce::Cluster;
+        else throw_with_prefix("xhdfe plugin: ", "unknown vce: " + v);
+    }
+    options.gamma0 = parse_bool(args.get_required("gamma0"), "gamma0");
+    options.cov0 = parse_bool(args.get_required("cov0"), "cov0");
+    if (auto val = args.get_optional("num_threads")) {
+        options.num_threads = parse_int(*val, "num_threads");
+    }
+
+    const hdfe::gelbach::GelbachResult res = hdfe::gelbach::decompose(
+        y, X1, X2, sizes, fes, has_cluster ? &cl : nullptr, options,
+        has_weight ? &wvec : nullptr, freq_weights);
+
+    const int G = static_cast<int>(res.delta.cols());
+    const int k1 = p + 1;
+    const std::string dmat = args.get_required("dmat");
+    const std::string semat = args.get_required("semat");
+    const std::string totmat = args.get_required("totmat");
+    for (int g = 0; g < G; ++g) {
+        for (int r = 0; r < k1; ++r) {
+            SF_mat_store(const_cast<char*>(dmat.c_str()), r + 1, g + 1, res.delta(r, g));
+            SF_mat_store(const_cast<char*>(semat.c_str()), r + 1, g + 1,
+                         std::sqrt(res.cov(g * k1 + r, g * k1 + r)));
+        }
+    }
+    for (int r = 0; r < k1; ++r) {
+        SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 1, res.total[r]);
+        SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 2,
+                     std::sqrt(res.total_cov(r, r)));
+    }
+    akm_save_scalar("__xgel_identity_gap", res.identity_gap);
+    akm_save_scalar("__xgel_n_obs", static_cast<double>(res.n_obs));
+    akm_save_scalar("__xgel_df_full", res.df_full);
+    akm_save_scalar("__xgel_converged", res.converged ? 1.0 : 0.0);
+    if (!res.notes.empty()) {
+        SF_macro_save(const_cast<char*>("_xgel_notes"), const_cast<char*>(res.notes.c_str()));
+    }
+    return 0;
+}
+
 STDLL stata_call(int argc, char* argv[]) {
     const auto plugin_total_t0 = std::chrono::steady_clock::now();
     try {
         ParsedArgs args(argc, argv);
+
+        if (auto task = args.get_optional("task")) {
+            if (*task == "akm_kss") {
+                return run_akm_kss(args);
+            }
+            if (*task == "akm_leave_out_set") {
+                return run_akm_leave_out_set(args);
+            }
+            if (*task == "gelbach") {
+                return run_gelbach(args);
+            }
+            throw_with_prefix("xhdfe plugin: ", "unknown task: " + *task);
+        }
 
         const std::string bmat = args.get_required("b");
         const std::string Vmat = args.get_required("V");

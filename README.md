@@ -30,6 +30,8 @@ is available for large problems.
 - **Group-level outcomes with individual fixed effects** — the `group()` / `individual()` machinery.
 - **Mobility groups** and connected-component diagnostics.
 - **Optional GPU** — CUDA absorber with fail-closed semantics (never a silent CPU fallback).
+- **AKM / worker-firm post-estimation** — leave-out (KSS) variance decomposition with plug-in, AGSU and KSS corrections, exact and Johnson-Lindenstrauss leverages, component standard errors, Andrews-Mikusheva weak-identification confidence intervals, fweights, and a leave-one-out connected-set utility (`xhdfeakm` / `xhdfeconnected` in Stata, `xhdfe.akm` in Python, `xhdfe_akm_kss()` in R); validated against Saggio's LeaveOutTwoWay (the canonical KSS implementation) and pytwoway. See [`docs/akm-kss.md`](docs/akm-kss.md).
+- **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` / `xhdfe_gelbach()`, validated against Gelbach's `b1x2`.
 
 ---
 
@@ -256,6 +258,7 @@ interaction FE, and `| endo ~ inst` for IV. See
 
 - **Quickstart & overview:** [`docs/quickstart.md`](docs/quickstart.md), [`docs/overview.md`](docs/overview.md).
 - **GPU (CUDA):** [`docs/gpu.md`](docs/gpu.md) — install-with-GPU, request, and verify in Stata/Python/R.
+- **AKM + leave-out (KSS) & Gelbach:** [`docs/akm-kss.md`](docs/akm-kss.md); `help xhdfeakm`, `help xhdfeconnected`, `help xhdfegelbach`.
 - **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
 - **Stata:** `help xhdfe`, `help xfe`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
