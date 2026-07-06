@@ -1,5 +1,8 @@
 {smcl}
-{* *! version 1.0.0  06jul2026}{...}
+{* *! version 2.12.0  06jul2026}{...}
+{vieweralsosee "xhdfe" "help xhdfe"}{...}
+{vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
+{vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {title:Title}
 
 {p2colset 5 24 26 2}{...}

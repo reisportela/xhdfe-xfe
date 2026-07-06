@@ -102,8 +102,25 @@ m_gpu <- xhdfe(y ~ x1 + x2 | firm + year, data, backend = "cuda")
 stopifnot(m_gpu$gpu_used == 1, m_gpu$gpu_status == "used")
 ```
 
+Worker-firm (AKM) leave-out (KSS) decomposition and the Gelbach companion
+(same compiled backend; validated against Saggio's LeaveOutTwoWay and
+`pytwoway`):
+
+```r
+# leave-out (KSS) variance decomposition with component SEs + AM q=1 CIs
+fit <- xhdfe_akm_kss(y, worker, firm, compute_se = TRUE, eigen_diagnostics = TRUE)
+fit$kss          # var(alpha), var(psi), cov, corr, shares of var(y)
+fit$component_se # KSS standard errors
+fit$weak_id      # Andrews-Mikusheva confidence intervals
+# Gelbach conditional decomposition
+xhdfe_gelbach(y, x1 = educ, x2_groups = list(skill = ability),
+              fes = list(firm = firm))
+```
+
 See `?xhdfe` for the full documentation (it mirrors the Stata help file
-section by section) and `examples/xhdfe_r_showcase.qmd` for a complete tour.
+section by section), `?xhdfe_akm_kss` / `?xhdfe_gelbach` for the worker-firm
+layer, and `examples/xhdfe_r_showcase.qmd` plus the top-level `examples/`
+scripts for complete tours.
 
 ## Validation
 

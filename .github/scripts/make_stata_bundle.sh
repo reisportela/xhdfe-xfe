@@ -13,6 +13,8 @@ rm -rf "_bundle" "${OUT}"
 mkdir -p "${STAGE}"
 
 cp stata/xhdfe.ado stata/xhdfe_estat.ado stata/xhdfe_p.ado stata/xhdfe.sthlp \
+   stata/xhdfeakm.ado stata/xhdfeakm.sthlp stata/xhdfeconnected.ado \
+   stata/xhdfeconnected.sthlp stata/xhdfegelbach.ado stata/xhdfegelbach.sthlp \
    stata/xhdfe.pkg stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg stata/stata.toc \
    "${STAGE}/"
 cp stata/xhdfe_hetero.ado stata/xhdfe_hetero.sthlp "${STAGE}/" 2>/dev/null || true

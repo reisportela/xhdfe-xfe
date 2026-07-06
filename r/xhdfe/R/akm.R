@@ -89,9 +89,21 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #' @param gpu Solve the two-way systems on the CUDA backend when available.
 #' @return An object of class \code{xhdfe_akm_kss}: a list with the sample
 #'   summary, observation-level \code{alpha}/\code{psi} on the kept rows,
-#'   control coefficients \code{beta}, the \code{plugin}/\code{agsu}/
-#'   \code{kss} component tables, row-level leverages \code{pii} and
-#'   \code{sigma_i}, and solver diagnostics.
+#'   control coefficients \code{beta}, and the \code{plugin}/\code{agsu}/
+#'   \code{kss} component tables. Each component table carries
+#'   \code{var_alpha}, \code{var_psi}, \code{cov_alpha_psi} plus the derived
+#'   \code{corr_alpha_psi}, \code{var_alpha_plus_psi} and the shares of
+#'   \code{var_y} (\code{share_var_alpha}, \code{share_var_psi},
+#'   \code{share_2cov}). Also returned: \code{var_y}, \code{sigma2_ho},
+#'   row-level leverages \code{pii} and \code{sigma_i}, and solver
+#'   diagnostics (\code{leverages_exact}, \code{gpu_used}, \code{converged},
+#'   ...). With \code{compute_se = TRUE} a \code{component_se} list holds the
+#'   KSS component standard errors and corrected point estimates; with
+#'   \code{eigen_diagnostics = TRUE} a \code{weak_id} list holds, per
+#'   component, the top eigenvalue and shares of Atilde, the Lindeberg
+#'   condition, \code{gamma_sq}, the F statistic, \code{theta_1}, the
+#'   Andrews-Mikusheva q = 1 confidence bounds (\code{ci_lb}/\code{ci_ub})
+#'   and the curvature.
 #' @references Kline P., Saggio R., Soelvsten M. (2020), Econometrica;
 #'   Andrews M. et al. (2008), JRSS-A; Abowd J., Kramarz F., Margolis D.
 #'   (1999), Econometrica.
