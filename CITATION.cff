@@ -12,7 +12,91 @@ authors:
     affiliation: "NIPE / Universidade do Minho"
     email: "tgstavares@eeg.uminho.pt"
     website: "https://www.tgstavares.com"
-version: "2.11.0"
-date-released: 2026-07-04
+version: "2.12.0"
+date-released: 2026-07-06
 url: "https://github.com/reisportela/xhdfe-xfe"
 license: MIT
+references:
+  - type: article
+    authors:
+      - family-names: "Abowd"
+        given-names: "John M."
+      - family-names: "Kramarz"
+        given-names: "Francis"
+      - family-names: "Margolis"
+        given-names: "David N."
+    title: "High wage workers and high wage firms"
+    journal: "Econometrica"
+    year: 1999
+    volume: 67
+    issue: 2
+    start: 251
+    end: 333
+  - type: article
+    authors:
+      - family-names: "Andrews"
+        given-names: "Martyn J."
+      - family-names: "Gill"
+        given-names: "Len"
+      - family-names: "Schank"
+        given-names: "Thorsten"
+      - family-names: "Upward"
+        given-names: "Richard"
+    title: "High wage workers and low wage firms: negative assortative matching or limited mobility bias?"
+    journal: "Journal of the Royal Statistical Society: Series A"
+    year: 2008
+    volume: 171
+    issue: 3
+    start: 673
+    end: 697
+  - type: article
+    authors:
+      - family-names: "Kline"
+        given-names: "Patrick"
+      - family-names: "Saggio"
+        given-names: "Raffaele"
+      - family-names: "Solvsten"
+        given-names: "Mikkel"
+    title: "Leave-out estimation of variance components"
+    journal: "Econometrica"
+    year: 2020
+    volume: 88
+    issue: 5
+    start: 1859
+    end: 1898
+  - type: article
+    authors:
+      - family-names: "Andrews"
+        given-names: "Donald W. K."
+      - family-names: "Mikusheva"
+        given-names: "Anna"
+    title: "Conditional inference with a functional nuisance parameter"
+    journal: "Econometrica"
+    year: 2016
+    volume: 84
+    issue: 4
+    start: 1571
+    end: 1612
+  - type: article
+    authors:
+      - family-names: "Gelbach"
+        given-names: "Jonah B."
+    title: "When do covariates matter? And which ones, and how much?"
+    journal: "Journal of Labor Economics"
+    year: 2016
+    volume: 34
+    issue: 2
+    start: 509
+    end: 543
+  - type: software
+    authors:
+      - family-names: "Saggio"
+        given-names: "Raffaele"
+    title: "LeaveOutTwoWay: leave-out estimation of variance components"
+    url: "https://github.com/rsaggio87/LeaveOutTwoWay"
+  - type: software
+    authors:
+      - family-names: "Lamadon"
+        given-names: "Thibaut"
+    title: "pytwoway: two-way fixed effect models in Python"
+    url: "https://github.com/tlamadon/pytwoway"

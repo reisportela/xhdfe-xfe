@@ -67,9 +67,19 @@ decomposition only; equals the row-expanded run exactly.}
 \value{
 An object of class \code{xhdfe_akm_kss}: a list with the sample summary,
 observation-level \code{alpha}/\code{psi} on the kept rows, control
-coefficients \code{beta}, the \code{plugin}/\code{agsu}/\code{kss} component
-tables, row-level leverages \code{pii} and \code{sigma_i}, and solver
-diagnostics.
+coefficients \code{beta}, and the \code{plugin}/\code{agsu}/\code{kss}
+component tables. Each component table carries \code{var_alpha},
+\code{var_psi}, \code{cov_alpha_psi} plus the derived \code{corr_alpha_psi},
+\code{var_alpha_plus_psi} and the shares of \code{var_y}
+(\code{share_var_alpha}, \code{share_var_psi}, \code{share_2cov}). Also
+returned: \code{var_y}, \code{sigma2_ho}, row-level leverages \code{pii} and
+\code{sigma_i}, and solver diagnostics. With \code{compute_se = TRUE} a
+\code{component_se} list holds the KSS component standard errors and corrected
+point estimates; with \code{eigen_diagnostics = TRUE} a \code{weak_id} list
+holds, per component, the top eigenvalue and shares of Atilde, the Lindeberg
+condition, \code{gamma_sq}, the F statistic, \code{theta_1}, the
+Andrews-Mikusheva q = 1 confidence bounds (\code{ci_lb}/\code{ci_ub}) and the
+curvature.
 }
 \description{
 Estimates the two-way AKM model \eqn{y = \alpha_{worker} + \psi_{firm} +

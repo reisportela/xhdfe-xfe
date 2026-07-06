@@ -241,6 +241,51 @@ interaction FE, and `| endo ~ inst` for IV. See
 
 ---
 
+## Worker-firm (AKM) and Gelbach post-estimation
+
+Beyond general-purpose HDFE regression, `xhdfe` ships a worker-firm layer that
+follows the Kline-Saggio-Solvsten (2020) leave-out methodology (validated
+against Saggio's LeaveOutTwoWay and `pytwoway`) and a Gelbach (2016)
+decomposition — all on the same compiled backend, in Stata, Python and R.
+Installation is the same as the core (they are part of the one package).
+
+Stata:
+
+```stata
+* leave-one-out connected set, then the AKM/KSS variance decomposition
+xhdfeconnected worker firm, generate(insample)
+xhdfeakm y, worker(worker) firm(firm) ci          // KSS SEs + Andrews-Mikusheva CIs
+xhdfegelbach y, x1(educ) x2groups("skill = ability") fes(firm)
+```
+
+Python:
+
+```python
+import xhdfe.akm as akm, xhdfe.gelbach as gelbach
+r = akm.akm_kss(y, worker, firm, compute_se=True, eigen_diagnostics=True)
+print(r["kss"], r["component_se"], r["weak_id"])
+g = gelbach.decompose(y, educ, x2_groups={"skill": ability}, fes={"firm": firm})
+```
+
+R:
+
+```r
+fit <- xhdfe_akm_kss(y, worker, firm, compute_se = TRUE, eigen_diagnostics = TRUE)
+g   <- xhdfe_gelbach(y, x1 = educ, x2_groups = list(skill = ability),
+                     fes = list(firm = firm))
+```
+
+The plug-in, AGSU (homoskedastic) and KSS (heteroskedasticity-robust leave-out)
+decompositions report the variance of worker effects, of firm effects, their
+covariance and correlation, and the shares of wage variance; with `se`/`ci`
+they add component standard errors and Andrews-Mikusheva weak-identification
+confidence intervals. Exact and Johnson-Lindenstrauss leverages, frequency
+weights and an optional CUDA solver are supported. Runnable examples in all
+three languages live in [`examples/`](examples/); a felsdvsimul walkthrough is
+in [`docs/akm-kss.md`](docs/akm-kss.md).
+
+---
+
 ## Repository layout
 
 | Path | Contents |
@@ -283,7 +328,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.11.0.
+> effects regression via a C++ backend.* Version 2.12.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
@@ -311,10 +356,38 @@ Alexander Fischer and collaborators (Python), and
 [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl)
 by Matthieu Gomez and collaborators (Julia).
 
+The worker-firm (AKM) leave-out layer follows, and is validated at machine
+precision against, [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay)
+by Raffaele Saggio (MATLAB) — the canonical Kline-Saggio-Solvsten (2020)
+implementation — and interoperates with, and is cross-checked against,
+[`pytwoway`](https://github.com/tlamadon/pytwoway) by Thibaut Lamadon and
+collaborators (Python). The Gelbach decomposition is validated against
+`b1x2` by Jonah Gelbach (Stata). Full credit to their authors.
+
 We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
 workshop collaboration around earlier versions of the project. We especially
 thank Sergio Correia for feedback on benchmarking, tolerances, and
 `reghdfe`-comparable validation. All remaining errors are ours.
+
+## References
+
+Methods implemented by `xhdfe`'s worker-firm post-estimation layer:
+
+- Abowd, J. M., F. Kramarz, and D. N. Margolis. 1999. High wage workers and
+  high wage firms. *Econometrica* 67(2): 251-333. (AKM two-way model.)
+- Andrews, M. J., L. Gill, T. Schank, and R. Upward. 2008. High wage workers
+  and low wage firms: negative assortative matching or limited mobility bias?
+  *Journal of the Royal Statistical Society A* 171(3): 673-697. (AGSU
+  homoskedastic correction.)
+- Kline, P., R. Saggio, and M. Solvsten. 2020. Leave-out estimation of
+  variance components. *Econometrica* 88(5): 1859-1898. (KSS leave-out
+  heteroskedasticity-robust correction and inference.)
+- Andrews, D. W. K., and A. Mikusheva. 2016. Conditional inference with a
+  functional nuisance parameter. *Econometrica* 84(4): 1571-1612.
+  (Weak-identification q=1 confidence intervals used by KSS.)
+- Gelbach, J. B. 2016. When do covariates matter? And which ones, and how
+  much? *Journal of Labor Economics* 34(2): 509-543. (Conditional
+  decomposition of coefficient movements.)
 
 ## Contributing
 

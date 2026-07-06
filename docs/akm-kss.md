@@ -84,3 +84,25 @@ correction applies. Inference reproduces Gelbach's b1x2 exactly
 Stata: `xhdfegelbach y [aw=w], x1(...) x2groups("name = vars : ...") fes(...)`;
 R: `xhdfe_gelbach(...)`. Validated against Gelbach's `b1x2` (44 checks at
 machine precision).
+
+## References and acknowledgements
+
+The worker-firm leave-out layer follows and is validated at machine precision
+against [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay) by
+Raffaele Saggio — the canonical KSS implementation — and interoperates with
+and is cross-checked against
+[`pytwoway`](https://github.com/tlamadon/pytwoway) by Thibaut Lamadon and
+collaborators; the Gelbach companion is validated against Jonah Gelbach's
+`b1x2`. Full credit to their authors.
+
+- Abowd, Kramarz & Margolis (1999), *Econometrica* 67(2): 251-333 — the AKM
+  two-way model.
+- Andrews, Gill, Schank & Upward (2008), *JRSS-A* 171(3): 673-697 — the AGSU
+  homoskedastic correction.
+- Kline, Saggio & Solvsten (2020), *Econometrica* 88(5): 1859-1898 — the KSS
+  leave-out heteroskedasticity-robust correction and inference.
+- Andrews & Mikusheva (2016), *Econometrica* 84(4): 1571-1612 — the
+  weak-identification q=1 confidence intervals.
+- Gelbach (2016), *Journal of Labor Economics* 34(2): 509-543 — the
+  conditional decomposition of coefficient movements.
+

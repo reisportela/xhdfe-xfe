@@ -76,6 +76,12 @@ shared=(
   stata/xhdfe_p.ado
   stata/xhdfe_estat.ado
   stata/xhdfe.sthlp
+  stata/xhdfeakm.ado
+  stata/xhdfeakm.sthlp
+  stata/xhdfeconnected.ado
+  stata/xhdfeconnected.sthlp
+  stata/xhdfegelbach.ado
+  stata/xhdfegelbach.sthlp
   stata/xfe.ado
   stata/xfe.sthlp
 )
@@ -120,6 +126,12 @@ f xhdfe.ado
 f xhdfe_p.ado
 f xhdfe_estat.ado
 f xhdfe.sthlp
+f xhdfeakm.ado
+f xhdfeakm.sthlp
+f xhdfeconnected.ado
+f xhdfeconnected.sthlp
+f xhdfegelbach.ado
+f xhdfegelbach.sthlp
 EOF
   else
     cat >> "$pkg" <<'EOF'
@@ -152,7 +164,7 @@ h $cmd.plugin
 EOF
 }
 
-write_pkg xhdfe "2.11.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
+write_pkg xhdfe "2.12.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
 write_pkg xfe "1.10.0" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
 
 cat > "$outdir/README.txt" <<'EOF'
