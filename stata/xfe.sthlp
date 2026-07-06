@@ -21,10 +21,10 @@
 
 {pstd}
 {cmd:xfe} shares the AI-assisted development workflow used for {cmd:xhdfe}.
-The project used AI coding tools, mainly Codex and Claude Code, and to a lesser
-extent Gemini Code Assist, to study existing HDFE packages, review relevant
+The project used AI coding tools to study existing HDFE packages, review relevant
 literature, inspect the Stata/C++ codebase, draft and revise patches, instrument
-slow paths, and improve absorption performance.{p_end}
+slow paths, and improve absorption performance. No AI tool or system is named or
+credited as a contributor.{p_end}
 
 {pstd}
 The listed human authors did not write the package line by line. Their role was

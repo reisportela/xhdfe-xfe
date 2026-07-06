@@ -83,6 +83,21 @@ post-estimation-style command: it does not change any {helpb xhdfe}
 estimation path. To only build the leave-out sample without estimating, use
 {helpb xhdfeconnected}.
 
+{pstd}
+{cmd:xhdfe} is, by design, primarily a high-performance replica of
+{helpb reghdfe}; from {cmd:pytwoway} (Lamadon and collaborators' reference
+Python toolkit for two-way worker-firm models) and the related AKM literature
+it adopts {it:only} what adds value inside that reghdfe universe -- this
+leave-out decomposition, the connected set and the Gelbach companion -- rather
+than reproducing pytwoway's broader structural models (CRE, BLM). The layer is
+validated at machine precision against both {cmd:pytwoway} and Saggio's
+{cmd:LeaveOutTwoWay}, and interoperates with pytwoway (the Python front-end can
+export the leave-out sample to the pytwoway / bipartitepandas format). The
+combination is most useful with large linked employer-employee data: do the
+fast HDFE regression and the leave-out variance decomposition here in a
+familiar reghdfe workflow, and use pytwoway for the structural models outside
+{cmd:xhdfe}'s scope.
+
 
 {title:Options}
 
