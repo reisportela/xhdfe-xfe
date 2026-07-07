@@ -64,8 +64,11 @@ opt-in, env-gated diagnostics that are silent by default).
 ## Install (CUDA, optional)
 
 Requires Linux, the NVIDIA CUDA toolkit (nvcc on PATH or `CUDA_HOME` set), and
-the package source (a clone or source tarball — a CPU install has no GPU). Use
-`XHDFE_ENABLE_CUDA=auto` to detect the local GPU architecture:
+the package source (a clone or source tarball — a CPU install has no GPU). Set
+`XHDFE_ENABLE_CUDA=auto`: the build detects your GPU with `nvidia-smi` (the same
+check Stata's `xhdfegpu` uses) and compiles for that exact architecture, failing
+with a clear error if no GPU or `nvidia-smi` is found rather than silently
+building CPU-only:
 
 ```bash
 XHDFE_ENABLE_CUDA=auto R CMD INSTALL xhdfe

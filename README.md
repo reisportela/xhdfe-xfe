@@ -191,8 +191,12 @@ git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python
 ```
 
 **With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source — never a prebuilt wheel). Use
-`XHDFE_ENABLE_CUDA=auto` to detect the local GPU architecture:
+`nvcc` and always builds from source — never a prebuilt wheel). Set
+`XHDFE_ENABLE_CUDA=auto`: the build detects your GPU with `nvidia-smi` (the same
+check Stata's `xhdfegpu` uses) and compiles for that exact architecture. If no
+GPU or `nvidia-smi` is found it stops with a clear error — it never silently
+builds CPU-only when you asked for CUDA (CPU stays the default, plain
+`pip install .`).
 
 ```bash
 # from a clone:
@@ -246,8 +250,11 @@ remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
 **With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source). Use `XHDFE_ENABLE_CUDA=auto` to detect
-the local GPU architecture:
+`nvcc` and always builds from source). Set `XHDFE_ENABLE_CUDA=auto`: the build
+detects your GPU with `nvidia-smi` (the same check Stata's `xhdfegpu` uses) and
+compiles for that exact architecture, failing with a clear error if no GPU or
+`nvidia-smi` is found rather than silently building CPU-only (CPU is the default
+`install_github`):
 
 ```r
 Sys.setenv(XHDFE_ENABLE_CUDA = "auto")
