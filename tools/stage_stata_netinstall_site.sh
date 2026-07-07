@@ -82,6 +82,8 @@ shared=(
   stata/xhdfeconnected.sthlp
   stata/xhdfegelbach.ado
   stata/xhdfegelbach.sthlp
+  stata/xhdfegpu.ado
+  stata/xhdfegpu.sthlp
   stata/xfe.ado
   stata/xfe.sthlp
 )
@@ -132,6 +134,10 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegpu.ado
+f xhdfegpu.sthlp
+f xfe.ado
+f xfe.sthlp
 EOF
   else
     cat >> "$pkg" <<'EOF'
@@ -140,31 +146,49 @@ f xfe.sthlp
 EOF
   fi
 
+  # Emit the platform-specific g lines that map a per-OS plugin file to the
+  # canonical runtime name. The xhdfe package ships BOTH plugins so that a
+  # single `net install xhdfe` delivers xfe too; the standalone xfe package
+  # ships only xfe.plugin.
+  emit_plugin_g_lines "$pkg" "$plugin_prefix" "$cmd.plugin"
+  if [[ "$cmd" == "xhdfe" ]]; then
+    emit_plugin_g_lines "$pkg" "xfe" "xfe.plugin"
+  fi
+
+  cat >> "$pkg" <<EOF
+h $cmd.plugin
+EOF
+  if [[ "$cmd" == "xhdfe" ]]; then
+    cat >> "$pkg" <<EOF
+h xfe.plugin
+EOF
+  fi
+}
+
+emit_plugin_g_lines() {
+  local pkg="$1" prefix="$2" dest="$3"
   if [[ "$has_linux" -eq 1 ]]; then
     cat >> "$pkg" <<EOF
-g LINUX64 ${plugin_prefix}.linux64.plugin $cmd.plugin
-g LINUX64P ${plugin_prefix}.linux64.plugin $cmd.plugin
+g LINUX64 ${prefix}.linux64.plugin ${dest}
+g LINUX64P ${prefix}.linux64.plugin ${dest}
 EOF
   fi
   if [[ "$has_macos" -eq 1 ]]; then
     cat >> "$pkg" <<EOF
-g MACARM64 ${plugin_prefix}.macos-universal.plugin $cmd.plugin
-g OSX.ARM64 ${plugin_prefix}.macos-universal.plugin $cmd.plugin
-g MACINTEL64 ${plugin_prefix}.macos-universal.plugin $cmd.plugin
-g OSX.X8664 ${plugin_prefix}.macos-universal.plugin $cmd.plugin
+g MACARM64 ${prefix}.macos-universal.plugin ${dest}
+g OSX.ARM64 ${prefix}.macos-universal.plugin ${dest}
+g MACINTEL64 ${prefix}.macos-universal.plugin ${dest}
+g OSX.X8664 ${prefix}.macos-universal.plugin ${dest}
 EOF
   fi
   if [[ "$has_windows" -eq 1 ]]; then
     cat >> "$pkg" <<EOF
-g WIN64 ${plugin_prefix}.win64.plugin $cmd.plugin
+g WIN64 ${prefix}.win64.plugin ${dest}
 EOF
   fi
-  cat >> "$pkg" <<EOF
-h $cmd.plugin
-EOF
 }
 
-write_pkg xhdfe "2.12.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
+write_pkg xhdfe "2.13.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
 write_pkg xfe "1.10.0" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
 
 cat > "$outdir/README.txt" <<'EOF'

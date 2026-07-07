@@ -1,10 +1,10 @@
-*! version 2.12.0 06jul2026
+*! version 2.13.0 07jul2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.12.0 06jul2026"
+        local version "2.13.0 07jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1822,6 +1822,9 @@ program define xhdfe, eclass sortpreserve
             di as err "xhdfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' was not available at runtime"
             di as err "xhdfe: check the GPU device/runtime and that xhdfe.plugin was built with `gpu_backend' support"
             di as err "xhdfe: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
+            if ("`gpu_backend'" == "cuda" & "`c(os)'" == "Unix") {
+                di as err "xhdfe: the net-install plugin is CPU-only; on a machine with an NVIDIA GPU run {bf:xhdfegpu} once to build and install a CUDA plugin for this hardware"
+            }
         }
         else if ("`gpu_status'" == "gpu_absorption_not_converged") {
             di as err "xhdfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption did not converge"
@@ -2180,7 +2183,7 @@ program define xhdfe, eclass sortpreserve
     ereturn local footnote "xhdfe__footnote"
     ereturn local estat_cmd "xhdfe_estat"
     ereturn local model "ols"
-    ereturn local version "2.12.0 06jul2026"
+    ereturn local version "2.13.0 07jul2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }

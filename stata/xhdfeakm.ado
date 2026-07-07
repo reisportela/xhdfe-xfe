@@ -1,4 +1,4 @@
-*! version 1.1.0  06jul2026
+*! version 1.1.0  07jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
