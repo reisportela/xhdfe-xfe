@@ -90,7 +90,7 @@ CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o
 akm_kss_cuda.o: akm_kss_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
 	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
-	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH),code=[compute_$(XHDFE_CUDA_ARCH),sm_$(XHDFE_CUDA_ARCH)] \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
 	    --expt-relaxed-constexpr \
 	    -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
 	    -I. -Iinclude -Ieigen -c $< -o $@

@@ -23,6 +23,27 @@ companion Stata command that partials out — residualizes — variables against
 multiple high-dimensional fixed effects on the same core, without fitting a
 regression. See [Stata](#stata) below and `help xfe`.
 
+As an illustration, the table below reports median estimator-call runtimes for
+an AKM-style wage regression using Portuguese matched employer-employee data.
+The specification uses 55,947,171 observations and absorbs 5,948,793 worker,
+799,265 firm, and 36 year fixed effects. It includes common seniority controls
+and clusters standard errors at the worker level:
+
+| Implementation | Backend | Seconds | Speedup vs. `reghdfe` |
+| --- | ---: | ---: | ---: |
+| `reghdfe`, Stata | CPU | 3,667.5 | 1.0x |
+| `FixedEffectModels.jl` | CPU | 916.3 | 4.0x |
+| `fixest` | CPU | 486.5 | 7.5x |
+| `pyfixest` | CPU | 110.4 | 33.2x |
+| `FixedEffectModels.jl` | CUDA | 105.7 | 34.7x |
+| `xhdfe`, Stata | CPU | 64.6 | 56.8x |
+| `xhdfe`, Python | CPU | 53.2 | 69.0x |
+| `xhdfe`, Stata | CUDA | 24.4 | 150.5x |
+| `xhdfe`, Python | CUDA | 13.2 | 277.7x |
+
+The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
+`reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
+
 ## Features
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
