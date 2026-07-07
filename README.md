@@ -25,7 +25,8 @@ regression. See [Stata](#stata) below and `help xfe`.
 
 As an illustration, the table below reports median estimator-call runtimes for
 an AKM-style wage regression using Portuguese matched employer-employee data,
-with worker, firm, and year fixed effects plus common seniority controls:
+with three absorbed fixed-effect dimensions (worker, firm, and year) plus
+common seniority controls:
 
 | Implementation | Backend | Seconds | Speedup vs. `reghdfe` |
 | --- | ---: | ---: | ---: |
