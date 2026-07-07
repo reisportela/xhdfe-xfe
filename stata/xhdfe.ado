@@ -1822,6 +1822,9 @@ program define xhdfe, eclass sortpreserve
             di as err "xhdfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' was not available at runtime"
             di as err "xhdfe: check the GPU device/runtime and that xhdfe.plugin was built with `gpu_backend' support"
             di as err "xhdfe: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
+            if ("`gpu_backend'" == "cuda" & "`c(os)'" == "Unix") {
+                di as err "xhdfe: the net-install plugin is CPU-only; on a machine with an NVIDIA GPU run {bf:xhdfegpu} once to build and install a CUDA plugin for this hardware"
+            }
         }
         else if ("`gpu_status'" == "gpu_absorption_not_converged") {
             di as err "xhdfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption did not converge"

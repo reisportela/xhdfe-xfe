@@ -14,4 +14,6 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegpu.ado
+f xhdfegpu.sthlp
 f xhdfe.plugin

@@ -82,6 +82,8 @@ shared=(
   stata/xhdfeconnected.sthlp
   stata/xhdfegelbach.ado
   stata/xhdfegelbach.sthlp
+  stata/xhdfegpu.ado
+  stata/xhdfegpu.sthlp
   stata/xfe.ado
   stata/xfe.sthlp
 )
@@ -132,6 +134,8 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegpu.ado
+f xhdfegpu.sthlp
 EOF
   else
     cat >> "$pkg" <<'EOF'
