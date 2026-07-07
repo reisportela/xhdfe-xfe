@@ -46,7 +46,20 @@ binary.
 
 ### Stata
 
-The net-install site ships CPU-only plugins, so build from a clone:
+The net-install site ships CPU-only plugins. The easiest way to get CUDA is the
+companion command **`xhdfegpu`** — run it once after `net install`:
+
+```stata
+xhdfegpu
+```
+
+It gates on `nvidia-smi` (so it only builds when a GPU is present), compiles a
+plugin for the local architecture, and installs it *over* the CPU plugin in
+place (same `xhdfe.plugin` / `xfe.plugin`). On a machine without internet, fetch
+the source zip elsewhere and pass it in: `xhdfegpu, zip("/path/to/xhdfe-src.zip")`.
+See `help xhdfegpu`. Then `discard` and use `gpubackend(cuda)` (Step 3).
+
+To build the plugin by hand instead, from a clone:
 
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe
