@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.12.0 06jul2026}{...}
+{* *! version 2.13.0 07jul2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -217,7 +217,13 @@ stops with an error instead of silently falling back to CPU.
 
 {phang}
 The online net-install and the release ZIPs ship {bf:CPU-only} plugins; the GPU cannot be obtained from the
-online material. To use CUDA you must build the plugin from source (Linux + NVIDIA only). First read your GPU's
+online material. On a Linux machine with an NVIDIA GPU, the easiest way to get CUDA is the companion command
+{helpb xhdfegpu}: run it once after {cmd:net install} and it detects the GPU, compiles a plugin for the local
+architecture, and installs it over the CPU plugin in place (no file renaming). On a machine without internet
+access, download the source zip and pass it in with {cmd:xhdfegpu, zip(}{it:path}{cmd:)}.
+
+{phang}
+To build the plugin by hand instead (Linux + NVIDIA only), first read your GPU's
 compute capability:
 
 {phang2}
@@ -1048,7 +1054,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.12.0.
+regression via a C++ backend." Version 2.13.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
