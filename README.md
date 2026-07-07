@@ -23,8 +23,9 @@ companion Stata command that partials out — residualizes — variables against
 multiple high-dimensional fixed effects on the same core, without fitting a
 regression. See [Stata](#stata) below and `help xfe`.
 
-On the paper's common-seniority AKM benchmark, median estimator-call runtimes
-are:
+As an illustration, the table below reports median estimator-call runtimes for
+an AKM-style wage regression using Portuguese matched employer-employee data,
+with worker, firm, and year fixed effects plus common seniority controls:
 
 | Implementation | Backend | Seconds | Speedup vs. `reghdfe` |
 | --- | ---: | ---: | ---: |
@@ -39,8 +40,8 @@ are:
 | `xhdfe`, Python | CUDA | 13.2 | 277.7x |
 
 These rows report the common-seniority specification only. The `xhdfe` rows use
-the paper's speed-oriented `xhdfe-fast` setting; the paper also reports
-additional accuracy columns, stricter `xhdfe` settings, and a
+the speed-oriented `xhdfe-fast` setting; the paper also reports additional
+accuracy columns, stricter `xhdfe` settings, and a
 firm-specific-seniority specification.
 
 ## Features
