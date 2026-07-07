@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.12.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.13.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -70,63 +70,93 @@ with the GPU feature, requesting it, and verifying it in Stata, Python, and R.
 
 ### Stata
 
-**Option A — install online from the release net-install site.** The release
-workflow publishes a Stata site whose `.pkg` files select the plugin for the
-current OS:
+**One command installs everything.** `net install xhdfe` installs the estimator
+*and* every companion command — `xfe`, `xhdfeakm`, `xhdfeconnected`,
+`xhdfegelbach`, and `xhdfegpu` — together with the CPU plugin for your OS:
 
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
-net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 ```
 
-The online package uses Stata platform-specific `g` lines for Linux, macOS
-Apple Silicon/Intel, and Windows when a Windows plugin artifact exists.
+That is all most users need. The commands you get:
 
-> **These prebuilt plugins are CPU-only** (OpenMP, no CUDA). The online
-> net-install and the release ZIPs never ship a GPU plugin. For NVIDIA GPU
-> acceleration you must build from source with the CUDA flag — see **Option C**
-> below. There is no way to obtain a GPU plugin from the online material alone,
-> because it contains no source, only the compiled CPU binaries.
+| Command | What it does |
+| --- | --- |
+| `xhdfe` | HDFE linear regression — the estimator (`help xhdfe`). |
+| `xfe` | Partials out / residualizes variables against the fixed effects, no regression (`help xfe`). |
+| `xhdfeakm` | Worker-firm (AKM) leave-out (KSS) variance decomposition (`help xhdfeakm`). |
+| `xhdfeconnected` | Largest leave-one-out connected set — KSS sample prep (`help xhdfeconnected`). |
+| `xhdfegelbach` | Gelbach (2016) decomposition of coefficient movements (`help xhdfegelbach`). |
+| `xhdfegpu` | Builds and installs a CUDA GPU plugin for this machine (`help xhdfegpu`). |
 
-**Option B — install a prebuilt release ZIP.** Download the distribution ZIP from the
-[Releases](https://github.com/reisportela/xhdfe-xfe/releases) page and unzip it. It
-bundles the platform plugin. In Stata, point `net install` at the unzipped
-folder that contains `xhdfe.pkg` and `stata.toc`:
+If you want *only* the standalone `xfe` partial-out tool, you can install it by
+itself with `net install xfe, from("…") replace`. The online package uses Stata
+platform-specific `g` lines for Linux, macOS Apple Silicon/Intel, and Windows
+when a Windows plugin artifact exists.
+
+#### Turn on the GPU (NVIDIA/CUDA) — one command
+
+The prebuilt plugins are **CPU-only**: a precompiled binary cannot know your
+GPU, so the online net-install and the release ZIPs never ship a CUDA plugin.
+On a Linux machine with an NVIDIA GPU, enable CUDA by running the companion
+command **once**, right after `net install`:
+
+```stata
+xhdfegpu
+```
+
+`xhdfegpu` detects the GPU, compiles a plugin for its exact architecture, and
+installs it *over* the CPU plugin in place — same `xhdfe.plugin` / `xfe.plugin`,
+no renaming, no extra files. Then reload the plugin and request the GPU as usual:
+
+```stata
+discard
+xhdfe price weight length, absorb(rep78) gpubackend(cuda)
+display e(gpu_used)          // 1
+```
+
+On a machine **without internet access**, download the self-contained source
+zip (`xhdfe-src.zip`, attached to each release and served from the net-install
+site) on another machine, copy it over, and hand it to `xhdfegpu`:
+
+```stata
+xhdfegpu, zip("/path/to/xhdfe-src.zip")
+```
+
+`xhdfegpu` needs the NVIDIA CUDA toolkit (`nvcc`) and a C++ compiler; see
+`help xhdfegpu`. The zip is self-contained (Eigen, pybind11 and Stata's plugin
+headers are vendored) so the build needs no further downloads.
+
+#### Install from a release ZIP (offline, no GitHub)
+
+Download the distribution ZIP from the
+[Releases](https://github.com/reisportela/xhdfe-xfe/releases) page, unzip it,
+and point `net install` at the folder that contains `xhdfe.pkg` and `stata.toc`
+(this also installs xfe and the companions):
 
 ```stata
 net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
-net install xfe,   from("/path/to/unzipped/xhdfe/stata") replace
 ```
 
-**Option C — build the plugin from source (required for GPU).** Get the source
-(clone the repo, or download a *source* release ZIP that bundles the C++ backend
-and build scripts) and build the plugin, then add the folder to your `adopath`:
+#### Build the plugin by hand (advanced)
+
+`xhdfegpu` automates the GPU build; to do it yourself, get the source (clone the
+repo, or download `xhdfe-src.zip`) and build, then add the folder to `adopath`:
 
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git
 cd xhdfe-xfe
-
 # CPU build (Linux + GCC; OpenMP recommended)
-bash stata/tools/build-plugin.sh --linux --openmp        # produces stata/xhdfe.plugin
-bash stata/tools/build-xfe-plugin.sh --linux --openmp    # produces stata/xfe.plugin
-```
-
-For **NVIDIA GPU (CUDA)**, use `--cuda auto`. The build script checks
-`nvidia-smi`, selects the local GPU architecture, and enables CUDA:
-
-```bash
-bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
+bash stata/tools/build-plugin.sh     --linux --openmp     # produces stata/xhdfe.plugin
+bash stata/tools/build-xfe-plugin.sh --linux --openmp     # produces stata/xfe.plugin
+# GPU build (Linux + NVIDIA; auto-detects the local architecture)
+bash stata/tools/build-plugin.sh     --linux --openmp --cuda auto
 bash stata/tools/build-xfe-plugin.sh --linux --openmp --cuda auto
 ```
 
-CUDA builds are **Linux + NVIDIA only** and require the CUDA toolkit (`nvcc`).
-For an explicit target, use `--cuda 90`; for a shareable multi-GPU binary, use
-`--cuda-archs "75,80,86,89,90"`. See `stata/BUILD_CUDA.md` for verification.
-Then point Stata at the folder:
-
-```stata
-adopath + "/path/to/xhdfe/stata"
-```
+For an explicit target use `--cuda 90`; for a shareable multi-GPU binary,
+`--cuda-archs "75,80,86,89,90"`. See `stata/BUILD_CUDA.md`. Then
+`adopath + "/path/to/xhdfe/stata"`.
 
 Minimal example (public data shipped with Stata):
 
@@ -135,18 +165,15 @@ sysuse auto, clear
 xhdfe price weight length, absorb(rep78)
 xhdfe price weight length, absorb(rep78) vce(cluster rep78)
 
-* Optional: request CUDA after installing a CUDA-enabled plugin
-xhdfe price weight length, absorb(rep78) vce(cluster rep78) gpubackend(cuda)
-display e(gpu_used)                 // must be 1
-display "`e(gpu_backend)'"          // must be "cuda"
-
 webuse nlswork, clear
 xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)
 xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)
-```
 
-`xfe` is a companion command that partials out variables (residualizes against
-absorbed fixed effects) using the same core. See `help xhdfe` and `help xfe`.
+* GPU (after xhdfegpu, or a CUDA-enabled plugin): request CUDA and verify
+xhdfe ln_wage grade age ttl_exp tenure, absorb(idcode year) gpubackend(cuda)
+display e(gpu_used)                 // must be 1
+display "`e(gpu_backend)'"          // must be "cuda"
+```
 
 ### Python
 
@@ -352,7 +379,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.12.0.
+> effects regression via a C++ backend.* Version 2.13.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
