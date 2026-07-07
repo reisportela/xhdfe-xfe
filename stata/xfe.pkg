@@ -11,4 +11,5 @@ g MACARM64 xfe.macos-universal.plugin xfe.plugin
 g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
 g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
 g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
+g WIN64 xfe.win64.plugin xfe.plugin
 h xfe.plugin

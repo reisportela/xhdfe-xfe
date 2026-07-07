@@ -23,11 +23,13 @@ g MACARM64 xhdfe.macos-universal.plugin xhdfe.plugin
 g OSX.ARM64 xhdfe.macos-universal.plugin xhdfe.plugin
 g MACINTEL64 xhdfe.macos-universal.plugin xhdfe.plugin
 g OSX.X8664 xhdfe.macos-universal.plugin xhdfe.plugin
+g WIN64 xhdfe.win64.plugin xhdfe.plugin
 g LINUX64 xfe.linux64.plugin xfe.plugin
 g LINUX64P xfe.linux64.plugin xfe.plugin
 g MACARM64 xfe.macos-universal.plugin xfe.plugin
 g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
 g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
 g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
+g WIN64 xfe.win64.plugin xfe.plugin
 h xhdfe.plugin
 h xfe.plugin
