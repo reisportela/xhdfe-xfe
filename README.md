@@ -25,8 +25,8 @@ regression. See [Stata](#stata) below and `help xfe`.
 
 As an illustration, the table below reports median estimator-call runtimes for
 an AKM-style wage regression using Portuguese matched employer-employee data.
-The specification uses 55,947,171 observations; absorbs 5,948,793 worker,
-799,265 firm, and 36 year fixed effects; includes common seniority controls;
+The specification uses 55,947,171 observations and absorbs 5,948,793 worker,
+799,265 firm, and 36 year fixed effects. It includes common seniority controls
 and clusters standard errors at the worker level:
 
 | Implementation | Backend | Seconds | Speedup vs. `reghdfe` |
