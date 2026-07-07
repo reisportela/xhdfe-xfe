@@ -41,11 +41,6 @@ and clusters standard errors at the worker level:
 | `xhdfe`, Stata | CUDA | 24.4 | 150.5x |
 | `xhdfe`, Python | CUDA | 13.2 | 277.7x |
 
-These rows report the common-seniority specification only. The `xhdfe` rows use
-the speed-oriented `xhdfe-fast` setting; the paper also reports additional
-accuracy columns, stricter `xhdfe` settings, and a
-firm-specific-seniority specification.
-
 ## Features
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
