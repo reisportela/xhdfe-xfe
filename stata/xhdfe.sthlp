@@ -217,7 +217,13 @@ stops with an error instead of silently falling back to CPU.
 
 {phang}
 The online net-install and the release ZIPs ship {bf:CPU-only} plugins; the GPU cannot be obtained from the
-online material. To use CUDA you must build the plugin from source (Linux + NVIDIA only). First read your GPU's
+online material. On a Linux machine with an NVIDIA GPU, the easiest way to get CUDA is the companion command
+{helpb xhdfegpu}: run it once after {cmd:net install} and it detects the GPU, compiles a plugin for the local
+architecture, and installs it over the CPU plugin in place (no file renaming). On a machine without internet
+access, download the source zip and pass it in with {cmd:xhdfegpu, zip(}{it:path}{cmd:)}.
+
+{phang}
+To build the plugin by hand instead (Linux + NVIDIA only), first read your GPU's
 compute capability:
 
 {phang2}

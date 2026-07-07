@@ -171,6 +171,17 @@ jobs:
             --macos-xfe   dl/xfe.plugin.macos \
             "${WIN_ARGS[@]}"
           ( cd netinstall_site && zip -q -r -X ../xhdfe-stata-netinstall-site.zip . )
+      - name: Build offline source distribution zip (for xhdfegpu)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Self-contained sources (C++/Stata/Python/R, CPU+GPU, all deps
+          # vendored) that xhdfegpu downloads to build a CUDA plugin, and that
+          # anyone can use to rebuild offline. Published into the net-install
+          # site so it lands at <gh-pages>/stata/xhdfe-src.zip.
+          bash tools/make_source_dist_zip.sh netinstall_site/stata/xhdfe-src.zip
+          gh release upload "$TAG" netinstall_site/stata/xhdfe-src.zip --clobber --repo "${{ github.repository }}"
       - name: Attach net-install site snapshot to release
         env:
           GH_TOKEN: ${{ github.token }}
