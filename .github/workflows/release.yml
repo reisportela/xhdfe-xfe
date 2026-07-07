@@ -79,7 +79,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install MinGW toolchain
-        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 zip
+        run: |
+          # Drop GitHub's third-party apt repos (packages.microsoft.com is
+          # intermittently degraded and breaks apt-get update); the packages we
+          # need come from the Ubuntu archive.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
+          sudo apt-get update || true
+          sudo apt-get install -y g++-mingw-w64-x86-64 zip
       - name: Build Windows plugins (CPU, MinGW)
         run: |
           bash stata/tools/build-plugin.sh --windows --no-openmp
@@ -139,7 +146,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install zip
-        run: sudo apt-get update && sudo apt-get install -y zip
+        run: |
+          # Drop GitHub's third-party apt repos (packages.microsoft.com is
+          # intermittently degraded and breaks apt-get update); zip comes from
+          # the Ubuntu archive.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
+          sudo apt-get update || true
+          sudo apt-get install -y zip
       - name: Download plugin artifacts
         uses: actions/download-artifact@v4
         with:
