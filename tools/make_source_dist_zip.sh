@@ -19,6 +19,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_ZIP="${1:-${ROOT_DIR}/xhdfe-src.zip}"
+# Resolve OUT_ZIP to an absolute path: the archive is written after a
+# `cd "${STAGE}"`, so a relative path (as passed by CI) would otherwise resolve
+# against the wrong directory. Also ensure its parent directory exists.
+mkdir -p "$(dirname -- "${OUT_ZIP}")"
+OUT_ZIP="$(cd -- "$(dirname -- "${OUT_ZIP}")" && pwd)/$(basename -- "${OUT_ZIP}")"
 
 VERSION="$(grep -m1 '^\*! version' "${ROOT_DIR}/stata/xhdfe.ado" | sed -E 's/^\*! version[[:space:]]+//')"
 [[ -n "${VERSION}" ]] || { echo "could not read version from stata/xhdfe.ado" >&2; exit 1; }
