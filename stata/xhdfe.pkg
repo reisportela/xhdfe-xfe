@@ -1,8 +1,9 @@
-v 2.12.0
+v 2.13.0
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
-d This package ships the `xhdfe` estimation command plus a platform-specific plugin binary.
-d If the bundled plugin is not compatible with your platform, build it from source in the repo:
+d Installs xhdfe and its companion commands (xfe, xhdfeakm, xhdfeconnected,
+d xhdfegelbach, xhdfegpu) plus platform-specific plugin binaries.
+d If a bundled plugin is not compatible with your platform, build it from source in the repo:
 d   `bash stata/tools/build-plugin.sh`
 f xhdfe.ado
 f xhdfe_p.ado
@@ -14,4 +15,9 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegpu.ado
+f xhdfegpu.sthlp
+f xfe.ado
+f xfe.sthlp
 f xhdfe.plugin
+f xfe.plugin

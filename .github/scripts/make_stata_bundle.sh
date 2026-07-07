@@ -15,6 +15,7 @@ mkdir -p "${STAGE}"
 cp stata/xhdfe.ado stata/xhdfe_estat.ado stata/xhdfe_p.ado stata/xhdfe.sthlp \
    stata/xhdfeakm.ado stata/xhdfeakm.sthlp stata/xhdfeconnected.ado \
    stata/xhdfeconnected.sthlp stata/xhdfegelbach.ado stata/xhdfegelbach.sthlp \
+   stata/xhdfegpu.ado stata/xhdfegpu.sthlp \
    stata/xhdfe.pkg stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg stata/stata.toc \
    "${STAGE}/"
 cp stata/xhdfe_hetero.ado stata/xhdfe_hetero.sthlp "${STAGE}/" 2>/dev/null || true
@@ -29,8 +30,14 @@ From Stata, point net install at this unzipped folder:
     net install xhdfe, from("/path/to/this/folder") replace
     net install xfe,   from("/path/to/this/folder") replace
 
-This is the CPU reference build. For GPU (NVIDIA/CUDA) acceleration, build
-the plugin from source (see the repository README and stata/BUILD_CUDA.md):
+This is the CPU reference build. For GPU (NVIDIA/CUDA) acceleration on a
+machine with an NVIDIA GPU, just run the companion command once after install:
+
+    xhdfegpu
+
+It detects the GPU, compiles a CUDA plugin for the local architecture, and
+installs it over this CPU plugin. On an offline machine, download the source
+zip and pass it in: xhdfegpu, zip("/path/to/xhdfe-src.zip"). To build by hand:
 
     XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=<your card, e.g. 90> \\
       bash stata/tools/build-plugin.sh --linux --openmp
