@@ -1,4 +1,4 @@
-*! version 1.1.0  07jul2026
+*! version 1.3.0  08jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -6,7 +6,7 @@
 program define xhdfeakm, rclass sortpreserve
     version 14.0
     syntax varname(numeric) [if] [in] [fweight], WORKer(varname numeric) FIRM(varname numeric) ///
-        [ CONTROLs(varlist numeric) LEAVEOUTlevel(string) LEVerages(string)          ///
+        [ CONTROLs(varlist fv ts numeric) LEAVEOUTlevel(string) LEVerages(string)    ///
           DRAWS(integer 200) SEED(real 20260705) noPRUNE GENerate(name) REPLACE      ///
           THREADS(integer 0) EXACTMAXrows(integer 10000)                             ///
           DIRECTMAXfirms(integer 50000) CGTOL(real 1e-10) FWLTOL(real 1e-10) ///
@@ -14,7 +14,47 @@ program define xhdfeakm, rclass sortpreserve
 
     local y `varlist'
     marksample touse
-    markout `touse' `worker' `firm' `controls'
+    markout `touse' `worker' `firm'
+    // controls() may contain factor / time-series terms (e.g. i.year). Expand
+    // them to numeric columns for the plugin (base/omitted levels dropped, as
+    // manual dummies would) and keep the expanded names for the e(b) labels.
+    local control_disp "`controls'"
+    local control_vars "`controls'"
+    if ("`controls'" != "") {
+        quietly fvexpand `controls' if `touse'
+        local control_disp "`r(varlist)'"
+        quietly fvrevar `controls' if `touse', substitute
+        local control_vars "`r(varlist)'"
+        markout `touse' `control_vars'
+    }
+    // Worker/firm ids are passed to the plugin as int32 (it relabels them to
+    // dense indices internally, so only the int32 range matters, not the exact
+    // codes). Raw ids outside int32 range (e.g. NISS/NIF person codes) or
+    // non-integer ids would be rejected, so recode such an id to a compact
+    // 1..N integer here. This preserves the worker-firm graph exactly, so the
+    // leave-out decomposition is unchanged.
+    local worker_use "`worker'"
+    local firm_use "`firm'"
+    local id_recoded 0
+    foreach part in worker firm {
+        local src "`worker'"
+        if ("`part'" == "firm") local src "`firm'"
+        quietly summarize `src' if `touse', meanonly
+        local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
+        if (!`need') {
+            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            local need = (r(N) > 0)
+        }
+        if (`need') {
+            tempvar idc_`part'
+            quietly egen long `idc_`part'' = group(`src') if `touse'
+            local `part'_use "`idc_`part''"
+            local id_recoded 1
+        }
+    }
+    if (`id_recoded') {
+        di as txt "note: worker/firm ids outside int32 range recoded to compact integers (graph and results unchanged)"
+    }
     local has_fweight 0
     tempvar fwvar
     if ("`weight'" != "") {
@@ -42,7 +82,7 @@ program define xhdfeakm, rclass sortpreserve
         exit 198
     }
     local do_prune = cond("`prune'" == "noprune", 0, 1)
-    local ncontrols : word count `controls'
+    local ncontrols : word count `control_vars'
 
     local store_effects 0
     if ("`generate'" != "") {
@@ -122,7 +162,7 @@ program define xhdfeakm, rclass sortpreserve
     if (`has_fweight') {
         local fw_var "`fwvar'"
     }
-    capture noisily plugin call `plugin_prog' `y' `worker' `firm' `fw_var' `controls' ///
+    capture noisily plugin call `plugin_prog' `y' `worker_use' `firm_use' `fw_var' `control_vars' ///
         `effect_vars' `keepvar' if `touse', "`cfg'"
     local rc = _rc
     if (`rc') {
@@ -169,7 +209,12 @@ program define xhdfeakm, rclass sortpreserve
         return local notes "`xakm_notes'"
     }
     if (`ncontrols' > 0) {
-        matrix colnames `bmat' = `controls'
+        if (`: word count `control_disp'' == `ncontrols') {
+            matrix colnames `bmat' = `control_disp'
+        }
+        else {
+            matrix colnames `bmat' = `control_vars'
+        }
         return matrix b = `bmat'
     }
 

@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.13.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.13.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -386,7 +386,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.13.0.
+> effects regression via a C++ backend.* Version 2.13.2.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
@@ -442,7 +442,13 @@ against `b1x2` by Jonah Gelbach. Full credit to their authors.
 We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
 workshop collaboration around earlier versions of the project. We especially
 thank Sergio Correia for feedback on benchmarking, tolerances, and
-`reghdfe`-comparable validation. All remaining errors are ours.
+`reghdfe`-comparable validation. We also warmly thank Alexander Fischer for
+sharing the latest updates on his and Kristof Schröder's novel graph-based
+fixed-effects demeaning strategy — a modified LSMR solver with an
+additive-Schwarz preconditioner built from the worker-firm bipartite graph (the
+[`within`](https://github.com/py-econometrics/within) project) — which has been
+very helpful for our ongoing work on high-dimensional demeaning. All remaining
+errors are ours.
 
 ## References
 
@@ -471,8 +477,8 @@ literature (see [Acknowledgements](#acknowledgements)):
 - Kline, P., R. Saggio, and M. Sølvsten. 2020. Leave-out estimation of
   variance components. *Econometrica* 88(5): 1859-1898. (KSS leave-out
   heteroskedasticity-robust correction and inference.)
-- Andrews, I., and A. Mikusheva. 2016. Conditional inference with a
-  functional nuisance parameter. *Econometrica* 84(4): 1571-1612.
+- Andrews, I., and A. Mikusheva. 2016. A geometric approach to nonlinear
+  econometric models. *Econometrica* 84(3): 1249-1264.
   (Weak-identification q=1 confidence intervals used by KSS.)
 - Gelbach, J. B. 2016. When do covariates matter? And which ones, and how
   much? *Journal of Labor Economics* 34(2): 509-543. (Conditional
