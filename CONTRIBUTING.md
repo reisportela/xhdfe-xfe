@@ -131,10 +131,22 @@ Rscript -e 'testthat::test_local("r/xhdfe")'
   module** — you need not regenerate it for a normal change; the committed
   fixture is used as-is.
 
-The Stata package ships worked comparison do-files under `stata/example/`
+The Stata package has a certification-test harness under `tests/stata/`,
+adapted from Sergio Correia's `reghdfe` test-suite style. It runs built-in
+Stata baselines (`regress`, `areg`), then checks `xhdfe` coefficients, variance
+matrices, stored scalars, postestimation predictions, singleton handling, and
+compatibility options:
+
+```bash
+bash stata/tools/build-plugin.sh --linux --openmp
+tests/stata/run_stata_tests.sh
+```
+
+On macOS, build the local plugin with the platform-appropriate flags first,
+for example `bash stata/tools/build-plugin.sh --no-openmp --no-march-native`.
+The older worked comparison do-files under `stata/example/`
 (`2.Detailed_Comparision_xhdfe_reghdfe.do`, `3.Check_Options_reghdfe_xhdfe.do`)
-that check option-by-option against `reghdfe`; run them in Stata after a plugin
-rebuild.
+remain useful for exploratory option-by-option comparisons against `reghdfe`.
 
 ## Non-regression expectation
 
