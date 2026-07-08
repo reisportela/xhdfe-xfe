@@ -352,6 +352,7 @@ in [`docs/akm-kss.md`](docs/akm-kss.md).
 | `python/`, `xhdfe/` | Python package (`import xhdfe`; the `HdfeRegressor` class). |
 | `r/` | R package (`r/xhdfe/`), examples, and helper tools. |
 | `stata/` | Stata package: `xhdfe.ado`, `xfe.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
+| `tests/` | `tests/stata/`: correctness-certification suite vs Stata oracles; `tests/benchmarks/`: public benchmark replication (datasets + Stata/Python/R runners). |
 | `docs/` | Quickstart and overview. |
 | `CMakeLists.txt`, `pyproject.toml`, `setup.py` | Build configuration for the C++ core and Python bindings. |
 
