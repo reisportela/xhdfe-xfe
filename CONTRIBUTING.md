@@ -144,6 +144,11 @@ tests/stata/run_stata_tests.sh
 
 On macOS, build the local plugin with the platform-appropriate flags first,
 for example `bash stata/tools/build-plugin.sh --no-openmp --no-march-native`.
+
+Performance-benchmark replication material lives under `tests/benchmarks/`
+(the public core-23 datasets by link or deterministic generator, plus
+Stata/Python/R runners) — see `tests/benchmarks/README.md`. It is about
+timing replication, not correctness certification.
 The older worked comparison do-files under `stata/example/`
 (`2.Detailed_Comparision_xhdfe_reghdfe.do`, `3.Check_Options_reghdfe_xhdfe.do`)
 remain useful for exploratory option-by-option comparisons against `reghdfe`.
