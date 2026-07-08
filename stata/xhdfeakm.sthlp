@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.13.0  07jul2026}{...}
+{* *! version 2.13.1  08jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -109,6 +109,10 @@ high-dimensional identifiers (integer-valued). Both are {bf:required}.
 {phang}{opth controls(varlist)} lists covariates that are partialled out at the
 person-year level with the xhdfe absorber (Frisch-Waugh-Lovell) before the
 two-way machinery runs; their coefficients are returned in {cmd:e()}/{cmd:r(b)}.
+Factor-variable notation is allowed, so {cmd:controls(i.year)} works directly
+(base level omitted, as with manual dummies) instead of expanding the dummies by
+hand; {cmd:i.}, {cmd:c.}, interactions and a chosen base ({cmd:ib#.}) are all
+supported.
 
 {phang}{opt leaveoutlevel(match|obs)} chooses the leave-out unit:
 {cmd:match} (worker-firm pair; the default and Saggio's default) or

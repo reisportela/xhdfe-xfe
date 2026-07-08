@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.13.0 07jul2026}{...}
+{* *! version 2.13.1 08jul2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -392,6 +392,8 @@ for {cmd:##}, label the joint term as one absorb entry or specify separate compo
 Labels also instruct xhdfe to store FE contributions even without {cmd:savefe}/{cmd:savefes}. For
 categorical FEs the output variable is {it:label}; for heterogeneous slopes {it:label} is the base
 name and xhdfe adds {cmd:Slope1} to slope contributions. Generated names must not already exist.
+Only the labeled terms are saved: unlabeled terms in the same {cmd:absorb()} (e.g. {cmd:year} in
+{cmd:absorb(year wfe=worker ffe=firm)}) are absorbed as usual but leave no variable behind.
 
 {pmore}
 {cmd:absorb(..., savefe)} saves fixed effect contributions into {it:__hdfe1__}, {it:__hdfe2__}, ...
@@ -1054,7 +1056,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.13.0.
+regression via a C++ backend." Version 2.13.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
