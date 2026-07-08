@@ -38,3 +38,9 @@ release_assets/
 .idea/
 .vscode/
 stata/tools/_build/
+
+# Stata certification-test output (logs from direct runs land next to the do-files)
+tests/stata/output/
+tests/stata/*.log
+tests/stata/**/*.log
+*.smcl
