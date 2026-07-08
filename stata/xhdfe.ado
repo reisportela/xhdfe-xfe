@@ -1,10 +1,10 @@
-*! version 2.13.0 07jul2026
+*! version 2.13.1 08jul2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.13.0 07jul2026"
+        local version "2.13.1 08jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1066,9 +1066,13 @@ program define xhdfe, eclass sortpreserve
         foreach entry of local absorb_ordered {
             local ++idx
             local alias_name : word `idx' of `absorb_aliases'
-            if ("`alias_name'" == ".") local alias_name ""
-            if ("`alias_name'" == "`entry'") local alias_name ""
-            if ("`alias_name'" != "") local savefe_alias 1
+            // Keep "." as the placeholder for unnamed terms: an empty token
+            // would collapse out of the space-separated list and shift every
+            // later alias onto the wrong absorb dimension (e.g. in
+            // absorb(year wfe=w_id ffe=f_id) wfe would capture the year FE).
+            if ("`alias_name'" == "") local alias_name "."
+            if ("`alias_name'" == "`entry'") local alias_name "."
+            if ("`alias_name'" != ".") local savefe_alias 1
             local fe_alias_out "`fe_alias_out' `alias_name'"
         }
     }
@@ -1201,14 +1205,27 @@ program define xhdfe, eclass sortpreserve
                 local entry_slope_label "`entry_group_label'#c.`slopevar'"
             }
             local alias_name : word `k' of `fe_alias_out'
+            if ("`alias_name'" == ".") local alias_name ""
+            local is_named = ("`alias_name'" != "")
             local vname "`alias_name'"
-            if ("`vname'" == "") local vname "__hdfe`k'__"
-            if ("`kind'" == "slope" & strlen("`vname'") > 26) {
+            if (!`is_named') {
+                // Unnamed terms still need a receiving column (the plugin
+                // writes one column per absorb dimension), but only the named
+                // ones are kept: use a tempvar so nothing leaks into the
+                // dataset and a re-run cannot collide (reghdfe semantics).
+                tempvar fe_unnamed_`k'
+                local vname "`fe_unnamed_`k''"
+            }
+            if ("`kind'" == "slope" & `is_named' & strlen("`vname'") > 26) {
                 di as err "absorb() alias `vname' is too long to save heterogeneous slope variables"
                 exit 198
             }
             if ("`kind'" == "slope" & "`slopeintercept'" == "0") {
                 local slope_vname "`vname'Slope1"
+                if (!`is_named') {
+                    tempvar fes_unnamed_`k'
+                    local slope_vname "`fes_unnamed_`k''"
+                }
                 confirm new variable `slope_vname'
                 gen double `slope_vname' = .
                 label variable `slope_vname' "[FE] `k'.`entry_slope_label'"
@@ -1221,6 +1238,10 @@ program define xhdfe, eclass sortpreserve
                 local fe_out_vars "`fe_out_vars' `vname'"
                 if ("`kind'" == "slope" & "`slopeintercept'" == "1") {
                     local slope_vname "`vname'Slope1"
+                    if (!`is_named') {
+                        tempvar fes_unnamed_`k'
+                        local slope_vname "`fes_unnamed_`k''"
+                    }
                     confirm new variable `slope_vname'
                     gen double `slope_vname' = .
                     label variable `slope_vname' "[FE] `k'.`entry_slope_label'"
@@ -2183,7 +2204,7 @@ program define xhdfe, eclass sortpreserve
     ereturn local footnote "xhdfe__footnote"
     ereturn local estat_cmd "xhdfe_estat"
     ereturn local model "ols"
-    ereturn local version "2.13.0 07jul2026"
+    ereturn local version "2.13.1 08jul2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
