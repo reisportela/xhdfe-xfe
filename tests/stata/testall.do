@@ -32,6 +32,7 @@ local tests ///
     "part1/multiway-cluster.do" ///
     "part1/heterogeneous-slopes.do" ///
     "part1/savefes.do" ///
+    "part1/savefe-alias.do" ///
     "part1/iv.do" ///
     "part1/weights-extended.do" ///
     "part1/group-individual.do" ///

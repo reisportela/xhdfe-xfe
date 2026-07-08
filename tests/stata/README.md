@@ -5,9 +5,11 @@ adapted from Sergio Correia's `reghdfe/test` suite: each test runs a trusted
 Stata baseline, runs `xhdfe`, and compares the public estimation contract
 instead of only checking that commands execute.
 
-The first layer uses built-in Stata commands (`regress` and `areg`) as oracles,
-so it can run without `reghdfe` installed. Later layers can add optional
-`reghdfe`-oracle tests for multi-way fixed effects and exact convention checks.
+The oracles are built-in Stata commands (`regress`, `areg`) plus the community
+packages `reghdfe` and `ivreghdfe`. **Both `reghdfe` and `ivreghdfe` are hard
+prerequisites**: `testall.do` runs every test unconditionally and the suite
+aborts (rc=601) if either oracle is missing. Install them first with
+`ssc install reghdfe` and `ssc install ivreghdfe` (plus `ftools`).
 
 ## Run
 
@@ -43,6 +45,7 @@ Logs are written under `tests/stata/output/`.
 - multiway clustered-VCE parity against `reghdfe`
 - heterogeneous-slope parity against `reghdfe`
 - saved fixed-effect reconstruction
+- named/aliased saved-FE mapping vs `reghdfe` (regression guard for mixed unnamed+named `absorb()` terms)
 - IV/2SLS parity against `ivreghdfe`
 - probability-weight and importance-weight behavior
 - `group()` / `individual()` behavior and aliases

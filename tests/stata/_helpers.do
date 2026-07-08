@@ -145,15 +145,25 @@ program define xcert_assert_matrix_close
         exit 503
     }
 
-    tempname maxdiff maxreldiff
+    tempname maxdiff maxreldiff onesided
     mata: {                                                                                  ///
         A = st_matrix("`left'");                                                             ///
         B = st_matrix("`right'");                                                            ///
+        st_numscalar("`onesided'", sum((A :>= .) :!= (B :>= .)));                            ///
         D = abs(A :- B);                                                                      ///
         S = (abs(A) :> abs(B)) :* abs(A) + (abs(A) :<= abs(B)) :* abs(B);                    ///
         S = (S :< 1) :* 1 + (S :>= 1) :* S;                                                   ///
         st_numscalar("`maxdiff'", max(D));                                                    ///
         st_numscalar("`maxreldiff'", max(D :/ S));                                            ///
+    }
+    // Mata's max() drops missing entries, so a position that is finite in one
+    // matrix and missing in the other would otherwise be invisible here (the
+    // scalar and variable comparators already guard one-sided missing).
+    if (`onesided' > 0) {
+        di as error "matrix comparison failed for `name': " `onesided' " position(s) missing on one side only"
+        matrix list `left'
+        matrix list `right'
+        exit 9
     }
     if (missing(`maxdiff')) {
         scalar `maxdiff' = 0
