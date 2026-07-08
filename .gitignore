@@ -38,3 +38,7 @@ release_assets/
 .idea/
 .vscode/
 stata/tools/_build/
+
+# Stata certification-test output
+tests/stata/output/
+*.smcl
