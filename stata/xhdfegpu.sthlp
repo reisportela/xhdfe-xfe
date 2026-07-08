@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.13.0  07jul2026}{...}
+{* *! version 2.13.2  08jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfe" "help xfe"}{...}
 {title:Title}

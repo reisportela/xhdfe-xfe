@@ -21,6 +21,39 @@ from __future__ import annotations
 import numpy as np
 
 
+def _id_codes(x):
+    """Worker/firm ids as dense int32 codes for the compiled core.
+
+    The core relabels ids to dense indices internally and only accepts int32,
+    so ids that fall outside int32 range (e.g. NISS/NIF person codes) or that
+    are non-integer / string labels are compacted to 0..N-1 codes here. Because
+    the core relabels anyway, this never changes the estimates — it only keeps
+    large or non-integer ids from being rejected.
+
+    Returns ``(codes, uniques)`` where ``codes`` is a length-n int32 vector and
+    ``uniques`` maps a code back to the caller's original id (``uniques[codes]
+    == x``), or ``None`` when the ids were already valid int32 and passed
+    through unchanged.
+    """
+    x = np.asarray(x)
+    if x.ndim != 1:
+        x = x.ravel()
+    i32 = np.iinfo(np.int32)
+    if (
+        np.issubdtype(x.dtype, np.integer)
+        and x.size
+        and x.min() >= i32.min
+        and x.max() <= i32.max
+    ):
+        return np.ascontiguousarray(x, dtype=np.int32), None
+    # Reject missing / non-finite ids instead of fusing them into one spurious
+    # worker/firm node (mirrors the R front-end, which stops on missing ids).
+    if np.issubdtype(x.dtype, np.floating) and not np.all(np.isfinite(x)):
+        raise ValueError("worker/firm ids contain missing or non-finite values")
+    uniques, codes = np.unique(x, return_inverse=True)
+    return np.ascontiguousarray(np.ravel(codes), dtype=np.int32), uniques
+
+
 def _core():
     import sys
 
@@ -48,12 +81,25 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     (leave_out_level, leverages, jla_draws, seed, prune, ...).
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
-    return _core().akm_kss(y, worker, firm, X=X, **kwargs)
+    wc, wu = _id_codes(worker)
+    fc, fu = _id_codes(firm)
+    res = _core().akm_kss(y, wc, fc, X=X, **kwargs)
+    # When ids were recoded, the core echoes back the compact codes in the
+    # per-row id vectors; map them to the caller's original ids so row_worker /
+    # row_firm keep their documented meaning.
+    if isinstance(res, dict):
+        if wu is not None and res.get("row_worker") is not None:
+            res["row_worker"] = wu[np.asarray(res["row_worker"])]
+        if fu is not None and res.get("row_firm") is not None:
+            res["row_firm"] = fu[np.asarray(res["row_firm"])]
+    return res
 
 
 def leave_out_set(worker, firm):
     """Largest leave-one-out connected set (KSS / LeaveOutTwoWay semantics)."""
-    return _core().akm_leave_out_set(worker, firm)
+    wc, _ = _id_codes(worker)
+    fc, _ = _id_codes(firm)
+    return _core().akm_leave_out_set(wc, fc)
 
 
 def subsampling_diagnostic(y, worker, firm, X=None, fractions=(0.0, 0.1, 0.2,

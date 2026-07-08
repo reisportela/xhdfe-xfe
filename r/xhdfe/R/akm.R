@@ -11,11 +11,17 @@
   if (is.character(x)) {
     return(as.integer(factor(x)))
   }
-  out <- as.integer(x)
-  if (anyNA(out)) {
-    stop(sprintf("%s contains missing or non-integer ids", label), call. = FALSE)
+  if (any(!is.finite(x))) {
+    stop(sprintf("%s contains missing or non-finite ids", label), call. = FALSE)
   }
-  out
+  # Numeric ids: keep the caller's integer codes when they fit int32; otherwise
+  # (e.g. NISS/NIF person codes larger than 2^31, or non-integer labels) compact
+  # to dense 1..N codes. The compiled core relabels ids to dense indices
+  # internally, so the recoding never changes the estimates.
+  if (all(x == floor(x)) && max(abs(x)) <= .Machine$integer.max) {
+    return(as.integer(x))
+  }
+  as.integer(factor(x))
 }
 
 #' Largest leave-one-out connected set (KSS)
