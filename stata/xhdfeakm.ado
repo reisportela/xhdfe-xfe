@@ -1,4 +1,4 @@
-*! version 1.1.0  07jul2026
+*! version 1.2.0  08jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -6,7 +6,7 @@
 program define xhdfeakm, rclass sortpreserve
     version 14.0
     syntax varname(numeric) [if] [in] [fweight], WORKer(varname numeric) FIRM(varname numeric) ///
-        [ CONTROLs(varlist numeric) LEAVEOUTlevel(string) LEVerages(string)          ///
+        [ CONTROLs(varlist fv ts numeric) LEAVEOUTlevel(string) LEVerages(string)    ///
           DRAWS(integer 200) SEED(real 20260705) noPRUNE GENerate(name) REPLACE      ///
           THREADS(integer 0) EXACTMAXrows(integer 10000)                             ///
           DIRECTMAXfirms(integer 50000) CGTOL(real 1e-10) FWLTOL(real 1e-10) ///
@@ -14,7 +14,19 @@ program define xhdfeakm, rclass sortpreserve
 
     local y `varlist'
     marksample touse
-    markout `touse' `worker' `firm' `controls'
+    markout `touse' `worker' `firm'
+    // controls() may contain factor / time-series terms (e.g. i.year). Expand
+    // them to numeric columns for the plugin (base/omitted levels dropped, as
+    // manual dummies would) and keep the expanded names for the e(b) labels.
+    local control_disp "`controls'"
+    local control_vars "`controls'"
+    if ("`controls'" != "") {
+        quietly fvexpand `controls' if `touse'
+        local control_disp "`r(varlist)'"
+        quietly fvrevar `controls' if `touse', substitute
+        local control_vars "`r(varlist)'"
+        markout `touse' `control_vars'
+    }
     local has_fweight 0
     tempvar fwvar
     if ("`weight'" != "") {
@@ -42,7 +54,7 @@ program define xhdfeakm, rclass sortpreserve
         exit 198
     }
     local do_prune = cond("`prune'" == "noprune", 0, 1)
-    local ncontrols : word count `controls'
+    local ncontrols : word count `control_vars'
 
     local store_effects 0
     if ("`generate'" != "") {
@@ -122,7 +134,7 @@ program define xhdfeakm, rclass sortpreserve
     if (`has_fweight') {
         local fw_var "`fwvar'"
     }
-    capture noisily plugin call `plugin_prog' `y' `worker' `firm' `fw_var' `controls' ///
+    capture noisily plugin call `plugin_prog' `y' `worker' `firm' `fw_var' `control_vars' ///
         `effect_vars' `keepvar' if `touse', "`cfg'"
     local rc = _rc
     if (`rc') {
@@ -169,7 +181,12 @@ program define xhdfeakm, rclass sortpreserve
         return local notes "`xakm_notes'"
     }
     if (`ncontrols' > 0) {
-        matrix colnames `bmat' = `controls'
+        if (`: word count `control_disp'' == `ncontrols') {
+            matrix colnames `bmat' = `control_disp'
+        }
+        else {
+            matrix colnames `bmat' = `control_vars'
+        }
         return matrix b = `bmat'
     }
 
