@@ -12,7 +12,7 @@ authors:
     affiliation: "NIPE / Universidade do Minho"
     email: "tgstavares@eeg.uminho.pt"
     website: "https://www.tgstavares.com"
-version: "2.13.1"
+version: "2.13.2"
 date-released: 2026-07-08
 url: "https://github.com/reisportela/xhdfe-xfe"
 license: MIT
@@ -70,13 +70,13 @@ references:
         given-names: "Isaiah"
       - family-names: "Mikusheva"
         given-names: "Anna"
-    title: "Conditional inference with a functional nuisance parameter"
+    title: "A Geometric Approach to Nonlinear Econometric Models"
     journal: "Econometrica"
     year: 2016
     volume: 84
-    issue: 4
-    start: 1571
-    end: 1612
+    issue: 3
+    start: 1249
+    end: 1264
   - type: article
     authors:
       - family-names: "Gelbach"
