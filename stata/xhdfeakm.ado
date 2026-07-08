@@ -1,4 +1,4 @@
-*! version 1.2.0  08jul2026
+*! version 1.3.0  08jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -26,6 +26,34 @@ program define xhdfeakm, rclass sortpreserve
         quietly fvrevar `controls' if `touse', substitute
         local control_vars "`r(varlist)'"
         markout `touse' `control_vars'
+    }
+    // Worker/firm ids are passed to the plugin as int32 (it relabels them to
+    // dense indices internally, so only the int32 range matters, not the exact
+    // codes). Raw ids outside int32 range (e.g. NISS/NIF person codes) or
+    // non-integer ids would be rejected, so recode such an id to a compact
+    // 1..N integer here. This preserves the worker-firm graph exactly, so the
+    // leave-out decomposition is unchanged.
+    local worker_use "`worker'"
+    local firm_use "`firm'"
+    local id_recoded 0
+    foreach part in worker firm {
+        local src "`worker'"
+        if ("`part'" == "firm") local src "`firm'"
+        quietly summarize `src' if `touse', meanonly
+        local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
+        if (!`need') {
+            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            local need = (r(N) > 0)
+        }
+        if (`need') {
+            tempvar idc_`part'
+            quietly egen long `idc_`part'' = group(`src') if `touse'
+            local `part'_use "`idc_`part''"
+            local id_recoded 1
+        }
+    }
+    if (`id_recoded') {
+        di as txt "note: worker/firm ids outside int32 range recoded to compact integers (graph and results unchanged)"
     }
     local has_fweight 0
     tempvar fwvar
@@ -134,7 +162,7 @@ program define xhdfeakm, rclass sortpreserve
     if (`has_fweight') {
         local fw_var "`fwvar'"
     }
-    capture noisily plugin call `plugin_prog' `y' `worker' `firm' `fw_var' `control_vars' ///
+    capture noisily plugin call `plugin_prog' `y' `worker_use' `firm_use' `fw_var' `control_vars' ///
         `effect_vars' `keepvar' if `touse', "`cfg'"
     local rc = _rc
     if (`rc') {
