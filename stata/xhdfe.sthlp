@@ -87,7 +87,7 @@
 {synopt: {cmdab:a:bsorb(}{it:label}{cmd:=}{it:absvar}{cmd:)}}label an absorbed effect and use {it:label} as the saved-FE base name{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:#c.}{it:x}{cmd:)}}absorb group-specific slopes without a level FE{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:##c.}{it:x}{cmd:)}}absorb a level FE plus group-specific slopes{p_end}
-{synopt: {cmdab:a:bsorb(}{it:...}{cmd:,} {cmdab:save:fe)}}save all fixed effect contributions with the {it:__hdfe*} prefix{p_end}
+{synopt: {cmdab:a:bsorb(}{it:...}{cmd:,} {cmd:savefe)}}save all fixed effect contributions with the {it:__hdfe*} prefix{p_end}
 {synopt: {opth savefes(prefix)}}save fixed effect contributions using a prefix{p_end}
 {synopt : }{bf:- note:} savefe/savefes are not supported when both {cmd:group()} and {cmd:individual()} are specified{p_end}
 
@@ -127,7 +127,7 @@
 {synopt :{opt ferecoverym:ethod(str)}}fixed-effect recovery method: {it:hybrid} (default) or {it:map}{p_end}
 {synopt :{opt maxit:er(#)}}maximum absorber iterations (default 100000){p_end}
 {synopt :{opt iter:ate(#)}}alias of {cmd:maxiter(#)} accepted for reghdfe compatibility{p_end}
-{synopt :{opt abs:orptionmethod(str)}}absorption method (auto, gauss-seidel, symmetric-gauss-seidel, jacobi, mlsmr, lsmr, auto-mlsmr; aliases supported){p_end}
+{synopt :{opt absorptionm:ethod(str)}}absorption method (auto, gauss-seidel, symmetric-gauss-seidel, jacobi, mlsmr, lsmr, auto-mlsmr; aliases supported){p_end}
 {synopt :{opt sym:metricsweep}}forward + backward sweep per iteration{p_end}
 {synopt :{opt jacobirel:axation(#)}}Jacobi relaxation parameter (0 = default){p_end}
 
@@ -596,7 +596,7 @@ forces recovery sweeps on the partial residual.
 {cmd:iterate(#)} is accepted as a reghdfe-compatible alias for {cmd:maxiter(#)}.
 
 {phang}
-{opt abs:orptionmethod(str)} sets the absorption method. Valid values (case-insensitive) are
+{opt absorptionm:ethod(str)} sets the absorption method. Valid values (case-insensitive) are
 {cmd:auto}; {cmd:gauss-seidel}/{cmd:gauss_seidel}/{cmd:gs}; {cmd:symmetric}/{cmd:sym}/{cmd:symgs}/{cmd:symmetric-gauss-seidel}/{cmd:symmetric_gauss_seidel}; {cmd:jacobi};
 {cmd:mlsmr}/{cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive};
 {cmd:lsmr}/{cmd:plain-lsmr}/{cmd:plain_lsmr}; and
@@ -1126,8 +1126,8 @@ Kline, Patrick, Raffaele Saggio, and Mikkel Soelvsten. 2020. "Leave-out estimati
 components." {it:Econometrica} 88(5): 1859-1898.{p_end}
 
 {phang}
-Andrews, Isaiah, and Anna Mikusheva. 2016. "Conditional inference with a functional
-nuisance parameter." {it:Econometrica} 84(4): 1571-1612.{p_end}
+Andrews, Isaiah, and Anna Mikusheva. 2016. "A geometric approach to nonlinear
+econometric models." {it:Econometrica} 84(3): 1249-1264.{p_end}
 
 {phang}
 Gelbach, Jonah B. 2016. "When do covariates matter? And which ones, and how much?"

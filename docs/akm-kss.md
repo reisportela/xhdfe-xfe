@@ -101,7 +101,7 @@ Adam A. Oppenheimer; the Gelbach companion is validated against Jonah Gelbach's
   homoskedastic correction.
 - Kline, Saggio & Sølvsten (2020), *Econometrica* 88(5): 1859-1898 — the KSS
   leave-out heteroskedasticity-robust correction and inference.
-- Andrews & Mikusheva (2016), *Econometrica* 84(4): 1571-1612 — the
+- Andrews & Mikusheva (2016), *Econometrica* 84(3): 1249-1264 — the
   weak-identification q=1 confidence intervals.
 - Gelbach (2016), *Journal of Labor Economics* 34(2): 509-543 — the
   conditional decomposition of coefficient movements.
