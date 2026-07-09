@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.14.1  09jul2026}{...}
+{* *! version 2.14.2  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -92,7 +92,17 @@ leave-out decomposition, the connected set and the Gelbach companion -- rather
 than reproducing pytwoway's broader structural models (CRE, BLM). The layer is
 validated at machine precision against both {cmd:pytwoway} and Saggio's
 {cmd:LeaveOutTwoWay}, and interoperates with pytwoway (the Python front-end can
-export the leave-out sample to the pytwoway / bipartitepandas format). The
+export the leave-out sample to the pytwoway / bipartitepandas format). When
+comparing against pytwoway directly, note two deliberate convention choices
+(both follow the canonical {cmd:LeaveOutTwoWay}): the stayer variance rule
+matches pytwoway's {it:non-default} {cmd:Sii_stayers='upper_bound'} option
+(pytwoway's default {cmd:'firm_mean'} imputes stayer variances from firm-level
+mover averages and can differ by 1-2 percent in var(alpha)/cov on
+stayer-heavy panels — a convention gap, not a discrepancy), and the plug-in
+components use the 1/(n-1) denominator versus pytwoway's 1/n (negligible
+above ~10,000 person-years). Avoid pytwoway's {cmd:exact_trace_ho/he=True}
+paths as an oracle: their var(alpha) quadrant is broken in pytwoway 0.3.21
+(negative variances observed; audited 09jul2026). The
 combination is most useful with large linked employer-employee data: do the
 fast HDFE regression and the leave-out variance decomposition here in a
 familiar reghdfe workflow, and use pytwoway for the structural models outside

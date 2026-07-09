@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.14.1  09jul2026}{...}
+{* *! version 2.14.2  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -78,19 +78,36 @@ Gelbach's {cmd:b1x2}.
 
 {pstd}At least one of {opt x2groups()} or {opt fes()} must be supplied.
 
-{pstd}{it:Performance environment switches} (diagnostic; defaults are the
-fast paths, validated on real designs against the retained reference to
-~1e-11): {cmd:XHDFE_GELBACH_FAST_FIT=0} restores the single retained
+{pstd}{it:Performance environment switches} (A/B reproduction only — NOT a
+safety fallback): {cmd:XHDFE_GELBACH_FAST_FIT=0} restores the single retained
 full-model fit; {cmd:XHDFE_GELBACH_WARM_RECOVERY=0} disables the shared MLSMR
 absorption that warm-starts the fixed-effect recovery and provides the within
 transform (a convergence gate falls back to the retained fit automatically
 when the recovery does not certify); {cmd:XHDFE_GELBACH_WITHIN_BATCH=0}
-restores per-column within fits. On severely ill-conditioned FE graphs the
-fast path resolves the per-dimension FE split to a tighter optimality
-certificate than the legacy retained path, so those FE-group contributions
-can differ from pre-2.14.1 output at the recovery-tolerance level (the fast
-answer is the more converged one); set {cmd:XHDFE_GELBACH_FAST_FIT=0} to
-reproduce legacy output exactly.
+restores per-column within fits.
+
+{pstd}{it:Warning (adversarial audit, 09jul2026).} The default fast path is
+the MORE-converged one: it resolves the per-dimension FE split with an exact
+normal-equations (MLSMR) solve behind a fail-closed convergence gate,
+validated against direct sparse oracles up to 1M rows on adversarial FE
+graphs. The legacy retained path recovers the split with Gauss-Seidel map
+sweeps whose stopping rule is blind to the slow modes of ill-conditioned FE
+graphs: on such graphs it can return a materially wrong per-dimension split
+(sign flips observed) while reporting convergence. Do not set
+{cmd:XHDFE_GELBACH_FAST_FIT=0} "to be safe" — it exists only to reproduce
+pre-2.14.1 output bitwise for A/B comparison. Since 2.14.2 the legacy and
+fallback paths cross-check their FE split against the exact normal equations
+and set {cmd:r(converged)}=0 with an explanatory note when the check fails.
+On well-conditioned designs the two paths agree to ~1e-11.
+
+{pstd}{it:Interpretation of per-FE-dimension contributions.} When the FE
+graph has two or more mobility components, the split of the combined FE
+contribution into per-dimension deltas depends on a normalization convention
+(the component mean-shift used by {cmd:xhdfe}); the total across FE
+dimensions and b_base - b_full are convention-invariant. Within a single
+connected mobility component the x1-row split is identified. A small
+{cmd:r(identity_gap)} certifies the decomposition identity only — it is NOT
+evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 
 
 {title:Stored results}

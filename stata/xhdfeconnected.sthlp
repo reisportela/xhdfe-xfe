@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.14.1  09jul2026}{...}
+{* *! version 2.14.2  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -33,7 +33,17 @@ generates equals {it:stub}{cmd:_keep} from
 {pstd}
 With {cmd:fweight}, row {it:i} stands for {it:w_i} identical person-year
 observations (the single-observation-worker rule counts person-years, so a
-single row with weight 2 or more is a T>1 worker).
+single row with weight 2 or more is a T>1 worker). Note the units under
+{cmd:fweight}: {cmd:r(n_obs_input)} counts raw data rows, while
+{cmd:r(n_obs_connected)} and {cmd:r(n_obs)} count weighted person-years.
+
+{pstd}
+The result is deterministic: it does not depend on the number of threads,
+and exact ties between equally-sized connected components (same firm count
+and same person-year count — essentially only possible on small or
+artificially symmetric graphs) are broken by the smallest firm id in the
+component rather than by the physical row order of the data (since 2.14.2;
+the reference LeaveOutTwoWay leaves such ties undefined).
 
 
 {title:Stored results}

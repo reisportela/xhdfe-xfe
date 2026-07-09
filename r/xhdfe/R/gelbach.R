@@ -52,6 +52,9 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
     X2 <- if (is.null(X2)) g else cbind(X2, g)
   }
   fe_list <- lapply(fes, function(ids) .akm_id_codes(ids, "fe"))
+  if (!is.null(cluster) && !identical(vce, "cluster")) {
+    stop("cluster ids supplied but vce != \"cluster\"", call. = FALSE)
+  }
   cl <- if (is.null(cluster)) NULL else .akm_id_codes(cluster, "cluster")
   w <- if (is.null(weights)) NULL else as.numeric(weights)
   out <- .xhdfe_cpp_gelbach(y, x1, X2, as.integer(sizes), fe_list, cl,
@@ -89,6 +92,11 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
   print(round(x$se, digits))
   cat(sprintf("\nTotal (= b_base - b_full): %s\n",
               paste(round(x$total, digits), collapse = " ")))
+  if (!isTRUE(x$converged)) {
+    warning("xhdfe_gelbach: the decomposition did not converge or failed a ",
+            "convergence cross-check - results are unreliable (see notes).",
+            call. = FALSE)
+  }
   if (nzchar(x$notes)) cat("notes:", x$notes, "\n")
   invisible(x)
 }

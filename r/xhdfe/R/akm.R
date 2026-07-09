@@ -6,10 +6,18 @@
 
 .akm_id_codes <- function(x, label) {
   if (is.factor(x)) {
-    return(as.integer(x))
+    codes <- as.integer(x)
+    if (anyNA(codes)) {
+      stop(sprintf("%s contains missing ids", label), call. = FALSE)
+    }
+    return(codes)
   }
   if (is.character(x)) {
-    return(as.integer(factor(x)))
+    codes <- as.integer(factor(x))
+    if (anyNA(codes)) {
+      stop(sprintf("%s contains missing ids", label), call. = FALSE)
+    }
+    return(codes)
   }
   if (any(!is.finite(x))) {
     stop(sprintf("%s contains missing or non-finite ids", label), call. = FALSE)

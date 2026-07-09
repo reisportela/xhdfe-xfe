@@ -39,7 +39,25 @@ formula, including robust cross terms via the within representation.
 
 Per the brief, NO KSS-style correction is applied: the contributions are
 linear functionals of the fixed effects and largely escape the quadratic
-limited-mobility bias. Weights are a documented follow-up.
+limited-mobility bias. Stata-style aweights and fweights are supported
+(weights=, fweights=True), matching b1x2's weighted estimators exactly.
+
+Fast/legacy paths (compiled core): the default fast path resolves the
+per-FE-dimension split via an MLSMR exact-normal-equations solve with a
+fail-closed convergence gate — it is the MORE-converged path. The env
+kill-switches XHDFE_GELBACH_FAST_FIT=0 / XHDFE_GELBACH_WARM_RECOVERY=0 /
+XHDFE_GELBACH_WITHIN_BATCH=0 exist for bitwise A/B reproduction of the
+pre-2.14.1 legacy output only; on ill-conditioned FE graphs the legacy
+retained path's per-dimension FE split can be materially wrong (its GS
+recovery certificate is blind to slow graph modes — adversarial audit
+09jul2026, finding G1) and is now cross-checked and flagged via
+`converged`/`notes`. Do NOT treat FAST_FIT=0 as a safety fallback.
+
+Note on interpretation: with two or more mobility components, the split of
+the combined FE contribution into per-FE-dimension deltas depends on a
+normalization convention (the component mean-shift documented above); the
+total across FE dimensions and b_base - b_full are convention-invariant.
+Within a single connected mobility component the x1-row split is identified.
 """
 
 from __future__ import annotations
@@ -177,7 +195,17 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "vce": vce,
         "gamma0": bool(gamma0),
         "notes": r["notes"],
+        "converged": bool(r["converged"]),
     }
     if not r["converged"]:
         out["notes"] += " (not converged)"
+        import warnings
+
+        warnings.warn(
+            "xhdfe.gelbach.decompose: the decomposition did not converge or "
+            "failed a convergence cross-check — results are unreliable. "
+            f"notes: {out['notes'].strip()}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return out

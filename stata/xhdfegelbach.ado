@@ -1,4 +1,4 @@
-*! version 1.0.0  09jul2026
+*! version 1.0.1  09jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -21,6 +21,10 @@ program define xhdfegelbach, rclass sortpreserve
     }
     if ("`vce'" == "cluster" & "`cluster'" == "") {
         di as err "vce(cluster) requires cluster()"
+        exit 198
+    }
+    if ("`vce'" != "cluster" & "`cluster'" != "") {
+        di as err "cluster() requires vce(cluster)"
         exit 198
     }
 

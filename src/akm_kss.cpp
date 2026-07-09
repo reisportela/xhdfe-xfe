@@ -326,10 +326,23 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
 
     // Largest connected component over active matches; component size is
     // measured in firms (LeaveOutTwoWay convention), ties broken by
-    // person-year rows and then by the smallest root.
+    // person-year rows and then — deterministically — by the smallest
+    // ORIGINAL firm id in the component (adversarial audit C2, 09jul2026:
+    // the previous final tie-break was the first-encountered union-find
+    // root, i.e. raw input ROW ORDER; on tie-heavy small graphs row order
+    // could even decide an empty-vs-valid final sample. The min-firm-id key
+    // is unique — components partition firms — and invariant to row
+    // permutation; non-tied graphs are unaffected. The reference MATLAB has
+    // no defined tie-break at all.)
     std::vector<long long> comp_obs(static_cast<std::size_t>(W0 + F0));
     std::vector<int> comp_firms(static_cast<std::size_t>(W0 + F0));
+    std::vector<int> comp_min_firm(static_cast<std::size_t>(W0 + F0));
     std::vector<std::uint8_t> firm_seen(static_cast<std::size_t>(F0));
+    std::vector<int> firm_orig(static_cast<std::size_t>(F0));
+    for (Eigen::Index i = 0; i < n; ++i) {
+        firm_orig[static_cast<std::size_t>(f0[static_cast<std::size_t>(i)])] =
+            firm_ids[i];
+    }
     const auto largest_cc = [&]() {
         UnionFind uf(W0 + F0);
         for (std::size_t m = 0; m < n_matches_all; ++m) {
@@ -339,6 +352,8 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         }
         std::fill(comp_obs.begin(), comp_obs.end(), 0);
         std::fill(comp_firms.begin(), comp_firms.end(), 0);
+        std::fill(comp_min_firm.begin(), comp_min_firm.end(),
+                  std::numeric_limits<int>::max());
         std::fill(firm_seen.begin(), firm_seen.end(), 0);
         for (std::size_t m = 0; m < n_matches_all; ++m) {
             if (!active[m]) {
@@ -348,7 +363,13 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             comp_obs[static_cast<std::size_t>(root)] += match_cnt[m];
             if (!firm_seen[static_cast<std::size_t>(match_f[m])]) {
                 firm_seen[static_cast<std::size_t>(match_f[m])] = 1;
-                ++comp_firms[static_cast<std::size_t>(uf.find(W0 + match_f[m]))];
+                const std::size_t fr =
+                    static_cast<std::size_t>(uf.find(W0 + match_f[m]));
+                ++comp_firms[fr];
+                const int fo = firm_orig[static_cast<std::size_t>(match_f[m])];
+                if (fo < comp_min_firm[fr]) {
+                    comp_min_firm[fr] = fo;
+                }
             }
         }
         int best = -1;
@@ -357,9 +378,20 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             if (comp_firms[rs] == 0 && comp_obs[rs] == 0) {
                 continue;
             }
-            if (best < 0 || comp_firms[rs] > comp_firms[static_cast<std::size_t>(best)] ||
-                (comp_firms[rs] == comp_firms[static_cast<std::size_t>(best)] &&
-                 comp_obs[rs] > comp_obs[static_cast<std::size_t>(best)])) {
+            if (best < 0) {
+                best = r;
+                continue;
+            }
+            const std::size_t bs = static_cast<std::size_t>(best);
+            if (comp_firms[rs] != comp_firms[bs]) {
+                if (comp_firms[rs] > comp_firms[bs]) {
+                    best = r;
+                }
+            } else if (comp_obs[rs] != comp_obs[bs]) {
+                if (comp_obs[rs] > comp_obs[bs]) {
+                    best = r;
+                }
+            } else if (comp_min_firm[rs] < comp_min_firm[bs]) {
                 best = r;
             }
         }
@@ -1773,9 +1805,18 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // and ANY thread count. XHDFE_AKM_JLA_BLOCK=0 selects the pre-2.14
         // sequential single-RHS loop kept verbatim below (bit-reproduces
         // older builds; its per-edge instruction schedule differs from the
-        // fused kernels by ~1 ulp). The direct (cached-LDLT) mode gains
-        // nothing from fusion and defaults to the sequential path; the CUDA
-        // mode batches the draw solves on the device.
+        // fused kernels by ~1 ulp PER SOLVE — note that at draws=1 the
+        // Pii/(Pii+Mii) ratio estimator can amplify that last-ulp solver
+        // difference to ~1e-10 in the components through the near-zero
+        // 1-draw Mii denominator; at draws >= 2 and at the shipped default
+        // of 200 the block=0-vs-batched difference is at machine epsilon.
+        // The block>=1 bit-invariance guarantee is CPU-scoped: the CUDA
+        // batched solver is bit-deterministic run-to-run but its CUB
+        // segmented-reduce shapes vary with the lane-group size, so GPU
+        // results differ across block sizes at the ~1e-14 level). The
+        // direct (cached-LDLT) mode gains nothing from fusion and defaults
+        // to the sequential path; the CUDA mode batches the draw solves on
+        // the device.
         int jla_block = solver.direct ? 0 : 8;
         if (const char* jbe = std::getenv("XHDFE_AKM_JLA_BLOCK")) {
             const int v = std::atoi(jbe);
@@ -3262,6 +3303,138 @@ Eigen::MatrixXd cluster_meat(const Eigen::MatrixXd& Z, const Eigen::VectorXi* co
     return sums.transpose() * sums;
 }
 
+// Post-recovery normalization of per-dimension FE contribution vectors,
+// replicating the v11 Component-style default: shift the per-mobility-
+// component mean of FE2 into FE1, then center FE1 (and dims >= 2) globally;
+// a single dimension is just centered. Shared by the fast warm path and the
+// legacy-path certification cross-check so both compare in one convention.
+void normalize_fe_effects_component_style(std::vector<Eigen::VectorXd>& fe,
+                                          const std::vector<Eigen::VectorXi>& fes_k,
+                                          const Eigen::VectorXd* wk_ptr) {
+    if (fe.empty()) {
+        return;
+    }
+    const Eigen::Index nk = fe[0].size();
+    // Neumaier-compensated weighted mean (matches v11 weighted_mean).
+    auto wmean = [&](const Eigen::VectorXd& v) -> double {
+        double sum = 0.0, comp = 0.0, wsum = 0.0, wcomp = 0.0;
+        for (Eigen::Index i = 0; i < v.size(); ++i) {
+            const double wi = wk_ptr ? (*wk_ptr)[i] : 1.0;
+            const double term = v[i] * wi;
+            const double t = sum + term;
+            comp += (std::abs(sum) >= std::abs(term)) ? ((sum - t) + term)
+                                                      : ((term - t) + sum);
+            sum = t;
+            const double tw = wsum + wi;
+            wcomp += (std::abs(wsum) >= std::abs(wi)) ? ((wsum - tw) + wi)
+                                                      : ((wi - tw) + wsum);
+            wsum = tw;
+        }
+        const double denom = wsum + wcomp;
+        return denom > 0.0 ? (sum + comp) / denom : 0.0;
+    };
+    const std::size_t rdims = fe.size();
+    if (rdims == 1) {
+        fe[0].array() -= wmean(fe[0]);
+    } else if (rdims >= 2) {
+        // Compact raw level codes first (direct-index when dense, hash otherwise).
+        auto compact_ids = [nk](const Eigen::VectorXi& f, std::vector<int>& out) -> int {
+            out.resize(static_cast<std::size_t>(nk));
+            long long mn = std::numeric_limits<long long>::max();
+            long long mx = std::numeric_limits<long long>::min();
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                mn = std::min<long long>(mn, f[i]);
+                mx = std::max<long long>(mx, f[i]);
+            }
+            const long long range = (nk > 0) ? (mx - mn + 1) : 0;
+            int next = 0;
+            if (range > 0 && range <= 4LL * nk + 1024) {
+                std::vector<int> lut(static_cast<std::size_t>(range), -1);
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    int& slot = lut[static_cast<std::size_t>(f[i] - mn)];
+                    if (slot < 0) {
+                        slot = next++;
+                    }
+                    out[static_cast<std::size_t>(i)] = slot;
+                }
+            } else {
+                std::unordered_map<int, int> lut;
+                lut.reserve(static_cast<std::size_t>(nk) / 4 + 16);
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    auto ins = lut.emplace(f[i], next);
+                    if (ins.second) {
+                        ++next;
+                    }
+                    out[static_cast<std::size_t>(i)] = ins.first->second;
+                }
+            }
+            return next;
+        };
+        std::vector<int> c0, c1;
+        const int K0 = compact_ids(fes_k[0], c0);
+        const int K1 = compact_ids(fes_k[1], c1);
+        // Union-find over the bipartite (fe0, fe1) level graph.
+        std::vector<int> parent(static_cast<std::size_t>(K0) +
+                                static_cast<std::size_t>(K1));
+        for (std::size_t i = 0; i < parent.size(); ++i) {
+            parent[i] = static_cast<int>(i);
+        }
+        auto find_root = [&parent](int a) -> int {
+            while (parent[static_cast<std::size_t>(a)] != a) {
+                parent[static_cast<std::size_t>(a)] =
+                    parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(a)])];
+                a = parent[static_cast<std::size_t>(a)];
+            }
+            return a;
+        };
+        for (Eigen::Index i = 0; i < nk; ++i) {
+            const int ra = find_root(c0[static_cast<std::size_t>(i)]);
+            const int rb = find_root(K0 + c1[static_cast<std::size_t>(i)]);
+            if (ra != rb) {
+                parent[static_cast<std::size_t>(rb)] = ra;
+            }
+        }
+        std::vector<int> comp_id(parent.size(), -1);
+        int num_components = 0;
+        Eigen::VectorXi components(nk);
+        for (Eigen::Index i = 0; i < nk; ++i) {
+            const int r = find_root(c0[static_cast<std::size_t>(i)]);
+            int& cid = comp_id[static_cast<std::size_t>(r)];
+            if (cid < 0) {
+                cid = num_components++;
+            }
+            components[i] = cid;
+        }
+        std::vector<double> comp_sum(static_cast<std::size_t>(num_components), 0.0);
+        std::vector<double> comp_w(static_cast<std::size_t>(num_components), 0.0);
+        const double* fe1_ptr = fe[1].data();
+        if (wk_ptr) {
+            const double* w = wk_ptr->data();
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                const std::size_t c = static_cast<std::size_t>(components[i]);
+                comp_sum[c] += fe1_ptr[i] * w[i];
+                comp_w[c] += w[i];
+            }
+        } else {
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                const std::size_t c = static_cast<std::size_t>(components[i]);
+                comp_sum[c] += fe1_ptr[i];
+                comp_w[c] += 1.0;
+            }
+        }
+        for (Eigen::Index i = 0; i < nk; ++i) {
+            const std::size_t c = static_cast<std::size_t>(components[i]);
+            const double shift = comp_w[c] > 0.0 ? comp_sum[c] / comp_w[c] : 0.0;
+            fe[1](i) -= shift;
+            fe[0](i) += shift;
+        }
+        fe[0].array() -= wmean(fe[0]);
+        for (std::size_t d = 2; d < rdims; ++d) {
+            fe[d].array() -= wmean(fe[d]);
+        }
+    }
+}
+
 }  // namespace
 
 GelbachResult decompose(const Eigen::VectorXd& y_in,
@@ -3457,7 +3630,15 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             // inputs (the exact pre-fast-path code) so every downstream
             // quantity — coefficients, covariance, residuals, FE effects —
             // is bitwise the reference on graphs the warm start cannot
-            // certify. Costs one extra fit; correctness never degrades.
+            // certify. CAUTION (adversarial audit G1, 09jul2026): the
+            // retained fit's own per-dimension FE split carries a WEAKER
+            // certificate than the fast path (GS map recovery; its
+            // update-size stopping rule is blind to slow graph modes and can
+            // return a materially wrong split with converged=1 on
+            // ill-conditioned FE graphs). The numbers are kept bitwise for
+            // A/B reproducibility, but the split is cross-checked against
+            // one MLSMR exact-normal-equations solve further down and
+            // flagged loudly when it fails.
             HdfeOptions hr = ho;
             hr.retain_fixed_effects = true;
             reg_ret.reset(new v11::HdfeRegressorV11(hr));
@@ -3468,127 +3649,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         // Post-recovery normalization: warm path only (the retained-fit
         // fallback normalizes inside v11).
         if (warm_done) {
-        // Neumaier-compensated weighted mean (matches v11 weighted_mean).
-        auto wmean = [&](const Eigen::VectorXd& v) -> double {
-            double sum = 0.0, comp = 0.0, wsum = 0.0, wcomp = 0.0;
-            for (Eigen::Index i = 0; i < v.size(); ++i) {
-                const double wi = wk_ptr ? (*wk_ptr)[i] : 1.0;
-                const double term = v[i] * wi;
-                const double t = sum + term;
-                comp += (std::abs(sum) >= std::abs(term)) ? ((sum - t) + term)
-                                                          : ((term - t) + sum);
-                sum = t;
-                const double tw = wsum + wi;
-                wcomp += (std::abs(wsum) >= std::abs(wi)) ? ((wsum - tw) + wi)
-                                                          : ((wi - tw) + wsum);
-                wsum = tw;
-            }
-            const double denom = wsum + wcomp;
-            return denom > 0.0 ? (sum + comp) / denom : 0.0;
-        };
-        const std::size_t rdims = fe_effects_sep.size();
-        if (rdims == 1) {
-            fe_effects_sep[0].array() -= wmean(fe_effects_sep[0]);
-        } else if (rdims >= 2) {
-            // Component normalization: shift the per-mobility-component mean of
-            // FE2 into FE1, then center FE1 (and dims >= 2) globally.
-            // Compact raw level codes first (direct-index when dense, hash otherwise).
-            auto compact_ids = [nk](const Eigen::VectorXi& f, std::vector<int>& out) -> int {
-                out.resize(static_cast<std::size_t>(nk));
-                long long mn = std::numeric_limits<long long>::max();
-                long long mx = std::numeric_limits<long long>::min();
-                for (Eigen::Index i = 0; i < nk; ++i) {
-                    mn = std::min<long long>(mn, f[i]);
-                    mx = std::max<long long>(mx, f[i]);
-                }
-                const long long range = (nk > 0) ? (mx - mn + 1) : 0;
-                int next = 0;
-                if (range > 0 && range <= 4LL * nk + 1024) {
-                    std::vector<int> lut(static_cast<std::size_t>(range), -1);
-                    for (Eigen::Index i = 0; i < nk; ++i) {
-                        int& slot = lut[static_cast<std::size_t>(f[i] - mn)];
-                        if (slot < 0) {
-                            slot = next++;
-                        }
-                        out[static_cast<std::size_t>(i)] = slot;
-                    }
-                } else {
-                    std::unordered_map<int, int> lut;
-                    lut.reserve(static_cast<std::size_t>(nk) / 4 + 16);
-                    for (Eigen::Index i = 0; i < nk; ++i) {
-                        auto ins = lut.emplace(f[i], next);
-                        if (ins.second) {
-                            ++next;
-                        }
-                        out[static_cast<std::size_t>(i)] = ins.first->second;
-                    }
-                }
-                return next;
-            };
-            std::vector<int> c0, c1;
-            const int K0 = compact_ids(fes_k[0], c0);
-            const int K1 = compact_ids(fes_k[1], c1);
-            // Union-find over the bipartite (fe0, fe1) level graph.
-            std::vector<int> parent(static_cast<std::size_t>(K0) +
-                                    static_cast<std::size_t>(K1));
-            for (std::size_t i = 0; i < parent.size(); ++i) {
-                parent[i] = static_cast<int>(i);
-            }
-            auto find_root = [&parent](int a) -> int {
-                while (parent[static_cast<std::size_t>(a)] != a) {
-                    parent[static_cast<std::size_t>(a)] =
-                        parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(a)])];
-                    a = parent[static_cast<std::size_t>(a)];
-                }
-                return a;
-            };
-            for (Eigen::Index i = 0; i < nk; ++i) {
-                const int ra = find_root(c0[static_cast<std::size_t>(i)]);
-                const int rb = find_root(K0 + c1[static_cast<std::size_t>(i)]);
-                if (ra != rb) {
-                    parent[static_cast<std::size_t>(rb)] = ra;
-                }
-            }
-            std::vector<int> comp_id(parent.size(), -1);
-            int num_components = 0;
-            Eigen::VectorXi components(nk);
-            for (Eigen::Index i = 0; i < nk; ++i) {
-                const int r = find_root(c0[static_cast<std::size_t>(i)]);
-                int& cid = comp_id[static_cast<std::size_t>(r)];
-                if (cid < 0) {
-                    cid = num_components++;
-                }
-                components[i] = cid;
-            }
-            std::vector<double> comp_sum(static_cast<std::size_t>(num_components), 0.0);
-            std::vector<double> comp_w(static_cast<std::size_t>(num_components), 0.0);
-            const double* fe1_ptr = fe_effects_sep[1].data();
-            if (wk_ptr) {
-                const double* w = wk_ptr->data();
-                for (Eigen::Index i = 0; i < nk; ++i) {
-                    const std::size_t c = static_cast<std::size_t>(components[i]);
-                    comp_sum[c] += fe1_ptr[i] * w[i];
-                    comp_w[c] += w[i];
-                }
-            } else {
-                for (Eigen::Index i = 0; i < nk; ++i) {
-                    const std::size_t c = static_cast<std::size_t>(components[i]);
-                    comp_sum[c] += fe1_ptr[i];
-                    comp_w[c] += 1.0;
-                }
-            }
-            for (Eigen::Index i = 0; i < nk; ++i) {
-                const std::size_t c = static_cast<std::size_t>(components[i]);
-                const double shift = comp_w[c] > 0.0 ? comp_sum[c] / comp_w[c] : 0.0;
-                fe_effects_sep[1](i) -= shift;
-                fe_effects_sep[0](i) += shift;
-            }
-            fe_effects_sep[0].array() -= wmean(fe_effects_sep[0]);
-            for (std::size_t d = 2; d < rdims; ++d) {
-                fe_effects_sep[d].array() -= wmean(fe_effects_sep[d]);
-            }
-        }
-        gprof_.mark("gel_fe_recovery");
+            normalize_fe_effects_component_style(fe_effects_sep, fes_k, wk_ptr);
+            gprof_.mark("gel_fe_recovery");
         }  // warm_done normalization
     }
     // regu: the regressor every downstream quantity reads from — the fast fit
@@ -3630,31 +3692,123 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         w_raw.resize(n);
         for (Eigen::Index i2 = 0; i2 < n; ++i2) w_raw[i2] = (*weights)[keep[i2]];
     }
+    // Legacy / gate-reject fallback certification (adversarial audit G1,
+    // 09jul2026): the retained fit recovers the per-dimension FE split with
+    // GS map sweeps whose update-size stopping rule is blind to the slow
+    // modes of ill-conditioned FE graphs — it can return a materially wrong
+    // split (sign flips observed) while reporting converged=1 and a clean
+    // identity gap. Cross-check the split against one MLSMR solve of the
+    // exact normal equations (the only certificate that held in the audits)
+    // plus the same gated polish the fast path uses. The reported NUMBERS
+    // are never changed here (XHDFE_GELBACH_FAST_FIT=0 stays bitwise
+    // A/B-reproducible); a failed cross-check sets converged=false and says
+    // so in notes, and an unavailable cross-check is noted softly.
+    if (!gel_fast_fit && !fes_in.empty() && n > 0) {
+        const auto& fe_eff = regu.results().fe_effects;
+        if (fe_eff.size() == fes_in.size() &&
+            fe_eff[0].size() == n) {
+            Eigen::VectorXd partial = e;
+            for (const auto& fd : fe_eff) partial += fd;
+            const Eigen::VectorXd* wk_cert = weights != nullptr ? &w_raw : nullptr;
+            HdfeOptions mo = ho;
+            mo.absorption_method = AbsorptionMethod::Mlsmr;
+            mo.retain_fixed_effects = true;
+            mo.krylov_lambda = 0.0;
+            Eigen::MatrixXd xin(n, 0);
+            detail::AbsorptionResult ares =
+                detail::absorb_fixed_effects_mlsmr(partial, xin, fes, wk_cert, mo);
+            bool check_ran = false;
+            const std::size_t rd = fes.size();
+            if (ares.converged && ares.fe_means.size() == rd &&
+                ares.fe_group_ids.size() == rd && ares.fe_levels.size() == rd) {
+                std::vector<Eigen::VectorXd> cand(rd);
+                Eigen::VectorXd resid = partial;
+                for (std::size_t d = 0; d < rd; ++d) {
+                    cand[d].resize(n);
+                    const std::vector<int>& gid = ares.fe_group_ids[d];
+                    const Eigen::VectorXd& lev = ares.fe_means[d];
+                    for (Eigen::Index i = 0; i < n; ++i) {
+                        const double v = lev[gid[static_cast<std::size_t>(i)]];
+                        cand[d][i] = v;
+                        resid[i] -= v;
+                    }
+                }
+                HdfeOptions po = ho;
+                po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
+                detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
+                    resid, ares.fe_group_ids, ares.fe_levels, wk_cert, po,
+                    ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
+                if (rec.converged && rec.contributions.size() == rd) {
+                    for (std::size_t d = 0; d < rd; ++d) {
+                        cand[d].noalias() += rec.contributions[d];
+                    }
+                    normalize_fe_effects_component_style(cand, fes, wk_cert);
+                    double rel = 0.0;
+                    for (std::size_t d = 0; d < rd; ++d) {
+                        const double scale =
+                            std::max(1.0, fe_eff[d].cwiseAbs().maxCoeff());
+                        rel = std::max(
+                            rel,
+                            (cand[d] - fe_eff[d]).cwiseAbs().maxCoeff() / scale);
+                    }
+                    check_ran = true;
+                    if (rel > 1e-3) {
+                        res.converged = false;
+                        res.notes +=
+                            "per-dimension FE split failed the exact-normal-"
+                            "equations cross-check on this graph "
+                            "(ill-conditioned); FE-block deltas from this "
+                            "legacy/fallback path are unreliable — use the "
+                            "default fast path. ";
+                    }
+                }
+            }
+            if (!check_ran) {
+                res.notes +=
+                    "per-dimension FE split could not be independently "
+                    "certified on this graph. ";
+            }
+        }
+    }
     const Eigen::VectorXi* ccodes_ptr = nullptr;
     if (cluster != nullptr) {
         if (cluster->size() != n0) throw std::runtime_error("gelbach: cluster length mismatch");
-        std::unordered_map<int, int> lev;
-        ccodes.resize(n);
-        for (Eigen::Index i = 0; i < n; ++i) {
-            auto it = lev.find((*cluster)[keep[i]]);
-            if (it == lev.end()) it = lev.emplace((*cluster)[keep[i]], n_clusters++).first;
-            ccodes[i] = it->second;
+        // vce is the single source of truth: cluster ids supplied with a
+        // non-cluster vce are ignored (previously the meat and multipliers
+        // silently switched to the clustered estimator while the caller had
+        // asked for — and the output was labelled — robust/unadjusted).
+        if (options.vce == GelbachVce::Cluster) {
+            std::unordered_map<int, int> lev;
+            ccodes.resize(n);
+            for (Eigen::Index i = 0; i < n; ++i) {
+                auto it = lev.find((*cluster)[keep[i]]);
+                if (it == lev.end()) it = lev.emplace((*cluster)[keep[i]], n_clusters++).first;
+                ccodes[i] = it->second;
+            }
+            ccodes_ptr = &ccodes;
         }
-        ccodes_ptr = &ccodes;
     }
     res.n_obs = static_cast<long long>(n);
 
     // weights: wq = moment weight (aweights normalized to sum n), sf = score
-    // factor for the robust meat (aweights: wq; fweights: sqrt(w)), n_eff =
-    // effective observation count (aweights: n; fweights: sum w). Matches
-    // b1x2 / Stata _robust conventions exactly (validated).
+    // factor for the sandwich meat, n_eff = effective observation count
+    // (aweights: n; fweights: sum w). Matches b1x2 / Stata _robust
+    // conventions exactly (validated). fweights score factor: sqrt(w) is
+    // correct only for the ROBUST meat, where each row's outer product then
+    // carries weight w (a row stands for w identical observations); under
+    // clustering the meat sums score rows within a cluster BEFORE the outer
+    // product, so a row standing for w copies must contribute w*z, not
+    // sqrt(w)*z — scoring sqrt(w) there understates the SEs (~sqrt(w-bar)x;
+    // fw-x-cluster audit finding F2, 09jul2026, fixed to match the
+    // row-expanded definition and b1x2 on expanded data).
     Eigen::VectorXd wq = Eigen::VectorXd::Ones(n);
     Eigen::VectorXd sf = Eigen::VectorXd::Ones(n);
     double n_eff = static_cast<double>(n);
     if (weights != nullptr) {
         if (freq_weights) {
             wq = w_raw;
-            sf = w_raw.cwiseSqrt();
+            sf = options.vce == GelbachVce::Cluster ? w_raw
+                                                    : w_raw.cwiseSqrt();
             n_eff = w_raw.sum();
         } else {
             wq = w_raw * (static_cast<double>(n) / w_raw.sum());

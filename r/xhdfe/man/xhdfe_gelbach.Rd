@@ -40,7 +40,30 @@ weights instead.}
 An object of class \code{xhdfe_gelbach}: a list with the base and full
 coefficients on \code{x1}, the per-group contributions \code{delta} with
 standard errors \code{se}, the total movement per \code{x1} column, and
-sample information.
+sample information. Always check \code{$converged}: when FALSE the
+decomposition (or its internal convergence cross-check) failed and the
+results are unreliable (\code{$notes} explains); \code{print} warns.
+A small \code{$identity_gap} certifies the decomposition identity only —
+it is not evidence that the per-dimension FE split is accurate.
+}
+\note{
+The default compiled path is the more-converged one: it resolves the
+per-FE-dimension split with an exact normal-equations (MLSMR) solve behind
+a fail-closed gate. The environment kill-switches
+\code{XHDFE_GELBACH_FAST_FIT=0}, \code{XHDFE_GELBACH_WARM_RECOVERY=0} and
+\code{XHDFE_GELBACH_WITHIN_BATCH=0} exist only to reproduce pre-2.14.1
+legacy output bitwise for A/B comparison — on ill-conditioned FE graphs the
+legacy retained path's per-dimension FE split can be materially wrong (its
+Gauss-Seidel recovery certificate is blind to slow graph modes; adversarial
+audit 09jul2026); since 2.14.2 those paths cross-check the split against
+the exact normal equations and set \code{converged = FALSE} when the check
+fails. Do not use them as a safety fallback.
+
+With two or more mobility components in the FE graph, the split of the
+combined FE contribution into per-dimension deltas depends on a
+normalization convention (component mean-shift); the total across FE
+dimensions and \code{b_base - b_full} are convention-invariant. Within a
+single connected mobility component the x1-row split is identified.
 }
 \description{
 Explains the movement of the \code{x1} coefficients between the base
