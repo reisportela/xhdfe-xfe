@@ -185,12 +185,21 @@ Cholesky solve (default 50000); larger problems use preconditioned CG.
 {opt fwltol(#)} is the absorber tolerance for the {opt controls()} step
 (default 1e-10).
 
-{phang}The leverage (JLA) solves are batched: each block of Rademacher draws
-is solved as one multi-right-hand-side system, with results identical for any
-block size and any thread count. The advanced environment variable
-{cmd:XHDFE_AKM_JLA_BLOCK} overrides the block size (default 8; {cmd:0}
-selects the pre-2.14 sequential solver, whose per-edge instruction schedule
-differs from the batched kernels at the last-ulp level).
+{phang}{it:Advanced performance environment variables} (defaults are tuned;
+override only for diagnostics or unusual hardware; none changes the default
+numeric output). {cmd:XHDFE_AKM_TEAM} caps the OpenMP team size used by the
+per-iteration solver regions: the default caps it by the edge work so a large
+thread pool does not oversubscribe small/medium graphs (the dominant speed
+lever below ~10M rows); {cmd:0} restores the uncapped team, {it:k} forces
+{it:k} threads. {cmd:XHDFE_AKM_JLA_BLOCK} overrides the JLA multi-RHS block
+size (default 8; {cmd:0} selects the pre-2.14 sequential solver, whose
+per-edge instruction schedule differs from the batched kernels at the
+last-ulp level). {cmd:XHDFE_AKM_SE_BLOCK} does the same for the component-SE /
+eigen-diagnostics / lincom solves (default 8; {cmd:0} = sequential).
+{cmd:XHDFE_AKM_SCATTER_CSR} (default on) selects the parallel CSR-ordered
+Rademacher scatter at scale; {cmd:0} restores the sequential scatter. The
+leverage and SE solves are batched so results are identical for any block
+size and any thread count.
 
 {dlgtab:Output}
 

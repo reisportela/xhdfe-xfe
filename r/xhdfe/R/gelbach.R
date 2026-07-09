@@ -55,6 +55,9 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   if (!is.null(cluster) && !identical(vce, "cluster")) {
     stop("cluster ids supplied but vce != \"cluster\"", call. = FALSE)
   }
+  if (identical(vce, "cluster") && is.null(cluster)) {
+    stop("vce = \"cluster\" requires cluster ids", call. = FALSE)
+  }
   cl <- if (is.null(cluster)) NULL else .akm_id_codes(cluster, "cluster")
   w <- if (is.null(weights)) NULL else as.numeric(weights)
   out <- .xhdfe_cpp_gelbach(y, x1, X2, as.integer(sizes), fe_list, cl,

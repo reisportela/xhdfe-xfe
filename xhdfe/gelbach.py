@@ -123,6 +123,12 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         cluster = np.asarray(cluster)
         _, ccodes = np.unique(cluster, return_inverse=True)
     else:
+        # Single source of truth: cluster ids with a non-cluster vce would
+        # otherwise be silently dropped and the user would get robust/
+        # unadjusted SEs labelled as such — match the Stata and R front-ends,
+        # which reject this combination rather than ignore it.
+        if cluster is not None:
+            raise ValueError("cluster ids supplied but vce != 'cluster'")
         ccodes = None
     x2_groups = dict(x2_groups or {})
     fes = dict(fes or {})

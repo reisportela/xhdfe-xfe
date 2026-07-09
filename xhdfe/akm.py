@@ -79,6 +79,24 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
 
     See ``help(xhdfe.py_hdfe_v11.akm_kss)`` for the full argument list
     (leave_out_level, leverages, jla_draws, seed, prune, ...).
+
+    Advanced performance environment variables (defaults are tuned; none
+    changes the default numeric output):
+
+    - ``XHDFE_AKM_TEAM`` caps the OpenMP team size of the per-iteration solver
+      regions. The default caps it by the edge work so a large thread pool does
+      not oversubscribe small/medium graphs (the dominant speed lever below
+      ~10M rows); ``0`` restores the uncapped team, ``k`` forces ``k`` threads.
+    - ``XHDFE_AKM_JLA_BLOCK`` overrides the JLA multi-RHS block size (default 8;
+      ``0`` selects the pre-2.14 sequential solver, last-ulp different).
+    - ``XHDFE_AKM_SE_BLOCK`` does the same for the component-SE / eigen-
+      diagnostics / lincom solves (default 8; ``0`` = sequential).
+    - ``XHDFE_AKM_SCATTER_CSR`` (default on) selects the parallel CSR-ordered
+      Rademacher scatter at scale; ``0`` restores the sequential scatter.
+
+    The leverage and SE solves are batched so results are identical for any
+    block size and any thread count. A ``RuntimeWarning`` is emitted if the
+    decomposition does not converge (check ``res['converged']``).
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     wc, wu = _id_codes(worker)
@@ -92,6 +110,20 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
             res["row_worker"] = wu[np.asarray(res["row_worker"])]
         if fu is not None and res.get("row_firm") is not None:
             res["row_firm"] = fu[np.asarray(res["row_firm"])]
+        # Surface non-convergence loudly, matching the Stata front-end
+        # (di as err) and the Gelbach front-end's warning — a silently
+        # returned non-converged decomposition is a footgun.
+        if res.get("converged") is False:
+            import warnings
+
+            note = str(res.get("notes", "")).strip()
+            warnings.warn(
+                "xhdfe.akm.akm_kss: the AKM/KSS decomposition did not "
+                "converge — results are unreliable."
+                + (f" notes: {note}" if note else ""),
+                RuntimeWarning,
+                stacklevel=2,
+            )
     return res
 
 

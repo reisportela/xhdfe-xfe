@@ -92,6 +92,22 @@ sqrt(match-length) FGLS weighting), person-year weighted components with
 denominator (n - 1), and the JLA leverage approximation with deterministic
 seeding for large samples.
 }
+\section{Advanced performance environment variables}{
+
+Defaults are tuned and none changes the default numeric output.
+\code{XHDFE_AKM_TEAM} caps the OpenMP team size of the per-iteration
+solver regions (the default caps it by the edge work so a large thread
+pool does not oversubscribe small/medium graphs \emph{--} the dominant
+speed lever below ~10M rows; \code{0} = uncapped, \code{k} forces
+\code{k}). \code{XHDFE_AKM_JLA_BLOCK} / \code{XHDFE_AKM_SE_BLOCK} set the
+multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
+(default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
+(default on) selects the parallel CSR-ordered Rademacher scatter at scale.
+The solves are batched so results are identical for any block size and
+thread count. A \code{warning()} fires on non-convergence
+(check \code{$converged}).
+}
+
 \examples{
 \donttest{
 n_w <- 100; n_f <- 12; reps <- 4

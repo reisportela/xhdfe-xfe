@@ -100,6 +100,19 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #' @param fweights Optional positive-integer frequency weights (row i stands
 #'   for fweights[i] identical person-year observations). Match-level point
 #'   decomposition only; equals the row-expanded run exactly.
+#' @section Advanced performance environment variables:
+#'   Defaults are tuned and none changes the default numeric output.
+#'   \code{XHDFE_AKM_TEAM} caps the OpenMP team size of the per-iteration
+#'   solver regions (the default caps it by the edge work so a large thread
+#'   pool does not oversubscribe small/medium graphs \emph{--} the dominant
+#'   speed lever below ~10M rows; \code{0} = uncapped, \code{k} forces
+#'   \code{k}). \code{XHDFE_AKM_JLA_BLOCK} / \code{XHDFE_AKM_SE_BLOCK} set the
+#'   multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
+#'   (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
+#'   (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
+#'   The solves are batched so results are identical for any block size and
+#'   thread count. A \code{warning()} fires on non-convergence
+#'   (check \code{$converged}).
 #' @param gpu Solve the two-way systems on the CUDA backend when available.
 #' @return An object of class \code{xhdfe_akm_kss}: a list with the sample
 #'   summary, observation-level \code{alpha}/\code{psi} on the kept rows,
@@ -199,6 +212,13 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                             .akm_id_codes(firm, "firm"),
                             X, opts, fweights)
   class(out) <- "xhdfe_akm_kss"
+  # Surface non-convergence loudly, matching the Stata front-end and the
+  # Gelbach treatment (a silently returned non-converged decomposition is a
+  # footgun); the flag stays on the object for programmatic checks.
+  if (isFALSE(out$converged)) {
+    warning("xhdfe_akm_kss: the AKM/KSS decomposition did not converge - ",
+            "results are unreliable (see $notes).", call. = FALSE)
+  }
   out
 }
 

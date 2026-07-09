@@ -188,7 +188,7 @@ EOF
   fi
 }
 
-write_pkg xhdfe "2.14.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
+write_pkg xhdfe "2.15.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
 write_pkg xfe "1.10.0" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
 
 cat > "$outdir/README.txt" <<'EOF'
