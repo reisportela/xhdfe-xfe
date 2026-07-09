@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.14.0.20260709 LANGUAGES CXX)
+project(xhdfe VERSION 2.14.1.20260709 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,9 +119,9 @@ set(XHDFE_SOURCES
     src/hdfe_regressor_v11.cpp
     src/fe_absorption.cpp
     src/schwarz_demean.cpp
+    src/akm_kss.cpp
     src/iv.cpp
     src/ols.cpp
-    src/akm_kss.cpp
 )
 if(XHDFE_ENABLE_CUDA)
     list(APPEND XHDFE_SOURCES src/fe_absorption_cuda.cu src/akm_kss_cuda.cu)

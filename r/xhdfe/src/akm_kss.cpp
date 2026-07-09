@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <chrono>
@@ -43,6 +44,9 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#if defined(__GNUC__) && !defined(__clang__)
+#include <parallel/algorithm>
+#endif
 #endif
 
 #include "hdfe/hdfe_regressor_v11.hpp"
@@ -120,9 +124,53 @@ struct UnionFind {
     }
 };
 
+// Env-gated phase profiler (XHDFE_AKM_PROFILE=1 -> stderr): diagnostic only,
+// no effect on results or default behavior.
+struct AkmPhaseProfiler {
+    bool on = false;
+    std::chrono::steady_clock::time_point t0;
+    AkmPhaseProfiler() {
+        const char* e = std::getenv("XHDFE_AKM_PROFILE");
+        on = (e != nullptr && e[0] != '\0' && e[0] != '0');
+        t0 = std::chrono::steady_clock::now();
+    }
+    void mark(const char* phase) {
+        if (!on) return;
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+        std::fprintf(stderr, "[akm-profile] %-24s %10.1f ms\n", phase, ms);
+        t0 = t1;
+    }
+};
+
 int relabel_dense(const Eigen::VectorXi& ids, std::vector<int>& out) {
     const Eigen::Index n = ids.size();
     out.resize(static_cast<std::size_t>(n));
+    // Fast path for near-dense id ranges: a direct-indexed LUT assigns labels
+    // in the same first-appearance row order as the hash map, so the output
+    // is identical; it just avoids ~n hash lookups.
+    if (n > 0) {
+        int mn = ids[0], mx = ids[0];
+        for (Eigen::Index i = 1; i < n; ++i) {
+            mn = std::min(mn, ids[i]);
+            mx = std::max(mx, ids[i]);
+        }
+        const long long range =
+            static_cast<long long>(mx) - static_cast<long long>(mn) + 1;
+        if (range <= 4LL * static_cast<long long>(n) + 1024) {
+            std::vector<int> lut(static_cast<std::size_t>(range), -1);
+            int next = 0;
+            for (Eigen::Index i = 0; i < n; ++i) {
+                int& slot = lut[static_cast<std::size_t>(ids[i] - mn)];
+                if (slot < 0) {
+                    slot = next++;
+                }
+                out[static_cast<std::size_t>(i)] = slot;
+            }
+            return next;
+        }
+    }
     std::unordered_map<int, int> levels;
     levels.reserve(static_cast<std::size_t>(std::min<Eigen::Index>(n, 1 << 20)));
     int next = 0;
@@ -223,11 +271,13 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
     if (n == 0) {
         return out;
     }
+    AkmPhaseProfiler bprof_;
 
     std::vector<int> w0;
     std::vector<int> f0;
     const int W0 = relabel_dense(worker_ids, w0);
     const int F0 = relabel_dense(firm_ids, f0);
+    bprof_.mark("los_relabel");
 
     // Initial match table: sort row indices by (worker, firm).
     std::vector<std::int64_t> order(static_cast<std::size_t>(n));
@@ -240,12 +290,21 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                     static_cast<std::uint64_t>(F0) +
                 static_cast<std::uint64_t>(f0[static_cast<std::size_t>(i)]);
         }
-        std::sort(order.begin(), order.end(), [&key](std::int64_t a, std::int64_t b) {
+        const auto cmp = [&key](std::int64_t a, std::int64_t b) {
             return key[static_cast<std::size_t>(a)] != key[static_cast<std::size_t>(b)]
                        ? key[static_cast<std::size_t>(a)] < key[static_cast<std::size_t>(b)]
                        : a < b;
-        });
+        };
+        // cmp is a strict total order (index tie-break), so every correct sort
+        // yields the identical permutation; use the parallel sort where
+        // available (GCC libstdc++ parallel mode) and std::sort elsewhere.
+#if defined(_OPENMP) && defined(__GNUC__) && !defined(__clang__)
+        __gnu_parallel::sort(order.begin(), order.end(), cmp);
+#else
+        std::sort(order.begin(), order.end(), cmp);
+#endif
     }
+    bprof_.mark("los_sort");
 
     std::vector<int> match_w;
     std::vector<int> match_f;
@@ -262,6 +321,7 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         row_match_all[row] = static_cast<int>(match_w.size()) - 1;
     }
     const std::size_t n_matches_all = match_w.size();
+    bprof_.mark("los_match_table");
     std::vector<std::uint8_t> active(n_matches_all, 1);
 
     // Largest connected component over active matches; component size is
@@ -323,17 +383,34 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         }
         out.set.n_obs_connected = obs;
     }
+    bprof_.mark("los_largest_cc");
 
     if (prune) {
         std::vector<int> worker_deg(static_cast<std::size_t>(W0));
         std::vector<int> mover_idx(static_cast<std::size_t>(W0));
         std::vector<int> firm_idx(static_cast<std::size_t>(F0));
+        double ms_deg = 0.0, ms_csr = 0.0, ms_artic = 0.0, ms_drop = 0.0;
+        auto now_ = std::chrono::steady_clock::now;
+        auto acc_ = [](std::chrono::steady_clock::time_point& t, double& sink) {
+            const auto t1 = std::chrono::steady_clock::now();
+            sink += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t).count() / 1000.0;
+            t = t1;
+        };
         while (true) {
+            auto tp_ = now_();
             // Movers = workers with >= 2 active matches (distinct firms).
+            // match_w is non-decreasing (match table built from (worker, firm)
+            // sorted rows), so per-worker counts land in contiguous runs and
+            // parallel chunks only race on at most one boundary worker each —
+            // atomics keep the counts exact.
             std::fill(worker_deg.begin(), worker_deg.end(), 0);
-            for (std::size_t m = 0; m < n_matches_all; ++m) {
-                if (active[m]) {
-                    ++worker_deg[static_cast<std::size_t>(match_w[m])];
+            const std::int64_t m_all = static_cast<std::int64_t>(n_matches_all);
+#pragma omp parallel for schedule(static)
+            for (std::int64_t m = 0; m < m_all; ++m) {
+                const std::size_t ms = static_cast<std::size_t>(m);
+                if (active[ms]) {
+#pragma omp atomic
+                    ++worker_deg[static_cast<std::size_t>(match_w[ms])];
                 }
             }
             std::fill(mover_idx.begin(), mover_idx.end(), -1);
@@ -356,6 +433,7 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             if (n_mov == 0) {
                 break;
             }
+            acc_(tp_, ms_deg);
             const int n_vertices = n_mov + n_frm;
             std::vector<int> adj_ptr(static_cast<std::size_t>(n_vertices) + 1, 0);
             for (std::size_t m = 0; m < n_matches_all; ++m) {
@@ -381,8 +459,10 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                     adj[static_cast<std::size_t>(fill_pos[static_cast<std::size_t>(fv)]++)] = mv;
                 }
             }
+            acc_(tp_, ms_csr);
             std::vector<std::uint8_t> artic;
             articulation_points(n_vertices, adj_ptr, adj, artic);
+            acc_(tp_, ms_artic);
             std::vector<std::uint8_t> bad_worker(static_cast<std::size_t>(W0), 0);
             bool any_bad = false;
             for (int w = 0; w < W0; ++w) {
@@ -395,13 +475,22 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             if (!any_bad) {
                 break;
             }
-            for (std::size_t m = 0; m < n_matches_all; ++m) {
-                if (active[m] && bad_worker[static_cast<std::size_t>(match_w[m])]) {
-                    active[m] = 0;
+#pragma omp parallel for schedule(static)
+            for (std::int64_t m = 0; m < m_all; ++m) {
+                const std::size_t ms = static_cast<std::size_t>(m);
+                if (active[ms] && bad_worker[static_cast<std::size_t>(match_w[ms])]) {
+                    active[ms] = 0;
                 }
             }
             largest_cc();
             ++out.set.prune_iterations;
+            acc_(tp_, ms_drop);
+        }
+        if (bprof_.on) {
+            std::fprintf(stderr,
+                         "[akm-profile]   prune sub: deg=%.1f csr=%.1f artic=%.1f "
+                         "drop+cc=%.1f ms\n",
+                         ms_deg, ms_csr, ms_artic, ms_drop);
         }
 
         // Drop workers observed only once (LeaveOutTwoWay: T > 1 filter).
@@ -416,6 +505,7 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                 active[m] = 0;
             }
         }
+        bprof_.mark("los_prune_loop");
     }
 
     // Final sample: rows of active matches, final dense labels in
@@ -460,11 +550,16 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                          static_cast<std::uint64_t>(std::max(out.n_firms, 1)) +
                      static_cast<std::uint64_t>(out.row_f[k]);
         }
-        std::sort(ord.begin(), ord.end(), [&key](std::int64_t a, std::int64_t b) {
+        const auto cmp2 = [&key](std::int64_t a, std::int64_t b) {
             return key[static_cast<std::size_t>(a)] != key[static_cast<std::size_t>(b)]
                        ? key[static_cast<std::size_t>(a)] < key[static_cast<std::size_t>(b)]
                        : a < b;
-        });
+        };
+#if defined(_OPENMP) && defined(__GNUC__) && !defined(__clang__)
+        __gnu_parallel::sort(ord.begin(), ord.end(), cmp2);
+#else
+        std::sort(ord.begin(), ord.end(), cmp2);
+#endif
         for (std::size_t k = 0; k < n_kept; ++k) {
             const std::size_t r = static_cast<std::size_t>(ord[k]);
             if (out.m_w.empty() || out.m_w.back() != out.row_w[r] || out.m_f.back() != out.row_f[r]) {
@@ -501,6 +596,7 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         }
         out.set.n_stayers = out.n_workers - out.set.n_movers;
     }
+    bprof_.mark("los_finalize");
     return out;
 }
 
@@ -1358,28 +1454,6 @@ LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
     }
     return build_leave_out_sample(worker_ids, firm_ids, true).set;
 }
-
-namespace {
-// Env-gated phase profiler (XHDFE_AKM_PROFILE=1 -> stderr): diagnostic only,
-// no effect on results or default behavior.
-struct AkmPhaseProfiler {
-    bool on = false;
-    std::chrono::steady_clock::time_point t0;
-    AkmPhaseProfiler() {
-        const char* e = std::getenv("XHDFE_AKM_PROFILE");
-        on = (e != nullptr && e[0] != ' ' && e[0] != '0');
-        t0 = std::chrono::steady_clock::now();
-    }
-    void mark(const char* phase) {
-        if (!on) return;
-        const auto t1 = std::chrono::steady_clock::now();
-        const double ms =
-            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
-        std::fprintf(stderr, "[akm-profile] %-24s %10.1f ms\n", phase, ms);
-        t0 = t1;
-    }
-};
-}  // namespace
 
 AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                                const Eigen::VectorXi& worker_ids,
@@ -3199,6 +3273,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         const GelbachOptions& options,
                         const Eigen::VectorXd* weights,
                         bool freq_weights) {
+    akm::AkmPhaseProfiler gprof_;
     const Eigen::Index n0 = y_in.size();
     const int p = static_cast<int>(X1_in.cols());
     const int q = static_cast<int>(X2_in.cols());
@@ -3231,28 +3306,309 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (weights != nullptr && weights->size() != n0) {
         throw std::runtime_error("gelbach: weights length mismatch");
     }
+    // Full fit strategy: retain_fixed_effects makes the absorber ineligible
+    // for the accelerated (auto-MLSMR) methods, so the 7+-column joint fit
+    // runs several times slower. Instead: (a) run the joint fit FAST without
+    // retention; (b) when FE blocks are needed, recover the per-observation
+    // FE contributions with a second single-column fit on the partialled
+    // outcome y - X b_full — the same recovery code path and normalization
+    // the retained fit uses, at ~1/(p+q) of the absorption cost.
+    // XHDFE_GELBACH_FAST_FIT=0 restores the single retained fit.
+    bool gel_fast_fit = true;
+    if (const char* gf = std::getenv("XHDFE_GELBACH_FAST_FIT")) {
+        gel_fast_fit = !(gf[0] == '0' && gf[1] == '\0');
+    }
     HdfeOptions ho;
     ho.se_type = StandardErrorType::Homoskedastic;
-    ho.retain_fixed_effects = !fes_in.empty();
+    ho.retain_fixed_effects = !fes_in.empty() && !gel_fast_fit;
     ho.num_threads = options.num_threads;
     ho.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 reg(ho);
     reg.fit(y_in, X_full, fes_in, weights);
-    if (!reg.results().converged) {
+    gprof_.mark("gel_full_fit");
+    // (b) separate FE recovery on the kept sample (fast-fit mode only).
+    // A retained 1-column fit would spend ~95% of its time in non-accelerated
+    // GS sweeps whose alphas get discarded when the hybrid check falls back to
+    // the map recovery — so call the map recovery directly on partial and
+    // replicate the v11 post-recovery normalization (Component style default).
+    std::vector<Eigen::VectorXd> fe_effects_sep;
+    Eigen::MatrixXd W_pre;  // demeaned [x1, x2] reused by the sandwich VCE below
+    std::unique_ptr<v11::HdfeRegressorV11> reg_ret;  // reference-fallback fit
+    if (gel_fast_fit && !fes_in.empty()) {
+        const Eigen::VectorXi& keep0 = reg.results().sample_index;
+        const Eigen::Index nk = keep0.size();
+        Eigen::VectorXd partial(nk);
+        const Eigen::VectorXd& cf = reg.results().coefficients;
+        const int ncf = static_cast<int>(cf.size()) - (cf.size() == p + q + 1 ? 1 : 0);
+        std::vector<Eigen::VectorXi> fes_k(fes_in.size());
+        for (std::size_t d = 0; d < fes_in.size(); ++d) {
+            fes_k[d].resize(nk);
+        }
+        Eigen::VectorXd w_k;
+        if (weights != nullptr) {
+            w_k.resize(nk);
+        }
+#pragma omp parallel for schedule(static)
+        for (Eigen::Index i = 0; i < nk; ++i) {
+            const Eigen::Index r0 = keep0[i];
+            double acc = y_in[r0];
+            for (int c = 0; c < ncf && c < p + q; ++c) {
+                acc -= X_full(r0, c) * cf[c];
+            }
+            partial[i] = acc;
+            for (std::size_t d = 0; d < fes_in.size(); ++d) {
+                fes_k[d][i] = fes_in[d][r0];
+            }
+            if (weights != nullptr) {
+                w_k[i] = (*weights)[r0];
+            }
+        }
+        const Eigen::VectorXd* wk_ptr = weights != nullptr ? &w_k : nullptr;
+        // Warm start: one MLSMR solve on partial (~8 Krylov iterations) gives
+        // near-converged per-level alphas; the exact map recovery then only
+        // polishes the small residual (1-2 sweeps) under its usual stopping
+        // rule. From-scratch GS recovery on this graph needs ~70 sweeps.
+        // Fail-closed: any non-convergence falls back to from-scratch recovery.
+        bool warm_recovery = !fes_k.empty();
+        if (const char* wr = std::getenv("XHDFE_GELBACH_WARM_RECOVERY")) {
+            warm_recovery = warm_recovery && !(wr[0] == '0' && wr[1] == '\0');
+        }
+        bool warm_done = false;
+        // For sandwich VCEs the within transform needs demeaned [x1, x2] as
+        // well — feed those columns to the SAME MLSMR call so one
+        // preconditioner build and one batched multi-RHS solve serve both the
+        // FE recovery warm start (y-slot alphas) and the within matrix W.
+        const bool want_W =
+            options.vce != GelbachVce::Unadjusted && (p + q) > 0;
+        if (warm_recovery) {
+            HdfeOptions mo = ho;
+            mo.absorption_method = AbsorptionMethod::Mlsmr;
+            mo.retain_fixed_effects = true;
+            // No ridge: with the default krylov_lambda the recovered alphas
+            // carry a lambda*A^{-1}*alpha bias that explodes in the slow
+            // directions of ill-conditioned FE graphs (observed 1e-5-level
+            // per-dim splits) while the GS gradient stays ~lambda*alpha/counts
+            // — invisible to any polish-side certificate. Solving the exact
+            // normal equations removes the bias at the source.
+            mo.krylov_lambda = 0.0;
+            Eigen::MatrixXd xin(nk, want_W ? (p + q) : 0);
+            if (want_W) {
+#pragma omp parallel for schedule(static)
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    xin.row(i) = X_full.row(keep0[i]);
+                }
+            }
+            detail::AbsorptionResult ares =
+                detail::absorb_fixed_effects_mlsmr(partial, xin, fes_k, wk_ptr, mo);
+            const std::size_t rd = fes_k.size();
+            if (ares.converged && ares.fe_means.size() == rd &&
+                ares.fe_group_ids.size() == rd && ares.fe_levels.size() == rd) {
+                std::vector<Eigen::VectorXd> warm(rd);
+                Eigen::VectorXd resid = partial;
+                for (std::size_t d = 0; d < rd; ++d) {
+                    warm[d].resize(nk);
+                    const std::vector<int>& gid = ares.fe_group_ids[d];
+                    const Eigen::VectorXd& lev = ares.fe_means[d];
+#pragma omp parallel for schedule(static)
+                    for (Eigen::Index i = 0; i < nk; ++i) {
+                        const double v = lev[gid[static_cast<std::size_t>(i)]];
+                        warm[d][i] = v;
+                        resid[i] -= v;
+                    }
+                }
+                // Convergence gate (fail-closed): accept the warm path only
+                // when the polish CONVERGES at the estimation tolerance within
+                // a few sweeps; anything else falls back to the full retained
+                // fit (bitwise the reference path). Note on ill-conditioned FE
+                // graphs: the accepted warm solution certifies a ~tol gradient
+                // (tighter than the legacy retained path's fe_tolerance
+                // criterion), so the per-dimension FE split can differ from
+                // pre-2.14.1 output at the fe_tolerance/mu_min level there —
+                // the warm answer is the more-converged one (see the zigzag
+                // precedent). XHDFE_GELBACH_FAST_FIT=0 restores legacy output.
+                HdfeOptions po = ho;
+                po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
+                detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
+                    resid, ares.fe_group_ids, ares.fe_levels, wk_ptr, po,
+                    ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
+                if (gprof_.on) {
+                    std::fprintf(stderr,
+                                 "[akm-profile]   gel gate: mlsmr_it=%d mlsmr_ok=%d "
+                                 "polish_it=%d polish_delta=%.3e polish_ok=%d\n",
+                                 ares.iterations, ares.converged ? 1 : 0,
+                                 rec.iterations, rec.max_delta,
+                                 rec.converged ? 1 : 0);
+                }
+                if (rec.converged && rec.contributions.size() == rd &&
+                    rec.iterations <= 3) {
+                    fe_effects_sep = std::move(warm);
+                    for (std::size_t d = 0; d < rd; ++d) {
+                        fe_effects_sep[d].noalias() += rec.contributions[d];
+                    }
+                    warm_done = true;
+                    if (want_W) {
+                        W_pre = std::move(ares.X_tilde);
+                    }
+                }
+            }
+        }
+        if (!warm_done) {
+            // Reference fallback: rerun the FULL retained fit on the original
+            // inputs (the exact pre-fast-path code) so every downstream
+            // quantity — coefficients, covariance, residuals, FE effects —
+            // is bitwise the reference on graphs the warm start cannot
+            // certify. Costs one extra fit; correctness never degrades.
+            HdfeOptions hr = ho;
+            hr.retain_fixed_effects = true;
+            reg_ret.reset(new v11::HdfeRegressorV11(hr));
+            reg_ret->fit(y_in, X_full, fes_in, weights);
+            gel_fast_fit = false;
+            gprof_.mark("gel_fe_recovery");
+        }
+        // Post-recovery normalization: warm path only (the retained-fit
+        // fallback normalizes inside v11).
+        if (warm_done) {
+        // Neumaier-compensated weighted mean (matches v11 weighted_mean).
+        auto wmean = [&](const Eigen::VectorXd& v) -> double {
+            double sum = 0.0, comp = 0.0, wsum = 0.0, wcomp = 0.0;
+            for (Eigen::Index i = 0; i < v.size(); ++i) {
+                const double wi = wk_ptr ? (*wk_ptr)[i] : 1.0;
+                const double term = v[i] * wi;
+                const double t = sum + term;
+                comp += (std::abs(sum) >= std::abs(term)) ? ((sum - t) + term)
+                                                          : ((term - t) + sum);
+                sum = t;
+                const double tw = wsum + wi;
+                wcomp += (std::abs(wsum) >= std::abs(wi)) ? ((wsum - tw) + wi)
+                                                          : ((wi - tw) + wsum);
+                wsum = tw;
+            }
+            const double denom = wsum + wcomp;
+            return denom > 0.0 ? (sum + comp) / denom : 0.0;
+        };
+        const std::size_t rdims = fe_effects_sep.size();
+        if (rdims == 1) {
+            fe_effects_sep[0].array() -= wmean(fe_effects_sep[0]);
+        } else if (rdims >= 2) {
+            // Component normalization: shift the per-mobility-component mean of
+            // FE2 into FE1, then center FE1 (and dims >= 2) globally.
+            // Compact raw level codes first (direct-index when dense, hash otherwise).
+            auto compact_ids = [nk](const Eigen::VectorXi& f, std::vector<int>& out) -> int {
+                out.resize(static_cast<std::size_t>(nk));
+                long long mn = std::numeric_limits<long long>::max();
+                long long mx = std::numeric_limits<long long>::min();
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    mn = std::min<long long>(mn, f[i]);
+                    mx = std::max<long long>(mx, f[i]);
+                }
+                const long long range = (nk > 0) ? (mx - mn + 1) : 0;
+                int next = 0;
+                if (range > 0 && range <= 4LL * nk + 1024) {
+                    std::vector<int> lut(static_cast<std::size_t>(range), -1);
+                    for (Eigen::Index i = 0; i < nk; ++i) {
+                        int& slot = lut[static_cast<std::size_t>(f[i] - mn)];
+                        if (slot < 0) {
+                            slot = next++;
+                        }
+                        out[static_cast<std::size_t>(i)] = slot;
+                    }
+                } else {
+                    std::unordered_map<int, int> lut;
+                    lut.reserve(static_cast<std::size_t>(nk) / 4 + 16);
+                    for (Eigen::Index i = 0; i < nk; ++i) {
+                        auto ins = lut.emplace(f[i], next);
+                        if (ins.second) {
+                            ++next;
+                        }
+                        out[static_cast<std::size_t>(i)] = ins.first->second;
+                    }
+                }
+                return next;
+            };
+            std::vector<int> c0, c1;
+            const int K0 = compact_ids(fes_k[0], c0);
+            const int K1 = compact_ids(fes_k[1], c1);
+            // Union-find over the bipartite (fe0, fe1) level graph.
+            std::vector<int> parent(static_cast<std::size_t>(K0) +
+                                    static_cast<std::size_t>(K1));
+            for (std::size_t i = 0; i < parent.size(); ++i) {
+                parent[i] = static_cast<int>(i);
+            }
+            auto find_root = [&parent](int a) -> int {
+                while (parent[static_cast<std::size_t>(a)] != a) {
+                    parent[static_cast<std::size_t>(a)] =
+                        parent[static_cast<std::size_t>(parent[static_cast<std::size_t>(a)])];
+                    a = parent[static_cast<std::size_t>(a)];
+                }
+                return a;
+            };
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                const int ra = find_root(c0[static_cast<std::size_t>(i)]);
+                const int rb = find_root(K0 + c1[static_cast<std::size_t>(i)]);
+                if (ra != rb) {
+                    parent[static_cast<std::size_t>(rb)] = ra;
+                }
+            }
+            std::vector<int> comp_id(parent.size(), -1);
+            int num_components = 0;
+            Eigen::VectorXi components(nk);
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                const int r = find_root(c0[static_cast<std::size_t>(i)]);
+                int& cid = comp_id[static_cast<std::size_t>(r)];
+                if (cid < 0) {
+                    cid = num_components++;
+                }
+                components[i] = cid;
+            }
+            std::vector<double> comp_sum(static_cast<std::size_t>(num_components), 0.0);
+            std::vector<double> comp_w(static_cast<std::size_t>(num_components), 0.0);
+            const double* fe1_ptr = fe_effects_sep[1].data();
+            if (wk_ptr) {
+                const double* w = wk_ptr->data();
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    const std::size_t c = static_cast<std::size_t>(components[i]);
+                    comp_sum[c] += fe1_ptr[i] * w[i];
+                    comp_w[c] += w[i];
+                }
+            } else {
+                for (Eigen::Index i = 0; i < nk; ++i) {
+                    const std::size_t c = static_cast<std::size_t>(components[i]);
+                    comp_sum[c] += fe1_ptr[i];
+                    comp_w[c] += 1.0;
+                }
+            }
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                const std::size_t c = static_cast<std::size_t>(components[i]);
+                const double shift = comp_w[c] > 0.0 ? comp_sum[c] / comp_w[c] : 0.0;
+                fe_effects_sep[1](i) -= shift;
+                fe_effects_sep[0](i) += shift;
+            }
+            fe_effects_sep[0].array() -= wmean(fe_effects_sep[0]);
+            for (std::size_t d = 2; d < rdims; ++d) {
+                fe_effects_sep[d].array() -= wmean(fe_effects_sep[d]);
+            }
+        }
+        gprof_.mark("gel_fe_recovery");
+        }  // warm_done normalization
+    }
+    // regu: the regressor every downstream quantity reads from — the fast fit
+    // normally, or the reference-fallback retained fit when the gate rejected.
+    const v11::HdfeRegressorV11& regu = reg_ret ? *reg_ret : reg;
+    if (!regu.results().converged) {
         res.converged = false;
         res.notes += "full-model absorption did not converge. ";
     }
-    const Eigen::VectorXd coefs = reg.results().coefficients;
+    const Eigen::VectorXd coefs = regu.results().coefficients;
     const bool has_cons = coefs.size() == p + q + 1;
     res.b_full = coefs.head(p);
     const Eigen::VectorXd b2 = coefs.segment(p, q);
-    const Eigen::MatrixXd V_hom = reg.results().covariance;
-    const Eigen::VectorXd e = reg.results().residuals;
-    const double df_full = reg.results().df_resid;
+    const Eigen::MatrixXd V_hom = regu.results().covariance;
+    const Eigen::VectorXd e = regu.results().residuals;
+    const double df_full = regu.results().df_resid;
     res.df_full = df_full;
 
     // restrict to the kept sample (singleton dropping)
-    const Eigen::VectorXi& keep = reg.results().sample_index;
+    const Eigen::VectorXi& keep = regu.results().sample_index;
     const Eigen::Index n = keep.size();
     Eigen::VectorXd y(n);
     Eigen::MatrixXd X1(n, p);
@@ -3312,6 +3668,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     hb.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 breg(hb);
     breg.fit(y, X1, {}, weights != nullptr ? &w_raw : nullptr);
+    gprof_.mark("gel_base_reg");
     const Eigen::VectorXd bco = breg.results().coefficients;
     res.b_base = bco.head(p);
 
@@ -3337,7 +3694,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             ++gi;
         }
         for (std::size_t d = 0; d < fes.size(); ++d, ++gi) {
-            H[gi] = reg.results().fe_effects[d];
+            H[gi] = gel_fast_fit ? fe_effects_sep[d] : regu.results().fe_effects[d];
         }
     }
     for (int g = 0; g < G; ++g) {
@@ -3362,7 +3719,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         const double s2u_w =
             (wq.array() * e.array().square()).sum() / df_full;
         const double vscale =
-            reg.results().sigma2 > 0.0 ? s2u_w / reg.results().sigma2 : 1.0;
+            regu.results().sigma2 > 0.0 ? s2u_w / regu.results().sigma2 : 1.0;
         for (int g = 0; g < G; ++g) {
             for (int h = 0; h < G; ++h) {
                 Eigen::MatrixXd block = Omega(g + 1, h + 1) * P;
@@ -3381,21 +3738,49 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         Eigen::MatrixXd W;
         int Kx;
         if (!fes.empty()) {
-            // within representation: absorb the FEs out of each [x1, x2] column
+            // within representation: absorb the FEs out of [x1, x2]. All
+            // Kx columns go through ONE multi-column absorption (the same
+            // partial_out building block the xfe command uses), sharing the
+            // FE index build and one joint iteration schedule, instead of
+            // one full absorber fit per column. XHDFE_GELBACH_WITHIN_BATCH=0
+            // restores the per-column loop (its per-column stopping rule can
+            // differ from the joint one at the solver-tolerance level).
             Kx = p + q;
             W.resize(n, Kx);
-            Eigen::MatrixXd ones = Eigen::MatrixXd::Ones(n, 1);
-            for (int c = 0; c < Kx; ++c) {
-                const Eigen::VectorXd col = c < p ? X1.col(c) : X2.col(c - p);
-                HdfeOptions hw;
-                hw.se_type = StandardErrorType::Homoskedastic;
-                hw.fit_intercept = false;
-                hw.drop_singletons = false;
-                hw.num_threads = options.num_threads;
-                hw.weights_are_frequencies = freq_weights;
+            bool within_batch = true;
+            if (const char* wb = std::getenv("XHDFE_GELBACH_WITHIN_BATCH")) {
+                within_batch = !(wb[0] == '0' && wb[1] == '\0');
+            }
+            HdfeOptions hw;
+            hw.se_type = StandardErrorType::Homoskedastic;
+            hw.fit_intercept = false;
+            hw.drop_singletons = false;
+            hw.num_threads = options.num_threads;
+            hw.weights_are_frequencies = freq_weights;
+            if (within_batch && W_pre.rows() == n && W_pre.cols() == Kx) {
+                // Demeaned [x1, x2] already produced by the shared MLSMR
+                // absorption in the FE-recovery warm start above.
+                W = std::move(W_pre);
+                gprof_.mark("gel_within_batch");
+            } else if (within_batch) {
+                Eigen::MatrixXd X1X2(n, Kx);
+                X1X2.leftCols(p) = X1;
+                X1X2.rightCols(q) = X2;
                 v11::HdfeRegressorV11 wreg(hw);
-                wreg.fit(col, ones, fes, weights != nullptr ? &w_raw : nullptr);
-                W.col(c) = wreg.results().residuals;
+                const detail::AbsorptionResult ab = wreg.partial_out(
+                    X1X2.col(0), X1X2.rightCols(Kx - 1), fes,
+                    weights != nullptr ? &w_raw : nullptr);
+                W.col(0) = ab.y_tilde;
+                W.rightCols(Kx - 1) = ab.X_tilde;
+        gprof_.mark("gel_within_batch");
+            } else {
+                Eigen::MatrixXd ones = Eigen::MatrixXd::Ones(n, 1);
+                for (int c = 0; c < Kx; ++c) {
+                    const Eigen::VectorXd col = c < p ? X1.col(c) : X2.col(c - p);
+                    v11::HdfeRegressorV11 wreg(hw);
+                    wreg.fit(col, ones, fes, weights != nullptr ? &w_raw : nullptr);
+                    W.col(c) = wreg.results().residuals;
+                }
             }
         } else {
             Kx = p + q + 1;
@@ -3426,6 +3811,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 X1t.array().colwise() * sf.cwiseProduct(vres[g]).array();
         }
         const Eigen::MatrixXd M = cluster_meat(Z, ccodes_ptr, n_clusters);
+        gprof_.mark("gel_meat");
         Eigen::MatrixXd bread = Eigen::MatrixXd::Zero(Kx + G * k1, Kx + G * k1);
         bread.topLeftCorner(Kx, Kx) = Sw;
         for (int g = 0; g < G; ++g) {
