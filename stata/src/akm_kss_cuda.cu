@@ -10,6 +10,7 @@
 #include <cub/cub.cuh>
 
 #include <cstdint>
+#include <cstring>
 #include <new>
 #include <vector>
 
@@ -188,6 +189,17 @@ struct AkmCudaContext {
     int* d_moffs = nullptr;
     void* d_mcub_tmp = nullptr;
     std::size_t mcub_tmp_bytes = 0;
+    // pinned host staging (perf 09jul2026): page-locked buffers for the
+    // rhs/z packs and the per-step scalar traffic of the multi-lane solver
+    // (pageable transfers stage through the driver's internal bounce buffer
+    // and pay extra latency on every CG step). All are optional — a null
+    // pointer means pinned allocation failed and the pageable fallback is
+    // used. Pinning changes transfer speed only, never values.
+    double* h_pack = nullptr;   // J * mr_lanes (rhs upload / z download)
+    double* h_dots = nullptr;   // mr_lanes (segmented-reduce results)
+    double* h_scal = nullptr;   // mr_lanes (alpha/beta uploads)
+    char* h_active = nullptr;   // mr_lanes (active-mask uploads)
+    double* h_dot1 = nullptr;   // single-lane dot result (device_dot)
 
     ~AkmCudaContext() {
         cudaFree(d_w_ptr);
@@ -220,6 +232,11 @@ struct AkmCudaContext {
         cudaFree(d_mactive);
         cudaFree(d_moffs);
         cudaFree(d_mcub_tmp);
+        cudaFreeHost(h_pack);
+        cudaFreeHost(h_dots);
+        cudaFreeHost(h_scal);
+        cudaFreeHost(h_active);
+        cudaFreeHost(h_dot1);
     }
 };
 
@@ -249,7 +266,12 @@ double device_dot(AkmCudaContext* c, const double* a, const double* b, int n) {
     }
     cub::DeviceReduce::Sum(c->d_cub_tmp, c->cub_tmp_bytes, c->d_pair, c->d_dot, n);
     double out = 0.0;
-    cudaMemcpy(&out, c->d_dot, sizeof(double), cudaMemcpyDeviceToHost);
+    if (c->h_dot1 != nullptr) {
+        cudaMemcpy(c->h_dot1, c->d_dot, sizeof(double), cudaMemcpyDeviceToHost);
+        out = *c->h_dot1;
+    } else {
+        cudaMemcpy(&out, c->d_dot, sizeof(double), cudaMemcpyDeviceToHost);
+    }
     return out;
 }
 
@@ -308,6 +330,9 @@ AkmCudaContext* akm_cuda_create(int n_workers, int n_firms, const int* m_w,
         akm_cuda_destroy(c);
         return nullptr;
     }
+    if (cudaMallocHost(&c->h_dot1, sizeof(double)) != cudaSuccess) {
+        c->h_dot1 = nullptr;  // optional; pageable fallback
+    }
     return c;
 }
 
@@ -332,8 +357,12 @@ bool seg_dots(AkmCudaContext* c, int nb, const double* a, const double* b,
     }
     cub::DeviceSegmentedReduce::Sum(c->d_mcub_tmp, c->mcub_tmp_bytes, c->d_mpair,
                                     c->d_mdots, nb, c->d_moffs, c->d_moffs + 1);
-    return cuda_ok(cudaMemcpy(out_host, c->d_mdots, sizeof(double) * nb,
-                              cudaMemcpyDeviceToHost));
+    double* dst = (c->h_dots != nullptr) ? c->h_dots : out_host;
+    if (!cuda_ok(cudaMemcpy(dst, c->d_mdots, sizeof(double) * nb,
+                            cudaMemcpyDeviceToHost)))
+        return false;
+    if (dst != out_host) std::memcpy(out_host, dst, sizeof(double) * nb);
+    return true;
 }
 
 bool mr_ensure(AkmCudaContext* c, int nb) {
@@ -341,10 +370,24 @@ bool mr_ensure(AkmCudaContext* c, int nb) {
     const std::size_t J = static_cast<std::size_t>(c->J);
     const std::size_t N = static_cast<std::size_t>(c->N);
     const std::size_t L = static_cast<std::size_t>(nb);
-    cudaFree(c->d_mx); cudaFree(c->d_mr); cudaFree(c->d_mz); cudaFree(c->d_mp);
-    cudaFree(c->d_mAp); cudaFree(c->d_mtw); cudaFree(c->d_mpair);
-    cudaFree(c->d_mdots); cudaFree(c->d_mscal); cudaFree(c->d_mactive);
-    cudaFree(c->d_moffs);
+    // free-and-null before reallocating: cudaMalloc leaves *ptr untouched on
+    // failure, so a stale (already freed) pointer would otherwise survive a
+    // partial OOM and be double-freed by the destructor.
+    cudaFree(c->d_mx); c->d_mx = nullptr;
+    cudaFree(c->d_mr); c->d_mr = nullptr;
+    cudaFree(c->d_mz); c->d_mz = nullptr;
+    cudaFree(c->d_mp); c->d_mp = nullptr;
+    cudaFree(c->d_mAp); c->d_mAp = nullptr;
+    cudaFree(c->d_mtw); c->d_mtw = nullptr;
+    cudaFree(c->d_mpair); c->d_mpair = nullptr;
+    cudaFree(c->d_mdots); c->d_mdots = nullptr;
+    cudaFree(c->d_mscal); c->d_mscal = nullptr;
+    cudaFree(c->d_mactive); c->d_mactive = nullptr;
+    cudaFree(c->d_moffs); c->d_moffs = nullptr;
+    cudaFreeHost(c->h_pack); c->h_pack = nullptr;
+    cudaFreeHost(c->h_dots); c->h_dots = nullptr;
+    cudaFreeHost(c->h_scal); c->h_scal = nullptr;
+    cudaFreeHost(c->h_active); c->h_active = nullptr;
     bool ok = cuda_ok(cudaMalloc(&c->d_mx, sizeof(double) * J * L)) &&
               cuda_ok(cudaMalloc(&c->d_mr, sizeof(double) * J * L)) &&
               cuda_ok(cudaMalloc(&c->d_mz, sizeof(double) * J * L)) &&
@@ -360,11 +403,31 @@ bool mr_ensure(AkmCudaContext* c, int nb) {
         c->mr_lanes = 0;
         return false;
     }
+    // pinned host staging is best-effort: on failure the pointers stay null
+    // and the callers use pageable transfers (values are identical).
+    if (cudaMallocHost(&c->h_pack, sizeof(double) * J * L) != cudaSuccess) {
+        c->h_pack = nullptr;
+    }
+    if (cudaMallocHost(&c->h_dots, sizeof(double) * L) != cudaSuccess) {
+        c->h_dots = nullptr;
+    }
+    if (cudaMallocHost(&c->h_scal, sizeof(double) * L) != cudaSuccess) {
+        c->h_scal = nullptr;
+    }
+    if (cudaMallocHost(&c->h_active, L) != cudaSuccess) {
+        c->h_active = nullptr;
+    }
     c->mr_lanes = nb;
     return true;
 }
 
 }  // namespace
+
+double* akm_cuda_pack_buffer(AkmCudaContext* c, int nb) {
+    if (c == nullptr || nb < 1 || nb > akm_cuda_max_lanes()) return nullptr;
+    if (!mr_ensure(c, nb)) return nullptr;
+    return c->h_pack;  // may be null: pinned staging is best-effort
+}
 
 int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
                            double* z_pack, int nb, double tol, int max_iter,
@@ -375,6 +438,25 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
     const std::size_t JL = static_cast<std::size_t>(J) * nb;
     dim3 gJ((J + kBlock - 1) / kBlock, nb);
     dim3 gN((c->N + kBlock - 1) / kBlock, nb);
+    // pinned staging helpers for the per-step scalar traffic (identical
+    // values; only the transfer path changes)
+    const auto up_active = [c, nb](const char* v) {
+        const char* src = v;
+        if (c->h_active != nullptr) {
+            std::memcpy(c->h_active, v, static_cast<std::size_t>(nb));
+            src = c->h_active;
+        }
+        cudaMemcpy(c->d_mactive, src, static_cast<std::size_t>(nb),
+                   cudaMemcpyHostToDevice);
+    };
+    const auto up_scal = [c, nb](const double* v) {
+        const double* src = v;
+        if (c->h_scal != nullptr) {
+            std::memcpy(c->h_scal, v, sizeof(double) * nb);
+            src = c->h_scal;
+        }
+        cudaMemcpy(c->d_mscal, src, sizeof(double) * nb, cudaMemcpyHostToDevice);
+    };
     {
         const int go = (nb + 1 + kBlock - 1) / kBlock;
         k_seg_offsets<<<go, kBlock>>>(nb, J, c->d_moffs);
@@ -390,7 +472,7 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
             cudaMemset(c->d_mr + static_cast<std::size_t>(l) * J + c->ground, 0,
                        sizeof(double));
         }
-        cudaMemcpy(c->d_mactive, act.data(), nb, cudaMemcpyHostToDevice);
+        up_active(act.data());
     }
     std::vector<double> rhs_norm2(nb), rz(nb), tol2(nb), pAp(nb), rr(nb), rz_new(nb);
     std::vector<double> alpha(nb), beta(nb);
@@ -404,7 +486,7 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
         }
         tol2[l] = tol * tol * rhs_norm2[l];
     }
-    cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
+    up_active(active.data());
     k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive, c->d_mr,
                                      c->d_mz);
     cudaMemcpy(c->d_mp, c->d_mz, sizeof(double) * JL, cudaMemcpyDeviceToDevice);
@@ -437,14 +519,12 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
             }
             alpha[l] = rz[l] / pAp[l];
         }
-        cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
-        cudaMemcpy(c->d_mscal, alpha.data(), sizeof(double) * nb,
-                   cudaMemcpyHostToDevice);
+        up_active(active.data());
+        up_scal(alpha.data());
         k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mp,
                                      c->d_mx);
         for (int l = 0; l < nb; ++l) alpha[l] = -alpha[l];
-        cudaMemcpy(c->d_mscal, alpha.data(), sizeof(double) * nb,
-                   cudaMemcpyHostToDevice);
+        up_scal(alpha.data());
         k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mAp,
                                      c->d_mr);
         if (!seg_dots(c, nb, c->d_mr, c->d_mr, rr.data())) return -1;
@@ -458,7 +538,7 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
                 active[l] = 0;
             }
         }
-        cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
+        up_active(active.data());
         if (!any_active()) break;
         k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive, c->d_mr,
                                          c->d_mz);
@@ -467,8 +547,7 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
             beta[l] = (active[l] && rz[l] != 0.0) ? rz_new[l] / rz[l] : 0.0;
             if (active[l]) rz[l] = rz_new[l];
         }
-        cudaMemcpy(c->d_mscal, beta.data(), sizeof(double) * nb,
-                   cudaMemcpyHostToDevice);
+        up_scal(beta.data());
         k_xpay_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mz,
                                      c->d_mp);
     }

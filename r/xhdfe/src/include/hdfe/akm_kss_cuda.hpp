@@ -37,6 +37,34 @@ void akm_cuda_destroy(AkmCudaContext* ctx);
 int akm_cuda_solve_S(AkmCudaContext* ctx, const double* rhs, double* z,
                      double tol, int max_iter);
 
+// Batched independent Jacobi-PCG: nb grounded systems S z_l = rhs_l solved
+// simultaneously (one kernel launch per step serves every lane; convergence
+// is tracked per lane and retired lanes are frozen on device). rhs/z are
+// host row-major J x nb... actually lane-major: rhs_pack/z_pack hold nb
+// contiguous length-J columns (lane l at offset l*J). iters_out[l] receives
+// the per-lane iteration count, or -1 when that lane failed to converge.
+// Returns 0 on success (individual lane failures are reported per lane),
+// -1 on a CUDA error. Lanes beyond the context's allocated width fall back
+// to sequential akm_cuda_solve_S calls by the caller.
+int akm_cuda_solve_S_multi(AkmCudaContext* ctx, const double* rhs_pack,
+                           double* z_pack, int nb, double tol, int max_iter,
+                           int* iters_out);
+
+// Maximum lane width supported by akm_cuda_solve_S_multi (workspace is
+// allocated lazily up to this bound).
+int akm_cuda_max_lanes();
+
+// Page-locked host staging buffer of nb * J doubles owned by the context
+// (sized on demand alongside the multi-RHS workspace). Packing the rhs
+// columns directly into it makes the akm_cuda_solve_S_multi host<->device
+// pack transfers pinned (DMA) instead of pageable. The same buffer may be
+// passed as both rhs_pack and z_pack: the solve reads the rhs fully before
+// writing z. Returns nullptr when pinned allocation is unavailable —
+// callers then use their own (pageable) buffers. The buffer stays valid
+// until the next akm_cuda_pack_buffer/akm_cuda_solve_S_multi call with a
+// larger nb, or context destruction.
+double* akm_cuda_pack_buffer(AkmCudaContext* ctx, int nb);
+
 }  // namespace akm
 }  // namespace hdfe
 

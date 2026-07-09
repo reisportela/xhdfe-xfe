@@ -54,6 +54,17 @@ int akm_cuda_solve_S_multi(AkmCudaContext* ctx, const double* rhs_pack,
 // allocated lazily up to this bound).
 int akm_cuda_max_lanes();
 
+// Page-locked host staging buffer of nb * J doubles owned by the context
+// (sized on demand alongside the multi-RHS workspace). Packing the rhs
+// columns directly into it makes the akm_cuda_solve_S_multi host<->device
+// pack transfers pinned (DMA) instead of pageable. The same buffer may be
+// passed as both rhs_pack and z_pack: the solve reads the rhs fully before
+// writing z. Returns nullptr when pinned allocation is unavailable —
+// callers then use their own (pageable) buffers. The buffer stays valid
+// until the next akm_cuda_pack_buffer/akm_cuda_solve_S_multi call with a
+// larger nb, or context destruction.
+double* akm_cuda_pack_buffer(AkmCudaContext* ctx, int nb);
+
 }  // namespace akm
 }  // namespace hdfe
 

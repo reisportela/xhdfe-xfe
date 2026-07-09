@@ -640,6 +640,7 @@ struct TwoWaySolver {
     int N = 0;
     int J = 0;
     int Jr = 0;  // grounded firm-block dimension (J - 1)
+    int team = 1;  // work-aware OMP team size for the light per-iteration regions
     const std::vector<int>* m_w = nullptr;
     const std::vector<int>* m_f = nullptr;
     std::vector<double> m_c;  // match weights (person-year counts)
@@ -719,6 +720,36 @@ struct TwoWaySolver {
         for (int f = 0; f < J; ++f) {
             inv_diagS[f] = (f < Jr && diagS[f] > 0.0) ? 1.0 / diagS[f] : 0.0;
         }
+        // Work-aware OMP team size (perf audit 09jul2026): the per-iteration
+        // parallel regions do O(M) gather work split into FIXED blocks, so a
+        // full 48-thread team on a small/medium graph spends more time at the
+        // per-region barriers than computing — measured 4-34x slowdowns vs
+        // 8-16 threads on every panel below ~10M person-year rows (both CPU
+        // and the host side of GPU runs), while at 47.5M the full team is
+        // right. Cap the team by the actual edge work; the fixed 4096/64
+        // element blocks make every capped region's output partition-
+        // invariant (disjoint writes, no cross-thread FP reductions), so the
+        // cap CANNOT change any output bit — verified t1/t8/t16/t48 identical.
+        // XHDFE_AKM_TEAM=0 restores the uncapped legacy team; =k forces
+        // min(k, omp_get_max_threads()).
+#ifdef _OPENMP
+        {
+            const int amb = omp_get_max_threads();
+            team = static_cast<int>(std::min<long long>(
+                amb,
+                std::max<long long>(1, static_cast<long long>(M) / 65536)));
+            if (const char* e = std::getenv("XHDFE_AKM_TEAM")) {
+                const int v = std::atoi(e);
+                if (v == 0) {
+                    team = amb;
+                } else if (v > 0) {
+                    team = std::min(v, amb);
+                }
+            }
+        }
+#else
+        team = 1;
+#endif
         cg_tol = opt.cg_tol;
         cg_max_iter = opt.cg_max_iter > 0
                           ? opt.cg_max_iter
@@ -795,7 +826,7 @@ struct TwoWaySolver {
         const std::vector<int>& mf = *m_f;
         parallel = parallel && N >= 16384;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel)
+#pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t w = 0; w < N; ++w) {
             double acc = 0.0;
@@ -812,7 +843,7 @@ struct TwoWaySolver {
         const std::vector<int>& mw = *m_w;
         parallel = parallel && J >= 16384;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel)
+#pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t f = 0; f < J; ++f) {
             double acc = 0.0;
@@ -943,7 +974,7 @@ struct TwoWaySolver {
         parallel = parallel && N >= 16384;
         const std::int64_t nblk = (N + 4095) / 4096;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel)
+#pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t blk = 0; blk < nblk; ++blk) {
             const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
@@ -978,7 +1009,7 @@ struct TwoWaySolver {
         parallel = parallel && J >= 16384;
         const std::int64_t nblk = (J + 4095) / 4096;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel)
+#pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t blk = 0; blk < nblk; ++blk) {
             const std::int64_t f_end = std::min<std::int64_t>((blk + 1) * 4096, J);
@@ -1011,6 +1042,11 @@ struct TwoWaySolver {
     // gathers across columns in tiles. Per column the arithmetic sequence
     // matches solve_S exactly: mult_B, elementwise /Dw, mult_Bt, then
     // Ap = Df .* p - Ap with Ap[Jr] = 0.
+    // The tile pack/unpack loops here and in solve_K_multi are parallelized
+    // (perf audit 09jul2026, P3): they are pure element copies or per-lane
+    // Eigen expressions evaluated exactly as in the sequential code, so any
+    // work partition yields identical bits; they were a measurable serial
+    // host cost per solve batch at 47.5M rows.
     void apply_S_multi(const std::vector<const Eigen::VectorXd*>& p,
                        std::vector<Eigen::VectorXd*>& Ap,
                        std::vector<double>& packP, std::vector<double>& packT,
@@ -1020,11 +1056,24 @@ struct TwoWaySolver {
         packT.resize(static_cast<std::size_t>(N) * kMrhsTile);
         for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
             const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
-            for (int k = 0; k < nb; ++k) {
-                const double* src = p[static_cast<std::size_t>(c0 + k)]->data();
-                for (std::int64_t j = 0; j < J; ++j) {
-                    packP[static_cast<std::size_t>(j) * kMrhsTile +
-                          static_cast<std::size_t>(k)] = src[j];
+            {
+                const double* srcp[kMrhsTile] = {nullptr};
+                for (int k = 0; k < nb; ++k) {
+                    srcp[k] = p[static_cast<std::size_t>(c0 + k)]->data();
+                }
+                const std::int64_t nblkj = (J + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#endif
+                for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                    const std::int64_t j_end = std::min<std::int64_t>((blk + 1) * 4096, J);
+                    for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                        double* dst = packP.data() +
+                                      static_cast<std::size_t>(j) * kMrhsTile;
+                        for (int k = 0; k < nb; ++k) {
+                            dst[k] = srcp[k][j];
+                        }
+                    }
                 }
             }
             mult_B_multi(packP.data(), packT.data(), parallel);
@@ -1032,7 +1081,7 @@ struct TwoWaySolver {
                 double* T = packT.data();
                 const std::int64_t nblkw = (N + 4095) / 4096;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && N >= 16384)
+#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
 #endif
                 for (std::int64_t blk = 0; blk < nblkw; ++blk) {
                     const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
@@ -1046,6 +1095,15 @@ struct TwoWaySolver {
                 }
             }
             mult_Bt_multi(packT.data(), packP.data(), parallel);
+            // per-lane unpack + finish: each lane's Eigen expressions are
+            // exactly the sequential ones (lane-parallel, disjoint outputs).
+            // Gated on J like every other J-length region: this loop runs
+            // once per CG step on the CPU path, and spawning a team for
+            // small-J lanes costs more than the work (measured +35% on a
+            // 330k-row panel at J=8k under load).
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && nb > 1 && J >= 16384) num_threads(std::min(team, nb))
+#endif
             for (int k = 0; k < nb; ++k) {
                 Eigen::VectorXd& apc = *Ap[static_cast<std::size_t>(c0 + k)];
                 for (std::int64_t j = 0; j < J; ++j) {
@@ -1056,10 +1114,18 @@ struct TwoWaySolver {
                 apc[Jr] = 0.0;
             }
             if (c0 + kMrhsTile < nc) {
-                for (int k = 0; k < nb; ++k) {
-                    for (std::int64_t j = 0; j < J; ++j) {
-                        packP[static_cast<std::size_t>(j) * kMrhsTile +
-                              static_cast<std::size_t>(k)] = 0.0;
+                const std::int64_t nblkj = (J + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#endif
+                for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                    const std::int64_t j_end = std::min<std::int64_t>((blk + 1) * 4096, J);
+                    for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                        double* dst = packP.data() +
+                                      static_cast<std::size_t>(j) * kMrhsTile;
+                        for (int k = 0; k < nb; ++k) {
+                            dst[k] = 0.0;
+                        }
                     }
                 }
             }
@@ -1086,24 +1152,30 @@ struct TwoWaySolver {
         if (use_cuda && parallel) {
             // GPU path: one batched device solve per group of lanes (fewer
             // kernel launches and one host sync per CG step for the whole
-            // group, instead of 3-4 per lane per step).
+            // group, instead of 3-4 per lane per step). The rhs columns are
+            // packed straight into the context's pinned staging buffer when
+            // available (page-locked DMA transfers; identical values), with
+            // the old pageable vectors as fallback. rhs and z share the
+            // staging buffer: the solve reads rhs fully before writing z.
             const int max_lanes = akm_cuda_max_lanes();
-            std::vector<double> rhs_pack;
-            std::vector<double> z_pack;
+            std::vector<double> pack_fallback;
             std::vector<int> its;
             for (int c0 = 0; c0 < nc; c0 += max_lanes) {
                 const int nb = std::min(max_lanes, nc - c0);
-                rhs_pack.resize(static_cast<std::size_t>(J) * nb);
-                z_pack.resize(static_cast<std::size_t>(J) * nb);
+                double* pack = akm_cuda_pack_buffer(cuda_ctx, nb);
+                if (pack == nullptr) {
+                    pack_fallback.resize(static_cast<std::size_t>(J) * nb);
+                    pack = pack_fallback.data();
+                }
                 its.assign(static_cast<std::size_t>(nb), -1);
                 for (int k = 0; k < nb; ++k) {
-                    std::memcpy(rhs_pack.data() + static_cast<std::size_t>(k) * J,
+                    std::memcpy(pack + static_cast<std::size_t>(k) * J,
                                 rhs[static_cast<std::size_t>(c0 + k)].data(),
                                 sizeof(double) * static_cast<std::size_t>(J));
                 }
-                const int rc = akm_cuda_solve_S_multi(cuda_ctx, rhs_pack.data(),
-                                                      z_pack.data(), nb, cg_tol,
-                                                      cg_max_iter, its.data());
+                const int rc = akm_cuda_solve_S_multi(cuda_ctx, pack, pack, nb,
+                                                      cg_tol, cg_max_iter,
+                                                      its.data());
                 if (rc != 0) {
                     // device error: fall back to per-lane solves
                     for (int k = 0; k < nb; ++k) {
@@ -1124,7 +1196,7 @@ struct TwoWaySolver {
                     Eigen::VectorXd& z = z_full[static_cast<std::size_t>(c0 + k)];
                     if (its[static_cast<std::size_t>(k)] >= 0) {
                         std::memcpy(z.data(),
-                                    z_pack.data() + static_cast<std::size_t>(k) * J,
+                                    pack + static_cast<std::size_t>(k) * J,
                                     sizeof(double) * static_cast<std::size_t>(J));
                         const_cast<TwoWaySolver*>(this)->cuda_iters +=
                             its[static_cast<std::size_t>(k)];
@@ -1138,6 +1210,20 @@ struct TwoWaySolver {
         }
 #endif
         if (direct) {
+            // Independent cached-LDLT backsolves into disjoint outputs: lane
+            // order is irrelevant and each solve is deterministic, so the
+            // parallel loop is bit-identical to the sequential one (perf
+            // audit 09jul2026 — the direct multi-RHS branch was serial).
+            // Team capped by the work-aware `team` (see the P1 cap above)
+            // and the lane count: on small direct panels the sparse
+            // backsolves are microseconds each and a full-team fork/barrier
+            // per call dominated the SE/CI phases (measured 5-10x at 15k
+            // rows, t1 == pre-batching); thread count cannot change bits.
+#ifdef _OPENMP
+            const int bs_team = std::min(nc, team);
+#pragma omp parallel for schedule(static) \
+    if (parallel && nc > 1 && bs_team > 1) num_threads(bs_team)
+#endif
             for (int c = 0; c < nc; ++c) {
                 Eigen::VectorXd z = ldlt.solve(rhs[static_cast<std::size_t>(c)].head(Jr).eval());
                 z_full[static_cast<std::size_t>(c)].setZero();
@@ -1245,6 +1331,12 @@ struct TwoWaySolver {
         const int nc = static_cast<int>(tw.size());
         std::vector<Eigen::VectorXd> scrw(static_cast<std::size_t>(nc));
         std::vector<Eigen::VectorXd> rhs(static_cast<std::size_t>(nc));
+        // per-lane prep (lane-parallel; each lane's expression is exactly
+        // the sequential one, outputs disjoint -> identical bits; N-gated
+        // like every other N-length region)
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && nc > 1 && N >= 16384) num_threads(std::min(team, nc))
+#endif
         for (int c = 0; c < nc; ++c) {
             if (tw[static_cast<std::size_t>(c)] != nullptr) {
                 scrw[static_cast<std::size_t>(c)] =
@@ -1259,14 +1351,31 @@ struct TwoWaySolver {
             std::vector<double> packY(static_cast<std::size_t>(J) * kMrhsTile);
             for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
                 const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
-                for (int k = 0; k < nb; ++k) {
-                    const double* src = scrw[static_cast<std::size_t>(c0 + k)].data();
-                    for (std::int64_t w = 0; w < N; ++w) {
-                        packS[static_cast<std::size_t>(w) * kMrhsTile +
-                              static_cast<std::size_t>(k)] = src[w];
+                {
+                    const double* srcp[kMrhsTile] = {nullptr};
+                    for (int k = 0; k < nb; ++k) {
+                        srcp[k] = scrw[static_cast<std::size_t>(c0 + k)].data();
+                    }
+                    const std::int64_t nblkw = (N + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
+#endif
+                    for (std::int64_t blk = 0; blk < nblkw; ++blk) {
+                        const std::int64_t w_end =
+                            std::min<std::int64_t>((blk + 1) * 4096, N);
+                        for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                            double* dst = packS.data() +
+                                          static_cast<std::size_t>(w) * kMrhsTile;
+                            for (int k = 0; k < nb; ++k) {
+                                dst[k] = srcp[k][w];
+                            }
+                        }
                     }
                 }
                 mult_Bt_multi(packS.data(), packY.data(), parallel);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && nb > 1 && J >= 16384) num_threads(std::min(team, nb))
+#endif
                 for (int k = 0; k < nb; ++k) {
                     Eigen::VectorXd& r = rhs[static_cast<std::size_t>(c0 + k)];
                     r.resize(J);
@@ -1281,10 +1390,19 @@ struct TwoWaySolver {
                     }
                 }
                 if (c0 + kMrhsTile < nc) {
-                    for (int k = 0; k < nb; ++k) {
-                        for (std::int64_t w = 0; w < N; ++w) {
-                            packS[static_cast<std::size_t>(w) * kMrhsTile +
-                                  static_cast<std::size_t>(k)] = 0.0;
+                    const std::int64_t nblkw = (N + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
+#endif
+                    for (std::int64_t blk = 0; blk < nblkw; ++blk) {
+                        const std::int64_t w_end =
+                            std::min<std::int64_t>((blk + 1) * 4096, N);
+                        for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                            double* dst = packS.data() +
+                                          static_cast<std::size_t>(w) * kMrhsTile;
+                            for (int k = 0; k < nb; ++k) {
+                                dst[k] = 0.0;
+                            }
                         }
                     }
                 }
@@ -1296,14 +1414,31 @@ struct TwoWaySolver {
             std::vector<double> packT(static_cast<std::size_t>(N) * kMrhsTile);
             for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
                 const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
-                for (int k = 0; k < nb; ++k) {
-                    const double* src = zf[static_cast<std::size_t>(c0 + k)].data();
-                    for (std::int64_t j = 0; j < J; ++j) {
-                        packZ[static_cast<std::size_t>(j) * kMrhsTile +
-                              static_cast<std::size_t>(k)] = src[j];
+                {
+                    const double* srcp[kMrhsTile] = {nullptr};
+                    for (int k = 0; k < nb; ++k) {
+                        srcp[k] = zf[static_cast<std::size_t>(c0 + k)].data();
+                    }
+                    const std::int64_t nblkj = (J + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#endif
+                    for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                        const std::int64_t j_end =
+                            std::min<std::int64_t>((blk + 1) * 4096, J);
+                        for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                            double* dst = packZ.data() +
+                                          static_cast<std::size_t>(j) * kMrhsTile;
+                            for (int k = 0; k < nb; ++k) {
+                                dst[k] = srcp[k][j];
+                            }
+                        }
                     }
                 }
                 mult_B_multi(packZ.data(), packT.data(), parallel);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && nb > 1 && N >= 16384) num_threads(std::min(team, nb))
+#endif
                 for (int k = 0; k < nb; ++k) {
                     Eigen::VectorXd& w = zw[static_cast<std::size_t>(c0 + k)];
                     w.resize(N);
@@ -1318,10 +1453,19 @@ struct TwoWaySolver {
                     }
                 }
                 if (c0 + kMrhsTile < nc) {
-                    for (int k = 0; k < nb; ++k) {
-                        for (std::int64_t j = 0; j < J; ++j) {
-                            packZ[static_cast<std::size_t>(j) * kMrhsTile +
-                                  static_cast<std::size_t>(k)] = 0.0;
+                    const std::int64_t nblkj = (J + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#endif
+                    for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                        const std::int64_t j_end =
+                            std::min<std::int64_t>((blk + 1) * 4096, J);
+                        for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                            double* dst = packZ.data() +
+                                          static_cast<std::size_t>(j) * kMrhsTile;
+                            for (int k = 0; k < nb; ++k) {
+                                dst[k] = 0.0;
+                            }
                         }
                     }
                 }
@@ -1333,7 +1477,64 @@ struct TwoWaySolver {
 }  // namespace
 
 
+// The batched SE/CI code paths below are outlined into noinline lambdas:
+// they add a lot of code to an already-huge translation unit, and letting
+// the optimizer inline them into the enclosing (fast-math) function bodies
+// was observed to flip unrelated inlining/vectorization decisions and shift
+// untouched loops (e.g. the sigma_i products) by one ulp between builds.
+// Outlining keeps the legacy code's codegen byte-stable while the new
+// blocks compile as separate functions.
+#if defined(_MSC_VER)
+#define XHDFE_AKM_OUTLINE
+#else
+#define XHDFE_AKM_OUTLINE __attribute__((noinline))
+#endif
+
+// Association-pinned scalar island: -fassociative-math lets the
+// reassociation pass pick the evaluation order of a*b*(c/d), and its choice
+// was observed to flip with translation-unit growth (2.14.x binaries
+// realize ((a*b))*(c/d); the grown unit flips to (a*(c/d))*b, shifting
+// sigma_i by one ulp between builds). This forces the shipped binaries'
+// order contractually: GCC re-enables strict association per-function,
+// clang gets optnone (value-safe), MSVC never reassociates parenthesized
+// expressions under /fp:precise.
+#if defined(_MSC_VER)
+#define XHDFE_AKM_STRICT_FN
+#elif defined(__clang__)
+#define XHDFE_AKM_STRICT_FN __attribute__((noinline, optnone))
+#else
+#define XHDFE_AKM_STRICT_FN \
+    __attribute__((noinline, optimize("-fno-associative-math")))
+#endif
+
 namespace {
+
+// Mover-row sigma product in the association the shipped binaries realize
+// (see XHDFE_AKM_STRICT_FN above).
+XHDFE_AKM_STRICT_FN
+double sigma_row_product(double yc, double corr_r, double eta_r, double m) {
+    return yc * corr_r * (eta_r / m);
+}
+
+// SE/CI-phase batching block size (mirrors XHDFE_AKM_JLA_BLOCK): the
+// component-SE simulations, the Hutchinson trace draws, the pencil subspace
+// lanes, the A_b/xi solve pair and the lincom columns are routed in blocks
+// through the batched multi-RHS solver. Per lane every scalar and vector
+// operation keeps its exact sequential sequence (ascending sim/draw/column
+// index), so results are identical for ANY block size >= 1 and ANY thread
+// count — the same guarantee (and the same ~last-ulp difference vs the
+// legacy single-RHS kernels) as the 2.14.0 JLA batching.
+// XHDFE_AKM_SE_BLOCK=0 keeps every sequential single-RHS loop verbatim.
+int akm_se_block_env() {
+    int blk = 8;
+    if (const char* sbe = std::getenv("XHDFE_AKM_SE_BLOCK")) {
+        const int v = std::atoi(sbe);
+        if (v >= 0 && v <= 64) {
+            blk = v;
+        }
+    }
+    return blk;
+}
 
 // Deterministic standard normal via Box-Muller on SplitMix64 uniforms.
 inline double normal_from_stream(std::uint64_t& state) {
@@ -1365,13 +1566,23 @@ std::vector<int> group_equally(const std::vector<double>& x, int n_groups) {
             f * s[static_cast<std::size_t>(w)];
     }
     std::vector<int> g(N, ng);
-    std::vector<double> xx(x);
-    for (int i = 0; i < ng - 1; ++i) {
-        for (std::size_t k = 0; k < N; ++k) {
-            if (xx[k] < cuts[static_cast<std::size_t>(i)]) {
-                g[k] = i + 1;
-                xx[k] = std::numeric_limits<double>::infinity();
-            }
+    // The cuts are non-decreasing (interpolated quantiles of the sorted
+    // sample) and the legacy O(ng*N) scan assigned row k the FIRST cut
+    // strictly above x[k] (later passes could not reassign a binned row).
+    // That is exactly std::upper_bound: bit-identical integer bins at
+    // O(N log ng) instead of ~1e10 serial scalar ops on a 10M-row panel
+    // (perf audit 09jul2026), parallel over rows (independent lookups), and
+    // it removes the fast-math-hazardous infinity sentinel of the old loop.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (N >= 16384)
+#endif
+    for (std::int64_t k = 0; k < static_cast<std::int64_t>(N); ++k) {
+        const std::size_t idx = static_cast<std::size_t>(
+            std::upper_bound(cuts.begin(), cuts.end(),
+                             x[static_cast<std::size_t>(k)]) -
+            cuts.begin());
+        if (idx < cuts.size()) {
+            g[static_cast<std::size_t>(k)] = static_cast<int>(idx) + 1;
         }
     }
     return g;
@@ -1814,10 +2025,15 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // batched solver is bit-deterministic run-to-run but its CUB
         // segmented-reduce shapes vary with the lane-group size, so GPU
         // results differ across block sizes at the ~1e-14 level). The
-        // direct (cached-LDLT) mode gains nothing from fusion and defaults
-        // to the sequential path; the CUDA mode batches the draw solves on
-        // the device.
-        int jla_block = solver.direct ? 0 : 8;
+        // direct (cached-LDLT) mode also defaults to the batched path since
+        // 2.15.0: fusion gains it nothing per solve, but the batched direct
+        // branch runs its independent backsolves in parallel (perf audit
+        // 09jul2026 — the legacy sequential loop made small direct-path
+        // panels the slowest per row; the ~1-ulp block=0-vs-batched note
+        // above applies unchanged, and XHDFE_AKM_JLA_BLOCK=0 still restores
+        // the pre-2.14 sequential loop bitwise). The CUDA mode batches the
+        // draw solves on the device.
+        int jla_block = 8;
         if (const char* jbe = std::getenv("XHDFE_AKM_JLA_BLOCK")) {
             const int v = std::atoi(jbe);
             if (v >= 0 && v <= 64) {
@@ -1836,13 +2052,86 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             std::vector<const Eigen::VectorXd*> tw_ptr(static_cast<std::size_t>(3 * DB));
             std::vector<const Eigen::VectorXd*> tf_ptr(static_cast<std::size_t>(3 * DB));
 
+            // CSR-parallel per-draw scatters (perf audit 09jul2026, P3): the
+            // sequential ascending-m scatter loops were the last O(M) serial
+            // work in the block prep — at 47.5M rows on the GPU path they
+            // left the device idle ~40% of the leverage-phase wall. They are
+            // parallelized over the solver's worker/firm CSR structures with
+            // the SAME per-slot addition sequences: each tw slot is owned by
+            // exactly one worker whose matches are visited ascending in m
+            // (matches are worker-major sorted, so w_ptr spans ascend in m),
+            // and each tf slot by exactly one firm whose f_matches entries
+            // ascend in m (f_matches is a counting sort over ascending m).
+            // The scattered values are precomputed elementwise into draw_val
+            // (one rounded expression per element, no accumulation, safe to
+            // vectorize), and the scatter adds keep the indirect
+            // `slot[index[m]] += draw_val[m]` form of the legacy loop so the
+            // compiler cannot contract or reassociate them under
+            // -ffast-math. Results are therefore bit-identical to the
+            // sequential scatters for any thread count (verified vs the
+            // pre-P3 module and vs XHDFE_AKM_SCATTER_CSR=0 in-binary).
+            // XHDFE_AKM_SCATTER_CSR=0 restores the sequential loops.
+            bool csr_scatter = true;
+            if (const char* cse = std::getenv("XHDFE_AKM_SCATTER_CSR")) {
+                csr_scatter = std::atoi(cse) != 0;
+            }
+            // Use the CSR-parallel scatters only when the work amortizes the
+            // per-draw region spawns (6 per draw): below ~2M working rows
+            // the legacy serial scatter is ~1ms/draw while a team wake-up on
+            // a contended box can cost several ms (measured +20% on a 330k
+            // panel at load 74), and the serial CSR traversal itself pays an
+            // extra indirection over the legacy loop. Below the threshold
+            // the ORIGINAL sequential loops run unchanged; above it the CSR
+            // loops produce the identical bits (same per-slot sequences).
+            const bool par_scatter =
+                csr_scatter && par_rows && solver.team > 1 && R >= 2097152;
+            const bool par_scatter_m =
+                csr_scatter && par_rows && solver.team > 1 && M >= 2097152;
+            Eigen::VectorXd draw_val;
+            if (par_scatter || par_scatter_m) {
+                draw_val.resize(static_cast<Eigen::Index>(M));
+            }
+            // Observation-level rows have no CSR; build one per side once
+            // per call (counting sort over ascending row order — the same
+            // construction as f_matches) so the obs-level +/-1 scatter gets
+            // per-slot ownership too. The +/-1 partial sums are integers
+            // (every add is exact), so ownership alone already guarantees
+            // bit-identical slots; ascending order is preserved anyway.
+            std::vector<std::int64_t> rw_ptr, rf_ptr, rw_rows, rf_rows;
+            if (par_scatter && !match_level) {
+                rw_ptr.assign(static_cast<std::size_t>(N) + 1, 0);
+                rf_ptr.assign(static_cast<std::size_t>(J) + 1, 0);
+                for (std::size_t k = 0; k < n_kept; ++k) {
+                    ++rw_ptr[static_cast<std::size_t>(sb.row_w[k]) + 1];
+                    ++rf_ptr[static_cast<std::size_t>(sb.row_f[k]) + 1];
+                }
+                for (std::size_t w = 0; w < static_cast<std::size_t>(N); ++w) {
+                    rw_ptr[w + 1] += rw_ptr[w];
+                }
+                for (std::size_t f = 0; f < static_cast<std::size_t>(J); ++f) {
+                    rf_ptr[f + 1] += rf_ptr[f];
+                }
+                rw_rows.resize(n_kept);
+                rf_rows.resize(n_kept);
+                std::vector<std::int64_t> pw(rw_ptr.begin(), rw_ptr.end() - 1);
+                std::vector<std::int64_t> pf(rf_ptr.begin(), rf_ptr.end() - 1);
+                for (std::size_t k = 0; k < n_kept; ++k) {
+                    rw_rows[static_cast<std::size_t>(
+                        pw[static_cast<std::size_t>(sb.row_w[k])]++)] =
+                        static_cast<std::int64_t>(k);
+                    rf_rows[static_cast<std::size_t>(
+                        pf[static_cast<std::size_t>(sb.row_f[k])]++)] =
+                        static_cast<std::int64_t>(k);
+                }
+            }
+
             for (int d0 = 0; d0 < p; d0 += DB) {
                 const int B = std::min(DB, p - d0);
                 // --- per-draw scatters (legacy sequences, block-local) -----
                 for (int b = 0; b < B; ++b) {
                     const int d = d0 + b;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
                     for (std::int64_t blk = 0; blk < n_blocks; ++blk) {
                         const std::uint64_t bits =
@@ -1858,7 +2147,59 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     Eigen::VectorXd& tf_b = tf1[static_cast<std::size_t>(b)];
                     tw_b = Eigen::VectorXd::Zero(N);
                     tf_b = Eigen::VectorXd::Zero(J);
-                    if (match_level) {
+                    if (par_scatter && match_level) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter) num_threads(solver.team)
+#endif
+                        for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
+                            draw_val[m] =
+                                std::sqrt(solver.m_c[static_cast<std::size_t>(m)]) *
+                                static_cast<double>(rvec[static_cast<std::size_t>(m)]);
+                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter) num_threads(solver.team)
+#endif
+                        for (std::int64_t w = 0; w < static_cast<std::int64_t>(N); ++w) {
+                            for (std::int64_t a = solver.w_ptr[static_cast<std::size_t>(w)];
+                                 a < solver.w_ptr[static_cast<std::size_t>(w) + 1]; ++a) {
+                                tw_b[sb.m_w[static_cast<std::size_t>(a)]] += draw_val[a];
+                            }
+                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter) num_threads(solver.team)
+#endif
+                        for (std::int64_t f = 0; f < static_cast<std::int64_t>(J); ++f) {
+                            for (std::int64_t a = solver.f_ptr[static_cast<std::size_t>(f)];
+                                 a < solver.f_ptr[static_cast<std::size_t>(f) + 1]; ++a) {
+                                const std::int64_t m =
+                                    solver.f_matches[static_cast<std::size_t>(a)];
+                                tf_b[sb.m_f[static_cast<std::size_t>(m)]] += draw_val[m];
+                            }
+                        }
+                    } else if (par_scatter) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter) num_threads(solver.team)
+#endif
+                        for (std::int64_t w = 0; w < static_cast<std::int64_t>(N); ++w) {
+                            for (std::int64_t a = rw_ptr[static_cast<std::size_t>(w)];
+                                 a < rw_ptr[static_cast<std::size_t>(w) + 1]; ++a) {
+                                const std::size_t k =
+                                    static_cast<std::size_t>(rw_rows[static_cast<std::size_t>(a)]);
+                                tw_b[sb.row_w[k]] += static_cast<double>(rvec[k]);
+                            }
+                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter) num_threads(solver.team)
+#endif
+                        for (std::int64_t f = 0; f < static_cast<std::int64_t>(J); ++f) {
+                            for (std::int64_t a = rf_ptr[static_cast<std::size_t>(f)];
+                                 a < rf_ptr[static_cast<std::size_t>(f) + 1]; ++a) {
+                                const std::size_t k =
+                                    static_cast<std::size_t>(rf_rows[static_cast<std::size_t>(a)]);
+                                tf_b[sb.row_f[k]] += static_cast<double>(rvec[k]);
+                            }
+                        }
+                    } else if (match_level) {
                         for (std::size_t m = 0; m < M; ++m) {
                             const double v =
                                 std::sqrt(solver.m_c[m]) * static_cast<double>(rvec[m]);
@@ -1873,7 +2214,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                         }
                     }
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
                     for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
                         msum[m] = rademacher_sum(
@@ -1891,11 +2232,47 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     Eigen::VectorXd& tf_c = tf2[static_cast<std::size_t>(b)];
                     tw_c = Eigen::VectorXd::Zero(N);
                     tf_c = Eigen::VectorXd::Zero(J);
-                    for (std::size_t m = 0; m < M; ++m) {
-                        const double su = msum[static_cast<Eigen::Index>(m)] * scale -
-                                          vbar * static_cast<double>(sb.m_cnt[m]);
-                        tw_c[sb.m_w[m]] += su;
-                        tf_c[sb.m_f[m]] += su;
+                    if (par_scatter_m) {
+                        // su is match-indexed in both leave-out levels; the
+                        // elementwise expression below is textually the
+                        // legacy `su` (same contraction), evaluated once per
+                        // match, then scattered through the match CSR.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter_m) num_threads(solver.team)
+#endif
+                        for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
+                            draw_val[m] =
+                                msum[static_cast<Eigen::Index>(m)] * scale -
+                                vbar * static_cast<double>(
+                                           sb.m_cnt[static_cast<std::size_t>(m)]);
+                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter_m) num_threads(solver.team)
+#endif
+                        for (std::int64_t w = 0; w < static_cast<std::int64_t>(N); ++w) {
+                            for (std::int64_t a = solver.w_ptr[static_cast<std::size_t>(w)];
+                                 a < solver.w_ptr[static_cast<std::size_t>(w) + 1]; ++a) {
+                                tw_c[sb.m_w[static_cast<std::size_t>(a)]] += draw_val[a];
+                            }
+                        }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_scatter_m) num_threads(solver.team)
+#endif
+                        for (std::int64_t f = 0; f < static_cast<std::int64_t>(J); ++f) {
+                            for (std::int64_t a = solver.f_ptr[static_cast<std::size_t>(f)];
+                                 a < solver.f_ptr[static_cast<std::size_t>(f) + 1]; ++a) {
+                                const std::int64_t m =
+                                    solver.f_matches[static_cast<std::size_t>(a)];
+                                tf_c[sb.m_f[static_cast<std::size_t>(m)]] += draw_val[m];
+                            }
+                        }
+                    } else {
+                        for (std::size_t m = 0; m < M; ++m) {
+                            const double su = msum[static_cast<Eigen::Index>(m)] * scale -
+                                              vbar * static_cast<double>(sb.m_cnt[m]);
+                            tw_c[sb.m_w[m]] += su;
+                            tf_c[sb.m_f[m]] += su;
+                        }
                     }
                 }
                 // --- batched solves: lanes [0,B)=(tw1,tf1) Pii draw;
@@ -1923,7 +2300,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 }
                 // --- fused accumulation, ascending d inside each row -------
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
                 for (std::int64_t blk = 0; blk < n_blocks; ++blk) {
                     const std::size_t base = static_cast<std::size_t>(blk) * 64;
@@ -1957,7 +2334,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     }
                 }
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
                 for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                     const int w = row_w_of[static_cast<std::size_t>(r)];
@@ -1982,7 +2359,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         for (int d = 0; d < p; ++d) {
             // --- (Pii, Mii) draw over working rows -------------------------
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
             for (std::int64_t b = 0; b < n_blocks; ++b) {
                 const std::uint64_t bits =
@@ -2013,7 +2390,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 solve_failed = true;
             }
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
             for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                 const int w = row_w_of[static_cast<std::size_t>(r)];
@@ -2037,7 +2414,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             // sums (parallel), then a sequential binning pass so the result
             // is independent of the thread count.
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
             for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
                 msum[m] = rademacher_sum(
@@ -2070,7 +2447,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 }
             }
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
 #endif
             for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                 const int w = row_w_of[static_cast<std::size_t>(r)];
@@ -2122,7 +2499,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             sigma[r] = 0.0;
             continue;
         }
-        sigma[r] = (yt[r] - mean_yt) * (eta[r] / m) * corr[r];
+        // sigma_row_product pins the multiplication order the shipped
+        // binaries realize (see XHDFE_AKM_STRICT_FN): bit-stable across
+        // builds where plain source is re-associated unpredictably.
+        sigma[r] = sigma_row_product(yt[r] - mean_yt, corr[r], eta[r], m);
     }
     if (match_level) {
         // Stayer sigma via the person-year formula (LeaveOutTwoWay
@@ -2222,6 +2602,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (options.compute_se) {
         const std::size_t n_py_sz = n_kept;
         const double NTd = n_py;
+        const int se_block = akm_se_block_env();
         // per-match bases with SE conventions
         std::vector<double> bp(M), bfe(M), bpe(M), bcov(M);
         std::vector<char> m_stayer(M, 0);
@@ -2540,16 +2921,53 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 Vf[b][J - 1] = 0.0;
             }
             Eigen::VectorXd aw(N), af(J), kw(N), kf(J);
+            // batched-lane storage (se_block >= 1): the NB solves of one
+            // subspace iteration are independent, so they go through the
+            // batched multi-RHS solver in a single call; the A_q
+            // applications and everything after the solves keep the exact
+            // per-lane sequential sequences. Iterations stay sequential.
+            std::vector<Eigen::VectorXd> pe_aw, pe_af;
+            std::vector<const Eigen::VectorXd*> pe_twp, pe_tfp;
+            std::vector<char> pe_ok;
+            if (se_block >= 1) {
+                pe_aw.assign(NB, Eigen::VectorXd(N));
+                pe_af.assign(NB, Eigen::VectorXd(J));
+                pe_twp.resize(NB);
+                pe_tfp.resize(NB);
+                for (int b = 0; b < NB; ++b) {
+                    pe_twp[static_cast<std::size_t>(b)] =
+                        &pe_aw[static_cast<std::size_t>(b)];
+                    pe_tfp[static_cast<std::size_t>(b)] =
+                        &pe_af[static_cast<std::size_t>(b)];
+                }
+            }
             double prev[3] = {0.0, 0.0, 0.0};
             lam[0] = lam[1] = lam[2] = 0.0;
             for (int it = 0; it < 2000; ++it) {
                 // Z_b = K^{-1} A_q V_b
+                if (se_block >= 1) {
+                    [&]() XHDFE_AKM_OUTLINE {
+                        for (int b = 0; b < NB; ++b) {
+                            apply_Aq(comp, Vw[b], Vf[b],
+                                     pe_aw[static_cast<std::size_t>(b)],
+                                     pe_af[static_cast<std::size_t>(b)]);
+                        }
+                        solver.solve_K_multi(pe_twp, pe_tfp, Vw, Vf, pe_ok,
+                                             cg_iters, true);
+                        for (int b = 0; b < NB; ++b) {
+                            if (!pe_ok[static_cast<std::size_t>(b)]) {
+                                res.converged = false;
+                            }
+                        }
+                    }();
+                } else {
                 for (int b = 0; b < NB; ++b) {
                     apply_Aq(comp, Vw[b], Vf[b], aw, af);
                     if (!solver.solve_K(aw, af, Vw[b], Vf[b], scw, scf, cg_iters,
                                         true)) {
                         res.converged = false;
                     }
+                }
                 }
                 // Rayleigh-Ritz in the pencil: Ah = V'A V, Kh = V'K V
                 Eigen::Matrix3d Ah, Kh;
@@ -2612,9 +3030,95 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // mean over draws of ||X K^{-1} A_q K^{-1} X' g||^2, g Rademacher.
         auto trace_atilde_sqr = [&](int comp) {
             const int nsim_tr = options.eig_trace_nsim;
+            double acc = 0.0;
+            if (se_block >= 1) {
+                [&]() XHDFE_AKM_OUTLINE {
+                // Two-wave batching: within a block of draws all FIRST
+                // solves are independent (batched together), each draw's
+                // SECOND solve depends on its own first solve only (A_q of
+                // it), so the second solves form another independent batch.
+                // Per draw the Rademacher stream, the A_q application and
+                // the accumulation keep the exact sequential sequences
+                // (ascending draw index), so acc is bit-identical for any
+                // block size >= 1 and any thread count.
+                const int TB = se_block;
+                std::vector<Eigen::VectorXd> t_tw(static_cast<std::size_t>(TB));
+                std::vector<Eigen::VectorXd> t_tf(static_cast<std::size_t>(TB));
+                std::vector<Eigen::VectorXd> t_c1w(static_cast<std::size_t>(TB));
+                std::vector<Eigen::VectorXd> t_c1f(static_cast<std::size_t>(TB));
+                std::vector<Eigen::VectorXd> t_aw(static_cast<std::size_t>(TB),
+                                                  Eigen::VectorXd(N));
+                std::vector<Eigen::VectorXd> t_af(static_cast<std::size_t>(TB),
+                                                  Eigen::VectorXd(J));
+                std::vector<Eigen::VectorXd> t_c2w(static_cast<std::size_t>(TB));
+                std::vector<Eigen::VectorXd> t_c2f(static_cast<std::size_t>(TB));
+                std::vector<const Eigen::VectorXd*> twp, tfp;
+                std::vector<char> okv;
+                for (int s0 = 0; s0 < nsim_tr; s0 += TB) {
+                    const int B = std::min(TB, nsim_tr - s0);
+                    twp.resize(static_cast<std::size_t>(B));
+                    tfp.resize(static_cast<std::size_t>(B));
+                    for (int b = 0; b < B; ++b) {
+                        const int s2 = s0 + b;
+                        std::uint64_t st =
+                            stream_seed(options.seed ^ 0x77ACE717ULL,
+                                        static_cast<std::uint64_t>(comp),
+                                        static_cast<std::uint64_t>(s2));
+                        Eigen::VectorXd& tw_b = t_tw[static_cast<std::size_t>(b)];
+                        Eigen::VectorXd& tf_b = t_tf[static_cast<std::size_t>(b)];
+                        tw_b = Eigen::VectorXd::Zero(N);
+                        tf_b = Eigen::VectorXd::Zero(J);
+                        for (std::size_t k = 0; k < n_py_sz; ++k) {
+                            st = splitmix64(st);
+                            const double g = (st >> 63) ? 1.0 : -1.0;
+                            tw_b[sb.row_w[k]] += g;
+                            tf_b[sb.row_f[k]] += g;
+                        }
+                        twp[static_cast<std::size_t>(b)] = &tw_b;
+                        tfp[static_cast<std::size_t>(b)] = &tf_b;
+                        t_c1w[static_cast<std::size_t>(b)].resize(N);
+                        t_c1f[static_cast<std::size_t>(b)].resize(J);
+                    }
+                    solver.solve_K_multi(twp, tfp, t_c1w, t_c1f, okv, cg_iters,
+                                         true);
+                    for (int b = 0; b < B; ++b) {
+                        if (!okv[static_cast<std::size_t>(b)]) {
+                            res.converged = false;
+                        }
+                        apply_Aq(comp, t_c1w[static_cast<std::size_t>(b)],
+                                 t_c1f[static_cast<std::size_t>(b)],
+                                 t_aw[static_cast<std::size_t>(b)],
+                                 t_af[static_cast<std::size_t>(b)]);
+                        twp[static_cast<std::size_t>(b)] =
+                            &t_aw[static_cast<std::size_t>(b)];
+                        tfp[static_cast<std::size_t>(b)] =
+                            &t_af[static_cast<std::size_t>(b)];
+                        t_c2w[static_cast<std::size_t>(b)].resize(N);
+                        t_c2f[static_cast<std::size_t>(b)].resize(J);
+                    }
+                    solver.solve_K_multi(twp, tfp, t_c2w, t_c2f, okv, cg_iters,
+                                         true);
+                    for (int b = 0; b < B; ++b) {
+                        if (!okv[static_cast<std::size_t>(b)]) {
+                            res.converged = false;
+                        }
+                        const Eigen::VectorXd& c2w_b =
+                            t_c2w[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd& c2f_b =
+                            t_c2f[static_cast<std::size_t>(b)];
+                        double tr_s = 0.0;
+                        for (std::size_t k = 0; k < n_py_sz; ++k) {
+                            const double v2 = c2w_b[sb.row_w[k]] + c2f_b[sb.row_f[k]];
+                            tr_s += v2 * v2;
+                        }
+                        acc += tr_s;
+                    }
+                }
+                }();
+                return acc / static_cast<double>(nsim_tr);
+            }
             Eigen::VectorXd tw2(N), tf2(J), c1w(N), c1f(J), aw(N), af(J),
                 c2w(N), c2f(J);
-            double acc = 0.0;
             for (int s2 = 0; s2 < nsim_tr; ++s2) {
                 std::uint64_t st = stream_seed(options.seed ^ 0x77ACE717ULL,
                                                static_cast<std::uint64_t>(comp),
@@ -2684,6 +3188,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             const std::vector<double> sig_t = options.se_sigma_lowess
                                                   ? lowess_sigma(bases)
                                                   : binned_sigma(bases);
+            prof_.mark("se_sigma_fit");
 
             // A_b and By
             tw_se.setZero();
@@ -2702,18 +3207,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     tf_se[sb.m_f[m]] += 0.5 * c * (alpha[sb.m_w[m]] - alpha_bar_se);
                 }
             }
-            if (!solver.solve_K(tw_se, tf_se, zw_se, zf_se, scw, scf, cg_iters, true)) {
-                res.converged = false;
-                res.notes += "SE solve (A_b) did not converge. ";
-            }
             Eigen::VectorXd By(static_cast<Eigen::Index>(n_py_sz));
-            for (std::size_t k = 0; k < n_py_sz; ++k) {
-                By[static_cast<Eigen::Index>(k)] =
-                    zw_se[sb.row_w[k]] + zf_se[sb.row_f[k]];
-            }
 
             // xi: u = Lambda_B y (block), ydx = (I-Lambda_P)^{-1} u,
-            // xi = ydx - X (K^{-1} X' ydx)
+            // xi = ydx - X (K^{-1} X' ydx). ydx does not depend on the A_b
+            // solve, so with se_block >= 1 the two independent solves go
+            // through the batched multi-RHS solver as one two-lane call
+            // (per lane identical to the sequential solve_K sequence).
             Eigen::VectorXd ydx(static_cast<Eigen::Index>(n_py_sz));
             if (match_level) {
                 for (std::size_t k = 0; k < n_py_sz; ++k) {
@@ -2737,15 +3237,61 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                         (den > 1e-12 ? den : 1.0);
                 }
             }
-            tw_se.setZero();
-            tf_se.setZero();
-            for (std::size_t k = 0; k < n_py_sz; ++k) {
-                tw_se[sb.row_w[k]] += ydx[static_cast<Eigen::Index>(k)];
-                tf_se[sb.row_f[k]] += ydx[static_cast<Eigen::Index>(k)];
-            }
-            if (!solver.solve_K(tw_se, tf_se, zw_se, zf_se, scw, scf, cg_iters, true)) {
-                res.converged = false;
-                res.notes += "SE solve (xi) did not converge. ";
+            if (se_block >= 1) {
+                [&]() XHDFE_AKM_OUTLINE {
+                std::vector<Eigen::VectorXd> p_tw(2), p_tf(2), p_zw(2), p_zf(2);
+                p_tw[0] = tw_se;
+                p_tf[0] = tf_se;
+                p_tw[1] = Eigen::VectorXd::Zero(N);
+                p_tf[1] = Eigen::VectorXd::Zero(J);
+                for (std::size_t k = 0; k < n_py_sz; ++k) {
+                    p_tw[1][sb.row_w[k]] += ydx[static_cast<Eigen::Index>(k)];
+                    p_tf[1][sb.row_f[k]] += ydx[static_cast<Eigen::Index>(k)];
+                }
+                for (int c = 0; c < 2; ++c) {
+                    p_zw[static_cast<std::size_t>(c)].resize(N);
+                    p_zf[static_cast<std::size_t>(c)].resize(J);
+                }
+                std::vector<const Eigen::VectorXd*> twp{&p_tw[0], &p_tw[1]};
+                std::vector<const Eigen::VectorXd*> tfp{&p_tf[0], &p_tf[1]};
+                std::vector<char> okv;
+                solver.solve_K_multi(twp, tfp, p_zw, p_zf, okv, cg_iters, true);
+                if (!okv[0]) {
+                    res.converged = false;
+                    res.notes += "SE solve (A_b) did not converge. ";
+                }
+                if (!okv[1]) {
+                    res.converged = false;
+                    res.notes += "SE solve (xi) did not converge. ";
+                }
+                for (std::size_t k = 0; k < n_py_sz; ++k) {
+                    By[static_cast<Eigen::Index>(k)] =
+                        p_zw[0][sb.row_w[k]] + p_zf[0][sb.row_f[k]];
+                }
+                // the SUM loop and the sims below read the xi solution from
+                // zw_se/zf_se exactly like the sequential path
+                zw_se.swap(p_zw[1]);
+                zf_se.swap(p_zf[1]);
+                }();
+            } else {
+                if (!solver.solve_K(tw_se, tf_se, zw_se, zf_se, scw, scf, cg_iters, true)) {
+                    res.converged = false;
+                    res.notes += "SE solve (A_b) did not converge. ";
+                }
+                for (std::size_t k = 0; k < n_py_sz; ++k) {
+                    By[static_cast<Eigen::Index>(k)] =
+                        zw_se[sb.row_w[k]] + zf_se[sb.row_f[k]];
+                }
+                tw_se.setZero();
+                tf_se.setZero();
+                for (std::size_t k = 0; k < n_py_sz; ++k) {
+                    tw_se[sb.row_w[k]] += ydx[static_cast<Eigen::Index>(k)];
+                    tf_se[sb.row_f[k]] += ydx[static_cast<Eigen::Index>(k)];
+                }
+                if (!solver.solve_K(tw_se, tf_se, zw_se, zf_se, scw, scf, cg_iters, true)) {
+                    res.converged = false;
+                    res.notes += "SE solve (xi) did not converge. ";
+                }
             }
             double SUM = 0.0;
             Eigen::VectorXd sum_etah_m = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(M));
@@ -2765,6 +3311,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                                  0.5 * (lam_eta + xi);
                 SUM += W * W * sig_t[k];
             }
+            prof_.mark("se_ab_xi");
 
             // ---- q=1 (Andrews-Mikusheva) preparation --------------------
             // eigAux + DO_R1 of leave_out_estimation_two_way: top pencil
@@ -2778,8 +3325,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             if (do_ci) {
                 Eigen::VectorXd q1w(N), q1f(J);
                 pencil_eigs(comp, lam3, q1w, q1f);
+                prof_.mark("eig_pencil");
                 lam1 = lam3[0];
                 trace_est = trace_atilde_sqr(comp);
+                prof_.mark("eig_trace");
                 x1bar.resize(static_cast<Eigen::Index>(n_py_sz));
                 double nrm2 = 0.0;
                 for (std::size_t k = 0; k < n_py_sz; ++k) {
@@ -2867,6 +3416,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 cov12 = 2.0 * cov12 / NTd;
                 sims2_re.assign(static_cast<std::size_t>(options.se_nsim), 0.0);
                 sims2_im.assign(static_cast<std::size_t>(options.se_nsim), 0.0);
+                prof_.mark("cov_r1");
             }
 
             // simulations for the quadratic part. Oracle-faithful complex
@@ -3000,6 +3550,184 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 }
                 return acc;
             };
+            // Sim-block batching (se_block, default 8; XHDFE_AKM_SE_BLOCK):
+            // the nsim draws are independent with deterministic per-sim
+            // seeds, so a block's re (and, on the complex-sigma path, im)
+            // solves all go through the batched multi-RHS solver in one
+            // call; per sim the draw stream, the scatters and every
+            // post-solve scalar/vector reduction keep the exact sequential
+            // sequences in ascending sim order, so results are identical for
+            // ANY block size >= 1 and ANY thread count (2.14.0 JLA
+            // guarantee). Extra memory is the per-lane person-year draw
+            // vectors: se_block * n * 8 bytes (2x when the component has
+            // negative sigma-tilde); reduce XHDFE_AKM_SE_BLOCK if tight.
+            // XHDFE_AKM_SE_BLOCK=0 keeps the sequential loop verbatim.
+            if (se_block >= 1) {
+                [&]() XHDFE_AKM_OUTLINE {
+                const int SB = se_block;
+                bool comp_has_neg = false;
+                for (std::size_t k = 0; k < n_py_sz; ++k) {
+                    if (sig_t[k] < 0.0) {
+                        comp_has_neg = true;
+                        break;
+                    }
+                }
+                std::vector<Eigen::VectorXd> vre_l(static_cast<std::size_t>(SB));
+                std::vector<Eigen::VectorXd> vim_l(static_cast<std::size_t>(SB));
+                std::vector<Eigen::VectorXd> s_tw(static_cast<std::size_t>(2 * SB));
+                std::vector<Eigen::VectorXd> s_tf(static_cast<std::size_t>(2 * SB));
+                std::vector<Eigen::VectorXd> s_zw(static_cast<std::size_t>(2 * SB));
+                std::vector<Eigen::VectorXd> s_zf(static_cast<std::size_t>(2 * SB));
+                std::vector<char> imag_l(static_cast<std::size_t>(SB));
+                std::vector<int> lane_im(static_cast<std::size_t>(SB));
+                std::vector<const Eigen::VectorXd*> twp, tfp;
+                std::vector<char> okv;
+                for (int s0 = 0; s0 < nsim; s0 += SB) {
+                    const int B = std::min(SB, nsim - s0);
+                    int nl = B;
+                    // --- per-sim draws + scatters (legacy sequences) -------
+                    for (int b = 0; b < B; ++b) {
+                        const int sidx = s0 + b;
+                        std::uint64_t st =
+                            stream_seed(options.seed ^ 0x5EEDC0FFEEULL,
+                                        static_cast<std::uint64_t>(comp),
+                                        static_cast<std::uint64_t>(sidx));
+                        bool any_imag = false;
+                        Eigen::VectorXd& vre_b = vre_l[static_cast<std::size_t>(b)];
+                        vre_b.resize(static_cast<Eigen::Index>(n_py_sz));
+                        if (comp_has_neg) {
+                            Eigen::VectorXd& vim_b =
+                                vim_l[static_cast<std::size_t>(b)];
+                            vim_b.resize(static_cast<Eigen::Index>(n_py_sz));
+                            for (std::size_t k = 0; k < n_py_sz; ++k) {
+                                const double nk = normal_from_stream(st);
+                                if (sig_t[k] >= 0.0) {
+                                    vre_b[static_cast<Eigen::Index>(k)] =
+                                        nk * std::sqrt(sig_t[k]);
+                                    vim_b[static_cast<Eigen::Index>(k)] = 0.0;
+                                } else {
+                                    vre_b[static_cast<Eigen::Index>(k)] = 0.0;
+                                    vim_b[static_cast<Eigen::Index>(k)] =
+                                        nk * std::sqrt(-sig_t[k]);
+                                    any_imag = true;
+                                }
+                            }
+                        } else {
+                            // no negative sigma-tilde anywhere: the
+                            // sequential loop writes vim = 0 and never reads
+                            // it; identical vre values, no vim lane needed.
+                            for (std::size_t k = 0; k < n_py_sz; ++k) {
+                                const double nk = normal_from_stream(st);
+                                vre_b[static_cast<Eigen::Index>(k)] =
+                                    nk * std::sqrt(sig_t[k]);
+                            }
+                        }
+                        imag_l[static_cast<std::size_t>(b)] = any_imag ? 1 : 0;
+                        Eigen::VectorXd& tw_b = s_tw[static_cast<std::size_t>(b)];
+                        Eigen::VectorXd& tf_b = s_tf[static_cast<std::size_t>(b)];
+                        tw_b = Eigen::VectorXd::Zero(N);
+                        tf_b = Eigen::VectorXd::Zero(J);
+                        for (std::size_t k = 0; k < n_py_sz; ++k) {
+                            tw_b[sb.row_w[k]] += vre_b[static_cast<Eigen::Index>(k)];
+                            tf_b[sb.row_f[k]] += vre_b[static_cast<Eigen::Index>(k)];
+                        }
+                        if (any_imag) {
+                            const Eigen::VectorXd& vim_b =
+                                vim_l[static_cast<std::size_t>(b)];
+                            lane_im[static_cast<std::size_t>(b)] = nl;
+                            Eigen::VectorXd& twi = s_tw[static_cast<std::size_t>(nl)];
+                            Eigen::VectorXd& tfi = s_tf[static_cast<std::size_t>(nl)];
+                            twi = Eigen::VectorXd::Zero(N);
+                            tfi = Eigen::VectorXd::Zero(J);
+                            for (std::size_t k = 0; k < n_py_sz; ++k) {
+                                twi[sb.row_w[k]] += vim_b[static_cast<Eigen::Index>(k)];
+                                tfi[sb.row_f[k]] += vim_b[static_cast<Eigen::Index>(k)];
+                            }
+                            ++nl;
+                        } else {
+                            lane_im[static_cast<std::size_t>(b)] = -1;
+                        }
+                    }
+                    // --- one batched multi-RHS call for the whole block ----
+                    twp.resize(static_cast<std::size_t>(nl));
+                    tfp.resize(static_cast<std::size_t>(nl));
+                    for (int l = 0; l < nl; ++l) {
+                        twp[static_cast<std::size_t>(l)] = &s_tw[static_cast<std::size_t>(l)];
+                        tfp[static_cast<std::size_t>(l)] = &s_tf[static_cast<std::size_t>(l)];
+                        s_zw[static_cast<std::size_t>(l)].resize(N);
+                        s_zf[static_cast<std::size_t>(l)].resize(J);
+                    }
+                    solver.solve_K_multi(twp, tfp, s_zw, s_zf, okv, cg_iters, true);
+                    // --- per-sim post-solve reductions, ascending sidx -----
+                    for (int b = 0; b < B; ++b) {
+                        const int sidx = s0 + b;
+                        const bool any_imag =
+                            imag_l[static_cast<std::size_t>(b)] != 0;
+                        any_imag_global = any_imag_global || any_imag;
+                        if (!okv[static_cast<std::size_t>(b)]) {
+                            res.converged = false;
+                        }
+                        const Eigen::VectorXd& vre_b = vre_l[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd& vim_b = vim_l[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd& zw_re_b = s_zw[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd& zf_re_b = s_zf[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd* zwi = nullptr;
+                        const Eigen::VectorXd* zfi = nullptr;
+                        if (any_imag) {
+                            const int li = lane_im[static_cast<std::size_t>(b)];
+                            if (!okv[static_cast<std::size_t>(li)]) {
+                                res.converged = false;
+                            }
+                            zwi = &s_zw[static_cast<std::size_t>(li)];
+                            zfi = &s_zf[static_cast<std::size_t>(li)];
+                        }
+                        // conjugate semantics (MATLAB ' and complex cov):
+                        // S_re = [R(re,re)+R(im,im)] - [G(re,re)+G(im,im)]
+                        // S_im = [R(re,im)-R(im,re)] - [G(re,im)-G(im,re)]
+                        const double Gd_rr = quad_dot(vre_b, vre_b, zw_re_b, zf_re_b);
+                        double Gd_ii = 0.0, Gd_ri = 0.0, Gd_ir = 0.0;
+                        double S_re = quad_sub(zw_re_b, zf_re_b, zw_re_b, zf_re_b) - Gd_rr;
+                        double S_im = 0.0;
+                        if (any_imag) {
+                            Gd_ii = quad_dot(vim_b, vim_b, *zwi, *zfi);
+                            Gd_ri = quad_dot(vre_b, vim_b, *zwi, *zfi);
+                            Gd_ir = quad_dot(vim_b, vre_b, zw_re_b, zf_re_b);
+                            S_re += quad_sub(*zwi, *zfi, *zwi, *zfi) - Gd_ii;
+                            S_im = (quad_sub(zw_re_b, zf_re_b, *zwi, *zfi) -
+                                    quad_sub(*zwi, *zfi, zw_re_b, zf_re_b)) -
+                                   (Gd_ri - Gd_ir);
+                        }
+                        sims_re[static_cast<std::size_t>(sidx)] = S_re;
+                        sims_im[static_cast<std::size_t>(sidx)] = S_im;
+                        if (do_ci) {
+                            // aux_SIM2 = -v' Lambda_B2 aux - lambda_1
+                            // (v'x1bar)(x1bar'v); G2(a,b) = G(a,b) -
+                            // lambda_1 d2(a,b), conjugate expansion as G.
+                            build_auxfull(vre_b, zw_re_b, zf_re_b, auxfull_re);
+                            const double dx_re = x1bar.dot(vre_b);
+                            double s2_re, s2_im;
+                            if (any_imag) {
+                                build_auxfull(vim_b, *zwi, *zfi, auxfull_im);
+                                const double dx_im = x1bar.dot(vim_b);
+                                const double G2_rr = Gd_rr - lam1 * diag2(vre_b, auxfull_re);
+                                const double G2_ii = Gd_ii - lam1 * diag2(vim_b, auxfull_im);
+                                const double G2_ri = Gd_ri - lam1 * diag2(vre_b, auxfull_im);
+                                const double G2_ir = Gd_ir - lam1 * diag2(vim_b, auxfull_re);
+                                s2_re = -(G2_rr + G2_ii) -
+                                        lam1 * (dx_re * dx_re + dx_im * dx_im);
+                                s2_im = -(G2_ri - G2_ir);
+                            } else {
+                                const double G2_rr = Gd_rr - lam1 * diag2(vre_b, auxfull_re);
+                                s2_re = -G2_rr - lam1 * dx_re * dx_re;
+                                s2_im = 0.0;
+                            }
+                            sims2_re[static_cast<std::size_t>(sidx)] = s2_re;
+                            sims2_im[static_cast<std::size_t>(sidx)] = s2_im;
+                        }
+                    }
+                }
+                }();
+            } else {
             for (int sidx = 0; sidx < nsim; ++sidx) {
                 std::uint64_t st = stream_seed(options.seed ^ 0x5EEDC0FFEEULL,
                                                static_cast<std::uint64_t>(comp),
@@ -3085,7 +3813,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     sims2_im[static_cast<std::size_t>(sidx)] = s2_im;
                 }
             }
+            }
             (void)any_imag_global;
+            prof_.mark("se_sims");
             double mre = 0.0, mim = 0.0;
             for (int t2 = 0; t2 < nsim; ++t2) {
                 mre += sims_re[static_cast<std::size_t>(t2)];
@@ -3231,6 +3961,62 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.lincom_se_kss.resize(r);
         res.lincom_se_white.resize(r);
         res.lincom_t.resize(r);
+        const int se_block = akm_se_block_env();
+        if (se_block >= 1) {
+            [&]() XHDFE_AKM_OUTLINE {
+            // Batch the r independent column solves through the multi-RHS
+            // solver in one call (tw is identically zero -> nullptr lanes,
+            // exactly the JLA fe-lane convention); the per-column scalar
+            // reductions keep the sequential order (ascending qq).
+            std::vector<Eigen::VectorXd> l_tf(static_cast<std::size_t>(r));
+            std::vector<Eigen::VectorXd> l_zw(static_cast<std::size_t>(r));
+            std::vector<Eigen::VectorXd> l_zf(static_cast<std::size_t>(r));
+            for (int qq = 0; qq < r; ++qq) {
+                Eigen::VectorXd eq = Eigen::VectorXd::Zero(r + 1);
+                eq[qq + 1] = 1.0;
+                const Eigen::VectorXd vw = Zt * zz.solve(eq);   // n_py vector
+                Eigen::VectorXd& tf_q = l_tf[static_cast<std::size_t>(qq)];
+                tf_q = Eigen::VectorXd::Zero(J);
+                for (std::size_t k = 0; k < n_kept; ++k) {
+                    tf_q[sb.row_f[k]] += vw[static_cast<Eigen::Index>(k)];
+                }
+                l_zw[static_cast<std::size_t>(qq)].resize(N);
+                l_zf[static_cast<std::size_t>(qq)].resize(J);
+            }
+            std::vector<const Eigen::VectorXd*> twp(static_cast<std::size_t>(r),
+                                                    nullptr);
+            std::vector<const Eigen::VectorXd*> tfp(static_cast<std::size_t>(r));
+            for (int qq = 0; qq < r; ++qq) {
+                tfp[static_cast<std::size_t>(qq)] = &l_tf[static_cast<std::size_t>(qq)];
+            }
+            std::vector<char> okv;
+            solver.solve_K_multi(twp, tfp, l_zw, l_zf, okv, cg_iters, true);
+            for (int qq = 0; qq < r; ++qq) {
+                if (!okv[static_cast<std::size_t>(qq)]) {
+                    res.converged = false;
+                    res.notes += "lincom solve did not converge. ";
+                }
+                const Eigen::VectorXd& zw_l = l_zw[static_cast<std::size_t>(qq)];
+                const Eigen::VectorXd& zf_l = l_zf[static_cast<std::size_t>(qq)];
+                double den_kss = 0.0, den_white = 0.0;
+                for (std::size_t m = 0; m < R; ++m) {
+                    const int w = row_w_of[m];
+                    const int f = row_f_of[m];
+                    const double sw = match_level
+                                          ? std::sqrt(row_wgt[static_cast<Eigen::Index>(m)])
+                                          : 1.0;
+                    const double xr = sw * (zw_l[w] + zf_l[f]);
+                    den_kss += sigma[static_cast<Eigen::Index>(m)] * xr * xr;
+                    den_white += eta[static_cast<Eigen::Index>(m)] *
+                                 eta[static_cast<Eigen::Index>(m)] * xr * xr;
+                }
+                res.lincom_coef[qq] = num[qq + 1];
+                res.lincom_se_kss[qq] = std::sqrt(den_kss);
+                res.lincom_se_white[qq] = std::sqrt(den_white);
+                res.lincom_t[qq] = num[qq + 1] / std::sqrt(den_kss);
+            }
+            }();
+        } else {
         Eigen::VectorXd tw0 = Eigen::VectorXd::Zero(N);
         Eigen::VectorXd tf(J), zw_l(N), zf_l(J), scr_w(N), scr_f(J);
         for (int qq = 0; qq < r; ++qq) {
@@ -3262,7 +4048,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             res.lincom_se_white[qq] = std::sqrt(den_white);
             res.lincom_t[qq] = num[qq + 1] / std::sqrt(den_kss);
         }
+        }
         res.solver_iterations = cg_iters;
+        prof_.mark("lincom");
     }
 
     // Observation-level effects, psi centered to zero person-year mean.
