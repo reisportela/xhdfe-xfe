@@ -1,4 +1,4 @@
-v 2.13.2
+v 2.14.0
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
