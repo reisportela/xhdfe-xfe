@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <new>
+#include <vector>
 
 namespace hdfe {
 namespace akm {
@@ -67,6 +68,83 @@ __global__ void k_mul_pair(int n, const double* a, const double* b, double* out)
     if (i < n) out[i] = a[i] * b[i];
 }
 
+
+__global__ void k_mult_b_multi(int n_workers, int nb, const std::int64_t* w_ptr,
+                               const int* m_f, const double* m_c, const double* x,
+                               const double* inv_dw, const char* active, double* t,
+                               int J, int N) {
+    const int w = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (w >= n_workers || l >= nb || !active[l]) return;
+    const double* xl = x + static_cast<std::size_t>(l) * J;
+    double acc = 0.0;
+    for (std::int64_t a = w_ptr[w]; a < w_ptr[w + 1]; ++a) {
+        acc += m_c[a] * xl[m_f[a]];
+    }
+    t[static_cast<std::size_t>(l) * N + w] = acc * inv_dw[w];
+}
+
+__global__ void k_mult_bt_finish_multi(int n_firms, int nb, int ground,
+                                       const std::int64_t* f_ptr,
+                                       const std::int64_t* f_matches, const int* m_w,
+                                       const double* m_c, const double* s,
+                                       const double* Df, const double* p, double* y,
+                                       const char* active, int J, int N) {
+    const int f = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (f >= n_firms || l >= nb || !active[l]) return;
+    const double* sl = s + static_cast<std::size_t>(l) * N;
+    double acc = 0.0;
+    for (std::int64_t a = f_ptr[f]; a < f_ptr[f + 1]; ++a) {
+        const std::int64_t m = f_matches[a];
+        acc += m_c[m] * sl[m_w[m]];
+    }
+    const std::size_t off = static_cast<std::size_t>(l) * J + f;
+    y[off] = (f == ground) ? 0.0 : Df[f] * p[off] - acc;
+}
+
+__global__ void k_axpy_multi(int n, int nb, const double* alpha, const char* active,
+                             const double* x, double* y) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (i >= n || l >= nb || !active[l]) return;
+    const std::size_t off = static_cast<std::size_t>(l) * n + i;
+    y[off] += alpha[l] * x[off];
+}
+
+__global__ void k_xpay_multi(int n, int nb, const double* beta, const char* active,
+                             const double* x, double* y) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (i >= n || l >= nb || !active[l]) return;
+    const std::size_t off = static_cast<std::size_t>(l) * n + i;
+    y[off] = x[off] + beta[l] * y[off];
+}
+
+__global__ void k_hadamard_multi(int n, int nb, const double* a, const char* active,
+                                 const double* b, double* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (i >= n || l >= nb || !active[l]) return;
+    const std::size_t off = static_cast<std::size_t>(l) * n + i;
+    out[off] = a[i] * b[off];
+}
+
+__global__ void k_mul_pair_multi(int n, int nb, const double* a, const double* b,
+                                 const char* active, double* out) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (i >= n || l >= nb) return;
+    const std::size_t off = static_cast<std::size_t>(l) * n + i;
+    // inactive lanes contribute zeros so the segmented sums stay defined
+    out[off] = active[l] ? a[off] * b[off] : 0.0;
+}
+
+__global__ void k_seg_offsets(int nb, int n, int* offs) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i <= nb) offs[i] = i * n;
+}
+
 }  // namespace
 
 struct AkmCudaContext {
@@ -95,6 +173,21 @@ struct AkmCudaContext {
     double* d_dot = nullptr;
     void* d_cub_tmp = nullptr;
     std::size_t cub_tmp_bytes = 0;
+    // multi-RHS workspace (allocated lazily on the first batched solve)
+    int mr_lanes = 0;
+    double* d_mx = nullptr;
+    double* d_mr = nullptr;
+    double* d_mz = nullptr;
+    double* d_mp = nullptr;
+    double* d_mAp = nullptr;
+    double* d_mtw = nullptr;
+    double* d_mpair = nullptr;
+    double* d_mdots = nullptr;
+    double* d_mscal = nullptr;
+    char* d_mactive = nullptr;
+    int* d_moffs = nullptr;
+    void* d_mcub_tmp = nullptr;
+    std::size_t mcub_tmp_bytes = 0;
 
     ~AkmCudaContext() {
         cudaFree(d_w_ptr);
@@ -115,6 +208,18 @@ struct AkmCudaContext {
         cudaFree(d_pair);
         cudaFree(d_dot);
         cudaFree(d_cub_tmp);
+        cudaFree(d_mx);
+        cudaFree(d_mr);
+        cudaFree(d_mz);
+        cudaFree(d_mp);
+        cudaFree(d_mAp);
+        cudaFree(d_mtw);
+        cudaFree(d_mpair);
+        cudaFree(d_mdots);
+        cudaFree(d_mscal);
+        cudaFree(d_mactive);
+        cudaFree(d_moffs);
+        cudaFree(d_mcub_tmp);
     }
 };
 
@@ -207,6 +312,183 @@ AkmCudaContext* akm_cuda_create(int n_workers, int n_firms, const int* m_w,
 }
 
 void akm_cuda_destroy(AkmCudaContext* ctx) { delete ctx; }
+int akm_cuda_max_lanes() { return 32; }
+
+namespace {
+
+// per-lane dots via one segmented reduce: out_host[l] = sum(pair[l*J..(l+1)*J))
+bool seg_dots(AkmCudaContext* c, int nb, const double* a, const double* b,
+              double* out_host) {
+    const int J = c->J;
+    dim3 grid((J + kBlock - 1) / kBlock, nb);
+    k_mul_pair_multi<<<grid, kBlock>>>(J, nb, a, b, c->d_mactive, c->d_mpair);
+    std::size_t need = 0;
+    cub::DeviceSegmentedReduce::Sum(nullptr, need, c->d_mpair, c->d_mdots, nb,
+                                    c->d_moffs, c->d_moffs + 1);
+    if (need > c->mcub_tmp_bytes) {
+        cudaFree(c->d_mcub_tmp);
+        if (!cuda_ok(cudaMalloc(&c->d_mcub_tmp, need))) return false;
+        c->mcub_tmp_bytes = need;
+    }
+    cub::DeviceSegmentedReduce::Sum(c->d_mcub_tmp, c->mcub_tmp_bytes, c->d_mpair,
+                                    c->d_mdots, nb, c->d_moffs, c->d_moffs + 1);
+    return cuda_ok(cudaMemcpy(out_host, c->d_mdots, sizeof(double) * nb,
+                              cudaMemcpyDeviceToHost));
+}
+
+bool mr_ensure(AkmCudaContext* c, int nb) {
+    if (c->mr_lanes >= nb) return true;
+    const std::size_t J = static_cast<std::size_t>(c->J);
+    const std::size_t N = static_cast<std::size_t>(c->N);
+    const std::size_t L = static_cast<std::size_t>(nb);
+    cudaFree(c->d_mx); cudaFree(c->d_mr); cudaFree(c->d_mz); cudaFree(c->d_mp);
+    cudaFree(c->d_mAp); cudaFree(c->d_mtw); cudaFree(c->d_mpair);
+    cudaFree(c->d_mdots); cudaFree(c->d_mscal); cudaFree(c->d_mactive);
+    cudaFree(c->d_moffs);
+    bool ok = cuda_ok(cudaMalloc(&c->d_mx, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mr, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mz, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mp, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mAp, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mtw, sizeof(double) * N * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mpair, sizeof(double) * J * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mdots, sizeof(double) * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mscal, sizeof(double) * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mactive, L)) &&
+              cuda_ok(cudaMalloc(&c->d_moffs, sizeof(int) * (L + 1)));
+    if (!ok) {
+        c->mr_lanes = 0;
+        return false;
+    }
+    c->mr_lanes = nb;
+    return true;
+}
+
+}  // namespace
+
+int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
+                           double* z_pack, int nb, double tol, int max_iter,
+                           int* iters_out) {
+    if (nb < 1 || nb > akm_cuda_max_lanes()) return -1;
+    if (!mr_ensure(c, nb)) return -1;
+    const int J = c->J;
+    const std::size_t JL = static_cast<std::size_t>(J) * nb;
+    dim3 gJ((J + kBlock - 1) / kBlock, nb);
+    dim3 gN((c->N + kBlock - 1) / kBlock, nb);
+    {
+        const int go = (nb + 1 + kBlock - 1) / kBlock;
+        k_seg_offsets<<<go, kBlock>>>(nb, J, c->d_moffs);
+    }
+    if (!cuda_ok(cudaMemcpy(c->d_mr, rhs_pack, sizeof(double) * JL,
+                            cudaMemcpyHostToDevice)))
+        return -1;
+    // pin grounds; x = 0; all lanes active
+    cudaMemset(c->d_mx, 0, sizeof(double) * JL);
+    {
+        std::vector<char> act(nb, 1);
+        for (int l = 0; l < nb; ++l) {
+            cudaMemset(c->d_mr + static_cast<std::size_t>(l) * J + c->ground, 0,
+                       sizeof(double));
+        }
+        cudaMemcpy(c->d_mactive, act.data(), nb, cudaMemcpyHostToDevice);
+    }
+    std::vector<double> rhs_norm2(nb), rz(nb), tol2(nb), pAp(nb), rr(nb), rz_new(nb);
+    std::vector<double> alpha(nb), beta(nb);
+    std::vector<char> active(nb, 1), ok_lane(nb, 0);
+    std::vector<int> its(nb, 0);
+    if (!seg_dots(c, nb, c->d_mr, c->d_mr, rhs_norm2.data())) return -1;
+    for (int l = 0; l < nb; ++l) {
+        if (rhs_norm2[l] == 0.0) {
+            active[l] = 0;
+            ok_lane[l] = 1;
+        }
+        tol2[l] = tol * tol * rhs_norm2[l];
+    }
+    cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
+    k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive, c->d_mr,
+                                     c->d_mz);
+    cudaMemcpy(c->d_mp, c->d_mz, sizeof(double) * JL, cudaMemcpyDeviceToDevice);
+    if (!seg_dots(c, nb, c->d_mr, c->d_mz, rz.data())) return -1;
+
+    auto any_active = [&]() {
+        for (int l = 0; l < nb; ++l)
+            if (active[l]) return true;
+        return false;
+    };
+    while (any_active()) {
+        // Ap = S p for active lanes
+        k_mult_b_multi<<<gN, kBlock>>>(c->N, nb, c->d_w_ptr, c->d_m_f, c->d_m_c,
+                                       c->d_mp, c->d_inv_dw, c->d_mactive, c->d_mtw,
+                                       J, c->N);
+        k_mult_bt_finish_multi<<<gJ, kBlock>>>(J, nb, c->ground, c->d_f_ptr,
+                                               c->d_f_matches, c->d_m_w, c->d_m_c,
+                                               c->d_mtw, c->d_Df, c->d_mp, c->d_mAp,
+                                               c->d_mactive, J, c->N);
+        if (!seg_dots(c, nb, c->d_mp, c->d_mAp, pAp.data())) return -1;
+        for (int l = 0; l < nb; ++l) {
+            if (!active[l]) {
+                alpha[l] = 0.0;
+                continue;
+            }
+            if (!(pAp[l] > 0.0) || !(pAp[l] < 1e300)) {
+                active[l] = 0;
+                alpha[l] = 0.0;
+                continue;
+            }
+            alpha[l] = rz[l] / pAp[l];
+        }
+        cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
+        cudaMemcpy(c->d_mscal, alpha.data(), sizeof(double) * nb,
+                   cudaMemcpyHostToDevice);
+        k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mp,
+                                     c->d_mx);
+        for (int l = 0; l < nb; ++l) alpha[l] = -alpha[l];
+        cudaMemcpy(c->d_mscal, alpha.data(), sizeof(double) * nb,
+                   cudaMemcpyHostToDevice);
+        k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mAp,
+                                     c->d_mr);
+        if (!seg_dots(c, nb, c->d_mr, c->d_mr, rr.data())) return -1;
+        for (int l = 0; l < nb; ++l) {
+            if (!active[l]) continue;
+            ++its[l];
+            if (rr[l] <= tol2[l]) {
+                ok_lane[l] = 1;
+                active[l] = 0;
+            } else if (its[l] >= max_iter) {
+                active[l] = 0;
+            }
+        }
+        cudaMemcpy(c->d_mactive, active.data(), nb, cudaMemcpyHostToDevice);
+        if (!any_active()) break;
+        k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive, c->d_mr,
+                                         c->d_mz);
+        if (!seg_dots(c, nb, c->d_mr, c->d_mz, rz_new.data())) return -1;
+        for (int l = 0; l < nb; ++l) {
+            beta[l] = (active[l] && rz[l] != 0.0) ? rz_new[l] / rz[l] : 0.0;
+            if (active[l]) rz[l] = rz_new[l];
+        }
+        cudaMemcpy(c->d_mscal, beta.data(), sizeof(double) * nb,
+                   cudaMemcpyHostToDevice);
+        k_xpay_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mz,
+                                     c->d_mp);
+    }
+    if (!cuda_ok(cudaMemcpy(z_pack, c->d_mx, sizeof(double) * JL,
+                            cudaMemcpyDeviceToHost)))
+        return -1;
+    for (int l = 0; l < nb; ++l) {
+        z_pack[static_cast<std::size_t>(l) * J + c->ground] = 0.0;
+        if (!ok_lane[l]) {
+            // zero the failed lane's solution (caller marks failure)
+            for (int j = 0; j < J; ++j)
+                z_pack[static_cast<std::size_t>(l) * J + j] = 0.0;
+            iters_out[l] = -1;
+        } else {
+            iters_out[l] = its[l];
+        }
+    }
+    return 0;
+}
+
 
 int akm_cuda_solve_S(AkmCudaContext* c, const double* rhs, double* z, double tol,
                      int max_iter) {

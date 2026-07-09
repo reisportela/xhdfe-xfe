@@ -33,6 +33,10 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -787,6 +791,415 @@ struct TwoWaySolver {
         zw = (tw - scr_w).cwiseQuotient(Dw);
         return true;
     }
+
+    // ---- Batched independent multi-RHS solves --------------------------
+    // The B / B' gathers are fused across columns (the graph indices and
+    // coefficients are streamed once per tile of up to kMrhsTile columns,
+    // and each gathered cache line serves every column in the tile), while
+    // every per-column vector/scalar operation reuses exactly the same
+    // Eigen expressions as the single-RHS path, applied in the same order.
+    // Each column of a batched solve is therefore bit-identical to a
+    // sequential solve_S / solve_K call for that RHS: the fused loops
+    // accumulate per column in the same edge order as mult_B / mult_Bt,
+    // and dot products / axpy updates stay per-column Eigen kernels.
+    static constexpr int kMrhsTile = 8;
+
+    // T = B X (worker space); X row-major J x kMrhsTile, T row-major
+    // N x kMrhsTile. The tile width is a compile-time constant and the outer
+    // loop runs over fixed-size 4096-row blocks, so both the generated code
+    // and the work partition are identical for every call and every thread
+    // count: a column's arithmetic never depends on how many real columns
+    // share the tile (padding lanes carry zeros) nor on the OpenMP split.
+    void mult_B_multi(const double* X, double* T, bool parallel) const {
+        const std::vector<int>& mf = *m_f;
+        parallel = parallel && N >= 16384;
+        const std::int64_t nblk = (N + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel)
+#endif
+        for (std::int64_t blk = 0; blk < nblk; ++blk) {
+            const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
+            for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                double acc[kMrhsTile];
+                for (int k = 0; k < kMrhsTile; ++k) {
+                    acc[k] = 0.0;
+                }
+                for (std::int64_t a = w_ptr[static_cast<std::size_t>(w)];
+                     a < w_ptr[static_cast<std::size_t>(w) + 1]; ++a) {
+                    const double c = m_c[static_cast<std::size_t>(a)];
+                    const double* xf =
+                        X + static_cast<std::size_t>(mf[static_cast<std::size_t>(a)]) *
+                                static_cast<std::size_t>(kMrhsTile);
+                    for (int k = 0; k < kMrhsTile; ++k) {
+                        acc[k] += c * xf[k];
+                    }
+                }
+                double* tw =
+                    T + static_cast<std::size_t>(w) * static_cast<std::size_t>(kMrhsTile);
+                for (int k = 0; k < kMrhsTile; ++k) {
+                    tw[k] = acc[k];
+                }
+            }
+        }
+    }
+
+    // Y = B' S (firm space); S row-major N x kMrhsTile, Y row-major
+    // J x kMrhsTile (fixed tile width + fixed 4096 blocks; see mult_B_multi).
+    void mult_Bt_multi(const double* S, double* Y, bool parallel) const {
+        const std::vector<int>& mw = *m_w;
+        parallel = parallel && J >= 16384;
+        const std::int64_t nblk = (J + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel)
+#endif
+        for (std::int64_t blk = 0; blk < nblk; ++blk) {
+            const std::int64_t f_end = std::min<std::int64_t>((blk + 1) * 4096, J);
+            for (std::int64_t f = blk * 4096; f < f_end; ++f) {
+                double acc[kMrhsTile];
+                for (int k = 0; k < kMrhsTile; ++k) {
+                    acc[k] = 0.0;
+                }
+                for (std::int64_t a = f_ptr[static_cast<std::size_t>(f)];
+                     a < f_ptr[static_cast<std::size_t>(f) + 1]; ++a) {
+                    const std::size_t m =
+                        static_cast<std::size_t>(f_matches[static_cast<std::size_t>(a)]);
+                    const double* sw =
+                        S + static_cast<std::size_t>(mw[m]) * static_cast<std::size_t>(kMrhsTile);
+                    const double c = m_c[m];
+                    for (int k = 0; k < kMrhsTile; ++k) {
+                        acc[k] += c * sw[k];
+                    }
+                }
+                double* yf =
+                    Y + static_cast<std::size_t>(f) * static_cast<std::size_t>(kMrhsTile);
+                for (int k = 0; k < kMrhsTile; ++k) {
+                    yf[k] = acc[k];
+                }
+            }
+        }
+    }
+
+    // Apply Ap_c = S p_c (grounded) for a set of columns, fusing the two
+    // gathers across columns in tiles. Per column the arithmetic sequence
+    // matches solve_S exactly: mult_B, elementwise /Dw, mult_Bt, then
+    // Ap = Df .* p - Ap with Ap[Jr] = 0.
+    void apply_S_multi(const std::vector<const Eigen::VectorXd*>& p,
+                       std::vector<Eigen::VectorXd*>& Ap,
+                       std::vector<double>& packP, std::vector<double>& packT,
+                       bool parallel) const {
+        const int nc = static_cast<int>(p.size());
+        packP.assign(static_cast<std::size_t>(J) * kMrhsTile, 0.0);
+        packT.resize(static_cast<std::size_t>(N) * kMrhsTile);
+        for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
+            const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
+            for (int k = 0; k < nb; ++k) {
+                const double* src = p[static_cast<std::size_t>(c0 + k)]->data();
+                for (std::int64_t j = 0; j < J; ++j) {
+                    packP[static_cast<std::size_t>(j) * kMrhsTile +
+                          static_cast<std::size_t>(k)] = src[j];
+                }
+            }
+            mult_B_multi(packP.data(), packT.data(), parallel);
+            {
+                double* T = packT.data();
+                const std::int64_t nblkw = (N + 4095) / 4096;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (parallel && N >= 16384)
+#endif
+                for (std::int64_t blk = 0; blk < nblkw; ++blk) {
+                    const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
+                    for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                        const double dw = Dw[w];
+                        double* tw = T + static_cast<std::size_t>(w) * kMrhsTile;
+                        for (int k = 0; k < kMrhsTile; ++k) {
+                            tw[k] /= dw;
+                        }
+                    }
+                }
+            }
+            mult_Bt_multi(packT.data(), packP.data(), parallel);
+            for (int k = 0; k < nb; ++k) {
+                Eigen::VectorXd& apc = *Ap[static_cast<std::size_t>(c0 + k)];
+                for (std::int64_t j = 0; j < J; ++j) {
+                    apc[j] = packP[static_cast<std::size_t>(j) * kMrhsTile +
+                                   static_cast<std::size_t>(k)];
+                }
+                apc = Df.cwiseProduct(*p[static_cast<std::size_t>(c0 + k)]) - apc;
+                apc[Jr] = 0.0;
+            }
+            if (c0 + kMrhsTile < nc) {
+                for (int k = 0; k < nb; ++k) {
+                    for (std::int64_t j = 0; j < J; ++j) {
+                        packP[static_cast<std::size_t>(j) * kMrhsTile +
+                              static_cast<std::size_t>(k)] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
+    // Batched independent Jacobi-PCG: per-column state and scalar updates
+    // are the exact single-RHS sequences; only the S-applies are fused.
+    // Returns per-column success; z columns of failed solves stay zero.
+    void solve_S_multi(std::vector<Eigen::VectorXd>& rhs,
+                       std::vector<Eigen::VectorXd>& z_full,
+                       std::vector<char>& success, long long& iters,
+                       bool parallel) const {
+        const int nc = static_cast<int>(rhs.size());
+        success.assign(static_cast<std::size_t>(nc), 0);
+        if (Jr == 0) {
+            for (int c = 0; c < nc; ++c) {
+                z_full[static_cast<std::size_t>(c)].setZero();
+                success[static_cast<std::size_t>(c)] = 1;
+            }
+            return;
+        }
+#ifdef HDFE_USE_CUDA
+        if (use_cuda && parallel) {
+            // GPU path: one batched device solve per group of lanes (fewer
+            // kernel launches and one host sync per CG step for the whole
+            // group, instead of 3-4 per lane per step).
+            const int max_lanes = akm_cuda_max_lanes();
+            std::vector<double> rhs_pack;
+            std::vector<double> z_pack;
+            std::vector<int> its;
+            for (int c0 = 0; c0 < nc; c0 += max_lanes) {
+                const int nb = std::min(max_lanes, nc - c0);
+                rhs_pack.resize(static_cast<std::size_t>(J) * nb);
+                z_pack.resize(static_cast<std::size_t>(J) * nb);
+                its.assign(static_cast<std::size_t>(nb), -1);
+                for (int k = 0; k < nb; ++k) {
+                    std::memcpy(rhs_pack.data() + static_cast<std::size_t>(k) * J,
+                                rhs[static_cast<std::size_t>(c0 + k)].data(),
+                                sizeof(double) * static_cast<std::size_t>(J));
+                }
+                const int rc = akm_cuda_solve_S_multi(cuda_ctx, rhs_pack.data(),
+                                                      z_pack.data(), nb, cg_tol,
+                                                      cg_max_iter, its.data());
+                if (rc != 0) {
+                    // device error: fall back to per-lane solves
+                    for (int k = 0; k < nb; ++k) {
+                        Eigen::VectorXd& r = rhs[static_cast<std::size_t>(c0 + k)];
+                        Eigen::VectorXd& z = z_full[static_cast<std::size_t>(c0 + k)];
+                        const int it = akm_cuda_solve_S(cuda_ctx, r.data(), z.data(),
+                                                        cg_tol, cg_max_iter);
+                        if (it >= 0) {
+                            const_cast<TwoWaySolver*>(this)->cuda_iters += it;
+                            success[static_cast<std::size_t>(c0 + k)] = 1;
+                        } else {
+                            z.setZero();
+                        }
+                    }
+                    continue;
+                }
+                for (int k = 0; k < nb; ++k) {
+                    Eigen::VectorXd& z = z_full[static_cast<std::size_t>(c0 + k)];
+                    if (its[static_cast<std::size_t>(k)] >= 0) {
+                        std::memcpy(z.data(),
+                                    z_pack.data() + static_cast<std::size_t>(k) * J,
+                                    sizeof(double) * static_cast<std::size_t>(J));
+                        const_cast<TwoWaySolver*>(this)->cuda_iters +=
+                            its[static_cast<std::size_t>(k)];
+                        success[static_cast<std::size_t>(c0 + k)] = 1;
+                    } else {
+                        z.setZero();
+                    }
+                }
+            }
+            return;
+        }
+#endif
+        if (direct) {
+            for (int c = 0; c < nc; ++c) {
+                Eigen::VectorXd z = ldlt.solve(rhs[static_cast<std::size_t>(c)].head(Jr).eval());
+                z_full[static_cast<std::size_t>(c)].setZero();
+                z_full[static_cast<std::size_t>(c)].head(Jr) = z;
+                success[static_cast<std::size_t>(c)] = 1;
+            }
+            return;
+        }
+
+        struct Lane {
+            Eigen::VectorXd x, r, z, p, Ap;
+            double rz = 0.0, tol2 = 0.0;
+            int it = 0;
+            bool active = false, ok = false;
+        };
+        std::vector<Lane> lane(static_cast<std::size_t>(nc));
+        for (int c = 0; c < nc; ++c) {
+            Lane& L = lane[static_cast<std::size_t>(c)];
+            L.x = Eigen::VectorXd::Zero(J);
+            L.r = rhs[static_cast<std::size_t>(c)];
+            L.r[Jr] = 0.0;
+            const double rhs_norm2 = L.r.squaredNorm();
+            z_full[static_cast<std::size_t>(c)].setZero();
+            if (rhs_norm2 == 0.0) {
+                success[static_cast<std::size_t>(c)] = 1;
+                continue;
+            }
+            L.z = inv_diagS.cwiseProduct(L.r);
+            L.p = L.z;
+            L.Ap.resize(J);
+            L.rz = L.r.dot(L.z);
+            L.tol2 = cg_tol * cg_tol * rhs_norm2;
+            L.active = true;
+        }
+
+        std::vector<double> packP, packT;
+        std::vector<const Eigen::VectorXd*> pcols;
+        std::vector<Eigen::VectorXd*> apcols;
+        std::vector<int> idx;
+        for (;;) {
+            pcols.clear();
+            apcols.clear();
+            idx.clear();
+            for (int c = 0; c < nc; ++c) {
+                Lane& L = lane[static_cast<std::size_t>(c)];
+                if (L.active && L.it < cg_max_iter) {
+                    pcols.push_back(&L.p);
+                    apcols.push_back(&L.Ap);
+                    idx.push_back(c);
+                } else if (L.active) {
+                    // iteration budget exhausted without convergence
+                    L.active = false;
+                }
+            }
+            if (idx.empty()) {
+                break;
+            }
+            apply_S_multi(pcols, apcols, packP, packT, parallel);
+            for (std::size_t q = 0; q < idx.size(); ++q) {
+                Lane& L = lane[static_cast<std::size_t>(idx[q])];
+                const double pAp = L.p.dot(L.Ap);
+                if (!(pAp > 0.0) || !guarded_finite(pAp)) {
+                    L.active = false;
+                    continue;
+                }
+                const double a = L.rz / pAp;
+                L.x += a * L.p;
+                L.r -= a * L.Ap;
+                if (L.r.squaredNorm() <= L.tol2) {
+                    ++L.it;
+                    L.ok = true;
+                    L.active = false;
+                    continue;
+                }
+                L.z = inv_diagS.cwiseProduct(L.r);
+                const double rz_new = L.r.dot(L.z);
+                L.p = L.z + (rz_new / L.rz) * L.p;
+                L.rz = rz_new;
+                ++L.it;
+            }
+        }
+        for (int c = 0; c < nc; ++c) {
+            Lane& L = lane[static_cast<std::size_t>(c)];
+            if (success[static_cast<std::size_t>(c)]) {
+                continue;  // zero-rhs fast path already succeeded
+            }
+            iters += L.it;
+            if (!L.ok && L.r.size() > 0 && L.r.squaredNorm() > L.tol2) {
+                continue;  // failed: z stays zero, success stays 0
+            }
+            L.x[Jr] = 0.0;
+            z_full[static_cast<std::size_t>(c)] = L.x;
+            success[static_cast<std::size_t>(c)] = 1;
+        }
+    }
+
+    // Batched solve_K: tw/tf may be nullptr to mean a zero vector. Per
+    // column the sequence matches solve_K exactly.
+    void solve_K_multi(const std::vector<const Eigen::VectorXd*>& tw,
+                       const std::vector<const Eigen::VectorXd*>& tf,
+                       std::vector<Eigen::VectorXd>& zw,
+                       std::vector<Eigen::VectorXd>& zf,
+                       std::vector<char>& success, long long& iters,
+                       bool parallel) const {
+        const int nc = static_cast<int>(tw.size());
+        std::vector<Eigen::VectorXd> scrw(static_cast<std::size_t>(nc));
+        std::vector<Eigen::VectorXd> rhs(static_cast<std::size_t>(nc));
+        for (int c = 0; c < nc; ++c) {
+            if (tw[static_cast<std::size_t>(c)] != nullptr) {
+                scrw[static_cast<std::size_t>(c)] =
+                    tw[static_cast<std::size_t>(c)]->cwiseQuotient(Dw);
+            } else {
+                scrw[static_cast<std::size_t>(c)] = Eigen::VectorXd::Zero(N);
+            }
+        }
+        {
+            // fused B' over the nc worker-space columns
+            std::vector<double> packS(static_cast<std::size_t>(N) * kMrhsTile, 0.0);
+            std::vector<double> packY(static_cast<std::size_t>(J) * kMrhsTile);
+            for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
+                const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
+                for (int k = 0; k < nb; ++k) {
+                    const double* src = scrw[static_cast<std::size_t>(c0 + k)].data();
+                    for (std::int64_t w = 0; w < N; ++w) {
+                        packS[static_cast<std::size_t>(w) * kMrhsTile +
+                              static_cast<std::size_t>(k)] = src[w];
+                    }
+                }
+                mult_Bt_multi(packS.data(), packY.data(), parallel);
+                for (int k = 0; k < nb; ++k) {
+                    Eigen::VectorXd& r = rhs[static_cast<std::size_t>(c0 + k)];
+                    r.resize(J);
+                    for (std::int64_t j = 0; j < J; ++j) {
+                        r[j] = packY[static_cast<std::size_t>(j) * kMrhsTile +
+                                     static_cast<std::size_t>(k)];
+                    }
+                    if (tf[static_cast<std::size_t>(c0 + k)] != nullptr) {
+                        r = *tf[static_cast<std::size_t>(c0 + k)] - r;
+                    } else {
+                        r = -r;
+                    }
+                }
+                if (c0 + kMrhsTile < nc) {
+                    for (int k = 0; k < nb; ++k) {
+                        for (std::int64_t w = 0; w < N; ++w) {
+                            packS[static_cast<std::size_t>(w) * kMrhsTile +
+                                  static_cast<std::size_t>(k)] = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+        solve_S_multi(rhs, zf, success, iters, parallel);
+        {
+            std::vector<double> packZ(static_cast<std::size_t>(J) * kMrhsTile, 0.0);
+            std::vector<double> packT(static_cast<std::size_t>(N) * kMrhsTile);
+            for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
+                const int nb = std::min(static_cast<int>(kMrhsTile), nc - c0);
+                for (int k = 0; k < nb; ++k) {
+                    const double* src = zf[static_cast<std::size_t>(c0 + k)].data();
+                    for (std::int64_t j = 0; j < J; ++j) {
+                        packZ[static_cast<std::size_t>(j) * kMrhsTile +
+                              static_cast<std::size_t>(k)] = src[j];
+                    }
+                }
+                mult_B_multi(packZ.data(), packT.data(), parallel);
+                for (int k = 0; k < nb; ++k) {
+                    Eigen::VectorXd& w = zw[static_cast<std::size_t>(c0 + k)];
+                    w.resize(N);
+                    for (std::int64_t i = 0; i < N; ++i) {
+                        w[i] = packT[static_cast<std::size_t>(i) * kMrhsTile +
+                                     static_cast<std::size_t>(k)];
+                    }
+                    if (tw[static_cast<std::size_t>(c0 + k)] != nullptr) {
+                        w = (*tw[static_cast<std::size_t>(c0 + k)] - w).cwiseQuotient(Dw);
+                    } else {
+                        w = (-w).cwiseQuotient(Dw);
+                    }
+                }
+                if (c0 + kMrhsTile < nc) {
+                    for (int k = 0; k < nb; ++k) {
+                        for (std::int64_t j = 0; j < J; ++j) {
+                            packZ[static_cast<std::size_t>(j) * kMrhsTile +
+                                  static_cast<std::size_t>(k)] = 0.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
 };
 
 }  // namespace
@@ -946,6 +1359,28 @@ LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
     return build_leave_out_sample(worker_ids, firm_ids, true).set;
 }
 
+namespace {
+// Env-gated phase profiler (XHDFE_AKM_PROFILE=1 -> stderr): diagnostic only,
+// no effect on results or default behavior.
+struct AkmPhaseProfiler {
+    bool on = false;
+    std::chrono::steady_clock::time_point t0;
+    AkmPhaseProfiler() {
+        const char* e = std::getenv("XHDFE_AKM_PROFILE");
+        on = (e != nullptr && e[0] != ' ' && e[0] != '0');
+        t0 = std::chrono::steady_clock::now();
+    }
+    void mark(const char* phase) {
+        if (!on) return;
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms =
+            std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
+        std::fprintf(stderr, "[akm-profile] %-24s %10.1f ms\n", phase, ms);
+        t0 = t1;
+    }
+};
+}  // namespace
+
 AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                                const Eigen::VectorXi& worker_ids,
                                const Eigen::VectorXi& firm_ids,
@@ -992,11 +1427,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     }
 
     AkmKssResult res;
+    AkmPhaseProfiler prof_;
     res.seed_used = options.seed;
     long long cg_iters = 0;
     SampleBuild sb = build_leave_out_sample(worker_ids, firm_ids, options.prune,
                                             has_fw ? &fw_rows : nullptr);
     res.sample = sb.set;
+    prof_.mark("leave_out_sample");
 
     const std::size_t n_kept = sb.rows.size();
     const std::size_t M = sb.m_w.size();
@@ -1070,6 +1507,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
         res.beta = reg.results().coefficients;
         ystar.noalias() -= Xk * res.beta;
+        prof_.mark("fwl_controls");
     }
 
     // ---- Working rows ------------------------------------------------------
@@ -1084,6 +1522,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     res.solver_direct = solver.direct;
     res.gpu_used = solver.use_cuda;
     res.n_rows = static_cast<long long>(R);
+    prof_.mark("solver_build");
 
     // Point estimates: person-year OLS normal equations.
     Eigen::VectorXd alpha(N);
@@ -1102,6 +1541,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             res.notes += "two-way point-estimation solve did not converge. ";
         }
     }
+    prof_.mark("point_solve");
 
     // Working-row transforms (sqrt-weight FGLS at match level).
     const std::vector<int>& row_w_of = match_level ? sb.m_w : sb.row_w;
@@ -1249,6 +1689,181 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         const bool par_rows = R >= 16384;
         (void)par_rows;
 
+        // Draw-block batching: the p draws are processed in blocks of DB and
+        // every draw's 3 solves go through the batched multi-RHS solver. Per
+        // draw the Rademacher streams, scatters and accumulation order are
+        // exactly the sequential sequences (draw-indexed SplitMix64 streams
+        // make generation order irrelevant; per-row accumulation keeps
+        // ascending-d order), and the fused kernels use fixed tile widths and
+        // fixed work blocks, so results are identical for ANY block size >= 1
+        // and ANY thread count. XHDFE_AKM_JLA_BLOCK=0 selects the pre-2.14
+        // sequential single-RHS loop kept verbatim below (bit-reproduces
+        // older builds; its per-edge instruction schedule differs from the
+        // fused kernels by ~1 ulp). The direct (cached-LDLT) mode gains
+        // nothing from fusion and defaults to the sequential path; the CUDA
+        // mode batches the draw solves on the device.
+        int jla_block = solver.direct ? 0 : 8;
+        if (const char* jbe = std::getenv("XHDFE_AKM_JLA_BLOCK")) {
+            const int v = std::atoi(jbe);
+            if (v >= 0 && v <= 64) {
+                jla_block = v;
+            }
+        }
+        if (jla_block >= 1) {
+            const int DB = jla_block;
+            std::vector<Eigen::VectorXd> tw1(static_cast<std::size_t>(DB));
+            std::vector<Eigen::VectorXd> tf1(static_cast<std::size_t>(DB));
+            std::vector<Eigen::VectorXd> tw2(static_cast<std::size_t>(DB));
+            std::vector<Eigen::VectorXd> tf2(static_cast<std::size_t>(DB));
+            std::vector<Eigen::VectorXd> zw_all(static_cast<std::size_t>(3 * DB));
+            std::vector<Eigen::VectorXd> zf_all(static_cast<std::size_t>(3 * DB));
+            std::vector<char> okv;
+            std::vector<const Eigen::VectorXd*> tw_ptr(static_cast<std::size_t>(3 * DB));
+            std::vector<const Eigen::VectorXd*> tf_ptr(static_cast<std::size_t>(3 * DB));
+
+            for (int d0 = 0; d0 < p; d0 += DB) {
+                const int B = std::min(DB, p - d0);
+                // --- per-draw scatters (legacy sequences, block-local) -----
+                for (int b = 0; b < B; ++b) {
+                    const int d = d0 + b;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_rows)
+#endif
+                    for (std::int64_t blk = 0; blk < n_blocks; ++blk) {
+                        const std::uint64_t bits =
+                            stream_seed(options.seed, static_cast<std::uint64_t>(3 * d),
+                                        static_cast<std::uint64_t>(blk));
+                        const std::size_t base = static_cast<std::size_t>(blk) * 64;
+                        const std::size_t hi = std::min(base + 64, R);
+                        for (std::size_t r = base; r < hi; ++r) {
+                            rvec[r] = ((bits >> (r - base)) & 1ULL) ? 1 : -1;
+                        }
+                    }
+                    Eigen::VectorXd& tw_b = tw1[static_cast<std::size_t>(b)];
+                    Eigen::VectorXd& tf_b = tf1[static_cast<std::size_t>(b)];
+                    tw_b = Eigen::VectorXd::Zero(N);
+                    tf_b = Eigen::VectorXd::Zero(J);
+                    if (match_level) {
+                        for (std::size_t m = 0; m < M; ++m) {
+                            const double v =
+                                std::sqrt(solver.m_c[m]) * static_cast<double>(rvec[m]);
+                            tw_b[sb.m_w[m]] += v;
+                            tf_b[sb.m_f[m]] += v;
+                        }
+                    } else {
+                        for (std::size_t k = 0; k < n_kept; ++k) {
+                            const double v = static_cast<double>(rvec[k]);
+                            tw_b[sb.row_w[k]] += v;
+                            tf_b[sb.row_f[k]] += v;
+                        }
+                    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_rows)
+#endif
+                    for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
+                        msum[m] = rademacher_sum(
+                            stream_seed(options.seed,
+                                        static_cast<std::uint64_t>(3 * d + 1),
+                                        static_cast<std::uint64_t>(m)),
+                            sb.m_cnt[static_cast<std::size_t>(m)]);
+                    }
+                    double tot = 0.0;
+                    for (std::size_t m = 0; m < M; ++m) {
+                        tot += msum[static_cast<Eigen::Index>(m)];
+                    }
+                    const double vbar = (tot / n_py) * scale;
+                    Eigen::VectorXd& tw_c = tw2[static_cast<std::size_t>(b)];
+                    Eigen::VectorXd& tf_c = tf2[static_cast<std::size_t>(b)];
+                    tw_c = Eigen::VectorXd::Zero(N);
+                    tf_c = Eigen::VectorXd::Zero(J);
+                    for (std::size_t m = 0; m < M; ++m) {
+                        const double su = msum[static_cast<Eigen::Index>(m)] * scale -
+                                          vbar * static_cast<double>(sb.m_cnt[m]);
+                        tw_c[sb.m_w[m]] += su;
+                        tf_c[sb.m_f[m]] += su;
+                    }
+                }
+                // --- batched solves: lanes [0,B)=(tw1,tf1) Pii draw;
+                //     [B,2B)=(0,tf2) fe; [2B,3B)=(tw2,0) pe ---------------
+                const int nl = 3 * B;
+                for (int b = 0; b < B; ++b) {
+                    tw_ptr[static_cast<std::size_t>(b)] = &tw1[static_cast<std::size_t>(b)];
+                    tf_ptr[static_cast<std::size_t>(b)] = &tf1[static_cast<std::size_t>(b)];
+                    tw_ptr[static_cast<std::size_t>(B + b)] = nullptr;
+                    tf_ptr[static_cast<std::size_t>(B + b)] = &tf2[static_cast<std::size_t>(b)];
+                    tw_ptr[static_cast<std::size_t>(2 * B + b)] = &tw2[static_cast<std::size_t>(b)];
+                    tf_ptr[static_cast<std::size_t>(2 * B + b)] = nullptr;
+                }
+                std::vector<const Eigen::VectorXd*> tws(tw_ptr.begin(), tw_ptr.begin() + nl);
+                std::vector<const Eigen::VectorXd*> tfs(tf_ptr.begin(), tf_ptr.begin() + nl);
+                for (int c = 0; c < nl; ++c) {
+                    zw_all[static_cast<std::size_t>(c)].resize(N);
+                    zf_all[static_cast<std::size_t>(c)].resize(J);
+                }
+                solver.solve_K_multi(tws, tfs, zw_all, zf_all, okv, cg_iters, true);
+                for (int c = 0; c < nl; ++c) {
+                    if (!okv[static_cast<std::size_t>(c)]) {
+                        solve_failed = true;
+                    }
+                }
+                // --- fused accumulation, ascending d inside each row -------
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_rows)
+#endif
+                for (std::int64_t blk = 0; blk < n_blocks; ++blk) {
+                    const std::size_t base = static_cast<std::size_t>(blk) * 64;
+                    const std::size_t hi = std::min(base + 64, R);
+                    for (int b = 0; b < B; ++b) {
+                        const int d = d0 + b;
+                        const std::uint64_t bits =
+                            stream_seed(options.seed, static_cast<std::uint64_t>(3 * d),
+                                        static_cast<std::uint64_t>(blk));
+                        const Eigen::VectorXd& zw_b = zw_all[static_cast<std::size_t>(b)];
+                        const Eigen::VectorXd& zf_b = zf_all[static_cast<std::size_t>(b)];
+                        for (std::size_t r = base; r < hi; ++r) {
+                            const int w = row_w_of[r];
+                            const int f = row_f_of[r];
+                            const double sw =
+                                match_level
+                                    ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)])
+                                    : 1.0;
+                            const double Z = sw * (zw_b[w] + zf_b[f]);
+                            const double g =
+                                ((bits >> (r - base)) & 1ULL) ? 1.0 : -1.0;
+                            const double diff = g - Z;
+                            const double z2 = Z * Z;
+                            const double m2 = diff * diff;
+                            Pacc[static_cast<Eigen::Index>(r)] += z2 / pd;
+                            Psq[static_cast<Eigen::Index>(r)] += z2 * z2 / pd;
+                            Macc[static_cast<Eigen::Index>(r)] += m2 / pd;
+                            Msq[static_cast<Eigen::Index>(r)] += m2 * m2 / pd;
+                            PM[static_cast<Eigen::Index>(r)] += z2 * m2 / pd;
+                        }
+                    }
+                }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (par_rows)
+#endif
+                for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
+                    const int w = row_w_of[static_cast<std::size_t>(r)];
+                    const int f = row_f_of[static_cast<std::size_t>(r)];
+                    const double sw =
+                        match_level ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)])
+                                    : 1.0;
+                    for (int b = 0; b < B; ++b) {
+                        const Eigen::VectorXd& zwf = zw_all[static_cast<std::size_t>(B + b)];
+                        const Eigen::VectorXd& zff = zf_all[static_cast<std::size_t>(B + b)];
+                        const Eigen::VectorXd& zwp = zw_all[static_cast<std::size_t>(2 * B + b)];
+                        const Eigen::VectorXd& zfp = zf_all[static_cast<std::size_t>(2 * B + b)];
+                        const double W2 = sw * (zwf[w] + zff[f]);
+                        const double W1 = sw * (zwp[w] + zfp[f]);
+                        Bfe[static_cast<Eigen::Index>(r)] += W2 * W2;
+                        Bpe[static_cast<Eigen::Index>(r)] += W1 * W1;
+                        Bcov[static_cast<Eigen::Index>(r)] += W1 * W2;
+                    }
+                }
+            }
+        } else {
         for (int d = 0; d < p; ++d) {
             // --- (Pii, Mii) draw over working rows -------------------------
 #ifdef _OPENMP
@@ -1354,6 +1969,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 Bcov[r] += W1 * W2;
             }
         }
+        }
         // Ratio estimator + nonlinearity correction (LeaveOutTwoWay).
         for (Eigen::Index r = 0; r < static_cast<Eigen::Index>(R); ++r) {
             const double denom = Pacc[r] + Macc[r];
@@ -1370,6 +1986,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             }
         }
     }
+    prof_.mark("leverages");
     res.solver_iterations = cg_iters + solver.cuda_iters;
     if (solve_failed) {
         res.converged = false;
