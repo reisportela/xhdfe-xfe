@@ -17,6 +17,9 @@
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 namespace py = pybind11;
+#if defined(_MSC_VER)
+using ssize_t = py::ssize_t;
+#endif
 using hdfe::AbsorptionMethod;
 using hdfe::ConvergenceCriterion;
 using hdfe::DofAdjustmentMethod;
