@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.13.2  08jul2026}{...}
+{* *! version 2.14.0  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -174,6 +174,13 @@ Cholesky solve (default 50000); larger problems use preconditioned CG.
 {phang}{opt cgtol(#)} is the two-way solver tolerance (default 1e-10);
 {opt fwltol(#)} is the absorber tolerance for the {opt controls()} step
 (default 1e-10).
+
+{phang}The leverage (JLA) solves are batched: each block of Rademacher draws
+is solved as one multi-right-hand-side system, with results identical for any
+block size and any thread count. The advanced environment variable
+{cmd:XHDFE_AKM_JLA_BLOCK} overrides the block size (default 8; {cmd:0}
+selects the pre-2.14 sequential solver, whose per-edge instruction schedule
+differs from the batched kernels at the last-ulp level).
 
 {dlgtab:Output}
 

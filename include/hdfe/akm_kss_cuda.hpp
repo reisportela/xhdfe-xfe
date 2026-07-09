@@ -37,6 +37,23 @@ void akm_cuda_destroy(AkmCudaContext* ctx);
 int akm_cuda_solve_S(AkmCudaContext* ctx, const double* rhs, double* z,
                      double tol, int max_iter);
 
+// Batched independent Jacobi-PCG: nb grounded systems S z_l = rhs_l solved
+// simultaneously (one kernel launch per step serves every lane; convergence
+// is tracked per lane and retired lanes are frozen on device). rhs/z are
+// host row-major J x nb... actually lane-major: rhs_pack/z_pack hold nb
+// contiguous length-J columns (lane l at offset l*J). iters_out[l] receives
+// the per-lane iteration count, or -1 when that lane failed to converge.
+// Returns 0 on success (individual lane failures are reported per lane),
+// -1 on a CUDA error. Lanes beyond the context's allocated width fall back
+// to sequential akm_cuda_solve_S calls by the caller.
+int akm_cuda_solve_S_multi(AkmCudaContext* ctx, const double* rhs_pack,
+                           double* z_pack, int nb, double tol, int max_iter,
+                           int* iters_out);
+
+// Maximum lane width supported by akm_cuda_solve_S_multi (workspace is
+// allocated lazily up to this bound).
+int akm_cuda_max_lanes();
+
 }  // namespace akm
 }  // namespace hdfe
 
