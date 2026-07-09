@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.14.0  09jul2026}{...}
+{* *! version 2.14.1  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -77,6 +77,20 @@ Gelbach's {cmd:b1x2}.
 {phang}{opt threads(#)} sets OpenMP threads (0 = library default).
 
 {pstd}At least one of {opt x2groups()} or {opt fes()} must be supplied.
+
+{pstd}{it:Performance environment switches} (diagnostic; defaults are the
+fast paths, validated on real designs against the retained reference to
+~1e-11): {cmd:XHDFE_GELBACH_FAST_FIT=0} restores the single retained
+full-model fit; {cmd:XHDFE_GELBACH_WARM_RECOVERY=0} disables the shared MLSMR
+absorption that warm-starts the fixed-effect recovery and provides the within
+transform (a convergence gate falls back to the retained fit automatically
+when the recovery does not certify); {cmd:XHDFE_GELBACH_WITHIN_BATCH=0}
+restores per-column within fits. On severely ill-conditioned FE graphs the
+fast path resolves the per-dimension FE split to a tighter optimality
+certificate than the legacy retained path, so those FE-group contributions
+can differ from pre-2.14.1 output at the recovery-tolerance level (the fast
+answer is the more converged one); set {cmd:XHDFE_GELBACH_FAST_FIT=0} to
+reproduce legacy output exactly.
 
 
 {title:Stored results}
