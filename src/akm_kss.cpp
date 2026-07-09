@@ -1367,7 +1367,7 @@ struct AkmPhaseProfiler {
     std::chrono::steady_clock::time_point t0;
     AkmPhaseProfiler() {
         const char* e = std::getenv("XHDFE_AKM_PROFILE");
-        on = (e != nullptr && e[0] != ' ' && e[0] != '0');
+        on = (e != nullptr && e[0] != '\0' && e[0] != '0');
         t0 = std::chrono::steady_clock::now();
     }
     void mark(const char* phase) {

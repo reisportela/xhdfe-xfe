@@ -112,6 +112,9 @@ if(XHDFE_BUILD_PYTHON)
 endif()
 
 # OpenMP (optional)
+if(MSVC)
+    set(OpenMP_CXX_FLAGS "/openmp:llvm /openmp:experimental" CACHE STRING "MSVC OpenMP flags" FORCE)
+endif()
 find_package(OpenMP)
 
 # Core library (v11 implementation)
@@ -135,14 +138,20 @@ target_include_directories(xhdfe PUBLIC include)
 target_link_libraries(xhdfe PUBLIC Eigen3::Eigen)
 target_compile_definitions(xhdfe PUBLIC HDFE_GPU_BACKEND_DEFAULT="${XHDFE_GPU_BACKEND_DEFAULT}")
 if(MSVC)
-    target_compile_options(xhdfe PRIVATE /bigobj)
+    target_compile_options(xhdfe PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/bigobj>
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>
+    )
 elseif(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(xhdfe PRIVATE -Wa,-mbig-obj)
 endif()
 
 if(XHDFE_ENABLE_CUDA)
     target_compile_definitions(xhdfe PUBLIC HDFE_USE_CUDA)
-    target_compile_options(xhdfe PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr>)
+    target_compile_options(xhdfe PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
 endif()
 if(XHDFE_ENABLE_METAL)
     target_compile_definitions(xhdfe PUBLIC HDFE_USE_METAL)

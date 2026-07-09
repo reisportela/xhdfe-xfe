@@ -203,9 +203,34 @@ bool schwarz_impl(double* Y, double* X, int64_t n, int k,
     auto dotcol = [&](const std::vector<double>& a, const std::vector<double>& ae,
                       const std::vector<double>& b, const std::vector<double>& be, double* out) {
         double s[S] = {0};
+#if defined(_MSC_VER)
+        // MSVC's OpenMP does not support array-section reductions (reduction(+ : s[:S]));
+        // use per-thread partial buffers instead (numerically equivalent, race-free).
+#ifdef _OPENMP
+        const int nthreads = std::max(1, omp_get_max_threads());
+        std::vector<double> partial(static_cast<std::size_t>(nthreads) * S, 0.0);
+#pragma omp parallel
+        {
+            double* local = partial.data() + static_cast<std::size_t>(omp_get_thread_num()) * S;
+#pragma omp for schedule(static)
+            for (int64_t v = 0; v < N; ++v) { const double* av = &a[v * S]; const double* bv = &b[v * S]; for (int c = 0; c < NC; ++c) local[c] += av[c] * bv[c]; }
+#pragma omp for schedule(static)
+            for (int64_t g = 0; g < totE; ++g) { const double* av = &ae[g * S]; const double* bv = &be[g * S]; for (int c = 0; c < NC; ++c) local[c] += av[c] * bv[c]; }
+        }
+        for (int t = 0; t < nthreads; ++t) {
+            const double* local = partial.data() + static_cast<std::size_t>(t) * S;
+            for (int c = 0; c < NC; ++c) s[c] += local[c];
+        }
+#else
+        for (int64_t v = 0; v < N; ++v) { const double* av = &a[v * S]; const double* bv = &b[v * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
+        for (int64_t g = 0; g < totE; ++g) { const double* av = &ae[g * S]; const double* bv = &be[g * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
+#endif
+#else
+        // Non-MSVC (GCC/Clang): unchanged from upstream.
         #pragma omp parallel for reduction(+ : s[:S]) schedule(static)
         for (int64_t v = 0; v < N; ++v) { const double* av = &a[v * S]; const double* bv = &b[v * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
         for (int64_t g = 0; g < totE; ++g) { const double* av = &ae[g * S]; const double* bv = &be[g * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
+#endif
         for (int c = 0; c < NC; ++c) out[c] = s[c];
     };
 

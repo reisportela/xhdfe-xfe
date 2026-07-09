@@ -27,6 +27,7 @@
 
 #include "fe_absorption_cuda.hpp"
 #include "fe_absorption_metal.hpp"
+#include "hdfe/compiler_compat.hpp"
 #include "schwarz_demean.hpp"
 
 #ifdef HDFE_USE_OPENMP
@@ -1103,11 +1104,11 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                         const int pf = idx + kPfDist;
                         if (pf < rows) {
                             const int ip = obs_index[pf];
-                            __builtin_prefetch(y_ptr + ip, 0, 1);
-                            __builtin_prefetch(x0 + ip, 0, 1);
-                            __builtin_prefetch(x1 + ip, 0, 1);
-                            __builtin_prefetch(x2 + ip, 0, 1);
-                            __builtin_prefetch(x3 + ip, 0, 1);
+                            HDFE_PREFETCH(y_ptr + ip, 0, 1);
+                            HDFE_PREFETCH(x0 + ip, 0, 1);
+                            HDFE_PREFETCH(x1 + ip, 0, 1);
+                            HDFE_PREFETCH(x2 + ip, 0, 1);
+                            HDFE_PREFETCH(x3 + ip, 0, 1);
                         }
                         const int i = obs_index[idx];
                         sum_y += y_ptr[i];
@@ -1159,12 +1160,12 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                         const int pf = idx + kPfDist;
                         if (pf < rows) {
                             const int ip = obs_index[pf];
-                            __builtin_prefetch(y_ptr + ip, 0, 1);
-                            __builtin_prefetch(x0 + ip, 0, 1);
-                            __builtin_prefetch(x1 + ip, 0, 1);
-                            __builtin_prefetch(x2 + ip, 0, 1);
-                            __builtin_prefetch(x3 + ip, 0, 1);
-                            __builtin_prefetch(weight_ptr + ip, 0, 1);
+                            HDFE_PREFETCH(y_ptr + ip, 0, 1);
+                            HDFE_PREFETCH(x0 + ip, 0, 1);
+                            HDFE_PREFETCH(x1 + ip, 0, 1);
+                            HDFE_PREFETCH(x2 + ip, 0, 1);
+                            HDFE_PREFETCH(x3 + ip, 0, 1);
+                            HDFE_PREFETCH(weight_ptr + ip, 0, 1);
                         }
                         const int i = obs_index[idx];
                         const double w = weight_ptr[i];
@@ -1312,11 +1313,11 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                         const int pf = idx + kPfDist;
                         if (pf < rows) {
                             const int ip = obs_index[pf];
-                            __builtin_prefetch(y_ptr + ip, 1, 1);
-                            __builtin_prefetch(x0 + ip, 1, 1);
-                            __builtin_prefetch(x1 + ip, 1, 1);
-                            __builtin_prefetch(x2 + ip, 1, 1);
-                            __builtin_prefetch(x3 + ip, 1, 1);
+                            HDFE_PREFETCH(y_ptr + ip, 1, 1);
+                            HDFE_PREFETCH(x0 + ip, 1, 1);
+                            HDFE_PREFETCH(x1 + ip, 1, 1);
+                            HDFE_PREFETCH(x2 + ip, 1, 1);
+                            HDFE_PREFETCH(x3 + ip, 1, 1);
                         }
                         const int i = obs_index[idx];
                         y_ptr[i] -= mean_y;
@@ -1409,11 +1410,11 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int pf = idx + kPfDist;
                     if (pf < rows) {
                         const int ip = obs_index[pf];
-                        __builtin_prefetch(y_ptr + ip, 1, 1);
-                        __builtin_prefetch(x0 + ip, 1, 1);
-                        __builtin_prefetch(x1 + ip, 1, 1);
-                        __builtin_prefetch(x2 + ip, 1, 1);
-                        __builtin_prefetch(x3 + ip, 1, 1);
+                        HDFE_PREFETCH(y_ptr + ip, 1, 1);
+                        HDFE_PREFETCH(x0 + ip, 1, 1);
+                        HDFE_PREFETCH(x1 + ip, 1, 1);
+                        HDFE_PREFETCH(x2 + ip, 1, 1);
+                        HDFE_PREFETCH(x3 + ip, 1, 1);
                     }
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
@@ -3042,7 +3043,7 @@ double combined_norm(const Eigen::VectorXd& y, const Eigen::MatrixXd& X) {
     const double* X_data = X.data();
 #pragma omp parallel for reduction(+ : total) schedule(static)
     for (Eigen::Index j = 0; j < cols; ++j) {
-        const double* __restrict__ col = X_data + j * rows;
+        const double* HDFE_RESTRICT col = X_data + j * rows;
         double local = 0.0;
 #pragma omp simd reduction(+ : local)
         for (Eigen::Index i = 0; i < rows; ++i) {
@@ -4570,8 +4571,8 @@ inline void irons_tuck_update(double* x,
 // plain memcpy on per-thread contiguous chunks. Falls back to memcpy when
 // below the size threshold. Used to speed up the per-iteration buffer copies
 // in the accelerator loop (y_ggx = y_gx, y_gx = result.y_tilde, etc.).
-inline void parallel_copy_doubles(double* __restrict__ dst,
-                                  const double* __restrict__ src,
+inline void parallel_copy_doubles(double* HDFE_RESTRICT dst,
+                                  const double* HDFE_RESTRICT src,
                                   std::size_t n,
                                   int threads) {
     if (dst == src || n == 0) {
@@ -5006,7 +5007,7 @@ void packed_demean_grouped(double* __restrict cur,
             if (Random) {
                 const int pf = idx + kPackedPfDist;
                 if (pf < n) {
-                    __builtin_prefetch(cur + static_cast<std::size_t>(obs_index[pf]) * S, 0, 1);
+                    HDFE_PREFETCH(cur + static_cast<std::size_t>(obs_index[pf]) * S, 0, 1);
                 }
             }
             const int i = Random ? obs_index[idx] : idx;
@@ -5031,7 +5032,7 @@ void packed_demean_grouped(double* __restrict cur,
                 if (Random) {
                     const int pf = idx + kPackedPfDist;
                     if (pf < n) {
-                        __builtin_prefetch(cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
+                        HDFE_PREFETCH(cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
                     }
                 }
                 const int i = Random ? obs_index[idx] : idx;
@@ -5055,7 +5056,7 @@ void packed_demean_grouped(double* __restrict cur,
                 if (Random) {
                     const int pf = idx + kPackedPfDist;
                     if (pf < n) {
-                        __builtin_prefetch(cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
+                        HDFE_PREFETCH(cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
                     }
                 }
                 const int i = Random ? obs_index[idx] : idx;
