@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.14.1  09jul2026}{...}
+{* *! version 2.15.0  09jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -92,7 +92,17 @@ leave-out decomposition, the connected set and the Gelbach companion -- rather
 than reproducing pytwoway's broader structural models (CRE, BLM). The layer is
 validated at machine precision against both {cmd:pytwoway} and Saggio's
 {cmd:LeaveOutTwoWay}, and interoperates with pytwoway (the Python front-end can
-export the leave-out sample to the pytwoway / bipartitepandas format). The
+export the leave-out sample to the pytwoway / bipartitepandas format). When
+comparing against pytwoway directly, note two deliberate convention choices
+(both follow the canonical {cmd:LeaveOutTwoWay}): the stayer variance rule
+matches pytwoway's {it:non-default} {cmd:Sii_stayers='upper_bound'} option
+(pytwoway's default {cmd:'firm_mean'} imputes stayer variances from firm-level
+mover averages and can differ by 1-2 percent in var(alpha)/cov on
+stayer-heavy panels — a convention gap, not a discrepancy), and the plug-in
+components use the 1/(n-1) denominator versus pytwoway's 1/n (negligible
+above ~10,000 person-years). Avoid pytwoway's {cmd:exact_trace_ho/he=True}
+paths as an oracle: their var(alpha) quadrant is broken in pytwoway 0.3.21
+(negative variances observed; audited 09jul2026). The
 combination is most useful with large linked employer-employee data: do the
 fast HDFE regression and the leave-out variance decomposition here in a
 familiar reghdfe workflow, and use pytwoway for the structural models outside
@@ -175,12 +185,21 @@ Cholesky solve (default 50000); larger problems use preconditioned CG.
 {opt fwltol(#)} is the absorber tolerance for the {opt controls()} step
 (default 1e-10).
 
-{phang}The leverage (JLA) solves are batched: each block of Rademacher draws
-is solved as one multi-right-hand-side system, with results identical for any
-block size and any thread count. The advanced environment variable
-{cmd:XHDFE_AKM_JLA_BLOCK} overrides the block size (default 8; {cmd:0}
-selects the pre-2.14 sequential solver, whose per-edge instruction schedule
-differs from the batched kernels at the last-ulp level).
+{phang}{it:Advanced performance environment variables} (defaults are tuned;
+override only for diagnostics or unusual hardware; none changes the default
+numeric output). {cmd:XHDFE_AKM_TEAM} caps the OpenMP team size used by the
+per-iteration solver regions: the default caps it by the edge work so a large
+thread pool does not oversubscribe small/medium graphs (the dominant speed
+lever below ~10M rows); {cmd:0} restores the uncapped team, {it:k} forces
+{it:k} threads. {cmd:XHDFE_AKM_JLA_BLOCK} overrides the JLA multi-RHS block
+size (default 8; {cmd:0} selects the pre-2.14 sequential solver, whose
+per-edge instruction schedule differs from the batched kernels at the
+last-ulp level). {cmd:XHDFE_AKM_SE_BLOCK} does the same for the component-SE /
+eigen-diagnostics / lincom solves (default 8; {cmd:0} = sequential).
+{cmd:XHDFE_AKM_SCATTER_CSR} (default on) selects the parallel CSR-ordered
+Rademacher scatter at scale; {cmd:0} restores the sequential scatter. The
+leverage and SE solves are batched so results are identical for any block
+size and any thread count.
 
 {dlgtab:Output}
 
