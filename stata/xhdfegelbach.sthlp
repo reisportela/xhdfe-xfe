@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.16.1  10jul2026}{...}
+{* *! version 2.17.0  10jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -26,6 +26,7 @@
 {synopt :{opth cluster(varname)}}cluster identifier (with {cmd:vce(cluster)}){p_end}
 {synopt :{opt gamma0}}reproduce b1x2's {cmd:gamma0} variant{p_end}
 {synopt :{opt cov0}}reproduce b1x2's {cmd:cov0} variant{p_end}
+{synopt :{opt tol(#)}}FE absorption tolerance; default {cmd:1e-8}{p_end}
 {synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
 {synoptline}
 {p2colreset}{...}
@@ -35,7 +36,7 @@
 {title:Description}
 
 {pstd}
-{cmd:xhdfegelbach} implements the Gelbach (2016) decomposition: it explains the
+{cmd:xhdfegelbach} implements the Gelbach (2016) decomposition: it accounts for the
 movement of the {opt x1()} coefficients between the {it:base} regression
 ({it:y} on {it:x1}) and the {it:full} regression ({it:y} on {it:x1} plus the
 covariate groups in {opt x2groups()} and the fixed effects in {opt fes()}) as a
@@ -52,6 +53,13 @@ against), including its {opt gamma0}/{opt cov0} variants and the aweight/
 fweight conventions. Fixed-effect groups are absorbed with the xhdfe backend,
 so high-dimensional FE groups are practical. Shares the compiled backend with
 the Python {cmd:xhdfe.gelbach.decompose} and R {cmd:xhdfe_gelbach} front-ends.
+
+{pstd}{bf:Interpretation warning.} This is a decomposition of coefficient
+movement for two declared specifications, not causal mediation. Causal
+interpretation requires a separately justified research design. Adding
+post-treatment variables, colliders, or fixed effects that alter the identifying
+comparisons can change the estimand or introduce bias. Block names and causal
+roles are supplied by the researcher and are not validated by the command.{p_end}
 
 
 {title:Options}
@@ -70,12 +78,22 @@ treated as its own group (always gamma0-style). Raw codes outside the signed
 32-bit range, and non-integer numeric labels, are compacted internally without
 changing category membership or results.
 
+{pstd}For absorbed FE blocks, the reported standard errors are conditional/
+{cmd:gamma0}: uncertainty from estimating the absorbed effects is not fully
+included. {cmd:r(fe_total)} reports the aggregate of all absorbed-FE dimensions;
+this is the preferred FE object when the FE graph has several mobility
+components.{p_end}
+
 {phang}{opt vce(vcetype)} selects the variance estimator: {cmd:unadjusted}
 (default), {cmd:robust}, or {cmd:cluster} (supply {opth cluster(varname)}).
 The cluster identifier is compacted under the same exact categorical rule.
 
 {phang}{opt gamma0} and {opt cov0} reproduce the corresponding options of
 Gelbach's {cmd:b1x2}.
+
+{phang}{opt tol(#)} sets the fixed-effect absorption tolerance. It must be
+finite and strictly positive; the default {cmd:1e-8} preserves the historical
+effective tolerance.
 
 {phang}{opt threads(#)} sets OpenMP threads (0 = library default).
 
@@ -122,25 +140,34 @@ evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 {synopt:{cmd:r(delta)}}contributions, one row per {opt x1()} variable, one column per group{p_end}
 {synopt:{cmd:r(se)}}standard errors matching {cmd:r(delta)}{p_end}
 {synopt:{cmd:r(total)}}total movement per {opt x1()} variable (base minus full) with its SE{p_end}
+{synopt:{cmd:r(b_base)}}base-model coefficients on {opt x1()}{p_end}
+{synopt:{cmd:r(b_full)}}full-model coefficients on {opt x1()}{p_end}
+{synopt:{cmd:r(cov)}}joint covariance of all group contributions{p_end}
+{synopt:{cmd:r(total_cov)}}covariance of the total movement{p_end}
+{synopt:{cmd:r(fe_total)}}aggregate absorbed-FE contribution and conditional SE (when {opt fes()} is used){p_end}
 
 {p2col 5 20 24 2: Scalars}{p_end}
 {synopt:{cmd:r(identity_gap)}}residual of the summation identity (should be ~0){p_end}
 {synopt:{cmd:r(n_obs)}}number of observations{p_end}
 {synopt:{cmd:r(df_full)}}residual degrees of freedom of the full model{p_end}
 {synopt:{cmd:r(converged)}}1 if the computation converged{p_end}
+{synopt:{cmd:r(tol)}}fixed-effect absorption tolerance used{p_end}
 
 {p2col 5 20 24 2: Macros}{p_end}
 {synopt:{cmd:r(vce)}}the variance estimator used{p_end}
 {synopt:{cmd:r(groups)}}the group names{p_end}
 {synopt:{cmd:r(notes)}}any solver notes{p_end}
+{synopt:{cmd:r(estimand)}}{cmd:coefficient_movement}{p_end}
+{synopt:{cmd:r(causal_interpretation)}}{cmd:no}{p_end}
+{synopt:{cmd:r(fe_se_type)}}{cmd:conditional_gamma0}{p_end}
 {p2colreset}{...}
 
 
 {title:Examples}
 
-{pstd}Decompose the education coefficient into an ability channel, a job-tenure
-channel and a firm fixed-effect channel:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("skill = ability : job = tenure exper") fes(firm_id)}{p_end}
+{pstd}Account for the movement of the education coefficient using an ability
+block, a job-covariate block and a firm fixed-effect block:{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("ability = ability : job_covariates = tenure exper") fes(firm_id)}{p_end}
 {phang2}{cmd:. matrix list r(delta)}{p_end}
 {phang2}{cmd:. matrix list r(total)}{p_end}
 
