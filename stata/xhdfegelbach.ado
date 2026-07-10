@@ -1,4 +1,4 @@
-*! version 1.1.0  10jul2026
+*! version 1.1.1  10jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -160,6 +160,16 @@ program define xhdfegelbach, rclass sortpreserve
     quietly findfile xhdfe.ado
     local plugin_path "`r(fn)'"
     local plugin_path : subinstr local plugin_path "xhdfe.ado" "xhdfe.plugin", all
+    // `program ... , plugin using()' does not expand a leading ~ the way
+    // `confirm file' does, so a tilde'd PLUS dir (the Unix default ~/ado/plus)
+    // makes the load fail with r(601). Expand it here so the confirm, the
+    // stale-path guard, and the load all see one absolute path.
+    if (substr(`"`plugin_path'"', 1, 1) == "~") {
+        local __plugin_home : env HOME
+        if (`"`__plugin_home'"' != "") {
+            local plugin_path : subinstr local plugin_path "~" `"`__plugin_home'"'
+        }
+    }
     capture confirm file "`plugin_path'"
     if (_rc) {
         di as err "xhdfe.plugin not found next to xhdfe.ado"

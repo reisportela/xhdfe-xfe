@@ -1,4 +1,4 @@
-v 1.10.0
+v 1.10.1
 d xfe: Partial-out variables with multiple fixed effects via a C++ plugin
 d
 d This package ships the `xfe` command plus a platform-specific plugin binary.
