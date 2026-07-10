@@ -2,11 +2,11 @@
 % Please edit documentation in R/gelbach.R
 \name{xhdfe_gelbach}
 \alias{xhdfe_gelbach}
-\title{Gelbach (2016) conditional decomposition of coefficient movements}
+\title{Gelbach (2016) decomposition of coefficient movements}
 \usage{
 xhdfe_gelbach(y, x1, x2_groups = NULL, fes = NULL, vce = "unadjusted",
-  cluster = NULL, gamma0 = FALSE, cov0 = FALSE, num_threads = 0L,
-  weights = NULL, fweights = FALSE)
+  cluster = NULL, gamma0 = FALSE, cov0 = FALSE, tol = 1e-8,
+  num_threads = 0L, weights = NULL, fweights = FALSE)
 }
 \arguments{
 \item{y}{Numeric outcome, length n.}
@@ -29,6 +29,9 @@ group.}
 \item{gamma0, cov0}{Reproduce the corresponding options of Gelbach's
 \code{b1x2} reference implementation.}
 
+\item{tol}{Positive fixed-effect absorption tolerance. The default
+\code{1e-8} preserves the historical effective tolerance.}
+
 \item{num_threads}{OpenMP threads (0 = library default).}
 
 \item{weights}{Optional analytic weights (aweights, b1x2 conventions).}
@@ -45,6 +48,10 @@ decomposition (or its internal convergence cross-check) failed and the
 results are unreliable (\code{$notes} explains); \code{print} warns.
 A small \code{$identity_gap} certifies the decomposition identity only —
 it is not evidence that the per-dimension FE split is accurate.
+\code{$fe_total} contains the aggregate absorbed-FE contribution and its
+conditional/\code{gamma0} covariance; \code{$se_type} labels inference by
+block. \code{$estimand} is \code{"coefficient_movement"} and
+\code{$causal_interpretation} is always \code{FALSE}.
 }
 \note{
 The default compiled path is the more-converged one: it resolves the
@@ -64,15 +71,22 @@ combined FE contribution into per-dimension deltas depends on a
 normalization convention (component mean-shift); the total across FE
 dimensions and \code{b_base - b_full} are convention-invariant. Within a
 single connected mobility component the x1-row split is identified.
+
+Standard errors for absorbed-FE blocks are conditional/\code{gamma0}:
+uncertainty from estimating the absorbed effects is not fully included.
 }
 \description{
-Explains the movement of the \code{x1} coefficients between the base
+Accounts for the movement of the \code{x1} coefficients between the base
 regression (y on x1) and the full regression (y on x1 plus the covariate
 groups and fixed effects) as a sum of per-group contributions
 \eqn{\delta_g = (X_1'X_1)^{-1} X_1'X_{2g} \hat\beta_g}, with standard
 errors per contribution. Numerical semantics follow Gelbach's \code{b1x2}
 (the reference implementation this function is validated against),
 including the aweight/fweight conventions.
+
+This is specification accounting, not causal mediation. Causal interpretation
+requires a separately justified research design; block names and causal roles
+are supplied by the researcher and are not validated by the function.
 }
 \references{
 Gelbach, J. B. (2016). When do covariates matter? And which ones, and how

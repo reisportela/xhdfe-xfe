@@ -1,4 +1,4 @@
-*! version 1.0.2  10jul2026
+*! version 1.1.0  10jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -7,7 +7,7 @@ program define xhdfegelbach, rclass sortpreserve
     version 14.0
     syntax varname(numeric) [if] [in] [aweight fweight /], x1(varlist numeric) ///
         [ x2groups(string) fes(varlist numeric) vce(string) cluster(varname numeric) ///
-          gamma0 cov0 threads(integer 0) ]
+          gamma0 cov0 tol(real 1e-8) threads(integer 0) ]
 
     local y `varlist'
     if ("`x2groups'" == "" & "`fes'" == "") {
@@ -27,6 +27,10 @@ program define xhdfegelbach, rclass sortpreserve
         di as err "cluster() requires vce(cluster)"
         exit 198
     }
+    if (!(`tol' > 0) | missing(`tol')) {
+        di as err "tol() must be finite and strictly positive"
+        exit 198
+    }
 
     * parse x2groups("name = varlist : name2 = varlist2") like b1x2's x2delta
     local gnames
@@ -40,6 +44,15 @@ program define xhdfegelbach, rclass sortpreserve
                 gettoken eq gvars : rest, parse("=")
                 local gname = trim("`gname'")
                 local gvars = trim("`gvars'")
+                if ("`gname'" == "" | "`gvars'" == "") {
+                    di as err "each x2groups() block must be name = varlist"
+                    exit 198
+                }
+                capture confirm name `gname'
+                if (_rc) {
+                    di as err "x2groups() block name `gname' is not a valid Stata name"
+                    exit 198
+                }
                 unab gvars : `gvars'
                 local gnames "`gnames' `gname'"
                 local x2vars "`x2vars' `gvars'"
@@ -50,6 +63,21 @@ program define xhdfegelbach, rclass sortpreserve
     }
     foreach f of local fes {
         local gnames "`gnames' `f'"
+    }
+    local duplicate_vars : list dups x2vars
+    if ("`duplicate_vars'" != "") {
+        di as err "x2 variables may not appear in more than one block: `duplicate_vars'"
+        exit 198
+    }
+    local overlap : list x1 & x2vars
+    if ("`overlap'" != "") {
+        di as err "variables may not appear in both x1() and x2groups(): `overlap'"
+        exit 198
+    }
+    local duplicate_names : list dups gnames
+    if ("`duplicate_names'" != "") {
+        di as err "x2 and FE block names must be unique: `duplicate_names'"
+        exit 198
     }
     local gsizes_csv : subinstr local gsizes " " ",", all
     local gsizes_csv = trim("`gsizes_csv'")
@@ -113,16 +141,21 @@ program define xhdfegelbach, rclass sortpreserve
     local k1 = `p' + 1
     local G : word count `gnames'
 
-    tempname D SE TOT
+    tempname D SE TOT BBASE BFULL COV TOTCOV FEAGG
     matrix `D' = J(`k1', `G', .)
     matrix `SE' = J(`k1', `G', .)
     matrix `TOT' = J(`k1', 2, .)
+    matrix `BBASE' = J(1, `p', .)
+    matrix `BFULL' = J(1, `p', .)
+    matrix `COV' = J(`G' * `k1', `G' * `k1', .)
+    matrix `TOTCOV' = J(`k1', `k1', .)
 
     local cfg "cfg=task=gelbach;p=`p';q=`q';nfe=`nfe';has_cluster=`=("`cluster'"!="")';"
     local cfg "`cfg'has_weight=`has_weight';weight_type=`weight';"
     local cfg "`cfg'group_sizes=`gsizes_csv';vce=`vce';"
-    local cfg "`cfg'gamma0=`=("`gamma0'"!="")';cov0=`=("`cov0'"!="")';num_threads=`threads';"
-    local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';"
+    local cfg "`cfg'gamma0=`=("`gamma0'"!="")';cov0=`=("`cov0'"!="")';tol=`tol';num_threads=`threads';"
+    local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';bbasemat=`BBASE';bfullmat=`BFULL';"
+    local cfg "`cfg'covmat=`COV';totcovmat=`TOTCOV';"
 
     quietly findfile xhdfe.ado
     local plugin_path "`r(fn)'"
@@ -157,15 +190,55 @@ program define xhdfegelbach, rclass sortpreserve
     matrix colnames `SE' = `gnames'
     matrix rownames `TOT' = `x1' _cons
     matrix colnames `TOT' = delta se
+    matrix colnames `BBASE' = `x1'
+    matrix colnames `BFULL' = `x1'
+    local covnames
+    foreach g of local gnames {
+        foreach x in `x1' _cons {
+            local covnames "`covnames' `g':`x'"
+        }
+    }
+    matrix rownames `COV' = `covnames'
+    matrix colnames `COV' = `covnames'
+    matrix rownames `TOTCOV' = `x1' _cons
+    matrix colnames `TOTCOV' = `x1' _cons
+
+    if (`nfe' > 0) {
+        matrix `FEAGG' = J(`k1', 2, .)
+        local first_fe = `G' - `nfe' + 1
+        tempname fec fev
+        forvalues r = 1/`k1' {
+            scalar `fec' = 0
+            scalar `fev' = 0
+            forvalues g = `first_fe'/`G' {
+                scalar `fec' = scalar(`fec') + `D'[`r', `g']
+                local gr = (`g' - 1) * `k1' + `r'
+                forvalues h = `first_fe'/`G' {
+                    local hr = (`h' - 1) * `k1' + `r'
+                    scalar `fev' = scalar(`fev') + `COV'[`gr', `hr']
+                }
+            }
+            matrix `FEAGG'[`r', 1] = scalar(`fec')
+            matrix `FEAGG'[`r', 2] = sqrt(max(0, scalar(`fev')))
+        }
+        matrix rownames `FEAGG' = `x1' _cons
+        matrix colnames `FEAGG' = delta se
+    }
 
     di as txt ""
-    di as txt "Gelbach conditional decomposition" as res "  (xhdfe backend, vce: `vce'`gamma0')"
+    di as txt "Gelbach coefficient-movement decomposition" as res "  (xhdfe backend, vce: `vce'`gamma0')"
+    di as txt "Specification accounting; not causal mediation."
     di as txt "Contributions (delta):"
     matrix list `D', noheader format(%12.6f)
     di as txt "Standard errors:"
     matrix list `SE', noheader format(%12.6f)
     di as txt "Total (= b_base - b_full):"
     matrix list `TOT', noheader format(%12.6f)
+    if (`nfe' > 0) {
+        di as txt "Absorbed-FE aggregate (conditional/gamma0 SE):"
+        matrix list `FEAGG', noheader format(%12.6f)
+        di as txt "note: SEs for absorbed-FE blocks condition on the recovered FE estimates"
+    }
     if (scalar(__xgel_converged) != 1) {
         di as err "warning: computation flagged non-converged; see r(notes)"
     }
@@ -174,11 +247,20 @@ program define xhdfegelbach, rclass sortpreserve
     return scalar n_obs = scalar(__xgel_n_obs)
     return scalar df_full = scalar(__xgel_df_full)
     return scalar converged = scalar(__xgel_converged)
+    return scalar tol = `tol'
     capture scalar drop __xgel_identity_gap __xgel_n_obs __xgel_df_full __xgel_converged
     return local vce "`vce'"
     return local groups "`gnames'"
+    return local estimand "coefficient_movement"
+    return local causal_interpretation "no"
+    return local fe_se_type "conditional_gamma0"
     if ("`xgel_notes'" != "") return local notes "`xgel_notes'"
     return matrix total = `TOT'
+    return matrix total_cov = `TOTCOV'
+    return matrix cov = `COV'
+    return matrix b_full = `BFULL'
+    return matrix b_base = `BBASE'
+    if (`nfe' > 0) return matrix fe_total = `FEAGG'
     return matrix se = `SE'
     return matrix delta = `D'
 end

@@ -4467,7 +4467,13 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
     {
         int acc = 0;
-        for (int g : x2_group_sizes) acc += g;
+        for (int g : x2_group_sizes) {
+            if (g <= 0) {
+                throw std::runtime_error(
+                    "gelbach: every x2 group must contain at least one column");
+            }
+            acc += g;
+        }
         if (acc != q) throw std::runtime_error("gelbach: group sizes do not sum to X2 columns");
     }
     for (const auto& f : fes_in) {
@@ -4478,6 +4484,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
     if (x2_group_sizes.empty() && fes_in.empty()) {
         throw std::runtime_error("gelbach: provide at least one x2 group or FE dimension");
+    }
+    if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
+        throw std::runtime_error("gelbach: tol must be finite and strictly positive");
     }
 
     GelbachResult res;
@@ -4506,11 +4515,22 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     HdfeOptions ho;
     ho.se_type = StandardErrorType::Homoskedastic;
     ho.retain_fixed_effects = !fes_in.empty() && !gel_fast_fit;
+    ho.tol = options.tol;
     ho.num_threads = options.num_threads;
     ho.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 reg(ho);
     reg.fit(y_in, X_full, fes_in, weights);
     gprof_.mark("gel_full_fit");
+    for (int c = 0; c < p + q; ++c) {
+        const auto& omitted = reg.results().omitted_reason;
+        if (c < static_cast<int>(omitted.size()) &&
+            omitted[static_cast<std::size_t>(c)] != 0) {
+            throw std::runtime_error(
+                "gelbach: the full specification is rank deficient after "
+                "absorbing fixed effects; every x1/x2 column must be uniquely "
+                "identified (remove duplicate, overlapping, or collinear columns)");
+        }
+    }
     // (b) separate FE recovery on the kept sample (fast-fit mode only).
     // A retained 1-column fit would spend ~95% of its time in non-accelerated
     // GS sweeps whose alphas get discarded when the hybrid check falls back to
@@ -4798,6 +4818,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 ccodes[i] = it->second;
             }
             ccodes_ptr = &ccodes;
+            if (n_clusters < 2) {
+                throw std::runtime_error(
+                    "gelbach: cluster vce requires at least two clusters");
+            }
         }
     }
     res.n_obs = static_cast<long long>(n);
@@ -4831,9 +4855,19 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     // ---- base model (X1 + constant, no FEs) ------------------------------
     HdfeOptions hb;
     hb.se_type = StandardErrorType::Homoskedastic;
+    hb.tol = options.tol;
     hb.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 breg(hb);
     breg.fit(y, X1, {}, weights != nullptr ? &w_raw : nullptr);
+    for (int c = 0; c < p; ++c) {
+        const auto& omitted = breg.results().omitted_reason;
+        if (c < static_cast<int>(omitted.size()) &&
+            omitted[static_cast<std::size_t>(c)] != 0) {
+            throw std::runtime_error(
+                "gelbach: the base specification is rank deficient; every x1 "
+                "column must be uniquely identified");
+        }
+    }
     gprof_.mark("gel_base_reg");
     const Eigen::VectorXd bco = breg.results().coefficients;
     res.b_base = bco.head(p);
@@ -4921,6 +4955,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             hw.se_type = StandardErrorType::Homoskedastic;
             hw.fit_intercept = false;
             hw.drop_singletons = false;
+            hw.tol = options.tol;
             hw.num_threads = options.num_threads;
             hw.weights_are_frequencies = freq_weights;
             if (within_batch && W_pre.rows() == n && W_pre.cols() == Kx) {

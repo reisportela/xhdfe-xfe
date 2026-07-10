@@ -1606,6 +1606,7 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     }
     options.gamma0 = parse_bool(args.get_required("gamma0"), "gamma0");
     options.cov0 = parse_bool(args.get_required("cov0"), "cov0");
+    options.tol = parse_double(args.get_required("tol"), "tol");
     if (auto val = args.get_optional("num_threads")) {
         options.num_threads = parse_int(*val, "num_threads");
     }
@@ -1619,6 +1620,10 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     const std::string dmat = args.get_required("dmat");
     const std::string semat = args.get_required("semat");
     const std::string totmat = args.get_required("totmat");
+    const std::string bbasemat = args.get_required("bbasemat");
+    const std::string bfullmat = args.get_required("bfullmat");
+    const std::string covmat = args.get_required("covmat");
+    const std::string totcovmat = args.get_required("totcovmat");
     for (int g = 0; g < G; ++g) {
         for (int r = 0; r < k1; ++r) {
             SF_mat_store(const_cast<char*>(dmat.c_str()), r + 1, g + 1, res.delta(r, g));
@@ -1630,6 +1635,22 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 1, res.total[r]);
         SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 2,
                      std::sqrt(res.total_cov(r, r)));
+    }
+    for (int c = 0; c < p; ++c) {
+        SF_mat_store(const_cast<char*>(bbasemat.c_str()), 1, c + 1, res.b_base[c]);
+        SF_mat_store(const_cast<char*>(bfullmat.c_str()), 1, c + 1, res.b_full[c]);
+    }
+    for (int r = 0; r < G * k1; ++r) {
+        for (int c = 0; c < G * k1; ++c) {
+            SF_mat_store(const_cast<char*>(covmat.c_str()), r + 1, c + 1,
+                         res.cov(r, c));
+        }
+    }
+    for (int r = 0; r < k1; ++r) {
+        for (int c = 0; c < k1; ++c) {
+            SF_mat_store(const_cast<char*>(totcovmat.c_str()), r + 1, c + 1,
+                         res.total_cov(r, c));
+        }
     }
     akm_save_scalar("__xgel_identity_gap", res.identity_gap);
     akm_save_scalar("__xgel_n_obs", static_cast<double>(res.n_obs));

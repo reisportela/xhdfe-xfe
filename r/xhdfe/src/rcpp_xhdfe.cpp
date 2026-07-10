@@ -1055,6 +1055,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                              std::string vce,
                              bool gamma0,
                              bool cov0,
+                             double tol,
                              int num_threads,
                              SEXP weights,
                              bool fweights) {
@@ -1104,6 +1105,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     }
     opt.gamma0 = gamma0;
     opt.cov0 = cov0;
+    opt.tol = tol;
     opt.num_threads = num_threads;
     Eigen::VectorXd w_vec;
     const Eigen::VectorXd* w_ptr = nullptr;

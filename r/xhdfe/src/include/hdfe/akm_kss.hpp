@@ -208,6 +208,7 @@ struct GelbachOptions {
     GelbachVce vce = GelbachVce::Unadjusted;
     bool gamma0 = false;
     bool cov0 = false;
+    double tol = 1e-8;
     int num_threads = 0;
 };
 

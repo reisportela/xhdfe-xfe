@@ -1,4 +1,9 @@
-"""Gelbach (2016) conditional decomposition, HDFE-aware (M9B).
+"""Gelbach (2016) coefficient-movement decomposition, HDFE-aware (M9B).
+
+This module provides specification accounting, not causal mediation. A causal
+interpretation requires a separately justified research design; block names
+and the decision to add a control or fixed effect are supplied by the user and
+are not validated by the command.
 
 Decomposes the change in the base-specification coefficients when covariate
 groups (and/or absorbed fixed-effect blocks) are added:
@@ -86,9 +91,13 @@ def _cluster_meat(Z, codes):
 
 
 def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
-              gamma0=False, cov0=False, tol=1e-10, num_threads=0,
+              gamma0=False, cov0=False, tol=1e-8, num_threads=0,
               weights=None, fweights=False):
-    """Gelbach conditional decomposition of b_base - b_full.
+    """Gelbach decomposition of the coefficient movement b_base - b_full.
+
+    The result is an accounting identity for the declared base and full
+    specifications. It does not identify a causal mechanism or mediated
+    effect.
 
     Parameters
     ----------
@@ -101,6 +110,10 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     gamma0 : bool — aux-regression variance only (b1x2's gamma0).
     cov0 : bool — drop the robust cross terms (b1x2's cov0; no-op for
         vce='unadjusted').
+    tol : positive float — fixed-effect absorption tolerance. The default
+        1e-8 preserves the historical effective tolerance of this wrapper.
+    weights : optional positive analytic or frequency weights.
+    fweights : interpret ``weights`` as positive integer frequency weights.
 
     Returns
     -------
@@ -109,19 +122,31 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     sample sizes and notes.
     """
     y = np.ascontiguousarray(y, dtype=float)
+    if y.ndim != 1:
+        raise ValueError("y must be one-dimensional")
     x1 = np.asarray(x1, dtype=float)
     if x1.ndim == 1:
         x1 = x1[:, None]
     n, p = x1.shape
     if y.shape[0] != n:
         raise ValueError("y and x1 must have the same number of rows")
+    if not np.all(np.isfinite(y)) or not np.all(np.isfinite(x1)):
+        raise ValueError("y and x1 must contain only finite values")
+    if not np.isfinite(tol) or tol <= 0:
+        raise ValueError("tol must be finite and strictly positive")
     if vce not in ("unadjusted", "robust", "cluster"):
         raise ValueError("vce must be 'unadjusted', 'robust' or 'cluster'")
     if vce == "cluster":
         if cluster is None:
             raise ValueError("vce='cluster' requires cluster ids")
         cluster = np.asarray(cluster)
+        if cluster.ndim != 1 or cluster.shape[0] != n:
+            raise ValueError("cluster ids must be one-dimensional with length n")
+        if np.issubdtype(cluster.dtype, np.number) and not np.all(np.isfinite(cluster)):
+            raise ValueError("cluster ids must not contain missing or non-finite values")
         _, ccodes = np.unique(cluster, return_inverse=True)
+        if np.unique(ccodes).size < 2:
+            raise ValueError("vce='cluster' requires at least two clusters")
     else:
         # Single source of truth: cluster ids with a non-cluster vce would
         # otherwise be silently dropped and the user would get robust/
@@ -134,6 +159,11 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     fes = dict(fes or {})
     if not x2_groups and not fes:
         raise ValueError("provide at least one x2 group or fixed-effect dimension")
+    all_names = list(x2_groups) + list(fes)
+    if any(not isinstance(name, str) or not name.strip() for name in all_names):
+        raise ValueError("every x2/FE block must have a non-empty string name")
+    if len(set(all_names)) != len(all_names):
+        raise ValueError("x2 and FE block names must be unique")
 
     groups = []  # (name, kind, payload)
     x2_cols = []
@@ -143,15 +173,37 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
             arr = arr[:, None]
         if arr.shape[0] != n:
             raise ValueError(f"x2 group {name!r} has wrong length")
+        if arr.shape[1] == 0:
+            raise ValueError(f"x2 group {name!r} must contain at least one column")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"x2 group {name!r} must contain only finite values")
         groups.append((name, "x2", arr))
         x2_cols.append(arr)
     fe_lists = []
     for name, ids in fes.items():
         ids = np.asarray(ids)
-        if ids.shape[0] != n:
-            raise ValueError(f"fe {name!r} has wrong length")
+        if ids.ndim != 1 or ids.shape[0] != n:
+            raise ValueError(f"fe {name!r} must be one-dimensional with length n")
+        if not np.issubdtype(ids.dtype, np.integer):
+            if (np.issubdtype(ids.dtype, np.floating) and
+                    np.all(np.isfinite(ids)) and np.all(ids == np.rint(ids))):
+                ids = np.rint(ids).astype(np.int64)
+            else:
+                raise ValueError(f"fe {name!r} ids must be finite integers")
         groups.append((name, "fe", len(fe_lists)))
         fe_lists.append(ids)
+
+    w = None
+    if weights is not None:
+        w = np.ascontiguousarray(weights, dtype=float)
+        if w.ndim != 1 or w.shape[0] != n:
+            raise ValueError("weights must be one-dimensional with length n")
+        if not np.all(np.isfinite(w)) or np.any(w <= 0):
+            raise ValueError("weights must be finite and strictly positive")
+        if fweights and not np.all(w == np.rint(w)):
+            raise ValueError("frequency weights must be integers")
+    elif fweights:
+        raise ValueError("fweights=True requires weights")
 
     core = _core()
     if not hasattr(core, "gelbach_decompose"):
@@ -163,12 +215,11 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                      if k == "x2"]) if x2_sizes else None)
     r = core.gelbach_decompose(y, x1, x2=X2, x2_group_sizes=x2_sizes,
                                fes=fe_lists if fe_lists else None,
-                               cluster=(np.asarray(cluster) if ccodes is not None
-                                        else None),
+                               cluster=(np.ascontiguousarray(ccodes, dtype=np.int64)
+                                        if ccodes is not None else None),
                                vce=vce, gamma0=bool(gamma0), cov0=bool(cov0),
-                               num_threads=num_threads,
-                               weights=(np.ascontiguousarray(weights, dtype=float)
-                                        if weights is not None else None),
+                               tol=float(tol), num_threads=num_threads,
+                               weights=w,
                                fweights=bool(fweights))
 
     p_ = x1.shape[1]
@@ -180,16 +231,24 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     order = [g for g, (_, kind, _d) in enumerate(groups) if kind == "x2"] + \
             [g for g, (_, kind, _d) in enumerate(groups) if kind == "fe"]
     names = [groups[g][0] for g in order]
+    kinds = [groups[g][1] for g in order]
     labels = [f"x1_{v + 1}" for v in range(p_)] + ["_cons"]
+    se_type = {
+        name: ("conditional_gamma0" if kind == "fe" else
+               ("gamma0" if gamma0 else "full"))
+        for name, kind in zip(names, kinds)
+    }
     out = {
         "names": names,
+        "group_kinds": dict(zip(names, kinds)),
         "labels": labels,
         "b_base": np.asarray(r["b_base"]),
         "b_full": np.asarray(r["b_full"]),
         "delta": {
             name: {"coef": delta[:, g],
                    "se": np.sqrt(np.diag(
-                       fullcov[g * k1:(g + 1) * k1, g * k1:(g + 1) * k1]))}
+                       fullcov[g * k1:(g + 1) * k1, g * k1:(g + 1) * k1])),
+                   "se_type": se_type[name]}
             for g, name in enumerate(names)
         },
         "total": {"coef": np.asarray(r["total"]),
@@ -200,9 +259,29 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "df_full": float(r["df_full"]),
         "vce": vce,
         "gamma0": bool(gamma0),
+        "tol": float(tol),
+        "estimand": "coefficient_movement",
+        "causal_interpretation": False,
         "notes": r["notes"],
         "converged": bool(r["converged"]),
     }
+    fe_groups = [g for g, kind in enumerate(kinds) if kind == "fe"]
+    if fe_groups:
+        fe_coef = delta[:, fe_groups].sum(axis=1)
+        fe_cov = np.zeros((k1, k1), dtype=float)
+        for g in fe_groups:
+            for h in fe_groups:
+                fe_cov += fullcov[g * k1:(g + 1) * k1,
+                                  h * k1:(h + 1) * k1]
+        out["fe_total"] = {
+            "members": [names[g] for g in fe_groups],
+            "coef": fe_coef,
+            "cov": fe_cov,
+            "se": np.sqrt(np.diag(fe_cov)),
+            "se_type": "conditional_gamma0",
+        }
+    else:
+        out["fe_total"] = None
     if not r["converged"]:
         out["notes"] += " (not converged)"
         import warnings

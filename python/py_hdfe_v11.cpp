@@ -1473,7 +1473,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         [](py::object y_obj, py::object X1_obj, py::object X2_obj,
            std::vector<int> x2_group_sizes, py::object fes_obj,
            py::object cluster_obj, const std::string& vce, bool gamma0,
-           bool cov0, int num_threads, py::object weights_obj,
+           bool cov0, double tol, int num_threads, py::object weights_obj,
            bool fweights) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
@@ -1526,6 +1526,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             }
             opt.gamma0 = gamma0;
             opt.cov0 = cov0;
+            opt.tol = tol;
             opt.num_threads = num_threads;
             std::optional<Eigen::VectorXd> w_vec;
             if (!weights_obj.is_none()) {
@@ -1562,7 +1563,8 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         py::arg("x2_group_sizes") = std::vector<int>{}, py::arg("fes") = py::none(),
         py::arg("cluster") = py::none(), py::arg("vce") = "unadjusted",
         py::arg("gamma0") = false, py::arg("cov0") = false,
-        py::arg("num_threads") = 0, py::arg("weights") = py::none(),
+        py::arg("tol") = 1e-8, py::arg("num_threads") = 0,
+        py::arg("weights") = py::none(),
         py::arg("fweights") = false,
         "Gelbach (2016) conditional decomposition, HDFE-aware (see "
         "xhdfe.gelbach for the friendly wrapper). Opt-in; does not affect "

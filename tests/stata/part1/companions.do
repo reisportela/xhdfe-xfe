@@ -44,7 +44,31 @@ xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///
 matrix gel_delta_compact = r(delta)
 matrix gel_se_compact = r(se)
 matrix gel_total_compact = r(total)
+matrix gel_cov_compact = r(cov)
+matrix gel_total_cov_compact = r(total_cov)
+matrix gel_b_base_compact = r(b_base)
+matrix gel_b_full_compact = r(b_full)
+matrix gel_fe_total_compact = r(fe_total)
 scalar gel_gap_compact = r(identity_gap)
+assert rowsof(gel_cov_compact) == 4 & colsof(gel_cov_compact) == 4
+assert rowsof(gel_total_cov_compact) == 2 & colsof(gel_total_cov_compact) == 2
+assert colsof(gel_b_base_compact) == 1 & colsof(gel_b_full_compact) == 1
+assert abs(gel_fe_total_compact[1, 1] - gel_delta_compact[1, 2]) <= 1e-12
+assert "`r(estimand)'" == "coefficient_movement"
+assert "`r(causal_interpretation)'" == "no"
+
+* Ambiguous block partitions and invalid tolerance settings fail closed.
+capture noisily xhdfegelbach y, x1(x1) x2groups("A = x2 : B = x2")
+assert _rc == 198
+capture noisily xhdfegelbach y, x1(x1) x2groups("A = x1")
+assert _rc == 198
+capture noisily xhdfegelbach y, x1(x1) x2groups("A = x2") tol(0)
+assert _rc == 198
+tempvar one_cluster
+gen byte `one_cluster' = 1
+capture noisily xhdfegelbach y, x1(x1) x2groups("A = x2") ///
+    vce(cluster) cluster(`one_cluster')
+assert _rc == 198
 
 recast double fe cluster
 replace fe = 3000000000 + 1009 * fe + 0.25
