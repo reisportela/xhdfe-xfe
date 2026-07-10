@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.15.0  09jul2026}{...}
+{* *! version 2.16.0  10jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -51,7 +51,7 @@ Gelbach's {cmd:b1x2} (the reference implementation this command is validated
 against), including its {opt gamma0}/{opt cov0} variants and the aweight/
 fweight conventions. Fixed-effect groups are absorbed with the xhdfe backend,
 so high-dimensional FE groups are practical. Shares the compiled backend with
-the Python {cmd:xhdfe.gelbach.gelbach} and R {cmd:xhdfe_gelbach} front-ends.
+the Python {cmd:xhdfe.gelbach.decompose} and R {cmd:xhdfe_gelbach} front-ends.
 
 
 {title:Options}
@@ -64,12 +64,15 @@ with the b1x2-style syntax {cmd:x2groups("A = a1 a2 : B = b1 b2 b3")} (groups
 separated by colons; each group is {it:name} {cmd:=} {it:varlist}). Each named
 group becomes one column of the contribution matrix.
 
-{phang}{opth fes(varlist)} gives fixed-effect dimensions (integer-valued
+{phang}{opth fes(varlist)} gives fixed-effect dimensions (numeric categorical
 identifiers) added in the full model, each absorbed with the xhdfe backend and
-treated as its own group (always gamma0-style).
+treated as its own group (always gamma0-style). Raw codes outside the signed
+32-bit range, and non-integer numeric labels, are compacted internally without
+changing category membership or results.
 
 {phang}{opt vce(vcetype)} selects the variance estimator: {cmd:unadjusted}
 (default), {cmd:robust}, or {cmd:cluster} (supply {opth cluster(varname)}).
+The cluster identifier is compacted under the same exact categorical rule.
 
 {phang}{opt gamma0} and {opt cov0} reproduce the corresponding options of
 Gelbach's {cmd:b1x2}.

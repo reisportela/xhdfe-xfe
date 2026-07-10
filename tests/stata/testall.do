@@ -46,7 +46,8 @@ local tests ///
     "part1/methods.do" ///
     "part1/postestimation.do" ///
     "part1/predict.do" ///
-    "part1/options.do"
+    "part1/options.do" ///
+    "part1/companions.do"
 
 foreach test of local tests {
     di as text _n "{hline 72}"

@@ -644,6 +644,7 @@ struct TwoWaySolver {
     const std::vector<int>* m_w = nullptr;
     const std::vector<int>* m_f = nullptr;
     std::vector<double> m_c;  // match weights (person-year counts)
+    std::vector<double> m_sqrt_c;  // lazy sqrt(match weight), reused by JLA
     Eigen::VectorXd Dw;
     Eigen::VectorXd Df;
     // Worker-major CSR (matches are sorted by worker already).
@@ -818,6 +819,14 @@ struct TwoWaySolver {
                     notes += "direct Cholesky of the firm Laplacian failed; using PCG. ";
                 }
             }
+        }
+    }
+
+    void ensure_sqrt_c() {
+        if (m_sqrt_c.size() == m_c.size()) return;
+        m_sqrt_c.resize(m_c.size());
+        for (std::size_t m = 0; m < m_c.size(); ++m) {
+            m_sqrt_c[m] = std::sqrt(m_c[m]);
         }
     }
 
@@ -1329,24 +1338,13 @@ struct TwoWaySolver {
                        std::vector<char>& success, long long& iters,
                        bool parallel) const {
         const int nc = static_cast<int>(tw.size());
-        std::vector<Eigen::VectorXd> scrw(static_cast<std::size_t>(nc));
         std::vector<Eigen::VectorXd> rhs(static_cast<std::size_t>(nc));
-        // per-lane prep (lane-parallel; each lane's expression is exactly
-        // the sequential one, outputs disjoint -> identical bits; N-gated
-        // like every other N-length region)
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && nc > 1 && N >= 16384) num_threads(std::min(team, nc))
-#endif
-        for (int c = 0; c < nc; ++c) {
-            if (tw[static_cast<std::size_t>(c)] != nullptr) {
-                scrw[static_cast<std::size_t>(c)] =
-                    tw[static_cast<std::size_t>(c)]->cwiseQuotient(Dw);
-            } else {
-                scrw[static_cast<std::size_t>(c)] = Eigen::VectorXd::Zero(N);
-            }
-        }
         {
-            // fused B' over the nc worker-space columns
+            // Fused B' over the nc worker-space columns. Write tw/Dw
+            // straight into the tile instead of creating and then copying
+            // one N-vector per RHS (about 960 MB at 5M workers, 24 lanes).
+            // Each quotient is still rounded once before B' consumes it;
+            // nullptr lanes remain exact zero lanes.
             std::vector<double> packS(static_cast<std::size_t>(N) * kMrhsTile, 0.0);
             std::vector<double> packY(static_cast<std::size_t>(J) * kMrhsTile);
             for (int c0 = 0; c0 < nc; c0 += kMrhsTile) {
@@ -1354,7 +1352,9 @@ struct TwoWaySolver {
                 {
                     const double* srcp[kMrhsTile] = {nullptr};
                     for (int k = 0; k < nb; ++k) {
-                        srcp[k] = scrw[static_cast<std::size_t>(c0 + k)].data();
+                        const Eigen::VectorXd* src =
+                            tw[static_cast<std::size_t>(c0 + k)];
+                        srcp[k] = src != nullptr ? src->data() : nullptr;
                     }
                     const std::int64_t nblkw = (N + 4095) / 4096;
 #ifdef _OPENMP
@@ -1367,7 +1367,9 @@ struct TwoWaySolver {
                             double* dst = packS.data() +
                                           static_cast<std::size_t>(w) * kMrhsTile;
                             for (int k = 0; k < nb; ++k) {
-                                dst[k] = srcp[k][w];
+                                dst[k] = srcp[k] != nullptr
+                                             ? srcp[k][w] / Dw[w]
+                                             : 0.0;
                             }
                         }
                     }
@@ -1667,6 +1669,21 @@ void am_confidence_interval(double NT, double lambda_1_raw, double gamma_sq,
 
 namespace {
 
+#ifdef _OPENMP
+// Keep the per-call OpenMP override exception-safe. Without this guard an
+// exception in AKM could silently change the thread limit seen by a later
+// xhdfe/core23 fit in the same process.
+struct ScopedOmpThreads {
+    int previous = 1;
+    explicit ScopedOmpThreads(int requested) : previous(omp_get_max_threads()) {
+        if (requested > 0) {
+            omp_set_num_threads(requested);
+        }
+    }
+    ~ScopedOmpThreads() { omp_set_num_threads(previous); }
+};
+#endif
+
 std::vector<long long> validate_fweights(const Eigen::VectorXd& fwv,
                                          Eigen::Index n) {
     if (fwv.size() != n) {
@@ -1716,10 +1733,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     }
 
 #ifdef _OPENMP
-    const int prev_threads = omp_get_max_threads();
-    if (options.num_threads > 0) {
-        omp_set_num_threads(options.num_threads);
-    }
+    ScopedOmpThreads omp_threads(options.num_threads);
 #endif
 
     std::vector<long long> fw_rows;
@@ -1749,7 +1763,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     long long cg_iters = 0;
     SampleBuild sb = build_leave_out_sample(worker_ids, firm_ids, options.prune,
                                             has_fw ? &fw_rows : nullptr);
-    res.sample = sb.set;
+    res.sample = std::move(sb.set);
     prof_.mark("leave_out_sample");
 
     const std::size_t n_kept = sb.rows.size();
@@ -1763,9 +1777,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         n_py_ll += static_cast<double>(sb.m_cnt[m]);
     }
     const double n_py = n_py_ll;  // person-year count (= n_kept unweighted)
-    // per kept-row frequency weight (1.0 unweighted)
-    Eigen::VectorXd kw = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(n_kept));
+    const bool rademacher_tot_int_exact =
+        n_py < 9007199254740992.0;  // strict gate avoids a rounded 2^53+1 total
+    // Keep this empty in the common unweighted case. Materialising an
+    // all-ones vector costs about 380 MB on a 47.5M-row panel.
+    Eigen::VectorXd kw;
     if (has_fw) {
+        kw.resize(static_cast<Eigen::Index>(n_kept));
         for (std::size_t k = 0; k < n_kept; ++k) {
             kw[static_cast<Eigen::Index>(k)] =
                 static_cast<double>(fw_rows[static_cast<std::size_t>(sb.rows[k])]);
@@ -1775,9 +1793,6 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (n_kept < 3 || N < 1 || J < 1 || n_py - 1.0 <= 0.0) {
         res.converged = false;
         res.notes = "leave-out sample too small for a variance decomposition. ";
-#ifdef _OPENMP
-        omp_set_num_threads(prev_threads);
-#endif
         return res;
     }
 
@@ -1831,11 +1846,24 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     Eigen::VectorXd m_ysum = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(M));
     for (std::size_t k = 0; k < n_kept; ++k) {
         m_ysum[sb.row_match[k]] +=
-            kw[static_cast<Eigen::Index>(k)] * ystar[static_cast<Eigen::Index>(k)];
+            (has_fw ? kw[static_cast<Eigen::Index>(k)] : 1.0) *
+            ystar[static_cast<Eigen::Index>(k)];
     }
+
+    long long n_input_py = static_cast<long long>(y.size());
+    if (has_fw) {
+        n_input_py = 0;
+        for (std::size_t i = 0; i < fw_rows.size(); ++i) n_input_py += fw_rows[i];
+    }
+    const bool use_exact =
+        options.leverage_method == LeverageMethod::Exact ||
+        (options.leverage_method == LeverageMethod::Auto &&
+         n_input_py <= options.exact_max_rows);
+    res.leverages_exact = use_exact;
 
     TwoWaySolver solver;
     solver.build(N, J, sb.m_w, sb.m_f, sb.m_cnt, options, res.notes);
+    if (match_level && !use_exact) solver.ensure_sqrt_c();
     res.solver_direct = solver.direct;
     res.gpu_used = solver.use_cuda;
     res.n_rows = static_cast<long long>(R);
@@ -1875,7 +1903,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         if (match_level) {
             for (std::size_t m = 0; m < M; ++m) {
                 const double c = static_cast<double>(sb.m_cnt[m]);
-                const double sc = std::sqrt(c);
+                const double sc = !solver.m_sqrt_c.empty()
+                                      ? solver.m_sqrt_c[m]
+                                      : std::sqrt(c);
                 row_wgt[static_cast<Eigen::Index>(m)] = c;
                 yt[static_cast<Eigen::Index>(m)] = sc * (m_ysum[static_cast<Eigen::Index>(m)] / c);
                 eta[static_cast<Eigen::Index>(m)] =
@@ -1900,17 +1930,6 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     Eigen::VectorXd Bfe(static_cast<Eigen::Index>(R));
     Eigen::VectorXd Bpe(static_cast<Eigen::Index>(R));
     Eigen::VectorXd Bcov(static_cast<Eigen::Index>(R));
-
-    long long n_input_py = static_cast<long long>(y.size());
-    if (has_fw) {
-        n_input_py = 0;
-        for (std::size_t i = 0; i < fw_rows.size(); ++i) n_input_py += fw_rows[i];
-    }
-    const bool use_exact =
-        options.leverage_method == LeverageMethod::Exact ||
-        (options.leverage_method == LeverageMethod::Auto &&
-         n_input_py <= options.exact_max_rows);
-    res.leverages_exact = use_exact;
 
     bool solve_failed = false;
     if (use_exact) {
@@ -2153,7 +2172,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 #endif
                         for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
                             draw_val[m] =
-                                std::sqrt(solver.m_c[static_cast<std::size_t>(m)]) *
+                                solver.m_sqrt_c[static_cast<std::size_t>(m)] *
                                 static_cast<double>(rvec[static_cast<std::size_t>(m)]);
                         }
 #ifdef _OPENMP
@@ -2202,7 +2221,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     } else if (match_level) {
                         for (std::size_t m = 0; m < M; ++m) {
                             const double v =
-                                std::sqrt(solver.m_c[m]) * static_cast<double>(rvec[m]);
+                                solver.m_sqrt_c[m] * static_cast<double>(rvec[m]);
                             tw_b[sb.m_w[m]] += v;
                             tf_b[sb.m_f[m]] += v;
                         }
@@ -2213,8 +2232,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                             tf_b[sb.row_f[k]] += v;
                         }
                     }
+                    long long tot_i = 0;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team) reduction(+ : tot_i)
 #endif
                     for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
                         msum[m] = rademacher_sum(
@@ -2222,10 +2242,22 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                                         static_cast<std::uint64_t>(3 * d + 1),
                                         static_cast<std::uint64_t>(m)),
                             sb.m_cnt[static_cast<std::size_t>(m)]);
+                        if (rademacher_tot_int_exact) {
+                            tot_i += static_cast<long long>(msum[m]);
+                        }
                     }
-                    double tot = 0.0;
-                    for (std::size_t m = 0; m < M; ++m) {
-                        tot += msum[static_cast<Eigen::Index>(m)];
+                    // Every Rademacher sum is integral. The integer
+                    // reduction is exact and thread-count invariant; its
+                    // final double conversion matches the legacy ascending
+                    // sum for all representable person-year counts.
+                    double tot = static_cast<double>(tot_i);
+                    if (!rademacher_tot_int_exact) {
+                        // Preserve the legacy FP accumulation for theoretical
+                        // frequency-weight totals beyond exact-double range.
+                        tot = 0.0;
+                        for (std::size_t m = 0; m < M; ++m) {
+                            tot += msum[static_cast<Eigen::Index>(m)];
+                        }
                     }
                     const double vbar = (tot / n_py) * scale;
                     Eigen::VectorXd& tw_c = tw2[static_cast<std::size_t>(b)];
@@ -2316,9 +2348,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                             const int w = row_w_of[r];
                             const int f = row_f_of[r];
                             const double sw =
-                                match_level
-                                    ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)])
-                                    : 1.0;
+                                match_level ? solver.m_sqrt_c[r] : 1.0;
                             const double Z = sw * (zw_b[w] + zf_b[f]);
                             const double g =
                                 ((bits >> (r - base)) & 1ULL) ? 1.0 : -1.0;
@@ -2339,9 +2369,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                     const int w = row_w_of[static_cast<std::size_t>(r)];
                     const int f = row_f_of[static_cast<std::size_t>(r)];
-                    const double sw =
-                        match_level ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)])
-                                    : 1.0;
+                    const double sw = match_level
+                                          ? solver.m_sqrt_c[static_cast<std::size_t>(r)]
+                                          : 1.0;
                     for (int b = 0; b < B; ++b) {
                         const Eigen::VectorXd& zwf = zw_all[static_cast<std::size_t>(B + b)];
                         const Eigen::VectorXd& zff = zf_all[static_cast<std::size_t>(B + b)];
@@ -2375,7 +2405,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             tf.setZero();
             if (match_level) {
                 for (std::size_t m = 0; m < M; ++m) {
-                    const double v = std::sqrt(solver.m_c[m]) * static_cast<double>(rvec[m]);
+                    const double v = solver.m_sqrt_c[m] * static_cast<double>(rvec[m]);
                     tw[sb.m_w[m]] += v;
                     tf[sb.m_f[m]] += v;
                 }
@@ -2395,8 +2425,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                 const int w = row_w_of[static_cast<std::size_t>(r)];
                 const int f = row_f_of[static_cast<std::size_t>(r)];
-                const double sw =
-                    match_level ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)]) : 1.0;
+                const double sw = match_level
+                                      ? solver.m_sqrt_c[static_cast<std::size_t>(r)]
+                                      : 1.0;
                 const double Z = sw * (zw[w] + zf[f]);
                 const double diff = static_cast<double>(rvec[static_cast<std::size_t>(r)]) - Z;
                 const double z2 = Z * Z;
@@ -2413,18 +2444,25 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             // without materializing person-year vectors: per-match Rademacher
             // sums (parallel), then a sequential binning pass so the result
             // is independent of the thread count.
+            long long tot_i = 0;
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team)
+#pragma omp parallel for schedule(static) if (par_rows && solver.team > 1) num_threads(solver.team) reduction(+ : tot_i)
 #endif
             for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
                 msum[m] = rademacher_sum(
                     stream_seed(options.seed, static_cast<std::uint64_t>(3 * d + 1),
                                 static_cast<std::uint64_t>(m)),
                     sb.m_cnt[static_cast<std::size_t>(m)]);
+                if (rademacher_tot_int_exact) {
+                    tot_i += static_cast<long long>(msum[m]);
+                }
             }
-            double tot = 0.0;
-            for (std::size_t m = 0; m < M; ++m) {
-                tot += msum[static_cast<Eigen::Index>(m)];
+            double tot = static_cast<double>(tot_i);
+            if (!rademacher_tot_int_exact) {
+                tot = 0.0;
+                for (std::size_t m = 0; m < M; ++m) {
+                    tot += msum[static_cast<Eigen::Index>(m)];
+                }
             }
             const double vbar = (tot / n_py) * scale;
             tw.setZero();
@@ -2452,8 +2490,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             for (std::int64_t r = 0; r < static_cast<std::int64_t>(R); ++r) {
                 const int w = row_w_of[static_cast<std::size_t>(r)];
                 const int f = row_f_of[static_cast<std::size_t>(r)];
-                const double sw =
-                    match_level ? std::sqrt(row_wgt[static_cast<Eigen::Index>(r)]) : 1.0;
+                const double sw = match_level
+                                      ? solver.m_sqrt_c[static_cast<std::size_t>(r)]
+                                      : 1.0;
                 const double W2 = sw * (zw_fe[w] + zf_fe[f]);
                 const double W1 = sw * (zw_pe[w] + zf_pe[f]);
                 Bfe[r] += W2 * W2;
@@ -2518,7 +2557,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             const double mii = 1.0 - 1.0 / T;
             const double e =
                 ystar[static_cast<Eigen::Index>(k)] - alpha[sb.row_w[k]] - psi[sb.row_f[k]];
-            acc[m] += kw[static_cast<Eigen::Index>(k)] *
+            acc[m] += (has_fw ? kw[static_cast<Eigen::Index>(k)] : 1.0) *
                       (ystar[static_cast<Eigen::Index>(k)] - mean_ypy) * (e / mii);
         }
         for (std::size_t m = 0; m < M; ++m) {
@@ -2580,7 +2619,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         for (std::size_t k = 0; k < n_kept; ++k) {
             const double e =
                 ystar[static_cast<Eigen::Index>(k)] - alpha[sb.row_w[k]] - psi[sb.row_f[k]];
-            rss_py += kw[static_cast<Eigen::Index>(k)] * e * e;
+            rss_py += (has_fw ? kw[static_cast<Eigen::Index>(k)] : 1.0) * e * e;
         }
         const double dof_ho = n_py - static_cast<double>(N + J - 1);
         res.sigma2_ho = dof_ho > 0.0 ? rss_py / dof_ho : 0.0;
@@ -3908,15 +3947,12 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             }
             res.notes += "var(alpha) SE not identified at match level with stayers (oracle rule). ";
         }
-        res.solver_iterations = cg_iters;
+        res.solver_iterations = cg_iters + solver.cuda_iters;
     }
 
     // ---- Row-level outputs -----------------------------------------------
-    res.pii = Pii;
-    res.sigma_i = sigma;
     res.row_worker.resize(static_cast<Eigen::Index>(R));
     res.row_firm.resize(static_cast<Eigen::Index>(R));
-    res.row_weight = row_wgt;
     for (std::size_t r = 0; r < R; ++r) {
         res.row_worker[static_cast<Eigen::Index>(r)] =
             sb.worker_orig[static_cast<std::size_t>(row_w_of[r])];
@@ -3943,6 +3979,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         if (Z->rows() != y.size()) {
             throw std::runtime_error("Z must have the same number of rows as y");
         }
+        if (match_level && solver.m_sqrt_c.empty()) solver.ensure_sqrt_c();
         const int r = static_cast<int>(Z->cols());
         Eigen::MatrixXd Zt(static_cast<Eigen::Index>(n_kept), r + 1);
         Zt.col(0).setOnes();
@@ -4002,9 +4039,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 for (std::size_t m = 0; m < R; ++m) {
                     const int w = row_w_of[m];
                     const int f = row_f_of[m];
-                    const double sw = match_level
-                                          ? std::sqrt(row_wgt[static_cast<Eigen::Index>(m)])
-                                          : 1.0;
+                    const double sw = match_level ? solver.m_sqrt_c[m] : 1.0;
                     const double xr = sw * (zw_l[w] + zf_l[f]);
                     den_kss += sigma[static_cast<Eigen::Index>(m)] * xr * xr;
                     den_white += eta[static_cast<Eigen::Index>(m)] *
@@ -4035,9 +4070,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             for (std::size_t m = 0; m < R; ++m) {
                 const int w = row_w_of[m];
                 const int f = row_f_of[m];
-                const double sw = match_level
-                                      ? std::sqrt(row_wgt[static_cast<Eigen::Index>(m)])
-                                      : 1.0;
+                const double sw = match_level ? solver.m_sqrt_c[m] : 1.0;
                 const double xr = sw * (zw_l[w] + zf_l[f]);
                 den_kss += sigma[static_cast<Eigen::Index>(m)] * xr * xr;
                 den_white += eta[static_cast<Eigen::Index>(m)] *
@@ -4049,9 +4082,15 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             res.lincom_t[qq] = num[qq + 1] / std::sqrt(den_kss);
         }
         }
-        res.solver_iterations = cg_iters;
+        res.solver_iterations = cg_iters + solver.cuda_iters;
         prof_.mark("lincom");
     }
+
+    // No internal consumer remains after lincom. Move these O(R) arrays into
+    // the result instead of copying them (hundreds of MB at AKM scale).
+    res.pii = std::move(Pii);
+    res.sigma_i = std::move(sigma);
+    res.row_weight = std::move(row_wgt);
 
     // Observation-level effects, psi centered to zero person-year mean.
     res.alpha.resize(static_cast<Eigen::Index>(n_kept));
@@ -4067,9 +4106,6 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.notes += "non-finite corrected components. ";
     }
 
-#ifdef _OPENMP
-    omp_set_num_threads(prev_threads);
-#endif
     return res;
 }
 

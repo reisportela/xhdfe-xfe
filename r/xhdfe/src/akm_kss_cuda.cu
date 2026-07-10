@@ -104,13 +104,19 @@ __global__ void k_mult_bt_finish_multi(int n_firms, int nb, int ground,
     y[off] = (f == ground) ? 0.0 : Df[f] * p[off] - acc;
 }
 
-__global__ void k_axpy_multi(int n, int nb, const double* alpha, const char* active,
-                             const double* x, double* y) {
+// One PCG update, preserving the two legacy AXPY expressions element by
+// element while avoiding a second scalar upload and a second full launch.
+__global__ void k_cg_update_multi(int n, int nb, const double* alpha,
+                                  const char* active, const double* p,
+                                  const double* Ap, double* x, double* r) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int l = blockIdx.y;
     if (i >= n || l >= nb || !active[l]) return;
     const std::size_t off = static_cast<std::size_t>(l) * n + i;
-    y[off] += alpha[l] * x[off];
+    const double a = alpha[l];
+    x[off] += a * p[off];
+    const double neg_a = -a;
+    r[off] += neg_a * Ap[off];
 }
 
 __global__ void k_xpay_multi(int n, int nb, const double* beta, const char* active,
@@ -196,7 +202,7 @@ struct AkmCudaContext {
     // pointer means pinned allocation failed and the pageable fallback is
     // used. Pinning changes transfer speed only, never values.
     double* h_pack = nullptr;   // J * mr_lanes (rhs upload / z download)
-    double* h_dots = nullptr;   // mr_lanes (segmented-reduce results)
+    double* h_dots = nullptr;   // 2 * mr_lanes (paired segmented-reduce results)
     double* h_scal = nullptr;   // mr_lanes (alpha/beta uploads)
     char* h_active = nullptr;   // mr_lanes (active-mask uploads)
     double* h_dot1 = nullptr;   // single-lane dot result (device_dot)
@@ -341,14 +347,15 @@ int akm_cuda_max_lanes() { return 32; }
 
 namespace {
 
-// per-lane dots via one segmented reduce: out_host[l] = sum(pair[l*J..(l+1)*J))
-bool seg_dots(AkmCudaContext* c, int nb, const double* a, const double* b,
-              double* out_host) {
+// Per-lane dots via one segmented reduce. The device-only primitive lets two
+// independent reductions be queued before a single host synchronization.
+bool seg_dots_device(AkmCudaContext* c, int nb, const double* a,
+                     const double* b, double* out_device) {
     const int J = c->J;
     dim3 grid((J + kBlock - 1) / kBlock, nb);
     k_mul_pair_multi<<<grid, kBlock>>>(J, nb, a, b, c->d_mactive, c->d_mpair);
     std::size_t need = 0;
-    cub::DeviceSegmentedReduce::Sum(nullptr, need, c->d_mpair, c->d_mdots, nb,
+    cub::DeviceSegmentedReduce::Sum(nullptr, need, c->d_mpair, out_device, nb,
                                     c->d_moffs, c->d_moffs + 1);
     if (need > c->mcub_tmp_bytes) {
         cudaFree(c->d_mcub_tmp);
@@ -356,12 +363,32 @@ bool seg_dots(AkmCudaContext* c, int nb, const double* a, const double* b,
         c->mcub_tmp_bytes = need;
     }
     cub::DeviceSegmentedReduce::Sum(c->d_mcub_tmp, c->mcub_tmp_bytes, c->d_mpair,
-                                    c->d_mdots, nb, c->d_moffs, c->d_moffs + 1);
+                                    out_device, nb, c->d_moffs, c->d_moffs + 1);
+    return cuda_ok(cudaGetLastError());
+}
+
+bool seg_dots(AkmCudaContext* c, int nb, const double* a, const double* b,
+              double* out_host) {
+    if (!seg_dots_device(c, nb, a, b, c->d_mdots)) return false;
     double* dst = (c->h_dots != nullptr) ? c->h_dots : out_host;
     if (!cuda_ok(cudaMemcpy(dst, c->d_mdots, sizeof(double) * nb,
                             cudaMemcpyDeviceToHost)))
         return false;
     if (dst != out_host) std::memcpy(out_host, dst, sizeof(double) * nb);
+    return true;
+}
+
+bool seg_dots_pair(AkmCudaContext* c, int nb,
+                   const double* a0, const double* b0,
+                   const double* a1, const double* b1,
+                   double* out_host) {
+    if (!seg_dots_device(c, nb, a0, b0, c->d_mdots)) return false;
+    if (!seg_dots_device(c, nb, a1, b1, c->d_mdots + nb)) return false;
+    double* dst = (c->h_dots != nullptr) ? c->h_dots : out_host;
+    if (!cuda_ok(cudaMemcpy(dst, c->d_mdots, sizeof(double) * 2 * nb,
+                            cudaMemcpyDeviceToHost)))
+        return false;
+    if (dst != out_host) std::memcpy(out_host, dst, sizeof(double) * 2 * nb);
     return true;
 }
 
@@ -395,7 +422,7 @@ bool mr_ensure(AkmCudaContext* c, int nb) {
               cuda_ok(cudaMalloc(&c->d_mAp, sizeof(double) * J * L)) &&
               cuda_ok(cudaMalloc(&c->d_mtw, sizeof(double) * N * L)) &&
               cuda_ok(cudaMalloc(&c->d_mpair, sizeof(double) * J * L)) &&
-              cuda_ok(cudaMalloc(&c->d_mdots, sizeof(double) * L)) &&
+              cuda_ok(cudaMalloc(&c->d_mdots, sizeof(double) * 2 * L)) &&
               cuda_ok(cudaMalloc(&c->d_mscal, sizeof(double) * L)) &&
               cuda_ok(cudaMalloc(&c->d_mactive, L)) &&
               cuda_ok(cudaMalloc(&c->d_moffs, sizeof(int) * (L + 1)));
@@ -408,7 +435,7 @@ bool mr_ensure(AkmCudaContext* c, int nb) {
     if (cudaMallocHost(&c->h_pack, sizeof(double) * J * L) != cudaSuccess) {
         c->h_pack = nullptr;
     }
-    if (cudaMallocHost(&c->h_dots, sizeof(double) * L) != cudaSuccess) {
+    if (cudaMallocHost(&c->h_dots, sizeof(double) * 2 * L) != cudaSuccess) {
         c->h_dots = nullptr;
     }
     if (cudaMallocHost(&c->h_scal, sizeof(double) * L) != cudaSuccess) {
@@ -474,7 +501,8 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
         }
         up_active(act.data());
     }
-    std::vector<double> rhs_norm2(nb), rz(nb), tol2(nb), pAp(nb), rr(nb), rz_new(nb);
+    std::vector<double> rhs_norm2(nb), rz(nb), tol2(nb), pAp(nb);
+    std::vector<double> rr_rz(static_cast<std::size_t>(2 * nb));
     std::vector<double> alpha(nb), beta(nb);
     std::vector<char> active(nb, 1), ok_lane(nb, 0);
     std::vector<int> its(nb, 0);
@@ -507,6 +535,7 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
                                                c->d_mtw, c->d_Df, c->d_mp, c->d_mAp,
                                                c->d_mactive, J, c->N);
         if (!seg_dots(c, nb, c->d_mp, c->d_mAp, pAp.data())) return -1;
+        bool active_changed = false;
         for (int l = 0; l < nb; ++l) {
             if (!active[l]) {
                 alpha[l] = 0.0;
@@ -514,24 +543,30 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
             }
             if (!(pAp[l] > 0.0) || !(pAp[l] < 1e300)) {
                 active[l] = 0;
+                active_changed = true;
                 alpha[l] = 0.0;
                 continue;
             }
             alpha[l] = rz[l] / pAp[l];
         }
-        up_active(active.data());
+        // In the normal path the mask cannot change between consecutive
+        // residual checks, so avoid an otherwise redundant H2D transfer.
+        if (active_changed) up_active(active.data());
         up_scal(alpha.data());
-        k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mp,
-                                     c->d_mx);
-        for (int l = 0; l < nb; ++l) alpha[l] = -alpha[l];
-        up_scal(alpha.data());
-        k_axpy_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mAp,
-                                     c->d_mr);
-        if (!seg_dots(c, nb, c->d_mr, c->d_mr, rr.data())) return -1;
+        k_cg_update_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive,
+                                          c->d_mp, c->d_mAp, c->d_mx, c->d_mr);
+        // Precondition first, then queue rr and r'z reductions back-to-back.
+        // Both CUB reductions retain their legacy shapes/order, but a single
+        // D2H transfer/synchronization returns both scalar vectors.
+        k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive,
+                                         c->d_mr, c->d_mz);
+        if (!seg_dots_pair(c, nb, c->d_mr, c->d_mr,
+                           c->d_mr, c->d_mz, rr_rz.data()))
+            return -1;
         for (int l = 0; l < nb; ++l) {
             if (!active[l]) continue;
             ++its[l];
-            if (rr[l] <= tol2[l]) {
+            if (rr_rz[static_cast<std::size_t>(l)] <= tol2[l]) {
                 ok_lane[l] = 1;
                 active[l] = 0;
             } else if (its[l] >= max_iter) {
@@ -540,12 +575,10 @@ int akm_cuda_solve_S_multi(AkmCudaContext* c, const double* rhs_pack,
         }
         up_active(active.data());
         if (!any_active()) break;
-        k_hadamard_multi<<<gJ, kBlock>>>(J, nb, c->d_inv_diag, c->d_mactive, c->d_mr,
-                                         c->d_mz);
-        if (!seg_dots(c, nb, c->d_mr, c->d_mz, rz_new.data())) return -1;
         for (int l = 0; l < nb; ++l) {
-            beta[l] = (active[l] && rz[l] != 0.0) ? rz_new[l] / rz[l] : 0.0;
-            if (active[l]) rz[l] = rz_new[l];
+            const double rz_new = rr_rz[static_cast<std::size_t>(nb + l)];
+            beta[l] = (active[l] && rz[l] != 0.0) ? rz_new / rz[l] : 0.0;
+            if (active[l]) rz[l] = rz_new;
         }
         up_scal(beta.data());
         k_xpay_multi<<<gJ, kBlock>>>(J, nb, c->d_mscal, c->d_mactive, c->d_mz,

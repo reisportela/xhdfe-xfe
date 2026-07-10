@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.15.0  09jul2026}{...}
+{* *! version 2.16.0  10jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -21,8 +21,8 @@
 {synopthdr}
 {synoptline}
 {syntab:Model}
-{synopt :{opth work:er(varname)}}worker (person) identifier, integer-valued; {bf:required}{p_end}
-{synopt :{opth firm(varname)}}firm (establishment) identifier, integer-valued; {bf:required}{p_end}
+{synopt :{opth work:er(varname)}}numeric worker (person) identifier; {bf:required}{p_end}
+{synopt :{opth firm(varname)}}numeric firm (establishment) identifier; {bf:required}{p_end}
 {synopt :{opth control:s(varlist)}}covariates partialled out (FWL) before the two-way step{p_end}
 {synopt :{opt leaveout:level(unit)}}leave-out unit: {cmd:match} (default) or {cmd:obs}{p_end}
 {synopt :{opt noprune}}skip the leave-out connected-set pruning{p_end}
@@ -114,7 +114,9 @@ familiar reghdfe workflow, and use pytwoway for the structural models outside
 {dlgtab:Model}
 
 {phang}{opth worker(varname)} and {opth firm(varname)} are the two
-high-dimensional identifiers (integer-valued). Both are {bf:required}.
+high-dimensional numeric identifiers. Both are {bf:required}. Codes outside
+the signed 32-bit range, and non-integer numeric labels, are compacted
+internally without changing the worker-firm graph or results.
 
 {phang}{opth controls(varlist)} lists covariates that are partialled out at the
 person-year level with the xhdfe absorber (Frisch-Waugh-Lovell) before the

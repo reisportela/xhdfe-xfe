@@ -155,9 +155,11 @@ def subsampling_diagnostic(y, worker, firm, X=None, fractions=(0.0, 0.1, 0.2,
     kw = worker[keep0]
     kf = firm[keep0]
     order = np.argsort(kw, kind="stable")
-    uw, start = np.unique(kw[order], return_index=True)
+    sorted_worker = kw[order]
+    sorted_firm = kf[order]
+    uw, start = np.unique(sorted_worker, return_index=True)
     n_firms_of = np.array([
-        np.unique(kf[order][s:e]).size
+        np.unique(sorted_firm[s:e]).size
         for s, e in zip(start, np.append(start[1:], kw.size))
     ])
     movers = uw[n_firms_of >= 2]

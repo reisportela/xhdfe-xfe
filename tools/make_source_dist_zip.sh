@@ -60,6 +60,14 @@ cp -a "${ROOT_DIR}/stata/tools/_deps/eigen-3.4.0.tar.gz" "${PKG}/stata/tools/_de
 cp -a "${ROOT_DIR}/stata/tools/_deps/stplugin.h" "${PKG}/stata/tools/_deps/"
 cp -a "${ROOT_DIR}/stata/tools/_deps/stplugin.c" "${PKG}/stata/tools/_deps/"
 
+# Installable Stata surface. Plugins are intentionally excluded here because
+# the autonomous release bundle combines this source tree with the native
+# Linux/Windows/macOS binaries from the generated net-install site.
+for f in "${ROOT_DIR}"/stata/*.ado "${ROOT_DIR}"/stata/*.sthlp \
+         "${ROOT_DIR}"/stata/*.pkg "${ROOT_DIR}"/stata/stata.toc; do
+  cp -a "$f" "${PKG}/stata/"
+done
+
 # ---- Python package -------------------------------------------------------
 copy_tree "${ROOT_DIR}/python" "${PKG}/python"
 copy_tree "${ROOT_DIR}/xhdfe"  "${PKG}/xhdfe"

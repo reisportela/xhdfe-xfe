@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Version: 2.15.0.20260709
+Version: 2.16.0.20260710
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
 exposes the same compiled estimator that older scripts imported as

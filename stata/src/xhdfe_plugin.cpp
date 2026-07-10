@@ -1554,6 +1554,10 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         if (std::abs(z - r) > 1e-6) {
             throw_with_prefix("xhdfe plugin: ", "ids must be integers");
         }
+        if (r < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
+            r > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+            throw_with_prefix("xhdfe plugin: ", "ids must fit in int32");
+        }
         return static_cast<int>(r);
     };
 
