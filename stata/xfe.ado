@@ -1,4 +1,4 @@
-*! version 1.10.0 10jul2026
+*! version 1.10.1 10jul2026
 program define xfe, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfe, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.10.0 10jul2026"
+        local version "1.10.1 10jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -821,6 +821,16 @@ program define xfe, eclass sortpreserve
     quietly findfile xfe.ado
     local plugin_path "`r(fn)'"
     local plugin_path : subinstr local plugin_path "xfe.ado" "xfe.plugin", all
+    // `program ... , plugin using()' does not expand a leading ~ the way
+    // `confirm file' does, so a tilde'd PLUS dir (the Unix default ~/ado/plus)
+    // makes the load fail with r(601). Expand it here so the confirm, the
+    // stale-path guard, and the load all see one absolute path.
+    if (substr(`"`plugin_path'"', 1, 1) == "~") {
+        local __plugin_home : env HOME
+        if (`"`__plugin_home'"' != "") {
+            local plugin_path : subinstr local plugin_path "~" `"`__plugin_home'"'
+        }
+    }
     capture confirm file "`plugin_path'"
     if (_rc) {
         di as err "xfe.plugin not found next to xfe.ado; rebuild the plugin in `plugin_path'"
@@ -1008,7 +1018,7 @@ program define xfe, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.10.0 10jul2026"
+    ereturn local version "1.10.1 10jul2026"
     ereturn local cmd "xfe"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {

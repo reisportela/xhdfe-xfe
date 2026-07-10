@@ -1,4 +1,4 @@
-v 1.10.0
+v 1.10.1
 d xfe: Partial-out variables with multiple fixed effects via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
