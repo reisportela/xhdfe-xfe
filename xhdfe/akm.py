@@ -94,9 +94,15 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     - ``XHDFE_AKM_SCATTER_CSR`` (default on) selects the parallel CSR-ordered
       Rademacher scatter at scale; ``0`` restores the sequential scatter.
 
-    The leverage and SE solves are batched so results are identical for any
-    block size and any thread count. A ``RuntimeWarning`` is emitted if the
-    decomposition does not converge (check ``res['converged']``).
+    The leverage and SE solves are batched without changing the estimator or
+    solver tolerances. Different thread/backend reduction schedules can differ
+    at the last-ulp level. A ``RuntimeWarning`` is emitted if the decomposition
+    does not converge (check ``res['converged']``).
+
+    Pass ``verbose=1`` to print phase-by-phase progress to stderr (leave-out
+    set, FWL, solver choice, JLA draws d/D with elapsed time and an ETA, SE
+    simulations, eigen diagnostics) — useful on multi-hour panels to see
+    where the estimation is. Output only; results are unaffected.
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     wc, wu = _id_codes(worker)

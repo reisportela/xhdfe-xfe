@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xhdfe"
-version = "2.16.0.20260710"
+version = "2.16.1.20260710"
 description = "High-dimensional fixed effects regression backed by the xhdfe C++ core"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,9 +31,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/reisportela/xhdfe-xfe"
-Repository = "https://github.com/reisportela/xhdfe-xfe"
-Issues = "https://github.com/reisportela/xhdfe-xfe/issues"
+Homepage = "https://github.com/reisportela/xhdfe"
+Repository = "https://github.com/reisportela/xhdfe"
+Issues = "https://github.com/reisportela/xhdfe/issues"
 
 [project.scripts]
 xhdfe-help = "xhdfe._help:main"

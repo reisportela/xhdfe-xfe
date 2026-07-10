@@ -22,9 +22,11 @@ print(r["kss"])
 # plug-in var(psi) = 34.398203 -> the KSS correction removes the
 # limited-mobility bias (2 movers, 15-obs leave-out sample).
 
-# JLA path (large samples): deterministic for any thread count
+# JLA path: deterministic streams; thread/backend reductions are FP64-equivalent
 r = akm.akm_kss(y, w, f, leverages="jla", jla_draws=150, seed=42)
 # r['kss']['var_psi'] == 6.13308521068209 in Python, R and Stata alike.
+# With controls, inspect the two independently tuned effective teams:
+# r['fwl_threads_used'], r['threads_used']
 
 # GPU (CUDA) solves for the JLA/SE machinery — 11.4x at 2M rows on an H100:
 r = akm.akm_kss(y, w, f, leverages="jla", gpu=True)      # r['gpu_used']
@@ -105,4 +107,3 @@ Adam A. Oppenheimer; the Gelbach companion is validated against Jonah Gelbach's
   weak-identification q=1 confidence intervals.
 - Gelbach (2016), *Journal of Labor Economics* 34(2): 509-543 — the
   conditional decomposition of coefficient movements.
-

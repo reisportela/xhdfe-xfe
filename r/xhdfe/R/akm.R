@@ -77,13 +77,16 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #' @param leverages \code{"auto"} (exact when the input has at most
 #'   \code{exact_max_rows} rows, else JLA), \code{"exact"} or \code{"jla"}.
 #' @param jla_draws Rademacher simulations for the JLA path (default 200).
-#' @param seed Seed for the JLA draws; results are reproducible for any
-#'   thread count.
+#' @param seed Seed for deterministic JLA streams. Different thread counts or
+#'   backends preserve the estimator and FP64 tolerance but can differ at the
+#'   last-ulp level because floating-point reductions are reassociated.
 #' @param prune Compute the leave-out connected set (default TRUE). Set to
 #'   FALSE only when the input is already a leave-out sample.
 #' @param exact_max_rows,direct_max_firms,direct_max_nnz,cg_tol,cg_max_iter
 #'   Solver knobs; see the package vignette sources.
-#' @param num_threads OpenMP threads (0 = library default).
+#' @param num_threads Maximum OpenMP threads for the command (0 = library
+#'   default). The FWL absorber and KSS solver tune their effective teams
+#'   separately; see \code{fwl_threads_used} and \code{threads_used}.
 #' @param fwl_tol,fwl_max_iter Absorber controls for the covariate step.
 #' @param compute_se Component standard errors (KSS leave-out inference).
 #' @param se_nsim Simulation draws for the SE quadratic part (default 1000).
@@ -100,6 +103,9 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #' @param fweights Optional positive-integer frequency weights (row i stands
 #'   for fweights[i] identical person-year observations). Match-level point
 #'   decomposition only; equals the row-expanded run exactly.
+#' @param verbose Print phase progress to the console (leave-out set, FWL,
+#'   solver, JLA draws d/D with elapsed time and an ETA, SE simulations,
+#'   eigen diagnostics). Output only; results are unaffected.
 #' @section Advanced performance environment variables:
 #'   Defaults are tuned and none changes the default numeric output.
 #'   \code{XHDFE_AKM_TEAM} caps the OpenMP team size of the per-iteration
@@ -110,8 +116,9 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
 #'   (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
 #'   (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
-#'   The solves are batched so results are identical for any block size and
-#'   thread count. A \code{warning()} fires on non-convergence
+#'   The solves are batched without changing the estimator or solver
+#'   tolerances; different schedules can differ at the last-ulp level. A
+#'   \code{warning()} fires on non-convergence
 #'   (check \code{$converged}).
 #' @param gpu Solve the two-way systems on the CUDA backend when available.
 #' @return An object of class \code{xhdfe_akm_kss}: a list with the sample
@@ -123,8 +130,9 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   \code{var_y} (\code{share_var_alpha}, \code{share_var_psi},
 #'   \code{share_2cov}). Also returned: \code{var_y}, \code{sigma2_ho},
 #'   row-level leverages \code{pii} and \code{sigma_i}, and solver
-#'   diagnostics (\code{leverages_exact}, \code{gpu_used}, \code{converged},
-#'   ...). With \code{compute_se = TRUE} a \code{component_se} list holds the
+#'   diagnostics (\code{leverages_exact}, \code{gpu_used},
+#'   \code{fwl_threads_used}, \code{threads_used}, \code{converged}, ...).
+#'   With \code{compute_se = TRUE} a \code{component_se} list holds the
 #'   KSS component standard errors and corrected point estimates; with
 #'   \code{eigen_diagnostics = TRUE} a \code{weak_id} list holds, per
 #'   component, the top eigenvalue and shares of Atilde, the Lindeberg
@@ -164,7 +172,8 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                           eig_trace_nsim = 100L,
                           se_sigma_lowess = FALSE,
                           gpu = FALSE,
-                          fweights = NULL) {
+                          fweights = NULL,
+                          verbose = FALSE) {
   y <- as.numeric(y)
   if (length(worker) != length(y) || length(firm) != length(y)) {
     stop("y, worker and firm must have the same length", call. = FALSE)
@@ -200,7 +209,8 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                eigen_diagnostics = isTRUE(eigen_diagnostics),
                eig_trace_nsim = as.integer(eig_trace_nsim),
                se_sigma_lowess = isTRUE(se_sigma_lowess),
-               gpu = isTRUE(gpu))
+               gpu = isTRUE(gpu),
+               verbose = as.integer(isTRUE(verbose)))
   if (!is.null(fweights)) {
     fweights <- as.numeric(fweights)
     if (length(fweights) != length(y)) {

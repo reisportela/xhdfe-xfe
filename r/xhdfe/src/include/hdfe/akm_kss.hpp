@@ -30,7 +30,7 @@ struct AkmOptions {
     LeverageMethod leverage_method = LeverageMethod::Auto;
     bool prune = true;                   //!< Compute the leave-out connected set. Set false only when the input is already a leave-out sample (e.g. cleaned by an oracle) to compare on identical rows.
     int jla_draws = 200;                 //!< Rademacher simulations for the JLA path (LeaveOutTwoWay default).
-    std::uint64_t seed = 20260705;       //!< Seed for the JLA draws (deterministic, thread-count independent).
+    std::uint64_t seed = 20260705;       //!< Seed for deterministic JLA streams; thread/backend reductions may differ at the last-ulp level.
     int exact_max_rows = 10000;          //!< Auto rule: exact leverages when the input has <= this many rows (LeaveOutTwoWay rule).
     int direct_max_firms = 50000;        //!< Direct sparse Cholesky of the firm Laplacian when #firms <= this, else matrix-free PCG.
     long long direct_max_nnz = 40000000; //!< Skip the direct path when the projected firm-Laplacian triplet count exceeds this.
@@ -47,6 +47,9 @@ struct AkmOptions {
     bool eigen_diagnostics = false;      //!< With compute_se: top-eigenvalue diagnostics and the Andrews-Mikusheva q=1 confidence interval (leave_out_COMPLETE eigen_diagno path).
     int eig_trace_nsim = 100;            //!< Hutchinson draws for tr(Atilde^2) (oracle default).
     double ci_level_unused = 0.0;        //!< Reserved (the oracle tabulation is for its fixed level).
+    int verbose = 0;                     //!< 0 = silent (default). 1 = phase announcements plus throttled intra-phase progress with elapsed time and an ETA on the long loops (JLA leverage draws, SE simulations). Output only — never changes any numeric result.
+    void (*progress)(const char* line, void* user) = nullptr;  //!< Optional sink for the verbose lines (one line per call, no trailing newline). When null, lines go to stderr. Called only from the calling thread, never from inside a parallel region — a Stata plugin can route it to SF_display.
+    void* progress_user = nullptr;       //!< Opaque pointer handed back to `progress`.
 };
 
 // Leave-out connected-set result. keep refers to the ORIGINAL input rows.
@@ -150,6 +153,8 @@ struct AkmKssResult {
     bool leverages_exact = true;     //!< Exact vs JLA path actually used.
     bool gpu_used = false;           //!< CUDA solver actually used for the PCG solves.
     bool solver_direct = true;       //!< Direct Cholesky vs PCG actually used.
+    int fwl_threads_used = 0;        //!< Effective absorber threads for controls (0 when no controls).
+    int threads_used = 1;            //!< Effective OpenMP team for the two-way KSS solver.
     int jla_draws_used = 0;
     std::uint64_t seed_used = 0;
     long long solver_iterations = 0; //!< Total PCG iterations across all solves (0 when fully direct).

@@ -1261,6 +1261,14 @@ ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
     return 0;
 }
 
+// Verbose progress sink for the AKM task: route the core's progress lines to
+// the Stata Results window (SF_display needs a mutable char* and a newline).
+void akm_progress_to_stata(const char* line, void* /*user*/) {
+    char buf[560];
+    std::snprintf(buf, sizeof buf, "%s\n", line);
+    SF_display(buf);
+}
+
 ST_retcode run_akm_kss(const ParsedArgs& args) {
     const int ncontrols = parse_int(args.get_required("ncontrols"), "ncontrols");
     const bool store_effects = parse_bool(args.get_required("store_effects"), "store_effects");
@@ -1388,6 +1396,12 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
     if (auto val = args.get_optional("se_nsim")) {
         options.se_nsim = parse_int(*val, "se_nsim");
     }
+    if (auto val = args.get_optional("verbose")) {
+        options.verbose = parse_bool(*val, "verbose") ? 1 : 0;
+        if (options.verbose) {
+            options.progress = &akm_progress_to_stata;
+        }
+    }
     if (auto val = args.get_optional("eigen_diagnostics")) {
         options.eigen_diagnostics = parse_bool(*val, "eigen_diagnostics");
         if (options.eigen_diagnostics) {
@@ -1434,6 +1448,8 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
     akm_save_scalar("__xakm_mean_pii", res.mean_pii);
     akm_save_scalar("__xakm_leverages_exact", res.leverages_exact ? 1.0 : 0.0);
     akm_save_scalar("__xakm_solver_direct", res.solver_direct ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_fwl_threads_used", static_cast<double>(res.fwl_threads_used));
+    akm_save_scalar("__xakm_threads_used", static_cast<double>(res.threads_used));
     akm_save_scalar("__xakm_jla_draws", static_cast<double>(res.jla_draws_used));
     akm_save_scalar("__xakm_seed", static_cast<double>(res.seed_used));
     akm_save_scalar("__xakm_solver_iterations", static_cast<double>(res.solver_iterations));

@@ -1277,7 +1277,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             long long direct_max_nnz, double cg_tol, int cg_max_iter, int num_threads,
             double fwl_tol, int fwl_max_iter, bool compute_se, int se_nsim,
             bool eigen_diagnostics, int eig_trace_nsim, bool gpu,
-            py::object fweights_obj, bool se_sigma_lowess) {
+            py::object fweights_obj, bool se_sigma_lowess, int verbose) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
                 throw std::runtime_error("y must be a 1-D array");
@@ -1325,6 +1325,8 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             opt.eig_trace_nsim = eig_trace_nsim;
             opt.se_sigma_lowess = se_sigma_lowess;
             opt.use_gpu = gpu;
+            opt.verbose = verbose;  // progress lines go to stderr (C-level,
+                                    // safe under gil_scoped_release)
 
             std::optional<Eigen::MatrixXd> Z_mat;
             if (!Z_obj.is_none()) {
@@ -1438,6 +1440,8 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["leverages_exact"] = r.leverages_exact;
             d["gpu_used"] = r.gpu_used;
             d["solver_direct"] = r.solver_direct;
+            d["fwl_threads_used"] = r.fwl_threads_used;
+            d["threads_used"] = r.threads_used;
             d["jla_draws_used"] = r.jla_draws_used;
             d["seed"] = r.seed_used;
             d["solver_iterations"] = r.solver_iterations;
@@ -1456,11 +1460,15 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         py::arg("se_nsim") = 1000, py::arg("eigen_diagnostics") = false,
         py::arg("eig_trace_nsim") = 100, py::arg("gpu") = false,
         py::arg("fweights") = py::none(), py::arg("se_sigma_lowess") = false,
+        py::arg("verbose") = 0,
         "AKM two-way estimation with plug-in / AGSU (homoskedastic) / KSS "
         "(heteroskedastic leave-out) variance decomposition on the leave-out "
         "connected set, following LeaveOutTwoWay (KSS 2020) semantics. Controls "
         "in X are partialled out with the xhdfe absorber (FWL). Opt-in: does "
-        "not affect any existing estimation path.");    m.def(
+        "not affect any existing estimation path. verbose=1 prints phase "
+        "progress to stderr (leave-out set, FWL, solver, JLA draws d/D with "
+        "elapsed time and ETA, SE sims, eigen diagnostics); output only, "
+        "results are unaffected.");    m.def(
         "gelbach_decompose",
         [](py::object y_obj, py::object X1_obj, py::object X2_obj,
            std::vector<int> x2_group_sizes, py::object fes_obj,

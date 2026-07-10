@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdarg>
 #include <cstdlib>
 #include <unordered_map>
 #include <utility>
@@ -141,6 +142,90 @@ struct AkmPhaseProfiler {
             std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count() / 1000.0;
         std::fprintf(stderr, "[akm-profile] %-24s %10.1f ms\n", phase, ms);
         t0 = t1;
+    }
+};
+
+// User-facing progress reporter (AkmOptions.verbose; requested by users with
+// multi-hour KSS runs who could not tell which phase the estimation was in).
+// Pure output: it never touches any numeric path, and it only ever emits from
+// the calling thread, outside parallel regions. Long loops (JLA draw blocks,
+// SE simulation batches) get throttled ticks with elapsed time and an ETA.
+struct AkmProgress {
+    int level = 0;
+    void (*sink)(const char*, void*) = nullptr;
+    void* user = nullptr;
+    std::chrono::steady_clock::time_point t0;
+    std::chrono::steady_clock::time_point last_tick;
+
+    void init(const AkmOptions& o) {
+        level = o.verbose;
+        sink = o.progress;
+        user = o.progress_user;
+        t0 = std::chrono::steady_clock::now();
+        last_tick = t0 - std::chrono::hours(1);
+    }
+    double elapsed() const {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                   .count() /
+               1000.0;
+    }
+    void emit(const char* line) {
+        if (sink != nullptr) {
+            sink(line, user);
+        } else {
+            std::fprintf(stderr, "%s\n", line);
+            std::fflush(stderr);
+        }
+    }
+    // Phase-level line: always emitted at verbose >= 1.
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 2, 3)))
+#endif
+    void say(const char* fmt, ...) {
+        if (level < 1) return;
+        char body[448];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(body, sizeof body, fmt, ap);
+        va_end(ap);
+        char line[512];
+        std::snprintf(line, sizeof line, "[xhdfeakm %8.1fs] %s", elapsed(), body);
+        emit(line);
+        last_tick = std::chrono::steady_clock::now();
+    }
+    // Intra-phase tick with ETA: throttled to >= 1s between lines (the final
+    // tick of a loop always prints). done/total in loop units; phase_t0 is
+    // when the loop started, so the ETA reflects the loop itself.
+    void tick(const char* what, long long done, long long total,
+              std::chrono::steady_clock::time_point phase_t0) {
+        if (level < 1 || total <= 0) return;
+        const auto now = std::chrono::steady_clock::now();
+        const bool final_tick = done >= total;
+        if (!final_tick &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick)
+                    .count() < 1000) {
+            return;
+        }
+        const double phase_s =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - phase_t0)
+                .count() /
+            1000.0;
+        char body[448];
+        if (final_tick || done <= 0) {
+            std::snprintf(body, sizeof body, "%s %lld/%lld (%.1fs)", what, done,
+                          total, phase_s);
+        } else {
+            const double eta = phase_s / static_cast<double>(done) *
+                               static_cast<double>(total - done);
+            std::snprintf(body, sizeof body,
+                          "%s %lld/%lld (%.1fs elapsed, ETA %.0fs)", what, done,
+                          total, phase_s, eta);
+        }
+        char line[512];
+        std::snprintf(line, sizeof line, "[xhdfeakm %8.1fs] %s", elapsed(), body);
+        emit(line);
+        last_tick = now;
     }
 };
 
@@ -676,7 +761,8 @@ struct TwoWaySolver {
     void build(int n_workers, int n_firms,
                const std::vector<int>& mw, const std::vector<int>& mf,
                const std::vector<long long>& mc,
-               const AkmOptions& opt, std::string& notes) {
+               const AkmOptions& opt, int default_team_cap,
+               std::string& notes) {
         N = n_workers;
         J = n_firms;
         Jr = std::max(J - 1, 0);
@@ -728,9 +814,10 @@ struct TwoWaySolver {
         // 8-16 threads on every panel below ~10M person-year rows (both CPU
         // and the host side of GPU runs), while at 47.5M the full team is
         // right. Cap the team by the actual edge work; the fixed 4096/64
-        // element blocks make every capped region's output partition-
-        // invariant (disjoint writes, no cross-thread FP reductions), so the
-        // cap CANNOT change any output bit — verified t1/t8/t16/t48 identical.
+        // element blocks keep the large disjoint-write regions partition
+        // stable. Thread-count comparisons are required to retain the same
+        // convergence and FP64 numerical tolerance; some solver reductions
+        // may differ at the last-ulp level on sufficiently large graphs.
         // XHDFE_AKM_TEAM=0 restores the uncapped legacy team; =k forces
         // min(k, omp_get_max_threads()).
 #ifdef _OPENMP
@@ -739,6 +826,14 @@ struct TwoWaySolver {
             team = static_cast<int>(std::min<long long>(
                 amb,
                 std::max<long long>(1, static_cast<long long>(M) / 65536)));
+            // controls() historically inherited the FWL absorber's tuned
+            // team (typically 16 on large panels). Preserve that performant
+            // default deliberately after making the process-wide state
+            // restoration explicit. The environment override below remains
+            // authoritative and can force any team up to the caller's budget.
+            if (default_team_cap > 0) {
+                team = std::min(team, default_team_cap);
+            }
             if (const char* e = std::getenv("XHDFE_AKM_TEAM")) {
                 const int v = std::atoi(e);
                 if (v == 0) {
@@ -1670,17 +1765,28 @@ void am_confidence_interval(double NT, double lambda_1_raw, double gamma_sq,
 namespace {
 
 #ifdef _OPENMP
-// Keep the per-call OpenMP override exception-safe. Without this guard an
-// exception in AKM could silently change the thread limit seen by a later
-// xhdfe/core23 fit in the same process.
-struct ScopedOmpThreads {
-    int previous = 1;
-    explicit ScopedOmpThreads(int requested) : previous(omp_get_max_threads()) {
+// Keep all process-wide thread settings exception-safe. HdfeRegressorV11
+// tunes OpenMP and Eigen for each fit; AKM is both its caller (FWL controls)
+// and a separate solver with its own work-aware team policy.
+struct ScopedThreadState {
+    int previous_omp = 1;
+    int previous_eigen = 1;
+    int previous_dynamic = 0;
+    explicit ScopedThreadState(int requested)
+        : previous_omp(omp_get_max_threads()),
+          previous_eigen(Eigen::nbThreads()),
+          previous_dynamic(omp_get_dynamic()) {
         if (requested > 0) {
+            omp_set_dynamic(0);
             omp_set_num_threads(requested);
+            Eigen::setNbThreads(requested);
         }
     }
-    ~ScopedOmpThreads() { omp_set_num_threads(previous); }
+    ~ScopedThreadState() {
+        Eigen::setNbThreads(previous_eigen);
+        omp_set_num_threads(previous_omp);
+        omp_set_dynamic(previous_dynamic);
+    }
 };
 #endif
 
@@ -1733,7 +1839,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     }
 
 #ifdef _OPENMP
-    ScopedOmpThreads omp_threads(options.num_threads);
+    ScopedThreadState thread_state(options.num_threads);
 #endif
 
     std::vector<long long> fw_rows;
@@ -1759,12 +1865,21 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 
     AkmKssResult res;
     AkmPhaseProfiler prof_;
+    AkmProgress vprog;
+    vprog.init(options);
     res.seed_used = options.seed;
     long long cg_iters = 0;
+    vprog.say("building the leave-out connected set (%lld input rows)...",
+              static_cast<long long>(y.size()));
     SampleBuild sb = build_leave_out_sample(worker_ids, firm_ids, options.prune,
                                             has_fw ? &fw_rows : nullptr);
     res.sample = std::move(sb.set);
     prof_.mark("leave_out_sample");
+    vprog.say("leave-out sample: %lld obs kept of %lld, %d workers (%d movers), "
+              "%d firms, %lld matches (%d prune rounds)",
+              res.sample.n_obs, res.sample.n_obs_input, res.sample.n_workers,
+              res.sample.n_movers, res.sample.n_firms, res.sample.n_matches,
+              res.sample.prune_iterations);
 
     const std::size_t n_kept = sb.rows.size();
     const std::size_t M = sb.m_w.size();
@@ -1793,6 +1908,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (n_kept < 3 || N < 1 || J < 1 || n_py - 1.0 <= 0.0) {
         res.converged = false;
         res.notes = "leave-out sample too small for a variance decomposition. ";
+        vprog.say("stopped: leave-out sample too small for a variance decomposition");
         return res;
     }
 
@@ -1831,8 +1947,22 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         ho.tol = options.fwl_tol;
         ho.max_iter = options.fwl_max_iter;
         ho.num_threads = options.num_threads;
+        vprog.say("partialling out %d control(s) (FWL absorber)...",
+                  static_cast<int>(Xk.cols()));
         v11::HdfeRegressorV11 reg(ho);
+#ifdef _OPENMP
+        {
+            // The nested fit may cap its own work to fewer threads. Restore
+            // the caller's OpenMP/Eigen/dynamic state before building the KSS
+            // solver, including on exceptions.
+            ScopedThreadState restore_after_fwl(0);
+            reg.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
+            res.fwl_threads_used = reg.threads_used();
+        }
+#else
         reg.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
+        res.fwl_threads_used = reg.threads_used();
+#endif
         if (!reg.results().converged) {
             res.converged = false;
             res.notes += "control partialling (FWL) absorber did not converge. ";
@@ -1840,6 +1970,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.beta = reg.results().coefficients;
         ystar.noalias() -= Xk * res.beta;
         prof_.mark("fwl_controls");
+        vprog.say("controls partialled out (%d FWL thread%s)",
+                  res.fwl_threads_used,
+                  res.fwl_threads_used == 1 ? "" : "s");
     }
 
     // ---- Working rows ------------------------------------------------------
@@ -1862,12 +1995,26 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     res.leverages_exact = use_exact;
 
     TwoWaySolver solver;
-    solver.build(N, J, sb.m_w, sb.m_f, sb.m_cnt, options, res.notes);
+    solver.build(N, J, sb.m_w, sb.m_f, sb.m_cnt, options,
+                 res.fwl_threads_used, res.notes);
     if (match_level && !use_exact) solver.ensure_sqrt_c();
     res.solver_direct = solver.direct;
     res.gpu_used = solver.use_cuda;
+    res.threads_used = solver.team;
+#ifdef _OPENMP
+    // Use one explicit phase budget for OpenMP and Eigen, then let the outer
+    // guard restore the caller's state on every exit path.
+    omp_set_dynamic(0);
+    omp_set_num_threads(res.threads_used);
+    Eigen::setNbThreads(res.threads_used);
+#endif
     res.n_rows = static_cast<long long>(R);
     prof_.mark("solver_build");
+    vprog.say("two-way solver ready: %s%s (%d firms, %lld matches, %d OpenMP thread%s)",
+              solver.direct ? "direct sparse Cholesky" : "Jacobi-PCG",
+              solver.use_cuda ? " on GPU (CUDA)" : "", J,
+              static_cast<long long>(M), res.threads_used,
+              res.threads_used == 1 ? "" : "s");
 
     // Point estimates: person-year OLS normal equations.
     Eigen::VectorXd alpha(N);
@@ -1887,6 +2034,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
     }
     prof_.mark("point_solve");
+    vprog.say("point estimates (alpha, psi) done");
 
     // Working-row transforms (sqrt-weight FGLS at match level).
     const std::vector<int>& row_w_of = match_level ? sb.m_w : sb.row_w;
@@ -1933,6 +2081,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 
     bool solve_failed = false;
     if (use_exact) {
+        vprog.say("leverages: exact path, one linear system per match "
+                  "(%lld matches)...", static_cast<long long>(M));
         // One unweighted solve per match; all rows of a match share it.
         Eigen::VectorXd base_p(static_cast<Eigen::Index>(M));
         Eigen::VectorXd base_fe(static_cast<Eigen::Index>(M));
@@ -1981,6 +2131,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             }
         }
         cg_iters += iter_sum;
+        vprog.say("exact leverages done (%lld systems solved)",
+                  static_cast<long long>(M));
         solve_failed = solve_failed || failed_local;
         if (match_level) {
             for (std::size_t m = 0; m < M; ++m) {
@@ -2006,6 +2158,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // independent accumulation (per-row bins, sequential scalar passes).
         const int p = options.jla_draws;
         res.jla_draws_used = p;
+        vprog.say("leverages: JLA approximation, %d draws x 3 solves"
+                  "%s...", p, solver.use_cuda ? " on GPU (CUDA)" : "");
+        const auto lev_t0 = std::chrono::steady_clock::now();
         Eigen::VectorXd Pacc = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(R));
         Eigen::VectorXd Psq = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(R));
         Eigen::VectorXd Macc = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(R));
@@ -2384,6 +2539,11 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                         Bcov[static_cast<Eigen::Index>(r)] += W1 * W2;
                     }
                 }
+                // A draw is complete only after both the solve and every
+                // post-solve reduction have finished.  Reporting before the
+                // reductions made the ETA systematically optimistic on the
+                // largest panels, where those O(R) passes are material.
+                vprog.tick("JLA draws", d0 + B, p, lev_t0);
             }
         } else {
         for (int d = 0; d < p; ++d) {
@@ -2499,6 +2659,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 Bpe[r] += W1 * W1;
                 Bcov[r] += W1 * W2;
             }
+            vprog.tick("JLA draws", d + 1, p, lev_t0);
         }
         }
         // Ratio estimator + nonlinearity correction (LeaveOutTwoWay).
@@ -2518,6 +2679,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
     }
     prof_.mark("leverages");
+    vprog.say("leverages done; computing sigma_i and the corrected components");
     res.solver_iterations = cg_iters + solver.cuda_iters;
     if (solve_failed) {
         res.converged = false;
@@ -2627,6 +2789,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.agsu.var_alpha = var_alpha_pi - res.sigma2_ho * sum_bpe / dof;
         res.agsu.cov_alpha_psi = cov_pi - res.sigma2_ho * sum_bcov / dof;
     }
+    vprog.say("corrected variance components done");
 
 
     // ---- Component standard errors (KSS high-rank case) --------------------
@@ -3189,8 +3352,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             return acc / static_cast<double>(nsim_tr);
         };
 
+        static const char* kSeCompName[3] = {"var(psi)", "cov(alpha,psi)",
+                                             "var(alpha)"};
         auto run_component = [&](int comp, const std::vector<double>& bases,
                                  double& theta_out, double& se_out) {
+            vprog.say("component SE: %s (%d sims%s)...", kSeCompName[comp],
+                      options.se_nsim,
+                      do_ci ? " + eigen diagnostics/AM CI" : "");
             // theta (leave_out_COMPLETE convention)
             double corr_sum = 0.0;
             Eigen::VectorXd sum_y_m = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(M));
@@ -3365,9 +3533,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 Eigen::VectorXd q1w(N), q1f(J);
                 pencil_eigs(comp, lam3, q1w, q1f);
                 prof_.mark("eig_pencil");
+                vprog.say("eigen diagnostics: subspace iteration done; "
+                          "Hutchinson trace (%d draws)...",
+                          options.eig_trace_nsim);
                 lam1 = lam3[0];
                 trace_est = trace_atilde_sqr(comp);
                 prof_.mark("eig_trace");
+                vprog.say("eigen diagnostics: Hutchinson trace done");
                 x1bar.resize(static_cast<Eigen::Index>(n_py_sz));
                 double nrm2 = 0.0;
                 for (std::size_t k = 0; k < n_py_sz; ++k) {
@@ -3601,6 +3773,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             // vectors: se_block * n * 8 bytes (2x when the component has
             // negative sigma-tilde); reduce XHDFE_AKM_SE_BLOCK if tight.
             // XHDFE_AKM_SE_BLOCK=0 keeps the sequential loop verbatim.
+            vprog.say("component SE: %s setup done; starting %d simulations...",
+                      kSeCompName[comp], nsim);
+            const auto se_sims_t0 = std::chrono::steady_clock::now();
             if (se_block >= 1) {
                 [&]() XHDFE_AKM_OUTLINE {
                 const int SB = se_block;
@@ -3764,6 +3939,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                             sims2_im[static_cast<std::size_t>(sidx)] = s2_im;
                         }
                     }
+                    // As for JLA, include all post-solve reductions in the
+                    // completed-simulation count so elapsed time and ETA
+                    // describe the full unit of work seen by the user.
+                    vprog.tick("SE sims", s0 + B, nsim, se_sims_t0);
                 }
                 }();
             } else {
@@ -3851,6 +4030,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     sims2_re[static_cast<std::size_t>(sidx)] = s2_re;
                     sims2_im[static_cast<std::size_t>(sidx)] = s2_im;
                 }
+                // XHDFE_AKM_SE_BLOCK=0 is the compatibility path.  It must
+                // remain observable too; otherwise verbose silently loses
+                // its most useful progress counter in that supported mode.
+                vprog.tick("SE sims", sidx + 1, nsim, se_sims_t0);
             }
             }
             (void)any_imag_global;
@@ -4084,6 +4267,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
         res.solver_iterations = cg_iters + solver.cuda_iters;
         prof_.mark("lincom");
+        vprog.say("lincom projections done (%d contrast(s))",
+                  static_cast<int>(res.lincom_coef.size()));
     }
 
     // No internal consumer remains after lincom. Move these O(R) arrays into
@@ -4106,6 +4291,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.notes += "non-finite corrected components. ";
     }
 
+    vprog.say("done: converged=%s, %lld solver iterations%s",
+              res.converged ? "yes" : "NO", res.solver_iterations,
+              res.gpu_used ? ", gpu_used=1" : "");
     return res;
 }
 

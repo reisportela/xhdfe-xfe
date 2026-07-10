@@ -936,6 +936,16 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
     if (opts.containsElementNamed("gpu")) {
         options.use_gpu = Rcpp::as<bool>(opts["gpu"]);
     }
+    if (opts.containsElementNamed("verbose")) {
+        options.verbose = Rcpp::as<int>(opts["verbose"]);
+        if (options.verbose) {
+            // Route progress to R's message stream (CRAN-safe). The core only
+            // emits from the calling (main R) thread, outside parallel regions.
+            options.progress = [](const char* line, void*) {
+                REprintf("%s\n", line);
+            };
+        }
+    }
     if (opts.containsElementNamed("eigen_diagnostics")) {
         options.eigen_diagnostics = Rcpp::as<bool>(opts["eigen_diagnostics"]);
         if (options.eigen_diagnostics) {
@@ -1020,6 +1030,8 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
     out["leverages_exact"] = res.leverages_exact;
     out["gpu_used"] = res.gpu_used;
     out["solver_direct"] = res.solver_direct;
+    out["fwl_threads_used"] = res.fwl_threads_used;
+    out["threads_used"] = res.threads_used;
     out["jla_draws_used"] = res.jla_draws_used;
     out["seed"] = static_cast<double>(res.seed_used);
     out["solver_iterations"] = static_cast<double>(res.solver_iterations);

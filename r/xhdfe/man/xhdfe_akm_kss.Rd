@@ -10,7 +10,7 @@ xhdfe_akm_kss(y, worker, firm, X = NULL, leave_out_level = "match",
   cg_tol = 1e-10, cg_max_iter = 0L, num_threads = 0L, fwl_tol = 1e-10,
   fwl_max_iter = 100000L, compute_se = FALSE, se_nsim = 1000L,
   eigen_diagnostics = FALSE, eig_trace_nsim = 100L,
-  se_sigma_lowess = FALSE, gpu = FALSE, fweights = NULL)
+  se_sigma_lowess = FALSE, gpu = FALSE, fweights = NULL, verbose = FALSE)
 }
 \arguments{
 \item{y}{Numeric outcome, length n.}
@@ -29,15 +29,18 @@ machinery runs.}
 
 \item{jla_draws}{Rademacher simulations for the JLA path (default 200).}
 
-\item{seed}{Seed for the JLA draws; results are reproducible for any thread
-count.}
+\item{seed}{Seed for deterministic JLA streams. Different thread counts or
+backends preserve the estimator and FP64 tolerance but can differ at the
+last-ulp level because floating-point reductions are reassociated.}
 
 \item{prune}{Compute the leave-out connected set (default TRUE). Set to
 FALSE only when the input is already a leave-out sample.}
 
 \item{exact_max_rows, direct_max_firms, direct_max_nnz, cg_tol, cg_max_iter}{Solver knobs.}
 
-\item{num_threads}{OpenMP threads (0 = library default).}
+\item{num_threads}{Maximum OpenMP threads for the command (0 = library
+default). The FWL absorber and KSS solver tune their effective teams
+separately; inspect \code{fwl_threads_used} and \code{threads_used}.}
 
 \item{fwl_tol, fwl_max_iter}{Absorber controls for the covariate step.}
 
@@ -63,6 +66,10 @@ sensitivity analysis on small/medium samples).}
 \item{fweights}{Optional positive-integer frequency weights (row i stands
 for fweights[i] identical person-year observations). Match-level point
 decomposition only; equals the row-expanded run exactly.}
+
+\item{verbose}{Print phase progress to the console (leave-out set, FWL,
+solver, JLA draws d/D with elapsed time and an ETA, SE simulations,
+eigen diagnostics). Output only; results are unaffected.}
 }
 \value{
 An object of class \code{xhdfe_akm_kss}: a list with the sample summary,
@@ -73,7 +80,8 @@ component tables. Each component table carries \code{var_alpha},
 \code{var_alpha_plus_psi} and the shares of \code{var_y}
 (\code{share_var_alpha}, \code{share_var_psi}, \code{share_2cov}). Also
 returned: \code{var_y}, \code{sigma2_ho}, row-level leverages \code{pii} and
-\code{sigma_i}, and solver diagnostics. With \code{compute_se = TRUE} a
+\code{sigma_i}, and solver diagnostics including \code{fwl_threads_used} and
+\code{threads_used}. With \code{compute_se = TRUE} a
 \code{component_se} list holds the KSS component standard errors and corrected
 point estimates; with \code{eigen_diagnostics = TRUE} a \code{weak_id} list
 holds, per component, the top eigenvalue and shares of Atilde, the Lindeberg
@@ -103,8 +111,8 @@ speed lever below ~10M rows; \code{0} = uncapped, \code{k} forces
 multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
 (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
 (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
-The solves are batched so results are identical for any block size and
-thread count. A \code{warning()} fires on non-convergence
+The solves are batched without changing the estimator or solver tolerances;
+different schedules can differ at the last-ulp level. A \code{warning()} fires on non-convergence
 (check \code{$converged}).
 }
 

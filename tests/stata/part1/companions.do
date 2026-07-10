@@ -14,6 +14,29 @@ gen double x1 = rnormal()
 gen double x2 = 0.35 * x1 + rnormal()
 gen double y = 1.2 * x1 - 0.7 * x2 + 0.03 * fe + rnormal()
 
+* xhdfeakm verbose must expose progress without changing the estimator.
+xhdfeakm y, worker(worker) firm(firm) leverages(jla) draws(8) seed(42)
+assert r(converged) == 1
+scalar akm_var_alpha_quiet = r(kss_var_alpha)
+scalar akm_var_psi_quiet = r(kss_var_psi)
+scalar akm_cov_quiet = r(kss_cov)
+xhdfeakm y, worker(worker) firm(firm) leverages(jla) draws(8) seed(42) verbose
+assert r(converged) == 1
+assert r(kss_var_alpha) == akm_var_alpha_quiet
+assert r(kss_var_psi) == akm_var_psi_quiet
+assert r(kss_cov) == akm_cov_quiet
+
+* The two phases expose their effective teams separately.  The stronger
+* restoration assertion (forced four-thread KSS team) lives in
+* VALIDATE_AKM_KSS.py, where the process environment can be scoped safely.
+xhdfeakm y, worker(worker) firm(firm) controls(x1) leverages(jla) draws(2) ///
+    seed(42) threads(4)
+assert r(converged) == 1
+assert r(fwl_threads_used) >= 1
+local akm_team_env : environment XHDFE_AKM_TEAM
+if ("`akm_team_env'" == "0") assert r(threads_used) == 4
+else assert inrange(r(threads_used), 1, 4)
+
 * Gelbach must be invariant to exact categorical relabelling, including raw
 * identifiers outside the plugin's int32 transport range.
 xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///

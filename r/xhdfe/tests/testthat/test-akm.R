@@ -68,12 +68,28 @@ test_that("JLA path is deterministic under a fixed seed", {
   expect_false(identical(a$kss, cc$kss))
 })
 
+test_that("verbose reports progress without changing AKM/KSS results", {
+  d <- felsdv()
+  quiet <- xhdfe_akm_kss(d$y, d$i, d$j, leverages = "jla",
+                         jla_draws = 8L, seed = 42L)
+  progress <- capture.output(
+    loud <- xhdfe_akm_kss(d$y, d$i, d$j, leverages = "jla",
+                          jla_draws = 8L, seed = 42L, verbose = TRUE),
+    type = "message"
+  )
+  expect_match(progress[[1]], "building the leave-out connected set")
+  expect_true(any(grepl("JLA draws 8/8", progress, fixed = TRUE)))
+  expect_identical(loud, quiet)
+})
+
 test_that("controls are partialled out and factor ids are accepted", {
   d <- felsdv()
   fit <- xhdfe_akm_kss(d$y, factor(paste0("w", d$i)), factor(paste0("f", d$j)),
                        X = cbind(d$x1, d$x2), leverages = "exact")
   expect_true(fit$converged)
   expect_length(fit$beta, 2L)
+  expect_gte(fit$fwl_threads_used, 1L)
+  expect_gte(fit$threads_used, 1L)
   expect_true(all(is.finite(unlist(fit$kss))))
   ref <- xhdfe_akm_kss(d$y, d$i, d$j, X = cbind(d$x1, d$x2), leverages = "exact")
   expect_equal(fit$kss, ref$kss, tolerance = 1e-12)
