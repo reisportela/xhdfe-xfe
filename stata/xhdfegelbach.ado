@@ -1,4 +1,4 @@
-*! version 1.0.1  09jul2026
+*! version 1.0.2  10jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -67,6 +67,46 @@ program define xhdfegelbach, rclass sortpreserve
     quietly count if `touse'
     if (r(N) == 0) error 2000
 
+    // FE and cluster ids enter the shared plugin as int32. Compact raw codes
+    // outside that range (for example NIF/NISS) or non-integer categorical
+    // codes to 1..N labels. Gelbach's decomposition depends only on category
+    // membership, so this is an exact relabelling with unchanged estimates.
+    local fes_use
+    local cluster_use "`cluster'"
+    local id_recoded 0
+    foreach src of local fes {
+        quietly summarize `src' if `touse', meanonly
+        local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
+        if (!`need') {
+            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            local need = (r(N) > 0)
+        }
+        if (`need') {
+            tempvar idc
+            quietly egen long `idc' = group(`src') if `touse'
+            local fes_use "`fes_use' `idc'"
+            local id_recoded 1
+        }
+        else local fes_use "`fes_use' `src'"
+    }
+    if ("`cluster'" != "") {
+        quietly summarize `cluster' if `touse', meanonly
+        local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
+        if (!`need') {
+            quietly count if `touse' & abs(`cluster' - floor(`cluster' + 0.5)) > 1e-6
+            local need = (r(N) > 0)
+        }
+        if (`need') {
+            tempvar clc
+            quietly egen long `clc' = group(`cluster') if `touse'
+            local cluster_use "`clc'"
+            local id_recoded 1
+        }
+    }
+    if (`id_recoded') {
+        di as txt "note: FE/cluster ids outside int32 range or non-integer recoded to compact integers (groups and results unchanged)"
+    }
+
     local p : word count `x1'
     local q : word count `x2vars'
     local nfe : word count `fes'
@@ -93,6 +133,11 @@ program define xhdfegelbach, rclass sortpreserve
         exit _rc
     }
     local plugin_prog "__xhdfe_plugin_dispatch"
+    if ("$XHDFE_PLUGIN_PATH_INTERNAL" != "" & "$XHDFE_PLUGIN_PATH_INTERNAL" != "`plugin_path'") {
+        di as err "xhdfegelbach: the active session is still bound to an older xhdfe.plugin path"
+        di as err "xhdfegelbach: run discard (with no arguments) and rerun the command"
+        exit 498
+    }
     capture program `plugin_prog', plugin using("`plugin_path'")
     if (_rc & _rc != 110) {
         di as err "xhdfe.plugin could not be loaded from `plugin_path'"
@@ -102,7 +147,7 @@ program define xhdfegelbach, rclass sortpreserve
 
     local wpass ""
     if (`has_weight') local wpass "`wvar'"
-    capture noisily plugin call `plugin_prog' `y' `x1' `x2vars' `fes' `cluster' `wpass' ///
+    capture noisily plugin call `plugin_prog' `y' `x1' `x2vars' `fes_use' `cluster_use' `wpass' ///
         if `touse', "`cfg'"
     if (_rc) exit _rc
 

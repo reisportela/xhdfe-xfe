@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.15.0  09jul2026}{...}
+{* *! version 2.16.0  10jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -44,6 +44,11 @@ and same person-year count — essentially only possible on small or
 artificially symmetric graphs) are broken by the smallest firm id in the
 component rather than by the physical row order of the data (since 2.14.2;
 the reference LeaveOutTwoWay leaves such ties undefined).
+
+{pstd}
+Worker and firm variables are numeric categorical identifiers. Codes outside
+the signed 32-bit range, and non-integer numeric labels, are compacted
+internally without changing the graph or the selected sample.
 
 
 {title:Stored results}
