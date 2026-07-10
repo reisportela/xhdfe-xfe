@@ -1,4 +1,4 @@
-*! version 1.6.0  10jul2026
+*! version 1.6.1  10jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -10,7 +10,8 @@ program define xhdfeakm, rclass sortpreserve
           DRAWS(integer 200) SEED(real 20260705) noPRUNE GENerate(name) REPLACE      ///
           THREADS(integer 0) EXACTMAXrows(integer 10000)                             ///
           DIRECTMAXfirms(integer 50000) CGTOL(real 1e-10) FWLTOL(real 1e-10) ///
-          SE SENSIM(integer 1000) CI EIGTRACENSIM(integer 100) SIGMALOWess GPU ]
+          SE SENSIM(integer 1000) CI EIGTRACENSIM(integer 100) SIGMALOWess GPU  ///
+          VERBose ]
 
     local y `varlist'
     marksample touse
@@ -130,6 +131,9 @@ program define xhdfeakm, rclass sortpreserve
     if ("`gpu'" != "") {
         local cfg "`cfg'use_gpu=1;"
     }
+    if ("`verbose'" != "") {
+        local cfg "`cfg'verbose=1;"
+    }
     local cfg "`cfg'cg_tol=`cgtol';fwl_tol=`fwltol';num_threads=`threads';"
     if (`ncontrols' > 0) {
         local cfg "`cfg'b=`bmat';"
@@ -170,7 +174,7 @@ program define xhdfeakm, rclass sortpreserve
     }
 
     // Collect the plugin scalars into r() and clean the hidden names up.
-    local smap "gpu_used plugin_var_alpha plugin_var_psi plugin_cov agsu_var_alpha agsu_var_psi agsu_cov kss_var_alpha kss_var_psi kss_cov var_y sigma2_ho n_obs n_obs_input n_obs_connected n_workers n_firms n_matches n_movers n_stayers n_rows max_pii mean_pii leverages_exact solver_direct jla_draws seed solver_iterations converged"
+    local smap "gpu_used plugin_var_alpha plugin_var_psi plugin_cov agsu_var_alpha agsu_var_psi agsu_cov kss_var_alpha kss_var_psi kss_cov var_y sigma2_ho n_obs n_obs_input n_obs_connected n_workers n_firms n_matches n_movers n_stayers n_rows max_pii mean_pii leverages_exact solver_direct fwl_threads_used threads_used jla_draws seed solver_iterations converged"
     foreach name of local smap {
         return scalar `name' = scalar(__xakm_`name')
         capture scalar drop __xakm_`name'

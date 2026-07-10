@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.16.0  10jul2026}{...}
+{* *! version 2.16.1  10jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -42,12 +42,13 @@
 
 {syntab:Solver / technical}
 {synopt :{opt gpu}}solve the two-way systems on the CUDA backend{p_end}
-{synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
+{synopt :{opt threads(#)}}maximum OpenMP threads (0 = library default){p_end}
 {synopt :{opt directmax:firms(#)}}firm cap for the direct sparse solve (default 50000){p_end}
 {synopt :{opt cgtol(#)}}two-way solver tolerance (default 1e-10){p_end}
 {synopt :{opt fwltol(#)}}absorber tolerance for the control step (default 1e-10){p_end}
 
 {syntab:Output}
+{synopt :{opt verb:ose}}print phase progress (JLA draws d/D with elapsed/ETA, SE sims, ...){p_end}
 {synopt :{opth gen:erate(stub)}}save {it:stub}{cmd:_alpha}, {it:stub}{cmd:_psi}, {it:stub}{cmd:_keep}{p_end}
 {synopt :{opt replace}}overwrite existing {opt generate()} variables{p_end}
 {synoptline}
@@ -145,8 +146,9 @@ when the estimation sample is already leave-out connected (for example after
 and {cmd:jla} force either path.
 
 {phang}{opt draws(#)} sets the number of JLA random projections (default 200,
-the LeaveOutTwoWay default). {opt seed(#)} seeds them; results are
-bit-reproducible for {it:any} thread count and backend.
+the LeaveOutTwoWay default). {opt seed(#)} makes the random streams
+deterministic. Thread/backend reductions preserve the estimator and FP64
+tolerance but can differ at the last-ulp level.
 
 {phang}{opt exactmaxrows(#)} is the row cap under which {cmd:auto} picks the
 exact path (default 10000, the LeaveOutTwoWay rule).
@@ -178,7 +180,10 @@ binned default. Intended for small/medium-sample sensitivity analysis
 plugin was built with CUDA support; check {cmd:r(gpu_used)}==1. The CPU path is
 the numerical reference and the results are identical to solver tolerance.
 
-{phang}{opt threads(#)} sets OpenMP threads (0 = library default).
+{phang}{opt threads(#)} sets the maximum OpenMP threads for this command
+(0 = library default). The FWL absorber and the two-way KSS solver tune their
+effective teams separately; inspect {cmd:r(fwl_threads_used)} and
+{cmd:r(threads_used)}.
 
 {phang}{opt directmaxfirms(#)} caps the firm dimension for the direct sparse
 Cholesky solve (default 50000); larger problems use preconditioned CG.
@@ -200,10 +205,17 @@ last-ulp level). {cmd:XHDFE_AKM_SE_BLOCK} does the same for the component-SE /
 eigen-diagnostics / lincom solves (default 8; {cmd:0} = sequential).
 {cmd:XHDFE_AKM_SCATTER_CSR} (default on) selects the parallel CSR-ordered
 Rademacher scatter at scale; {cmd:0} restores the sequential scatter. The
-leverage and SE solves are batched so results are identical for any block
-size and any thread count.
+leverage and SE solves are batched without changing the estimator or solver
+tolerances; different schedules can differ at the last-ulp level.
 
 {dlgtab:Output}
+
+{phang}{opt verbose} prints phase-by-phase progress to the Results window:
+the leave-out sample counts, the FWL control step, the solver choice, the
+leverage phase with a running {it:draws done/total} counter (elapsed time and
+an ETA — the long phase on big panels), the SE simulations and the eigen
+diagnostics. Output only: results are identical with or without it.
+{cmd:set rmsg on} complements it with per-command timing.
 
 {phang}{opth generate(stub)} stores {it:stub}{cmd:_alpha} and
 {it:stub}{cmd:_psi} (observation-level worker and firm effects on the leave-out
@@ -239,6 +251,8 @@ overwrites existing such variables.
 {synopt:{cmd:r(max_pii)} {cmd:r(mean_pii)}}leverage diagnostics{p_end}
 {synopt:{cmd:r(leverages_exact)}}1 if the exact leverage path was used{p_end}
 {synopt:{cmd:r(solver_direct)}}1 if the direct sparse solve was used{p_end}
+{synopt:{cmd:r(fwl_threads_used)}}effective threads in the {opt controls()} FWL absorber (0 without controls){p_end}
+{synopt:{cmd:r(threads_used)}}effective OpenMP team in the two-way KSS solver{p_end}
 {synopt:{cmd:r(jla_draws)} {cmd:r(seed)}}JLA draws and seed actually used{p_end}
 {synopt:{cmd:r(solver_iterations)} {cmd:r(converged)}}solver diagnostics{p_end}
 {synopt:{cmd:r(gpu_used)}}1 if the CUDA backend solved the systems{p_end}
