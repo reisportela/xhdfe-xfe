@@ -188,8 +188,20 @@ EOF
   fi
 }
 
-write_pkg xhdfe "2.16.0" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
-write_pkg xfe "1.10.0" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
+package_version() {
+  local pkg="$1"
+  awk '$1 == "v" { print $2; exit }' "$repo_root/stata/$pkg.pkg"
+}
+
+xhdfe_version="$(package_version xhdfe)"
+xfe_version="$(package_version xfe)"
+[[ -n "$xhdfe_version" && -n "$xfe_version" ]] || {
+  echo "Could not read package versions from stata/*.pkg" >&2
+  exit 1
+}
+
+write_pkg xhdfe "$xhdfe_version" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
+write_pkg xfe "$xfe_version" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
 
 cat > "$outdir/README.txt" <<'EOF'
 xhdfe / xfe Stata net-install site
