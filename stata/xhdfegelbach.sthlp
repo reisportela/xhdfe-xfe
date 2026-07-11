@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.18.0  11jul2026}{...}
+{* *! version 2.18.1  11jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -29,7 +29,7 @@
 {synopt :{opt tol(#)}}FE absorption tolerance; default {cmd:1e-8}{p_end}
 {synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
 {synopt :{opt gpu}}request CUDA for the full HDFE absorption{p_end}
-{synopt :{opt verbose}}print deterministic phase progress and elapsed time{p_end}
+{synopt :{opt verbose}}stream deterministic phase progress and elapsed time live{p_end}
 {synoptline}
 {p2colreset}{...}
 {p 4 6 2}{cmd:aweight}s and {cmd:fweight}s are allowed (b1x2 conventions).{p_end}
@@ -107,10 +107,11 @@ compiled, unavailable, fails, or does not converge, the existing xhdfe
 fallback rules preserve the CPU result. Inspect {cmd:r(gpu_used)} and
 {cmd:r(gpu_status)} to distinguish real CUDA use from fallback.
 
-{phang}{opt verbose} prints phase-level progress for the full fit, certified
-FE recovery, base fit, covariance construction, and final convergence check.
-It changes output only: quiet and verbose runs with the same inputs return
-identical matrices.
+{phang}{opt verbose} streams phase-level progress live for the full fit,
+certified FE recovery, base fit, covariance construction, and final
+convergence check. Each line is flushed before the next phase. It changes
+output only: quiet and verbose runs with the same inputs return identical
+matrices.
 
 {pstd}At least one of {opt x2groups()} or {opt fes()} must be supplied.
 
