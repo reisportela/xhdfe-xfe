@@ -1,4 +1,4 @@
-*! version 1.1.1  10jul2026
+*! version 1.2.0  11jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -7,7 +7,7 @@ program define xhdfegelbach, rclass sortpreserve
     version 14.0
     syntax varname(numeric) [if] [in] [aweight fweight /], x1(varlist numeric) ///
         [ x2groups(string) fes(varlist numeric) vce(string) cluster(varname numeric) ///
-          gamma0 cov0 tol(real 1e-8) threads(integer 0) ]
+          gamma0 cov0 tol(real 1e-8) threads(integer 0) GPU VERBose ]
 
     local y `varlist'
     if ("`x2groups'" == "" & "`fes'" == "") {
@@ -29,6 +29,10 @@ program define xhdfegelbach, rclass sortpreserve
     }
     if (!(`tol' > 0) | missing(`tol')) {
         di as err "tol() must be finite and strictly positive"
+        exit 198
+    }
+    if (`threads' < 0) {
+        di as err "threads() must be nonnegative"
         exit 198
     }
 
@@ -154,6 +158,7 @@ program define xhdfegelbach, rclass sortpreserve
     local cfg "`cfg'has_weight=`has_weight';weight_type=`weight';"
     local cfg "`cfg'group_sizes=`gsizes_csv';vce=`vce';"
     local cfg "`cfg'gamma0=`=("`gamma0'"!="")';cov0=`=("`cov0'"!="")';tol=`tol';num_threads=`threads';"
+    local cfg "`cfg'use_gpu=`=("`gpu'"!="")';verbose=`=("`verbose'"!="")';"
     local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';bbasemat=`BBASE';bfullmat=`BFULL';"
     local cfg "`cfg'covmat=`COV';totcovmat=`TOTCOV';"
 
@@ -252,18 +257,37 @@ program define xhdfegelbach, rclass sortpreserve
     if (scalar(__xgel_converged) != 1) {
         di as err "warning: computation flagged non-converged; see r(notes)"
     }
+    else if (strpos(lower("`xgel_notes'"), "warning:") > 0) {
+        di as err "warning: Gelbach inferential diagnostic; see r(notes)"
+    }
 
     return scalar identity_gap = scalar(__xgel_identity_gap)
     return scalar n_obs = scalar(__xgel_n_obs)
     return scalar df_full = scalar(__xgel_df_full)
     return scalar converged = scalar(__xgel_converged)
     return scalar tol = `tol'
+    foreach name in threads_used gpu_used gpu_status_code gpu_attempted ///
+        gpu_absorption_converged gpu_absorption_iterations {
+        return scalar `name' = scalar(__xgel_`name')
+        capture scalar drop __xgel_`name'
+    }
+    return scalar gpu_requested = ("`gpu'" != "")
     capture scalar drop __xgel_identity_gap __xgel_n_obs __xgel_df_full __xgel_converged
     return local vce "`vce'"
     return local groups "`gnames'"
     return local estimand "coefficient_movement"
     return local causal_interpretation "no"
     return local fe_se_type "conditional_gamma0"
+    local gpu_status "not_requested"
+    if (return(gpu_status_code) == 1) local gpu_status "used"
+    else if (return(gpu_status_code) == 2) local gpu_status "unavailable"
+    else if (return(gpu_status_code) == 3) local gpu_status "not_converged"
+    else if (return(gpu_status_code) == 4) local gpu_status "failed"
+    else if (return(gpu_status_code) == 5) local gpu_status "cpu_cache"
+    else if (return(gpu_status_code) == 6) local gpu_status "not_applicable"
+    local gpu_backend = cond(return(gpu_used) == 1, "cuda", "cpu")
+    return local gpu_backend "`gpu_backend'"
+    return local gpu_status "`gpu_status'"
     if ("`xgel_notes'" != "") return local notes "`xgel_notes'"
     return matrix total = `TOT'
     return matrix total_cov = `TOTCOV'
@@ -273,4 +297,8 @@ program define xhdfegelbach, rclass sortpreserve
     if (`nfe' > 0) return matrix fe_total = `FEAGG'
     return matrix se = `SE'
     return matrix delta = `D'
+    if ("`gpu'" != "") {
+        di as txt "GPU backend: " as res "`gpu_backend'" ///
+            as txt " (" as res "`gpu_status'" as txt ")"
+    }
 end

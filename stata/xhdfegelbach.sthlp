@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.17.1  10jul2026}{...}
+{* *! version 2.18.0  11jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -28,6 +28,8 @@
 {synopt :{opt cov0}}reproduce b1x2's {cmd:cov0} variant{p_end}
 {synopt :{opt tol(#)}}FE absorption tolerance; default {cmd:1e-8}{p_end}
 {synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
+{synopt :{opt gpu}}request CUDA for the full HDFE absorption{p_end}
+{synopt :{opt verbose}}print deterministic phase progress and elapsed time{p_end}
 {synoptline}
 {p2colreset}{...}
 {p 4 6 2}{cmd:aweight}s and {cmd:fweight}s are allowed (b1x2 conventions).{p_end}
@@ -97,6 +99,19 @@ effective tolerance.
 
 {phang}{opt threads(#)} sets OpenMP threads (0 = library default).
 
+{phang}{opt gpu} requests the CUDA backend for the full HDFE specification.
+The exact MLSMR fixed-effect recovery and the Gelbach covariance algebra stay
+on CPU; this hybrid split preserves the certified FE normalization while
+accelerating the absorption phase that benefits from the GPU. If CUDA is not
+compiled, unavailable, fails, or does not converge, the existing xhdfe
+fallback rules preserve the CPU result. Inspect {cmd:r(gpu_used)} and
+{cmd:r(gpu_status)} to distinguish real CUDA use from fallback.
+
+{phang}{opt verbose} prints phase-level progress for the full fit, certified
+FE recovery, base fit, covariance construction, and final convergence check.
+It changes output only: quiet and verbose runs with the same inputs return
+identical matrices.
+
 {pstd}At least one of {opt x2groups()} or {opt fes()} must be supplied.
 
 {pstd}{it:Performance environment switches} (A/B reproduction only — NOT a
@@ -120,6 +135,33 @@ pre-2.14.1 output bitwise for A/B comparison. Since 2.14.2 the legacy and
 fallback paths cross-check their FE split against the exact normal equations
 and set {cmd:r(converged)}=0 with an explanatory note when the check fails.
 On well-conditioned designs the two paths agree to ~1e-11.
+
+{pstd}{it:Near-collinear observed blocks.} A full model can converge and the
+Gelbach summation identity can be exact while columns inside one
+{opt x2groups()} block are so nearly collinear that the block's standard
+errors depend materially on solver/ISA rounding. The backend runs a
+bounded-cost normalized-Gram diagnostic and writes a warning to
+{cmd:r(notes)} for severe cases; point estimates are not altered. In the
+11jul2026 adversarial fixture (correlation 0.9999999999995), the default
+tolerance agreed with a dense oracle within 0.024%, but alternative tight
+tolerances moved the ill-conditioned block SE by as much as 7%, while a
+well-conditioned block stayed within 2e-8. Such a warning means the split SE
+is numerically indeterminate; tightening {opt tol()} does not select a unique
+correct answer.{p_end}
+
+{pstd}{it:Floating-point reproducibility.} For {cmd:vce(cluster)}, the streamed
+cluster-meat kernel may contract multiply-add operations (FMA). Relative to
+the former materialized-score path this changes converged-cell SEs by at most
+one last-place unit in the audited matrix (1.388e-17 absolute; coefficients
+and deltas bit-identical). This deterministic rounding is accepted to retain
+the large memory/runtime improvement. On deliberately ill-conditioned,
+already non-converged cells it can be amplified; rely on {cmd:r(converged)}
+and the conditioning note, not cross-build bit identity. Well-conditioned
+Python/Stata/R specifications retain machine-precision parity. A separate
+Stata-vs-Python plateau of about 7e-8 (or 2.6e-7 with fweights) was observed
+only in an ill-conditioned FE/block split; its block-SE differences were much
+larger and are covered by the warning above, so no universal 1e-7 accuracy
+claim is made.{p_end}
 
 {pstd}{it:Interpretation of per-FE-dimension contributions.} When the FE
 graph has two or more mobility components, the split of the combined FE
@@ -152,6 +194,13 @@ evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 {synopt:{cmd:r(df_full)}}residual degrees of freedom of the full model{p_end}
 {synopt:{cmd:r(converged)}}1 if the computation converged{p_end}
 {synopt:{cmd:r(tol)}}fixed-effect absorption tolerance used{p_end}
+{synopt:{cmd:r(threads_used)}}effective thread count reported by the backend{p_end}
+{synopt:{cmd:r(gpu_requested)}}1 when {opt gpu} was specified{p_end}
+{synopt:{cmd:r(gpu_used)}}1 only if CUDA was actually used{p_end}
+{synopt:{cmd:r(gpu_status_code)}}0 not requested; 1 used; 2 unavailable; 3 not converged; 4 failed; 5 CPU cache; 6 not applicable{p_end}
+{synopt:{cmd:r(gpu_attempted)}}1 if GPU absorption was attempted{p_end}
+{synopt:{cmd:r(gpu_absorption_converged)}}1 if attempted GPU absorption converged{p_end}
+{synopt:{cmd:r(gpu_absorption_iterations)}}iterations of attempted GPU absorption{p_end}
 
 {p2col 5 20 24 2: Macros}{p_end}
 {synopt:{cmd:r(vce)}}the variance estimator used{p_end}
@@ -160,6 +209,8 @@ evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 {synopt:{cmd:r(estimand)}}{cmd:coefficient_movement}{p_end}
 {synopt:{cmd:r(causal_interpretation)}}{cmd:no}{p_end}
 {synopt:{cmd:r(fe_se_type)}}{cmd:conditional_gamma0}{p_end}
+{synopt:{cmd:r(gpu_backend)}}effective backend, {cmd:cuda} or {cmd:cpu}{p_end}
+{synopt:{cmd:r(gpu_status)}}{cmd:not_requested}, {cmd:used}, {cmd:unavailable}, {cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, or {cmd:not_applicable}{p_end}
 {p2colreset}{...}
 
 
@@ -173,6 +224,10 @@ block, a job-covariate block and a firm fixed-effect block:{p_end}
 
 {pstd}Cluster-robust inference by firm:{p_end}
 {phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") vce(cluster) cluster(firm_id)}{p_end}
+
+{pstd}Request real CUDA absorption and show phase progress:{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(firm_id year) vce(cluster) cluster(worker_id) gpu verbose}{p_end}
+{phang2}{cmd:. return list}{p_end}
 
 {pstd}A fuller walkthrough (Stata/Python/R) ships as
 {bf:examples/gelbach_example.do}.{p_end}

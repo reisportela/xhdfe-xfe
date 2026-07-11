@@ -1,4 +1,4 @@
-*! version 1.10.1 10jul2026
+*! version 1.10.1 11jul2026
 program define xfe, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfe, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.10.1 10jul2026"
+        local version "1.10.1 11jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1018,7 +1018,7 @@ program define xfe, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.10.1 10jul2026"
+    ereturn local version "1.10.1 11jul2026"
     ereturn local cmd "xfe"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {

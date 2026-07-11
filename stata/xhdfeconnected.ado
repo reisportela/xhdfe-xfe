@@ -1,4 +1,4 @@
-*! version 1.1.2  10jul2026
+*! version 1.2.0  11jul2026
 *! Leave-one-out connected set (KSS / LeaveOutTwoWay semantics) as a
 *! standalone sample-preparation utility on the xhdfe backend: largest
 *! connected component (firm count), iterative removal of articulation
@@ -8,11 +8,15 @@
 program define xhdfeconnected, rclass sortpreserve
     version 14.0
     syntax varlist(min=2 max=2 numeric) [if] [in] [fweight], ///
-        GENerate(name) [REPLACE]
+        GENerate(name) [REPLACE THREADS(integer 0) GPU VERBose]
 
     tokenize `varlist'
     local worker `1'
     local firm `2'
+    if (`threads' < 0) {
+        di as err "threads() must be nonnegative"
+        exit 198
+    }
     marksample touse
     markout `touse' `worker' `firm'
     quietly count if `touse'
@@ -66,6 +70,7 @@ program define xhdfeconnected, rclass sortpreserve
     quietly gen double `keepvar' = . if `touse'
 
     local cfg "cfg=task=akm_leave_out_set;has_fweight=`has_fweight';"
+    local cfg "`cfg'num_threads=`threads';use_gpu=`=("`gpu'"!="")';verbose=`=("`verbose'"!="")';"
 
     // Bind the plugin next to the active xhdfe.ado (same guards as xhdfeakm).
     quietly findfile xhdfe.ado
@@ -111,10 +116,20 @@ program define xhdfeconnected, rclass sortpreserve
     }
 
     foreach name in n_obs n_obs_input n_obs_connected n_workers n_firms ///
-        n_matches n_movers n_stayers prune_iterations {
+        n_matches n_movers n_stayers prune_iterations threads_used gpu_used ///
+        gpu_status_code {
         return scalar `name' = scalar(__xakm_`name')
         capture scalar drop __xakm_`name'
     }
+    return scalar gpu_requested = ("`gpu'" != "")
+    local gpu_status "not_requested"
+    if (return(gpu_status_code) == 1) local gpu_status "used"
+    else if (return(gpu_status_code) == 2) local gpu_status "unavailable"
+    else if (return(gpu_status_code) == 4) local gpu_status "failed"
+    else if (return(gpu_status_code) == 6) local gpu_status "not_beneficial"
+    local gpu_backend = cond(return(gpu_used) == 1, "cuda", "cpu")
+    return local gpu_backend "`gpu_backend'"
+    return local gpu_status "`gpu_status'"
     return local cmd "xhdfeconnected"
 
     quietly gen byte `generate' = (`keepvar' == 1) if `touse'
@@ -131,4 +146,8 @@ program define xhdfeconnected, rclass sortpreserve
     di as txt "  firms:   " as res %10.0fc return(n_firms) ///
         as txt "   matches " as res %10.0fc return(n_matches)
     di as txt "  flag saved in " as res "`generate'"
+    if ("`gpu'" != "") {
+        di as txt "  GPU backend: " as res "`gpu_backend'" ///
+            as txt " (" as res "`gpu_status'" as txt ")"
+    }
 end
