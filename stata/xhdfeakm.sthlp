@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.18.0  11jul2026}{...}
+{* *! version 2.18.1  11jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -48,7 +48,7 @@
 {synopt :{opt fwltol(#)}}absorber tolerance for the control step (default 1e-10){p_end}
 
 {syntab:Output}
-{synopt :{opt verb:ose}}print phase progress (JLA draws d/D with elapsed/ETA, SE sims, ...){p_end}
+{synopt :{opt verb:ose}}stream the active phase live (leave-out set, FWL, solver, JLA draws d/D with elapsed/ETA, SE sims, ...){p_end}
 {synopt :{opth gen:erate(stub)}}save {it:stub}{cmd:_alpha}, {it:stub}{cmd:_psi}, {it:stub}{cmd:_keep}{p_end}
 {synopt :{opt replace}}overwrite existing {opt generate()} variables{p_end}
 {synoptline}
@@ -146,7 +146,9 @@ are present: canonical {cmd:leave_out_COMPLETE} reports only var(psi) and
 cov(alpha,psi) inference on this level, and the former movers-only extension
 was anti-conservative in fixed-design Monte Carlo (SE/empirical-SD 0.56-0.65;
 95% AM coverage 0.68-0.77). Use {cmd:obs} for var(alpha) inference; the
-var(alpha) point decompositions remain available at both levels.
+var(alpha) point decompositions remain available at both levels. The command
+prints this reason immediately as a warning and retains the same text in
+{cmd:r(notes)} for programmatic use.
 
 {phang}{opt noprune} skips the leave-out connected-set computation; use only
 when the estimation sample is already leave-out connected (for example after
@@ -186,12 +188,19 @@ default).
 
 {pstd}Simulation-based variance estimates can be negative in finite samples.
 The established convention truncates the corresponding component SE to zero;
-the command records this explicitly in {cmd:r(notes)}. If the AM interval is
+the command prints the full warning immediately and also records it in
+{cmd:r(notes)}. If the AM interval is
 mathematically undefined (for example a nonpositive quadratic variance or no
-admissible real-root envelope), both bounds are returned as missing and a note
-is emitted; internal finite sentinels are never exposed. Python and R
+admissible real-root envelope), both bounds are returned as missing and the
+reason is printed; internal finite sentinels are never exposed. Python and R
 front-ends additionally raise a warning for these inferential diagnostics.
 {p_end}
+
+{pstd}With {opt verbose}, progress is flushed to the Results window as each
+phase starts or advances; it is not buffered until the final table. Long JLA
+and SE-simulation loops report completed work, elapsed time and ETA at
+throttled intervals. Without {opt verbose}, the standard compact output is
+unchanged.{p_end}
 
 {phang}{opt sigmalowess} uses the LeaveOutTwoWay mode-0 lowess surface fit of
 sigma-i on ({it:P_ii}, {it:B_ii}) for the SE quadratic part instead of the

@@ -1279,12 +1279,19 @@ ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
     return 0;
 }
 
-// Verbose progress sink for the AKM task: route the core's progress lines to
-// the Stata Results window (SF_display needs a mutable char* and a newline).
+// Verbose progress sink for the companion tasks: route each core progress
+// line to the Stata Results window and force it to become visible before the
+// next (potentially long) numerical phase starts.  SF_display() alone may
+// leave plugin output queued until `plugin call` returns, which turns useful
+// progress into an end-of-command dump.  The SPI's output flush plus GUI poll
+// are output-only and this callback is invoked exclusively on Stata's calling
+// thread, outside OpenMP regions.
 void akm_progress_to_stata(const char* line, void* /*user*/) {
     char buf[560];
     std::snprintf(buf, sizeof buf, "%s\n", line);
     SF_display(buf);
+    (_stata_)->spoutflush();
+    (void)(_stata_)->pollnow();
 }
 
 ST_retcode run_akm_kss(const ParsedArgs& args) {

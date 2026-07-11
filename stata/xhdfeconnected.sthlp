@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.18.0  11jul2026}{...}
+{* *! version 2.18.1  11jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -24,7 +24,7 @@
 {synopt :{opt replace}}replace an existing target variable{p_end}
 {synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
 {synopt :{opt gpu}}use stable CUDA radix sorting when measured profitable{p_end}
-{synopt :{opt verbose}}print deterministic graph-construction progress{p_end}
+{synopt :{opt verbose}}stream deterministic graph-construction progress live{p_end}
 {synoptline}
 {p2colreset}{...}
 
@@ -83,9 +83,10 @@ the faster CPU path is retained and {cmd:r(gpu_status)} is
 {cmd:not_beneficial}. An unavailable or failed GPU also falls back without
 changing the sample. {cmd:r(gpu_used)} equals one only after a real CUDA sort.
 
-{phang}{opt verbose} prints phase progress for id compaction, CUDA selection,
-largest-component construction, pruning, and finalization. It does not alter
-the graph or returned flag.
+{phang}{opt verbose} streams phase progress live for id compaction, CUDA
+selection, largest-component construction, pruning, and finalization. Each
+line is flushed before the next phase; it does not alter the graph or returned
+flag.
 
 {pstd}The {cmd:threads()}/{cmd:gpu}/{cmd:verbose} execution controls and backend
 diagnostics documented here are currently exposed by the Stata companion.
