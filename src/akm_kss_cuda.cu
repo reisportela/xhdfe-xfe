@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -22,6 +23,12 @@ namespace {
 constexpr int kBlock = 256;
 
 inline bool cuda_ok(cudaError_t st) { return st == cudaSuccess; }
+
+__global__ void k_iota_i64(std::int64_t* out, std::size_t n) {
+    const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                          threadIdx.x;
+    if (i < n) out[i] = static_cast<std::int64_t>(i);
+}
 
 __global__ void k_mult_b(int n_workers, const std::int64_t* w_ptr, const int* m_f,
                          const double* m_c, const double* x, const double* inv_dw,
@@ -153,6 +160,70 @@ __global__ void k_seg_offsets(int nb, int n, int* offs) {
 }
 
 }  // namespace
+
+bool akm_cuda_stable_sort_u64(const std::uint64_t* keys,
+                              std::int64_t* order_out,
+                              std::size_t n) {
+    if (n == 0) return true;
+    if (keys == nullptr || order_out == nullptr ||
+        n > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        !akm_cuda_available()) {
+        return false;
+    }
+
+    std::uint64_t* d_keys_in = nullptr;
+    std::uint64_t* d_keys_out = nullptr;
+    std::int64_t* d_order_in = nullptr;
+    std::int64_t* d_order_out = nullptr;
+    void* d_temp = nullptr;
+    auto cleanup = [&]() {
+        cudaFree(d_temp);
+        cudaFree(d_order_out);
+        cudaFree(d_order_in);
+        cudaFree(d_keys_out);
+        cudaFree(d_keys_in);
+    };
+
+    const std::size_t key_bytes = n * sizeof(std::uint64_t);
+    const std::size_t order_bytes = n * sizeof(std::int64_t);
+    bool ok = cuda_ok(cudaMalloc(&d_keys_in, key_bytes)) &&
+              cuda_ok(cudaMalloc(&d_keys_out, key_bytes)) &&
+              cuda_ok(cudaMalloc(&d_order_in, order_bytes)) &&
+              cuda_ok(cudaMalloc(&d_order_out, order_bytes)) &&
+              cuda_ok(cudaMemcpy(d_keys_in, keys, key_bytes,
+                                 cudaMemcpyHostToDevice));
+    if (!ok) {
+        cleanup();
+        return false;
+    }
+
+    const unsigned blocks = static_cast<unsigned>((n + kBlock - 1) / kBlock);
+    k_iota_i64<<<blocks, kBlock>>>(d_order_in, n);
+    if (!cuda_ok(cudaGetLastError())) {
+        cleanup();
+        return false;
+    }
+
+    std::size_t temp_bytes = 0;
+    cub::DeviceRadixSort::SortPairs(nullptr, temp_bytes,
+                                    d_keys_in, d_keys_out,
+                                    d_order_in, d_order_out,
+                                    static_cast<int>(n));
+    if (!cuda_ok(cudaGetLastError()) ||
+        !cuda_ok(cudaMalloc(&d_temp, temp_bytes))) {
+        cleanup();
+        return false;
+    }
+    cub::DeviceRadixSort::SortPairs(d_temp, temp_bytes,
+                                    d_keys_in, d_keys_out,
+                                    d_order_in, d_order_out,
+                                    static_cast<int>(n));
+    ok = cuda_ok(cudaGetLastError()) &&
+         cuda_ok(cudaMemcpy(order_out, d_order_out, order_bytes,
+                            cudaMemcpyDeviceToHost));
+    cleanup();
+    return ok;
+}
 
 struct AkmCudaContext {
     int N = 0;

@@ -74,6 +74,13 @@ single connected mobility component the x1-row split is identified.
 
 Standard errors for absorbed-FE blocks are conditional/\code{gamma0}:
 uncertainty from estimating the absorbed effects is not fully included.
+
+Severely near-collinear observed x2 blocks are flagged in \code{$notes}
+without changing values; their split SE can be rounding/tolerance sensitive.
+For clustered VCE, streamed-meat FMA may differ from the former materialized
+path by one last-place unit in well-conditioned cells, while coefficients and
+deltas remain bit-identical. Inferential notes raise \code{warning()} even
+when the decomposition identity converges.
 }
 \description{
 Accounts for the movement of the \code{x1} coefficients between the base

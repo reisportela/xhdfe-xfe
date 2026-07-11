@@ -27,6 +27,14 @@
 #'   estimators exactly.
 #' @param fweights Treat \code{weights} as frequency weights.
 #' @param num_threads OpenMP threads (0 = library default).
+#' @section Numerical diagnostics:
+#'   A bounded-cost normalized-Gram check records a warning in \code{$notes}
+#'   when an observed x2 block is severely near-collinear; values are not
+#'   altered, but that block's split SE can be rounding/tolerance sensitive.
+#'   Cluster-meat FMA may differ from the former materialized path by one
+#'   last-place unit in well-conditioned cells, with coefficients/deltas
+#'   bit-identical. Inferential notes raise \code{warning()} even when the
+#'   decomposition identity converges.
 #' @return An object of class \code{xhdfe_gelbach}: per-group contribution
 #'   vectors over \code{[x1..., _cons]} with standard errors, the total
 #'   (= b_base - b_full), the full covariance, and diagnostics.
@@ -142,6 +150,15 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   out$estimand <- "coefficient_movement"
   out$causal_interpretation <- FALSE
   class(out) <- "xhdfe_gelbach"
+  if (isFALSE(out$converged)) {
+    warning("xhdfe_gelbach: the decomposition did not converge or failed a ",
+            "convergence cross-check - results are unreliable (see $notes).",
+            call. = FALSE)
+  } else if (nzchar(out$notes) && grepl("warning:", tolower(out$notes),
+                                        fixed = TRUE)) {
+    warning("xhdfe_gelbach: inferential diagnostic - ", out$notes,
+            call. = FALSE)
+  }
   out
 }
 

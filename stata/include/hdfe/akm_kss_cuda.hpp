@@ -18,6 +18,14 @@ struct AkmCudaContext;
 
 bool akm_cuda_available();
 
+// Stable radix sort of host uint64 keys. order_out receives the original
+// 0-based row indices in ascending key order; equal-key rows retain their
+// original order.  Used by xhdfeconnected's opt-in GPU match-table build.
+// Returns false on an unavailable device, allocation failure, or CUDA error.
+bool akm_cuda_stable_sort_u64(const std::uint64_t* keys,
+                              std::int64_t* order_out,
+                              std::size_t n);
+
 // Builds the context (uploads the match CSR/CSC structure). Returns nullptr
 // when CUDA is unavailable or allocation fails (caller falls back to CPU).
 AkmCudaContext* akm_cuda_create(int n_workers, int n_firms,

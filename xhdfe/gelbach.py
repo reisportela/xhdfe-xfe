@@ -58,6 +58,13 @@ recovery certificate is blind to slow graph modes — adversarial audit
 09jul2026, finding G1) and is now cross-checked and flagged via
 `converged`/`notes`. Do NOT treat FAST_FIT=0 as a safety fallback.
 
+Severely near-collinear columns inside an observed x2 block are detected with
+a bounded-cost normalized-Gram diagnostic. The decomposition values are left
+unchanged, but ``notes`` and a ``RuntimeWarning`` flag that the block SE split
+can be tolerance/rounding sensitive. For clustered VCE, the streamed meat may
+use FMA and differ from the former materialized path by one last-place unit in
+well-conditioned cells; coefficients and deltas remain bit-identical.
+
 Note on interpretation: with two or more mobility components, the split of
 the combined FE contribution into per-FE-dimension deltas depends on a
 normalization convention (the component mean-shift documented above); the
@@ -289,6 +296,15 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         warnings.warn(
             "xhdfe.gelbach.decompose: the decomposition did not converge or "
             "failed a convergence cross-check — results are unreliable. "
+            f"notes: {out['notes'].strip()}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    elif "warning:" in out["notes"].lower():
+        import warnings
+
+        warnings.warn(
+            "xhdfe.gelbach.decompose: inferential diagnostic. "
             f"notes: {out['notes'].strip()}",
             RuntimeWarning,
             stacklevel=2,

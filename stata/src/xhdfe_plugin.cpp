@@ -1188,6 +1188,8 @@ void akm_save_scalar(const char* name, double value) {
     }
 }
 
+void akm_progress_to_stata(const char* line, void* user);
+
 // Leave-out connected set only (task=akm_leave_out_set; the xhdfeconnected
 // ado): computes the KSS leave-one-out sample flag and counts without
 // running the decomposition.
@@ -1239,8 +1241,20 @@ ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
         }
     }
 
+    hdfe::akm::LeaveOutSetOptions options;
+    if (auto val = args.get_optional("num_threads")) {
+        options.num_threads = parse_int(*val, "num_threads");
+    }
+    if (auto val = args.get_optional("use_gpu")) {
+        options.use_gpu = parse_bool(*val, "use_gpu");
+    }
+    if (auto val = args.get_optional("verbose")) {
+        options.verbose = parse_int(*val, "verbose");
+        if (options.verbose > 0) options.progress = &akm_progress_to_stata;
+    }
+
     const hdfe::akm::LeaveOutSetResult set = hdfe::akm::leave_out_connected_set(
-        worker, firm, has_fweight ? &fw : nullptr);
+        worker, firm, has_fweight ? &fw : nullptr, options);
 
     for (int i = 0; i < n; ++i) {
         const int row = obs.obs_no(i);
@@ -1258,6 +1272,10 @@ ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
     akm_save_scalar("__xakm_n_stayers", static_cast<double>(set.n_stayers));
     akm_save_scalar("__xakm_prune_iterations",
                     static_cast<double>(set.prune_iterations));
+    akm_save_scalar("__xakm_threads_used", static_cast<double>(set.threads_used));
+    akm_save_scalar("__xakm_gpu_used", set.gpu_used ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_gpu_status_code",
+                    static_cast<double>(set.gpu_status_code));
     return 0;
 }
 
@@ -1610,6 +1628,22 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     if (auto val = args.get_optional("num_threads")) {
         options.num_threads = parse_int(*val, "num_threads");
     }
+    bool use_gpu = false;
+    if (auto val = args.get_optional("use_gpu")) {
+        use_gpu = parse_bool(*val, "use_gpu");
+    }
+    if (auto val = args.get_optional("verbose")) {
+        options.verbose = parse_int(*val, "verbose");
+        if (options.verbose > 0) options.progress = &akm_progress_to_stata;
+    }
+
+    // Use the same scoped backend selection as the main xhdfe task.  The
+    // environment is restored on every exit path; no later command inherits
+    // this request.
+    std::optional<ScopedEnvVar> gpu_env;
+    if (use_gpu) {
+        gpu_env.emplace("XHDFE_GPU_BACKEND", "cuda");
+    }
 
     const hdfe::gelbach::GelbachResult res = hdfe::gelbach::decompose(
         y, X1, X2, sizes, fes, has_cluster ? &cl : nullptr, options,
@@ -1656,6 +1690,16 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     akm_save_scalar("__xgel_n_obs", static_cast<double>(res.n_obs));
     akm_save_scalar("__xgel_df_full", res.df_full);
     akm_save_scalar("__xgel_converged", res.converged ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_threads_used", static_cast<double>(res.threads_used));
+    akm_save_scalar("__xgel_gpu_used", res.gpu_used ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_gpu_status_code",
+                    static_cast<double>(use_gpu && nfe == 0 ? 6
+                                                           : res.gpu_status_code));
+    akm_save_scalar("__xgel_gpu_attempted", res.gpu_attempted ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_gpu_absorption_converged",
+                    res.gpu_absorption_converged ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_gpu_absorption_iterations",
+                    static_cast<double>(res.gpu_absorption_iterations));
     if (!res.notes.empty()) {
         SF_macro_save(const_cast<char*>("_xgel_notes"), const_cast<char*>(res.notes.c_str()));
     }

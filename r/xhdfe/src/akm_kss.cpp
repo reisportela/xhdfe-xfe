@@ -154,6 +154,7 @@ struct AkmProgress {
     int level = 0;
     void (*sink)(const char*, void*) = nullptr;
     void* user = nullptr;
+    const char* task = "xhdfeakm";
     std::chrono::steady_clock::time_point t0;
     std::chrono::steady_clock::time_point last_tick;
 
@@ -161,6 +162,15 @@ struct AkmProgress {
         level = o.verbose;
         sink = o.progress;
         user = o.progress_user;
+        task = "xhdfeakm";
+        t0 = std::chrono::steady_clock::now();
+        last_tick = t0 - std::chrono::hours(1);
+    }
+    void init(const LeaveOutSetOptions& o) {
+        level = o.verbose;
+        sink = o.progress;
+        user = o.progress_user;
+        task = "xhdfeconnected";
         t0 = std::chrono::steady_clock::now();
         last_tick = t0 - std::chrono::hours(1);
     }
@@ -190,7 +200,7 @@ struct AkmProgress {
         std::vsnprintf(body, sizeof body, fmt, ap);
         va_end(ap);
         char line[512];
-        std::snprintf(line, sizeof line, "[xhdfeakm %8.1fs] %s", elapsed(), body);
+        std::snprintf(line, sizeof line, "[%s %8.1fs] %s", task, elapsed(), body);
         emit(line);
         last_tick = std::chrono::steady_clock::now();
     }
@@ -223,7 +233,7 @@ struct AkmProgress {
                           total, phase_s, eta);
         }
         char line[512];
-        std::snprintf(line, sizeof line, "[xhdfeakm %8.1fs] %s", elapsed(), body);
+        std::snprintf(line, sizeof line, "[%s %8.1fs] %s", task, elapsed(), body);
         emit(line);
         last_tick = now;
     }
@@ -346,7 +356,9 @@ void articulation_points(int n_vertices,
 SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                                    const Eigen::VectorXi& firm_ids,
                                    bool prune,
-                                   const std::vector<long long>* fw = nullptr) {
+                                   const std::vector<long long>* fw = nullptr,
+                                   bool gpu_sort_requested = false,
+                                   AkmProgress* progress = nullptr) {
     if (worker_ids.size() != firm_ids.size()) {
         throw std::runtime_error("worker and firm id vectors must have the same length");
     }
@@ -357,18 +369,49 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         return out;
     }
     AkmPhaseProfiler bprof_;
+    // On the local H100/OpenMP workstation, a cold CUDA context is slower
+    // than the parallel CPU sort below 10M rows (1.2M: ~0.54s vs ~0.22-0.30s;
+    // 4M: ~0.97-1.02s vs ~0.69-0.88s).  At 10M the paths reach parity and
+    // the radix sort can win when the context is already warm.  Keep the
+    // opt-in feature honest by declining CUDA below that measured crossover.
+    constexpr Eigen::Index kGpuSortMinRows = 10000000;
+    bool gpu_sort_enabled = false;
+    if (gpu_sort_requested) {
+        if (n < kGpuSortMinRows) {
+            out.set.gpu_status_code = 6;
+            if (progress) {
+                progress->say("CUDA sort skipped below the 10,000,000-row profitability gate");
+            }
+        } else {
+#ifdef HDFE_USE_CUDA
+            gpu_sort_enabled = akm_cuda_available();
+            if (!gpu_sort_enabled) out.set.gpu_status_code = 2;
+#else
+            out.set.gpu_status_code = 2;
+#endif
+            if (progress && !gpu_sort_enabled) {
+                progress->say("CUDA sort unavailable; using the deterministic CPU path");
+            }
+        }
+    }
 
     std::vector<int> w0;
     std::vector<int> f0;
     const int W0 = relabel_dense(worker_ids, w0);
     const int F0 = relabel_dense(firm_ids, f0);
     bprof_.mark("los_relabel");
+    if (progress) {
+        progress->say("ids compacted: %d workers, %d firms", W0, F0);
+    }
 
     // Initial match table: sort row indices by (worker, firm).
     std::vector<std::int64_t> order(static_cast<std::size_t>(n));
     std::iota(order.begin(), order.end(), 0);
     {
         std::vector<std::uint64_t> key(static_cast<std::size_t>(n));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(gpu_sort_enabled && n >= 200000)
+#endif
         for (Eigen::Index i = 0; i < n; ++i) {
             key[static_cast<std::size_t>(i)] =
                 static_cast<std::uint64_t>(w0[static_cast<std::size_t>(i)]) *
@@ -380,14 +423,38 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                        ? key[static_cast<std::size_t>(a)] < key[static_cast<std::size_t>(b)]
                        : a < b;
         };
+        // The CUDA radix sort is stable and starts from row indices in input
+        // order, so equal match keys retain the same row-order tie-break as
+        // cmp.  On any CUDA failure, fall back to the exact CPU ordering.
+        bool sorted_on_gpu = false;
+#ifdef HDFE_USE_CUDA
+        if (gpu_sort_enabled) {
+            if (progress) progress->say("sorting %lld match keys on CUDA...",
+                                        static_cast<long long>(n));
+            sorted_on_gpu = akm_cuda_stable_sort_u64(key.data(), order.data(),
+                                                     static_cast<std::size_t>(n));
+            if (sorted_on_gpu) {
+                out.set.gpu_used = true;
+                out.set.gpu_status_code = 1;
+            } else {
+                gpu_sort_enabled = false;
+                out.set.gpu_status_code = 4;
+                if (progress) {
+                    progress->say("CUDA sort failed; completing with the deterministic CPU path");
+                }
+            }
+        }
+#endif
         // cmp is a strict total order (index tie-break), so every correct sort
         // yields the identical permutation; use the parallel sort where
         // available (GCC libstdc++ parallel mode) and std::sort elsewhere.
+        if (!sorted_on_gpu) {
 #if defined(_OPENMP) && defined(__GNUC__) && !defined(__clang__)
-        __gnu_parallel::sort(order.begin(), order.end(), cmp);
+            __gnu_parallel::sort(order.begin(), order.end(), cmp);
 #else
-        std::sort(order.begin(), order.end(), cmp);
+            std::sort(order.begin(), order.end(), cmp);
 #endif
+        }
     }
     bprof_.mark("los_sort");
 
@@ -501,6 +568,10 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         out.set.n_obs_connected = obs;
     }
     bprof_.mark("los_largest_cc");
+    if (progress) {
+        progress->say("largest connected component: %lld person-year observations",
+                      out.set.n_obs_connected);
+    }
 
     if (prune) {
         std::vector<int> worker_deg(static_cast<std::size_t>(W0));
@@ -601,6 +672,10 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             }
             largest_cc();
             ++out.set.prune_iterations;
+            if (progress) {
+                progress->say("leave-out pruning round %d completed",
+                              out.set.prune_iterations);
+            }
             acc_(tp_, ms_drop);
         }
         if (bprof_.on) {
@@ -662,6 +737,9 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         std::vector<std::int64_t> ord(n_kept);
         std::iota(ord.begin(), ord.end(), 0);
         std::vector<std::uint64_t> key(n_kept);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(gpu_sort_enabled && n_kept >= 200000)
+#endif
         for (std::size_t k = 0; k < n_kept; ++k) {
             key[k] = static_cast<std::uint64_t>(out.row_w[k]) *
                          static_cast<std::uint64_t>(std::max(out.n_firms, 1)) +
@@ -672,11 +750,26 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                        ? key[static_cast<std::size_t>(a)] < key[static_cast<std::size_t>(b)]
                        : a < b;
         };
-#if defined(_OPENMP) && defined(__GNUC__) && !defined(__clang__)
-        __gnu_parallel::sort(ord.begin(), ord.end(), cmp2);
-#else
-        std::sort(ord.begin(), ord.end(), cmp2);
+        bool sorted_on_gpu = false;
+#ifdef HDFE_USE_CUDA
+        if (gpu_sort_enabled && n_kept >= static_cast<std::size_t>(kGpuSortMinRows)) {
+            sorted_on_gpu = akm_cuda_stable_sort_u64(key.data(), ord.data(), n_kept);
+            if (!sorted_on_gpu) {
+                gpu_sort_enabled = false;
+                out.set.gpu_status_code = 4;
+                if (progress) {
+                    progress->say("final CUDA match sort failed; using the CPU path");
+                }
+            }
+        }
 #endif
+        if (!sorted_on_gpu) {
+#if defined(_OPENMP) && defined(__GNUC__) && !defined(__clang__)
+            __gnu_parallel::sort(ord.begin(), ord.end(), cmp2);
+#else
+            std::sort(ord.begin(), ord.end(), cmp2);
+#endif
+        }
         for (std::size_t k = 0; k < n_kept; ++k) {
             const std::size_t r = static_cast<std::size_t>(ord[k]);
             if (out.m_w.empty() || out.m_w.back() != out.row_w[r] || out.m_f.back() != out.row_f[r]) {
@@ -714,6 +807,12 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         out.set.n_stayers = out.n_workers - out.set.n_movers;
     }
     bprof_.mark("los_finalize");
+    if (progress) {
+        progress->say("sample construction complete: %lld observations, %d workers, "
+                      "%d firms, %lld matches",
+                      out.set.n_obs, out.set.n_workers, out.set.n_firms,
+                      out.set.n_matches);
+    }
     return out;
 }
 
@@ -1812,13 +1911,31 @@ std::vector<long long> validate_fweights(const Eigen::VectorXd& fwv,
 
 LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
                                           const Eigen::VectorXi& firm_ids,
-                                          const Eigen::VectorXd* fweights) {
+                                          const Eigen::VectorXd* fweights,
+                                          const LeaveOutSetOptions& options) {
+#ifdef _OPENMP
+    ScopedThreadState thread_state(options.num_threads);
+#endif
+    AkmProgress progress;
+    progress.init(options);
+    progress.say("building the leave-out connected set (%lld input rows)...",
+                 static_cast<long long>(worker_ids.size()));
+    LeaveOutSetResult out;
     if (fweights != nullptr) {
         const std::vector<long long> fw =
             validate_fweights(*fweights, worker_ids.size());
-        return build_leave_out_sample(worker_ids, firm_ids, true, &fw).set;
+        out = build_leave_out_sample(worker_ids, firm_ids, true, &fw,
+                                     options.use_gpu, &progress)
+                  .set;
+    } else {
+        out = build_leave_out_sample(worker_ids, firm_ids, true, nullptr,
+                                     options.use_gpu, &progress)
+                  .set;
     }
-    return build_leave_out_sample(worker_ids, firm_ids, true).set;
+#ifdef _OPENMP
+    out.threads_used = omp_get_max_threads();
+#endif
+    return out;
 }
 
 AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
@@ -1872,7 +1989,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     vprog.say("building the leave-out connected set (%lld input rows)...",
               static_cast<long long>(y.size()));
     SampleBuild sb = build_leave_out_sample(worker_ids, firm_ids, options.prune,
-                                            has_fw ? &fw_rows : nullptr);
+                                            has_fw ? &fw_rows : nullptr,
+                                            false, &vprog);
     res.sample = std::move(sb.set);
     prof_.mark("leave_out_sample");
     vprog.say("leave-out sample: %lld obs kept of %lld, %d workers (%d movers), "
@@ -1966,6 +2084,22 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         if (!reg.results().converged) {
             res.converged = false;
             res.notes += "control partialling (FWL) absorber did not converge. ";
+        }
+        {
+            std::string omitted;
+            const auto& reason = reg.results().omitted_reason;
+            for (int c = 0; c < static_cast<int>(Xk.cols()); ++c) {
+                if (c < static_cast<int>(reason.size()) &&
+                    reason[static_cast<std::size_t>(c)] != 0) {
+                    if (!omitted.empty()) omitted += ",";
+                    omitted += std::to_string(c + 1);
+                }
+            }
+            if (!omitted.empty()) {
+                res.notes += "warning: control column(s) " + omitted +
+                             " omitted after FWL because of collinearity; "
+                             "their reported coefficients are zero. ";
+            }
         }
         res.beta = reg.results().coefficients;
         ystar.noalias() -= Xk * res.beta;
@@ -2865,8 +2999,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 bpe[m] = it != rep_bpe.end() ? it->second : 0.0;
             }
         }
-        const bool has_stayers = res.sample.n_stayers > 0;
-        const bool pe_identified = !(match_level && has_stayers);
+        // leave_out_COMPLETE deliberately reports only var(psi) and
+        // cov(alpha,psi) SE/CI at match level (n_of_parameters=2), regardless
+        // of whether the retained sample contains stayers.  The former
+        // movers-only extension for var(alpha) was not oracle-backed and is
+        // anti-conservative in fixed-design Monte Carlo, so keep it missing
+        // rather than return invalid inference.
+        const bool pe_identified = !match_level;
 
         // person-year eta and block leave-out eta_h
         Eigen::VectorXd eta_py(static_cast<Eigen::Index>(n_py_sz));
@@ -4052,7 +4191,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 svar += dre * dre + dim * dim;
             }
             svar /= static_cast<double>(nsim - 1);
-            se_out = std::sqrt(std::max(0.0, (4.0 * SUM - svar))) / NTd;
+            const double se_numer = 4.0 * SUM - svar;
+            se_out = std::sqrt(std::max(0.0, se_numer)) / NTd;
+            if (se_numer < 0.0) {
+                res.notes += std::string("warning: simulated variance estimate for ") +
+                             kSeCompName[comp] +
+                             " was negative; its component SE was truncated to zero. ";
+            }
 
             if (do_ci) {
                 double m2re = 0.0, m2im = 0.0;
@@ -4096,10 +4241,27 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 res.f_stat[comp] = b1 * b1 / cov11;
                 res.theta_1[comp] =
                     theta_out - (lam1 / NTd) * (b1 * b1 - cov11);
-                am_confidence_interval(NTd, lam1, res.gamma_sq[comp], cov11,
-                                       cov12, cov22, b1, res.theta_1[comp],
-                                       res.ci_lb[comp], res.ci_ub[comp],
-                                       res.curvature[comp]);
+                bool ci_ok = cov11 > 0.0 && cov22 > 0.0 &&
+                             guarded_finite(cov11) && guarded_finite(cov12) &&
+                             guarded_finite(cov22) &&
+                             guarded_finite(res.gamma_sq[comp]);
+                if (ci_ok) {
+                    am_confidence_interval(NTd, lam1, res.gamma_sq[comp], cov11,
+                                           cov12, cov22, b1, res.theta_1[comp],
+                                           res.ci_lb[comp], res.ci_ub[comp],
+                                           res.curvature[comp]);
+                    ci_ok = guarded_finite(res.ci_lb[comp]) &&
+                            guarded_finite(res.ci_ub[comp]) &&
+                            res.ci_lb[comp] <= res.ci_ub[comp];
+                }
+                if (!ci_ok) {
+                    res.ci_lb[comp] = kNaN;
+                    res.ci_ub[comp] = kNaN;
+                    res.curvature[comp] = kNaN;
+                    res.notes += std::string("warning: Andrews-Mikusheva CI for ") +
+                                 kSeCompName[comp] +
+                                 " is undefined for this sample; bounds are missing. ";
+                }
             }
         };
 
@@ -4128,7 +4290,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 res.ci_ub[2] = kNaN;
                 res.curvature[2] = kNaN;
             }
-            res.notes += "var(alpha) SE not identified at match level with stayers (oracle rule). ";
+            res.notes +=
+                "warning: var(alpha) component SE/CI is not identified at "
+                "match level under the leave_out_COMPLETE oracle; use "
+                "leave_out_level=obs for var(alpha) inference. ";
         }
         res.solver_iterations = cg_iters + solver.cuda_iters;
     }
@@ -4303,6 +4468,137 @@ namespace gelbach {
 
 namespace {
 
+struct GelbachProgress {
+    int level = 0;
+    void (*sink)(const char*, void*) = nullptr;
+    void* user = nullptr;
+    std::chrono::steady_clock::time_point t0;
+
+    void init(const GelbachOptions& options) {
+        level = options.verbose;
+        sink = options.progress;
+        user = options.progress_user;
+        t0 = std::chrono::steady_clock::now();
+    }
+    double elapsed() const {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now() - t0)
+                   .count() /
+               1000.0;
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 2, 3)))
+#endif
+    void say(const char* fmt, ...) {
+        if (level < 1) return;
+        char body[448];
+        va_list ap;
+        va_start(ap, fmt);
+        std::vsnprintf(body, sizeof body, fmt, ap);
+        va_end(ap);
+        char line[512];
+        std::snprintf(line, sizeof line, "[xhdfegelbach %8.1fs] %s",
+                      elapsed(), body);
+        if (sink != nullptr) {
+            sink(line, user);
+        } else {
+            std::fprintf(stderr, "%s\n", line);
+            std::fflush(stderr);
+        }
+    }
+};
+
+#ifdef _OPENMP
+struct GelbachScopedThreadState {
+    int previous_omp = 1;
+    int previous_eigen = 1;
+    int previous_dynamic = 0;
+    explicit GelbachScopedThreadState(int requested)
+        : previous_omp(omp_get_max_threads()),
+          previous_eigen(Eigen::nbThreads()),
+          previous_dynamic(omp_get_dynamic()) {
+        if (requested > 0) {
+            omp_set_dynamic(0);
+            omp_set_num_threads(requested);
+            Eigen::setNbThreads(requested);
+        }
+    }
+    ~GelbachScopedThreadState() {
+        Eigen::setNbThreads(previous_eigen);
+        omp_set_num_threads(previous_omp);
+        omp_set_dynamic(previous_dynamic);
+    }
+};
+#endif
+
+int gelbach_recovery_team(int requested, Eigen::Index n) {
+    // The exact MLSMR warm recovery repeatedly scatters over n rows.  The
+    // work-aware cap follows the same principle as the post-2.15 AKM solver:
+    // avoid barrier/TLS overhead on small and medium panels, while leaving
+    // large panels and caller-requested smaller teams untouched.
+    int team = requested > 0 ? requested : 1;  // preserve historical auto=1
+    if (n < 2000000) {
+        team = std::min(team, 4);
+    } else if (n < 12000000) {
+        team = std::min(team, 8);
+    } else if (n < 30000000) {
+        team = std::min(team, 16);
+    }
+    if (const char* e = std::getenv("XHDFE_GELBACH_TEAM")) {
+        const int v = std::atoi(e);
+        if (v == 0) {
+            team = requested > 0 ? requested : 1;
+        } else if (v > 0) {
+            team = requested > 0 ? std::min(v, requested) : v;
+        }
+    }
+    return std::max(1, team);
+}
+
+// Cheap, deterministic fail-loud diagnostic for severe within-group
+// collinearity.  Inspect at most 8192 evenly spaced kept rows so the check is
+// O(1) in panel size and cannot become a new large-panel bottleneck.  The
+// normalized Gram threshold corresponds to kappa >= 1e12: well beyond normal
+// estimation noise, but low enough to catch the x2-block design where SEs are
+// observably tolerance/ISA sensitive while the point identity still passes.
+bool gelbach_x2_group_ill_conditioned(const Eigen::MatrixXd& X2,
+                                      int first,
+                                      int width,
+                                      const Eigen::VectorXd* weights) {
+    if (width < 2 || X2.rows() < 2) return false;
+    const Eigen::Index ns = std::min<Eigen::Index>(X2.rows(), 8192);
+    Eigen::VectorXd mean = Eigen::VectorXd::Zero(width);
+    double sw = 0.0;
+    for (Eigen::Index s = 0; s < ns; ++s) {
+        const Eigen::Index i = (s * X2.rows()) / ns;
+        const double wi = weights != nullptr ? (*weights)[i] : 1.0;
+        mean.noalias() += wi * X2.row(i).segment(first, width).transpose();
+        sw += wi;
+    }
+    if (!(sw > 0.0)) return false;
+    mean /= sw;
+    Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(width, width);
+    for (Eigen::Index s = 0; s < ns; ++s) {
+        const Eigen::Index i = (s * X2.rows()) / ns;
+        const double wi = weights != nullptr ? (*weights)[i] : 1.0;
+        const Eigen::VectorXd z =
+            X2.row(i).segment(first, width).transpose() - mean;
+        gram.noalias() += wi * (z * z.transpose());
+    }
+    Eigen::VectorXd scale(width);
+    for (int c = 0; c < width; ++c) {
+        if (!(gram(c, c) > 0.0)) return true;
+        scale[c] = 1.0 / std::sqrt(gram(c, c));
+    }
+    gram = scale.asDiagonal() * gram * scale.asDiagonal();
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(gram,
+                                                             Eigen::EigenvaluesOnly);
+    if (eig.info() != Eigen::Success) return true;
+    const double largest = eig.eigenvalues()[width - 1];
+    const double smallest = eig.eigenvalues()[0];
+    return largest > 0.0 && smallest <= largest * 1e-12;
+}
+
 Eigen::MatrixXd cluster_meat(const Eigen::MatrixXd& Z, const Eigen::VectorXi* codes,
                              int n_clusters) {
     if (codes == nullptr) {
@@ -4311,6 +4607,59 @@ Eigen::MatrixXd cluster_meat(const Eigen::MatrixXd& Z, const Eigen::VectorXi* co
     Eigen::MatrixXd sums = Eigen::MatrixXd::Zero(n_clusters, Z.cols());
     for (Eigen::Index i = 0; i < Z.rows(); ++i) {
         sums.row((*codes)[i]) += Z.row(i);
+    }
+    return sums.transpose() * sums;
+}
+
+Eigen::MatrixXd gelbach_cluster_meat_streamed(
+    const Eigen::MatrixXd& W,
+    const Eigen::MatrixXd& X1t,
+    const Eigen::VectorXd& se_score,
+    const Eigen::VectorXd& sf,
+    const std::vector<Eigen::VectorXd>& vres,
+    const Eigen::VectorXi& codes,
+    int n_clusters,
+    int threads) {
+    const Eigen::Index n = W.rows();
+    const int Kx = static_cast<int>(W.cols());
+    const int k1 = static_cast<int>(X1t.cols());
+    const int G = static_cast<int>(vres.size());
+    const int L = Kx + G * k1;
+
+    std::vector<std::int64_t> ptr(static_cast<std::size_t>(n_clusters) + 1, 0);
+    for (Eigen::Index i = 0; i < n; ++i) {
+        ++ptr[static_cast<std::size_t>(codes[i]) + 1];
+    }
+    for (int c = 0; c < n_clusters; ++c) {
+        ptr[static_cast<std::size_t>(c + 1)] += ptr[static_cast<std::size_t>(c)];
+    }
+    std::vector<std::int64_t> cursor = ptr;
+    std::vector<int> order(static_cast<std::size_t>(n));
+    for (Eigen::Index i = 0; i < n; ++i) {
+        const int c = codes[i];
+        order[static_cast<std::size_t>(cursor[static_cast<std::size_t>(c)]++)] =
+            static_cast<int>(i);
+    }
+
+    Eigen::MatrixXd sums = Eigen::MatrixXd::Zero(n_clusters, L);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(n >= 200000 && threads > 1) num_threads(threads)
+#endif
+    for (int c = 0; c < n_clusters; ++c) {
+        for (std::int64_t pos = ptr[static_cast<std::size_t>(c)];
+             pos < ptr[static_cast<std::size_t>(c + 1)]; ++pos) {
+            const Eigen::Index i = order[static_cast<std::size_t>(pos)];
+            const double ue = se_score[i];
+            for (int j = 0; j < Kx; ++j) {
+                sums(c, j) += W(i, j) * ue;
+            }
+            for (int g = 0; g < G; ++g) {
+                const double gv = sf[i] * vres[static_cast<std::size_t>(g)][i];
+                for (int j = 0; j < k1; ++j) {
+                    sums(c, Kx + g * k1 + j) += X1t(i, j) * gv;
+                }
+            }
+        }
     }
     return sums.transpose() * sums;
 }
@@ -4459,6 +4808,11 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         const Eigen::VectorXd* weights,
                         bool freq_weights) {
     akm::AkmPhaseProfiler gprof_;
+#ifdef _OPENMP
+    GelbachScopedThreadState thread_state(options.num_threads);
+#endif
+    GelbachProgress progress;
+    progress.init(options);
     const Eigen::Index n0 = y_in.size();
     const int p = static_cast<int>(X1_in.cols());
     const int q = static_cast<int>(X2_in.cols());
@@ -4490,8 +4844,13 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
 
     GelbachResult res;
+    const int recovery_threads = gelbach_recovery_team(options.num_threads, n0);
     const int G = static_cast<int>(x2_group_sizes.size() + fes_in.size());
     const int k1 = p + 1;
+    progress.say("starting decomposition: %lld observations, %d x1 column(s), "
+                 "%d x2 column(s), %d fixed-effect dimension(s)",
+                 static_cast<long long>(n0), p, q,
+                 static_cast<int>(fes_in.size()));
 
     // ---- full model ------------------------------------------------------
     Eigen::MatrixXd X_full(n0, p + q);
@@ -4519,8 +4878,12 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     ho.num_threads = options.num_threads;
     ho.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 reg(ho);
+    progress.say("fitting the full specification...");
     reg.fit(y_in, X_full, fes_in, weights);
     gprof_.mark("gel_full_fit");
+    progress.say("full specification fitted: converged=%s, %d thread(s)%s",
+                 reg.results().converged ? "yes" : "NO", reg.threads_used(),
+                 reg.gpu_used() ? ", CUDA used" : "");
     for (int c = 0; c < p + q; ++c) {
         const auto& omitted = reg.results().omitted_reason;
         if (c < static_cast<int>(omitted.size()) &&
@@ -4540,6 +4903,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     Eigen::MatrixXd W_pre;  // demeaned [x1, x2] reused by the sandwich VCE below
     std::unique_ptr<v11::HdfeRegressorV11> reg_ret;  // reference-fallback fit
     if (gel_fast_fit && !fes_in.empty()) {
+        progress.say("recovering fixed-effect blocks with certified MLSMR "
+                     "(%d internal thread%s)...",
+                     recovery_threads, recovery_threads == 1 ? "" : "s");
         const Eigen::VectorXi& keep0 = reg.results().sample_index;
         const Eigen::Index nk = keep0.size();
         Eigen::VectorXd partial(nk);
@@ -4589,6 +4955,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             HdfeOptions mo = ho;
             mo.absorption_method = AbsorptionMethod::Mlsmr;
             mo.retain_fixed_effects = true;
+            mo.num_threads = recovery_threads;
             // No ridge: with the default krylov_lambda the recovered alphas
             // carry a lambda*A^{-1}*alpha bias that explodes in the slow
             // directions of ill-conditioned FE graphs (observed 1e-5-level
@@ -4633,6 +5000,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 // precedent). XHDFE_GELBACH_FAST_FIT=0 restores legacy output.
                 HdfeOptions po = ho;
                 po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
+                po.num_threads = recovery_threads;
                 detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
                     resid, ares.fe_group_ids, ares.fe_levels, wk_ptr, po,
                     ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
@@ -4683,11 +5051,18 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         if (warm_done) {
             normalize_fe_effects_component_style(fe_effects_sep, fes_k, wk_ptr);
             gprof_.mark("gel_fe_recovery");
+            progress.say("fixed-effect recovery certified");
         }  // warm_done normalization
     }
     // regu: the regressor every downstream quantity reads from — the fast fit
     // normally, or the reference-fallback retained fit when the gate rejected.
     const v11::HdfeRegressorV11& regu = reg_ret ? *reg_ret : reg;
+    res.threads_used = std::max(regu.threads_used(), recovery_threads);
+    res.gpu_used = regu.gpu_used();
+    res.gpu_status_code = regu.gpu_status_code();
+    res.gpu_attempted = regu.gpu_attempted();
+    res.gpu_absorption_converged = regu.gpu_absorption_converged();
+    res.gpu_absorption_iterations = regu.gpu_absorption_iterations();
     if (!regu.results().converged) {
         res.converged = false;
         res.notes += "full-model absorption did not converge. ";
@@ -4715,6 +5090,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         X1.row(i) = X1_in.row(keep[i]);
         if (q > 0) X2.row(i) = X2_in.row(keep[i]);
     }
+    // The downstream decomposition uses the kept X1/X2 matrices. Release the
+    // full pre-singleton design now; at AKM scale this lowers peak resident
+    // memory by several gigabytes without changing any arithmetic.
+    X_full = Eigen::MatrixXd();
     for (std::size_t d = 0; d < fes_in.size(); ++d) {
         fes[d].resize(n);
         for (Eigen::Index i = 0; i < n; ++i) fes[d][i] = fes_in[d][keep[i]];
@@ -4723,6 +5102,21 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (weights != nullptr) {
         w_raw.resize(n);
         for (Eigen::Index i2 = 0; i2 < n; ++i2) w_raw[i2] = (*weights)[keep[i2]];
+    }
+    {
+        int first = 0;
+        for (std::size_t g = 0; g < x2_group_sizes.size(); ++g) {
+            const int width = x2_group_sizes[g];
+            if (gelbach_x2_group_ill_conditioned(
+                    X2, first, width, weights != nullptr ? &w_raw : nullptr)) {
+                res.notes +=
+                    "warning: observed x2 group " + std::to_string(g + 1) +
+                    " is severely ill-conditioned (near-collinear columns); "
+                    "its Gelbach split standard errors can be sensitive to "
+                    "rounding and solver tolerance. ";
+            }
+            first += width;
+        }
     }
     // Legacy / gate-reject fallback certification (adversarial audit G1,
     // 09jul2026): the retained fit recovers the per-dimension FE split with
@@ -4745,6 +5139,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             HdfeOptions mo = ho;
             mo.absorption_method = AbsorptionMethod::Mlsmr;
             mo.retain_fixed_effects = true;
+            mo.num_threads = recovery_threads;
             mo.krylov_lambda = 0.0;
             Eigen::MatrixXd xin(n, 0);
             detail::AbsorptionResult ares =
@@ -4767,6 +5162,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 }
                 HdfeOptions po = ho;
                 po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
+                po.num_threads = recovery_threads;
                 detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
                     resid, ares.fe_group_ids, ares.fe_levels, wk_cert, po,
                     ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
@@ -4856,8 +5252,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     HdfeOptions hb;
     hb.se_type = StandardErrorType::Homoskedastic;
     hb.tol = options.tol;
+    hb.num_threads = recovery_threads;
     hb.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 breg(hb);
+    progress.say("fitting the base specification...");
     breg.fit(y, X1, {}, weights != nullptr ? &w_raw : nullptr);
     for (int c = 0; c < p; ++c) {
         const auto& omitted = breg.results().omitted_reason;
@@ -4869,6 +5267,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         }
     }
     gprof_.mark("gel_base_reg");
+    progress.say("base specification fitted");
     const Eigen::VectorXd bco = breg.results().coefficients;
     res.b_base = bco.head(p);
 
@@ -4935,6 +5334,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         }
     } else {
         // b1x2's stacked-system sandwich (multipliers validated vs b1x2).
+        progress.say("building the %s covariance system...",
+                     options.vce == GelbachVce::Cluster ? "clustered" : "robust");
         Eigen::MatrixXd W;
         int Kx;
         if (!fes.empty()) {
@@ -4956,7 +5357,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             hw.fit_intercept = false;
             hw.drop_singletons = false;
             hw.tol = options.tol;
-            hw.num_threads = options.num_threads;
+            hw.num_threads = recovery_threads;
             hw.weights_are_frequencies = freq_weights;
             if (within_batch && W_pre.rows() == n && W_pre.cols() == Kx) {
                 // Demeaned [x1, x2] already produced by the shared MLSMR
@@ -5005,14 +5406,25 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             q_vu = (nd - 1.0) / df_full * gc / (gc - 1.0);
         }
         const Eigen::VectorXd se_score = sf.cwiseProduct(e);
-        Eigen::MatrixXd Z(n, Kx + G * k1);
-        Z.leftCols(Kx) = W.array().colwise() * se_score.array();
-        for (int g = 0; g < G; ++g) {
-            Z.middleCols(Kx + g * k1, k1) =
-                X1t.array().colwise() * sf.cwiseProduct(vres[g]).array();
+        Eigen::MatrixXd M;
+        if (ccodes_ptr != nullptr) {
+            // Sum score rows directly by cluster. This preserves each
+            // cluster's original row-addition order while avoiding the
+            // n x (Kx + G*k1) stacked-score matrix (multi-GB at AKM scale).
+            M = gelbach_cluster_meat_streamed(
+                W, X1t, se_score, sf, vres, *ccodes_ptr, n_clusters,
+                recovery_threads);
+        } else {
+            Eigen::MatrixXd Z(n, Kx + G * k1);
+            Z.leftCols(Kx) = W.array().colwise() * se_score.array();
+            for (int g = 0; g < G; ++g) {
+                Z.middleCols(Kx + g * k1, k1) =
+                    X1t.array().colwise() * sf.cwiseProduct(vres[g]).array();
+            }
+            M = cluster_meat(Z, nullptr, 0);
         }
-        const Eigen::MatrixXd M = cluster_meat(Z, ccodes_ptr, n_clusters);
         gprof_.mark("gel_meat");
+        progress.say("covariance system assembled");
         Eigen::MatrixXd bread = Eigen::MatrixXd::Zero(Kx + G * k1, Kx + G * k1);
         bread.topLeftCorner(Kx, Kx) = Sw;
         for (int g = 0; g < G; ++g) {
@@ -5067,6 +5479,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         res.converged = false;
         res.notes += "identity gap above tolerance. ";
     }
+    progress.say("done: converged=%s, identity gap %.3e%s",
+                 res.converged ? "yes" : "NO", res.identity_gap,
+                 res.gpu_used ? ", gpu_used=1" : "");
     return res;
 }
 

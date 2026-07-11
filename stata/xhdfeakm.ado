@@ -1,4 +1,4 @@
-*! version 1.6.2  10jul2026
+*! version 1.7.0  11jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -275,5 +275,8 @@ program define xhdfeakm, rclass sortpreserve
     di as txt "var(y) = " as res %-12.6f return(var_y) as txt "  leverages: " as res "`levtxt'"
     if (return(converged) != 1) {
         di as err "warning: the AKM/KSS computation did not fully converge; see r(notes)"
+    }
+    else if (strpos(lower("`xakm_notes'"), "warning:") > 0) {
+        di as err "warning: AKM/KSS inferential diagnostic; see r(notes)"
     }
 end

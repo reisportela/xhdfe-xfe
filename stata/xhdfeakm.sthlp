@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.17.1  10jul2026}{...}
+{* *! version 2.18.0  11jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -102,8 +102,12 @@ mover averages and can differ by 1-2 percent in var(alpha)/cov on
 stayer-heavy panels — a convention gap, not a discrepancy), and the plug-in
 components use the 1/(n-1) denominator versus pytwoway's 1/n (negligible
 above ~10,000 person-years). Avoid pytwoway's {cmd:exact_trace_ho/he=True}
-paths as an oracle: their var(alpha) quadrant is broken in pytwoway 0.3.21
-(negative variances observed; audited 09jul2026). The
+paths as an oracle: a broadcasting defect in pytwoway 0.3.21 corrupts every
+exact-trace quadrant that uses its alpha-alpha inverse block, including
+var(alpha) and the exact HE cov(alpha,psi) cross-quadrant. The latter differs
+by 3.1e-4 to 7.3e-4 on audited stayer-heavy panels; replacing the broadcast
+with a diagonal matrix restores the dense/xhdfe result to about 4e-10
+(audited 11jul2026). The
 combination is most useful with large linked employer-employee data: do the
 fast HDFE regression and the leave-out variance decomposition here in a
 familiar reghdfe workflow, and use pytwoway for the structural models outside
@@ -127,11 +131,22 @@ Factor-variable notation is allowed, so {cmd:controls(i.year)} works directly
 hand; {cmd:i.}, {cmd:c.}, interactions and a chosen base ({cmd:ib#.}) are all
 supported.
 
+{pstd}If a control is collinear with the absorbed effects or another control,
+its coefficient is set to zero under the reduced-model convention and
+{cmd:r(notes)} identifies the one-based control column. Extremely
+near-collinear controls can have individually unstable coefficients even when
+fitted values are stable; do not interpret an omitted zero as estimated
+evidence.{p_end}
+
 {phang}{opt leaveoutlevel(match|obs)} chooses the leave-out unit:
 {cmd:match} (worker-firm pair; the default and Saggio's default) or
-{cmd:obs} (a single person-year observation). At {cmd:match} level with
-stayers, {it:var(alpha)} inference is not point-identified and its SE/CI are
-returned as missing (the oracle rule); use {cmd:obs} to identify it.
+{cmd:obs} (a single person-year observation). At {cmd:match} level,
+{it:var(alpha)} component SE/CI are returned as missing whether or not stayers
+are present: canonical {cmd:leave_out_COMPLETE} reports only var(psi) and
+cov(alpha,psi) inference on this level, and the former movers-only extension
+was anti-conservative in fixed-design Monte Carlo (SE/empirical-SD 0.56-0.65;
+95% AM coverage 0.68-0.77). Use {cmd:obs} for var(alpha) inference; the
+var(alpha) point decompositions remain available at both levels.
 
 {phang}{opt noprune} skips the leave-out connected-set computation; use only
 when the estimation sample is already leave-out connected (for example after
@@ -168,6 +183,15 @@ F statistic, the curvature-adjusted point estimate {it:theta_1}, the AM
 confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
 sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
+
+{pstd}Simulation-based variance estimates can be negative in finite samples.
+The established convention truncates the corresponding component SE to zero;
+the command records this explicitly in {cmd:r(notes)}. If the AM interval is
+mathematically undefined (for example a nonpositive quadratic variance or no
+admissible real-root envelope), both bounds are returned as missing and a note
+is emitted; internal finite sentinels are never exposed. Python and R
+front-ends additionally raise a warning for these inferential diagnostics.
+{p_end}
 
 {phang}{opt sigmalowess} uses the LeaveOutTwoWay mode-0 lowess surface fit of
 sigma-i on ({it:P_ii}, {it:B_ii}) for the SE quadratic part instead of the

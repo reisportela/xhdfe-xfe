@@ -89,6 +89,10 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   separately; see \code{fwl_threads_used} and \code{threads_used}.
 #' @param fwl_tol,fwl_max_iter Absorber controls for the covariate step.
 #' @param compute_se Component standard errors (KSS leave-out inference).
+#'   Under the canonical leave_out_COMPLETE rule, match level reports firm and
+#'   covariance inference only; var(alpha) SE/CI are missing at match level
+#'   even without stayers. Use \code{leave_out_level = "obs"} for var(alpha)
+#'   inference.
 #' @param se_nsim Simulation draws for the SE quadratic part (default 1000).
 #' @param eigen_diagnostics Weak-identification diagnostics and the
 #'   Andrews-Mikusheva q = 1 confidence intervals (leave_out_COMPLETE
@@ -118,8 +122,10 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
 #'   The solves are batched without changing the estimator or solver
 #'   tolerances; different schedules can differ at the last-ulp level. A
-#'   \code{warning()} fires on non-convergence
-#'   (check \code{$converged}).
+#'   \code{warning()} fires on non-convergence (check \code{$converged}) and
+#'   on inferential diagnostics recorded in \code{$notes}, including omitted
+#'   collinear controls, truncated negative simulated variances and undefined
+#'   AM intervals.
 #' @param gpu Solve the two-way systems on the CUDA backend when available.
 #' @return An object of class \code{xhdfe_akm_kss}: a list with the sample
 #'   summary, observation-level \code{alpha}/\code{psi} on the kept rows,
@@ -228,6 +234,10 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
   if (isFALSE(out$converged)) {
     warning("xhdfe_akm_kss: the AKM/KSS decomposition did not converge - ",
             "results are unreliable (see $notes).", call. = FALSE)
+  } else if (nzchar(out$notes) && grepl("warning:", tolower(out$notes),
+                                        fixed = TRUE)) {
+    warning("xhdfe_akm_kss: inferential diagnostic - ", out$notes,
+            call. = FALSE)
   }
   out
 }

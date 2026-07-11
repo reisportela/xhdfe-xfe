@@ -23,7 +23,7 @@ subsampling diagnostic and export to the `pytwoway` / LeaveOutTwoWay format.
 
 **Gelbach** — decomposing the movement of a base coefficient (a return to
 education) between a short and a long regression into an additive,
-order-invariant contribution per channel, with unadjusted and cluster-robust
+order-invariant contribution per declared block, with unadjusted and cluster-robust
 inference.
 
 ## Running them
@@ -52,6 +52,10 @@ Rscript examples/gelbach_example.R
 
 For the GPU (CUDA) path, add `gpu` (Stata) / `gpu=True` (Python) / `gpu=TRUE`
 (R) to the AKM calls when the plugin/extension was built with CUDA support.
+In Stata, `xhdfegelbach, gpu verbose` accelerates the full HDFE absorption and
+shows phase progress; `xhdfeconnected, gpu verbose` uses deterministic CUDA
+radix sorting on graphs at or above its measured 10-million-row profitability
+gate and reports the effective backend in `r(gpu_status)`.
 
 ## Background and validation
 

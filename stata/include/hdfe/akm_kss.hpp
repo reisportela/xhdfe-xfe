@@ -52,6 +52,17 @@ struct AkmOptions {
     void* progress_user = nullptr;       //!< Opaque pointer handed back to `progress`.
 };
 
+// Options for the standalone leave-out connected-set utility.  The graph
+// semantics are identical to the sample-building phase of akm_kss_decompose;
+// these switches control execution and progress reporting only.
+struct LeaveOutSetOptions {
+    int num_threads = 0;                 //!< 0 = preserve the caller/library default.
+    bool use_gpu = false;                //!< Use CUDA for stable match-key sorting when profitable/available; graph pruning remains CPU.
+    int verbose = 0;                     //!< 0 = silent; 1 = phase progress. Output only.
+    void (*progress)(const char* line, void* user) = nullptr;
+    void* progress_user = nullptr;
+};
+
 // Leave-out connected-set result. keep refers to the ORIGINAL input rows.
 struct LeaveOutSetResult {
     std::vector<std::uint8_t> keep;  //!< 1 = row belongs to the leave-out connected sample.
@@ -64,6 +75,9 @@ struct LeaveOutSetResult {
     int n_movers = 0;                //!< Workers with >= 2 distinct firms in the leave-out sample.
     int n_stayers = 0;               //!< Workers with a single firm in the leave-out sample.
     int prune_iterations = 0;
+    int threads_used = 1;          //!< OpenMP budget used by sample construction.
+    bool gpu_used = false;         //!< CUDA stable sort actually executed.
+    int gpu_status_code = 0;       //!< 0 not requested, 1 used, 2 unavailable, 4 failed, 6 below profitability gate.
 };
 
 // One variance-decomposition column: the three canonical AKM components.
@@ -117,8 +131,9 @@ struct AkmKssResult {
     // theta_c_* are the leave_out_COMPLETE-convention point estimates the
     // SEs are centered on (they differ from the kss components by O(1/n):
     // uncentered y, 1/n normalization, oracle stayer conventions).
-    // se_var_alpha / theta_c_var_alpha are NaN at match level when stayers
-    // are present (not identified; oracle rule).
+    // se_var_alpha / theta_c_var_alpha are NaN at match level: the canonical
+    // leave_out_COMPLETE oracle reports only the firm and covariance
+    // components there.  Use observation level for var(alpha) inference.
     double se_var_psi = 0.0;
     double se_cov_alpha_psi = 0.0;
     double se_var_alpha = 0.0;
@@ -128,8 +143,8 @@ struct AkmKssResult {
 
     // Weak-identification diagnostics and Andrews-Mikusheva q=1 confidence
     // intervals (eigen_diagnostics = true; leave_out_COMPLETE conventions).
-    // Arrays are indexed fe(0), cov(1), pe(2); pe entries are NaN under the
-    // match-level-with-stayers rule.
+    // Arrays are indexed fe(0), cov(1), pe(2); pe entries are NaN at match
+    // level under the leave_out_COMPLETE oracle rule.
     double eig_lambda1[3] = {0, 0, 0};        //!< Top eigenvalue of Atilde (unnormalized).
     double eig_share1[3] = {0, 0, 0};         //!< lambda_1^2 / tr(Atilde^2).
     double eig_share2[3] = {0, 0, 0};
@@ -169,8 +184,9 @@ struct AkmKssResult {
 // serves both leave-out levels (the level changes the collapse and sigma_i,
 // not the pruning).
 LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
-                                          const Eigen::VectorXi& firm_ids,
-                                          const Eigen::VectorXd* fweights = nullptr);
+                                           const Eigen::VectorXi& firm_ids,
+                                           const Eigen::VectorXd* fweights = nullptr,
+                                           const LeaveOutSetOptions& options = LeaveOutSetOptions{});
 
 // Full AKM + leave-out variance decomposition on the leave-out connected set.
 // X may be nullptr (no controls); controls are partialled out at the
@@ -210,6 +226,9 @@ struct GelbachOptions {
     bool cov0 = false;
     double tol = 1e-8;
     int num_threads = 0;
+    int verbose = 0;                     //!< 0 = silent; 1 = phase progress. Output only.
+    void (*progress)(const char* line, void* user) = nullptr;
+    void* progress_user = nullptr;
 };
 
 struct GelbachResult {
@@ -223,6 +242,12 @@ struct GelbachResult {
     long long n_obs = 0;
     double df_full = 0.0;
     bool converged = true;
+    int threads_used = 1;
+    bool gpu_used = false;
+    int gpu_status_code = 0;
+    bool gpu_attempted = false;
+    bool gpu_absorption_converged = false;
+    int gpu_absorption_iterations = 0;
     std::string notes;
 };
 

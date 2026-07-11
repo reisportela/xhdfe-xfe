@@ -44,7 +44,11 @@ separately; inspect \code{fwl_threads_used} and \code{threads_used}.}
 
 \item{fwl_tol, fwl_max_iter}{Absorber controls for the covariate step.}
 
-\item{compute_se}{Component standard errors (KSS leave-out inference).}
+\item{compute_se}{Component standard errors (KSS leave-out inference).
+Under the canonical leave_out_COMPLETE rule, match level reports firm and
+covariance inference only; var(alpha) SE/CI are missing at match level even
+without stayers. Use \code{leave_out_level = "obs"} for var(alpha)
+inference.}
 
 \item{se_nsim}{Simulation draws for the SE quadratic part (default 1000).}
 
@@ -112,8 +116,10 @@ multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
 (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
 (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
 The solves are batched without changing the estimator or solver tolerances;
-different schedules can differ at the last-ulp level. A \code{warning()} fires on non-convergence
-(check \code{$converged}).
+different schedules can differ at the last-ulp level. A \code{warning()} fires on
+non-convergence (check \code{$converged}) and on inferential diagnostics
+recorded in \code{$notes}, including omitted collinear controls, truncated
+negative simulated variances and undefined AM intervals.
 }
 
 \examples{

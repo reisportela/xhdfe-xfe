@@ -97,7 +97,15 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     The leverage and SE solves are batched without changing the estimator or
     solver tolerances. Different thread/backend reduction schedules can differ
     at the last-ulp level. A ``RuntimeWarning`` is emitted if the decomposition
-    does not converge (check ``res['converged']``).
+    does not converge (check ``res['converged']``) or if ``notes`` contains an
+    inferential warning (collinear control omission, a truncated negative
+    simulated variance, or an undefined AM interval).
+
+    Under the canonical ``leave_out_COMPLETE`` rule, match-level component
+    inference reports only ``var_psi`` and ``cov_alpha_psi``. Therefore
+    ``se_var_alpha`` and its AM diagnostics are missing at match level even on
+    movers-only samples; use ``leave_out_level='obs'`` for var(alpha)
+    inference. Point decompositions remain available at both levels.
 
     Pass ``verbose=1`` to print phase-by-phase progress to stderr (leave-out
     set, FWL, solver choice, JLA draws d/D with elapsed time and an ETA, SE
@@ -119,14 +127,22 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
         # Surface non-convergence loudly, matching the Stata front-end
         # (di as err) and the Gelbach front-end's warning — a silently
         # returned non-converged decomposition is a footgun.
+        note = str(res.get("notes", "")).strip()
         if res.get("converged") is False:
             import warnings
 
-            note = str(res.get("notes", "")).strip()
             warnings.warn(
                 "xhdfe.akm.akm_kss: the AKM/KSS decomposition did not "
                 "converge — results are unreliable."
                 + (f" notes: {note}" if note else ""),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif "warning:" in note.lower():
+            import warnings
+
+            warnings.warn(
+                "xhdfe.akm.akm_kss: inferential diagnostic. " + note,
                 RuntimeWarning,
                 stacklevel=2,
             )

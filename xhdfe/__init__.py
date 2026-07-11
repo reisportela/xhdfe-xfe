@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+
 from ._version import __version__
 from ._help import help_path, help_text, print_help
 
@@ -39,11 +41,7 @@ def __getattr__(name: str):
     if name in _CORE_EXPORTS:
         return getattr(_load_core(), name)
     if name == "akm":
-        from . import akm
-
-        return akm
+        return importlib.import_module(".akm", __name__)
     if name == "gelbach":
-        from . import gelbach
-
-        return gelbach
+        return importlib.import_module(".gelbach", __name__)
     raise AttributeError(f"module 'xhdfe' has no attribute {name!r}")
