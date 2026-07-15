@@ -29,7 +29,7 @@ jobs:
   validate-tag:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
@@ -49,7 +49,7 @@ jobs:
     needs: validate-tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: Build Linux plugins (manylinux2014, CPU, OpenMP)
@@ -85,7 +85,7 @@ jobs:
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cpu
           cp stata/xfe.plugin artifacts/xfe.plugin.linux-cpu
       - name: Upload Linux plugin artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: plugins-linux
           path: artifacts/*
@@ -95,7 +95,7 @@ jobs:
     needs: validate-tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: Install MinGW toolchain
@@ -117,7 +117,7 @@ jobs:
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
           cp stata/xfe.plugin artifacts/xfe.plugin.windows
       - name: Upload Windows plugin artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: plugins-windows
           path: artifacts/*
@@ -133,7 +133,7 @@ jobs:
     needs: validate-tag
     runs-on: macos-14           # Apple Silicon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: Install zip
@@ -150,7 +150,7 @@ jobs:
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.macos
           cp stata/xfe.plugin artifacts/xfe.plugin.macos
       - name: Upload macOS plugin artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: plugins-macos
           path: artifacts/*
@@ -166,7 +166,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [linux, windows, macos]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: Install zip
@@ -179,7 +179,7 @@ jobs:
           sudo apt-get update || true
           sudo apt-get install -y zip
       - name: Download plugin artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dl
           pattern: plugins-*
@@ -204,7 +204,6 @@ jobs:
             --windows-xhdfe dl/xhdfe.plugin.windows \
             --windows-xfe   dl/xfe.plugin.windows
           bash tools/validate_stata_package_site.sh netinstall_site/stata
-          ( cd netinstall_site && zip -q -r -X ../xhdfe-stata-netinstall-site.zip . )
       - name: Build offline source distribution zip (for xhdfegpu)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -233,7 +232,12 @@ jobs:
       - name: Attach net-install site snapshot to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" xhdfe-stata-netinstall-site.zip --clobber --repo "${{ github.repository }}"
+        run: |
+          set -euo pipefail
+          ( cd netinstall_site && zip -q -r -X ../xhdfe-stata-netinstall-site.zip . )
+          unzip -t xhdfe-stata-netinstall-site.zip
+          unzip -Z1 xhdfe-stata-netinstall-site.zip | grep -Fxq 'stata/xhdfe-src.zip'
+          gh release upload "$TAG" xhdfe-stata-netinstall-site.zip --clobber --repo "${{ github.repository }}"
       - name: Publish Stata net-install site to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
