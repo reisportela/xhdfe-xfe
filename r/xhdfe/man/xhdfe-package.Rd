@@ -111,7 +111,7 @@ acknowledged. The usual disclaimer applies.
 
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.11.0.
+effects regression via a C++ backend." Version 2.18.2.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear

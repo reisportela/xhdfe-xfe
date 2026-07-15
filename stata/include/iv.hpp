@@ -8,6 +8,7 @@ namespace detail {
 
 Eigen::MatrixXd project_endogenous(const Eigen::MatrixXd& instrument_matrix,
                                    const Eigen::MatrixXd& endogenous,
+                                   int num_exogenous,
                                    const Eigen::VectorXd* weights);
 
 }  // namespace detail

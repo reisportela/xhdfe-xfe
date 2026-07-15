@@ -7330,7 +7330,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     "Instrument matrix is empty after combining exogenous regressors and user-supplied instruments");
             }
             Eigen::MatrixXd projected =
-                detail::project_endogenous(instrument_matrix, X_endog, w_ptr);
+                detail::project_endogenous(instrument_matrix, X_endog,
+                                           static_cast<int>(X_exog.cols()), w_ptr);
             Eigen::MatrixXd second_stage = transformed_X_used;
             for (int idx = 0; idx < static_cast<int>(active_endog_cols.size()); ++idx) {
                 second_stage.col(active_endog_cols[static_cast<std::size_t>(idx)]) = projected.col(idx);

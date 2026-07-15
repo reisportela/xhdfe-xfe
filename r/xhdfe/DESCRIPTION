@@ -1,7 +1,7 @@
 Package: xhdfe
 Type: Package
 Title: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend
-Version: 2.18.1.20260711
+Version: 2.18.2.20260715
 Authors@R: c(
     person("Miguel", "Portela", email = "miguel.portela@eeg.uminho.pt", role = c("aut", "cre")),
     person("Tiago", "Tavares", email = "tgstavares@eeg.uminho.pt", role = "aut"))
@@ -20,8 +20,8 @@ License: MIT + file LICENSE
 Copyright: The package bundles the Eigen 3.4.0 headers (MPL-2.0, with parts
     under BSD-3-Clause and Apache-2.0); see inst/COPYRIGHTS and the license
     texts under src/eigen/.
-URL: https://github.com/reisportela/xhdfe
-BugReports: https://github.com/reisportela/xhdfe/issues
+URL: https://github.com/reisportela/xhdfe-xfe
+BugReports: https://github.com/reisportela/xhdfe-xfe/issues
 Encoding: UTF-8
 NeedsCompilation: yes
 SystemRequirements: C++17 compiler (GCC, Clang/AppleClang, or Rtools/MinGW),

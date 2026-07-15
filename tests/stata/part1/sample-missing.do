@@ -65,11 +65,20 @@ if (`rc' != 198) {
 }
 di as text "  expected rc individual_without_group: `rc'"
 
-xhdfe y x z, absorb(id) endogenous(x) instruments(z) keepsingletons noheader notable nofootnote
+xhdfe y x, absorb(id) endogenous(x) instruments(z) keepsingletons noheader notable nofootnote
 if (e(N) != 95) {
     di as error "IV missing-data sample count mismatch: e(N)=" e(N)
     exit 9
 }
 di as text "  scalar iv_markout_N: " e(N)
+
+capture noisily xhdfe y x z, absorb(id) endogenous(x) instruments(z) ///
+    keepsingletons noheader notable nofootnote
+local rc = _rc
+if (`rc' != 198) {
+    di as error "expected duplicated included/excluded instrument to fail with rc=198; got rc=`rc'"
+    exit 9
+}
+di as text "  expected rc duplicated_included_excluded_instrument: `rc'"
 
 exit

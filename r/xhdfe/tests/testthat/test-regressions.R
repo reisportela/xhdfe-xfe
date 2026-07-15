@@ -133,3 +133,30 @@ test_that("matrix interface rejects NAs in ids, weights and instruments (audit P
                          endogenous = 2),
                "missing values")
 })
+
+test_that("IV identification failures are loud without classifying weak full-rank IV", {
+  X <- cbind(x1 = rd$x1, endo = rd$endo)
+  expect_error(
+    xhdfe_fit(rd$y, X, fes = list(rd$f1),
+              instruments = matrix(0, n, 1), endogenous = 2),
+    "zero|rank deficient"
+  )
+  expect_error(
+    xhdfe_fit(rd$y, X, fes = list(rd$f1),
+              instruments = cbind(rd$z, rd$z), endogenous = 2),
+    "rank deficient"
+  )
+  endo2 <- 0.4 * rd$z + rnorm(n)
+  expect_error(
+    xhdfe_fit(rd$y, cbind(X, endo2 = endo2), fes = list(rd$f1),
+              instruments = matrix(rd$z, n, 1), endogenous = c(2, 3)),
+    "underidentified"
+  )
+
+  weak_endo <- 1e-8 * rd$z + rnorm(n)
+  weak_y <- 0.4 * rd$x1 + 0.8 * weak_endo + rnorm(n)
+  weak <- xhdfe_fit(weak_y, cbind(x1 = rd$x1, endo = weak_endo),
+                    instruments = matrix(rd$z, n, 1), endogenous = 2)
+  expect_true(weak$converged)
+  expect_true(all(is.finite(weak$coefficients)))
+})
