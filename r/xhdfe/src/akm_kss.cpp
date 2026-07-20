@@ -2822,6 +2822,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 
     // ---- sigma_i ------------------------------------------------------------
     Eigen::VectorXd sigma(static_cast<Eigen::Index>(R));
+    std::int64_t n_unit_leverage_nonstayer = 0;
     for (Eigen::Index r = 0; r < static_cast<Eigen::Index>(R); ++r) {
         if (match_level && row_stayer[static_cast<std::size_t>(r)]) {
             sigma[r] = 0.0;  // replaced below
@@ -2829,8 +2830,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
         const double m = Mii[r];
         if (m <= 1e-12) {
-            res.converged = false;
-            res.notes += "leverage ~1 on a non-stayer row; sample is not leave-out connected. ";
+            ++n_unit_leverage_nonstayer;
             sigma[r] = 0.0;
             continue;
         }
@@ -2838,6 +2838,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // binaries realize (see XHDFE_AKM_STRICT_FN): bit-stable across
         // builds where plain source is re-associated unpredictably.
         sigma[r] = sigma_row_product(yt[r] - mean_yt, corr[r], eta[r], m);
+    }
+    if (n_unit_leverage_nonstayer > 0) {
+        res.converged = false;
+        // Keep diagnostics O(1) in the sample size.  Appending this sentence
+        // once per affected row could exceed Stata's macro/line limit before
+        // the ado layer had a chance to display the non-convergence warning.
+        res.notes +=
+            "leverage ~1 on a non-stayer row; sample is not leave-out connected; "
+            "affected working rows: " +
+            std::to_string(n_unit_leverage_nonstayer) + ". ";
     }
     if (match_level) {
         // Stayer sigma via the person-year formula (LeaveOutTwoWay
@@ -4611,6 +4621,86 @@ Eigen::MatrixXd cluster_meat(const Eigen::MatrixXd& Z, const Eigen::VectorXi* co
     return sums.transpose() * sums;
 }
 
+// The general HDFE estimator classifies a slope as FE-collinear when the
+// squared norm left after absorption is at most 1e-9 of the raw squared norm
+// (src/hdfe_regressor_v11.cpp). Keep the Gelbach metadata and the inference
+// diagnostic tied to that exact, documented boundary.
+constexpr double kGelbachFeCollinearSsRatioTol = 1e-9;
+
+bool gelbach_same_partition(const Eigen::VectorXi& a,
+                            const Eigen::VectorXi& b) {
+    if (a.size() != b.size() || a.size() == 0) return false;
+    std::unordered_map<int, int> a_to_b;
+    std::unordered_map<int, int> b_to_a;
+    a_to_b.reserve(static_cast<std::size_t>(a.size()) / 4 + 16);
+    b_to_a.reserve(static_cast<std::size_t>(a.size()) / 4 + 16);
+    for (Eigen::Index i = 0; i < a.size(); ++i) {
+        const auto ab = a_to_b.emplace(a[i], b[i]);
+        if (!ab.second && ab.first->second != b[i]) return false;
+        const auto ba = b_to_a.emplace(b[i], a[i]);
+        if (!ba.second && ba.first->second != a[i]) return false;
+    }
+    return true;
+}
+
+bool gelbach_targets_invariant_within_cluster(
+    const Eigen::MatrixXd& X1,
+    const std::vector<int>& targets,
+    const Eigen::VectorXi& codes,
+    int n_clusters,
+    const Eigen::VectorXd& weights) {
+    if (X1.rows() != codes.size() || weights.size() != codes.size() ||
+        X1.rows() == 0 || n_clusters <= 0) {
+        return false;
+    }
+    Eigen::VectorXd group_w = Eigen::VectorXd::Zero(n_clusters);
+    for (Eigen::Index i = 0; i < codes.size(); ++i) {
+        group_w[codes[i]] += weights[i];
+    }
+    for (const int target : targets) {
+        Eigen::VectorXd group_sum = Eigen::VectorXd::Zero(n_clusters);
+        double raw_ss = 0.0;
+        for (Eigen::Index i = 0; i < codes.size(); ++i) {
+            const double wi = weights[i];
+            const double xi = X1(i, target);
+            group_sum[codes[i]] += wi * xi;
+            raw_ss += wi * xi * xi;
+        }
+        double within_ss = 0.0;
+        for (Eigen::Index i = 0; i < codes.size(); ++i) {
+            const int g = codes[i];
+            if (!(group_w[g] > 0.0)) return false;
+            const double demeaned = X1(i, target) - group_sum[g] / group_w[g];
+            within_ss += weights[i] * demeaned * demeaned;
+        }
+        if (!(raw_ss > 0.0) ||
+            within_ss > kGelbachFeCollinearSsRatioTol * raw_ss) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int gelbach_absorbing_cluster_fe(
+    const Eigen::MatrixXd& X1,
+    const std::vector<int>& targets,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXi* cluster_codes,
+    int n_clusters,
+    const Eigen::VectorXd& weights) {
+    if (cluster_codes == nullptr || targets.empty()) return -1;
+    if (!gelbach_targets_invariant_within_cluster(
+            X1, targets, *cluster_codes, n_clusters, weights)) {
+        return -1;
+    }
+    for (std::size_t d = 0; d < fes.size(); ++d) {
+        if (gelbach_same_partition(fes[d], *cluster_codes)) {
+            return static_cast<int>(d);
+        }
+    }
+    return -1;
+}
+
 Eigen::MatrixXd gelbach_cluster_meat_streamed(
     const Eigen::MatrixXd& W,
     const Eigen::MatrixXd& X1t,
@@ -4816,6 +4906,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     const Eigen::Index n0 = y_in.size();
     const int p = static_cast<int>(X1_in.cols());
     const int q = static_cast<int>(X2_in.cols());
+    if (p <= 0) {
+        throw std::runtime_error(
+            "gelbach: X1 must contain at least one focal column");
+    }
     if (X1_in.rows() != n0 || (q > 0 && X2_in.rows() != n0)) {
         throw std::runtime_error("gelbach: X1/X2 must have the same rows as y");
     }
@@ -4843,7 +4937,28 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         throw std::runtime_error("gelbach: tol must be finite and strictly positive");
     }
 
+    std::vector<unsigned char> declared_absorbed(static_cast<std::size_t>(p), 0);
+    for (const int c : options.absorbed_x1) {
+        if (c < 0 || c >= p) {
+            throw std::runtime_error(
+                "gelbach: absorbed_x1 index is outside the X1 column range");
+        }
+        if (declared_absorbed[static_cast<std::size_t>(c)] != 0) {
+            throw std::runtime_error(
+                "gelbach: absorbed_x1 indices must be unique");
+        }
+        declared_absorbed[static_cast<std::size_t>(c)] = 1;
+    }
+    const bool absorbed_target_mode = !options.absorbed_x1.empty();
+    if (absorbed_target_mode && fes_in.empty()) {
+        throw std::runtime_error(
+            "gelbach: absorbed targets require at least one absorbed FE dimension");
+    }
+
     GelbachResult res;
+    res.n_obs_input = static_cast<long long>(n0);
+    res.x1_absorbed = Eigen::VectorXi::Zero(p);
+    res.fe_collinear_ss_ratio_tol = kGelbachFeCollinearSsRatioTol;
     const int recovery_threads = gelbach_recovery_team(options.num_threads, n0);
     const int G = static_cast<int>(x2_group_sizes.size() + fes_in.size());
     const int k1 = p + 1;
@@ -4884,16 +4999,60 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     progress.say("full specification fitted: converged=%s, %d thread(s)%s",
                  reg.results().converged ? "yes" : "NO", reg.threads_used(),
                  reg.gpu_used() ? ", CUDA used" : "");
-    for (int c = 0; c < p + q; ++c) {
-        const auto& omitted = reg.results().omitted_reason;
-        if (c < static_cast<int>(omitted.size()) &&
-            omitted[static_cast<std::size_t>(c)] != 0) {
-            throw std::runtime_error(
-                "gelbach: the full specification is rank deficient after "
-                "absorbing fixed effects; every x1/x2 column must be uniquely "
-                "identified (remove duplicate, overlapping, or collinear columns)");
+    const auto& omitted = reg.results().omitted_reason;
+    std::vector<int> active_x1;
+    if (!absorbed_target_mode) {
+        // Keep the established estimand on a branch with no absorbed-target
+        // bookkeeping in its hot path.
+        for (int c = 0; c < p + q; ++c) {
+            const int reason = c < static_cast<int>(omitted.size())
+                                   ? omitted[static_cast<std::size_t>(c)]
+                                   : 0;
+            if (reason != 0) {
+                throw std::runtime_error(
+                    "gelbach: the full specification is rank deficient after "
+                    "absorbing fixed effects; every undeclared x1/x2 column must "
+                    "be uniquely identified (remove duplicate, overlapping, or "
+                    "collinear columns)");
+            }
+        }
+    } else {
+        active_x1.reserve(static_cast<std::size_t>(p));
+        for (int c = 0; c < p + q; ++c) {
+            const int reason = c < static_cast<int>(omitted.size())
+                                   ? omitted[static_cast<std::size_t>(c)]
+                                   : 0;
+            const bool declared =
+                c < p && declared_absorbed[static_cast<std::size_t>(c)] != 0;
+            if (declared) {
+                // This is a different, explicitly constrained estimand.  It
+                // is admissible only when the target itself is in the FE
+                // span. A generic rank omission (reason 2), or a target that
+                // remains identified, must never be silently re-labelled as
+                // absorbed.
+                if (reason != 1) {
+                    throw std::runtime_error(
+                        "gelbach: every declared absorbed target must be omitted "
+                        "specifically because it is collinear with the absorbed "
+                        "fixed effects");
+                }
+                res.x1_absorbed[c] = 1;
+            } else if (reason != 0) {
+                throw std::runtime_error(
+                    "gelbach: the full specification is rank deficient after "
+                    "absorbing fixed effects; every undeclared x1/x2 column must "
+                    "be uniquely identified (remove duplicate, overlapping, or "
+                    "collinear columns)");
+            }
+            if (c < p && reason == 0) {
+                active_x1.push_back(c);
+            }
         }
     }
+    const int p_score = absorbed_target_mode
+                            ? static_cast<int>(active_x1.size())
+                            : p;
+    const int score_design_cols = p_score + q;
     // (b) separate FE recovery on the kept sample (fast-fit mode only).
     // A retained 1-column fit would spend ~95% of its time in non-accelerated
     // GS sweeps whose alphas get discarded when the hybrid check falls back to
@@ -4950,7 +5109,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         // preconditioner build and one batched multi-RHS solve serve both the
         // FE recovery warm start (y-slot alphas) and the within matrix W.
         const bool want_W =
-            options.vce != GelbachVce::Unadjusted && (p + q) > 0;
+            options.vce != GelbachVce::Unadjusted && score_design_cols > 0;
         if (warm_recovery) {
             HdfeOptions mo = ho;
             mo.absorption_method = AbsorptionMethod::Mlsmr;
@@ -4963,11 +5122,24 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             // — invisible to any polish-side certificate. Solving the exact
             // normal equations removes the bias at the source.
             mo.krylov_lambda = 0.0;
-            Eigen::MatrixXd xin(nk, want_W ? (p + q) : 0);
+            Eigen::MatrixXd xin(nk, want_W ? score_design_cols : 0);
             if (want_W) {
+                if (!absorbed_target_mode) {
 #pragma omp parallel for schedule(static)
-                for (Eigen::Index i = 0; i < nk; ++i) {
-                    xin.row(i) = X_full.row(keep0[i]);
+                    for (Eigen::Index i = 0; i < nk; ++i) {
+                        xin.row(i) = X_full.row(keep0[i]);
+                    }
+                } else {
+#pragma omp parallel for schedule(static)
+                    for (Eigen::Index i = 0; i < nk; ++i) {
+                        int out = 0;
+                        for (const int c : active_x1) {
+                            xin(i, out++) = X_full(keep0[i], c);
+                        }
+                        for (int c = 0; c < q; ++c) {
+                            xin(i, out++) = X_full(keep0[i], p + c);
+                        }
+                    }
                 }
             }
             detail::AbsorptionResult ares =
@@ -5070,6 +5242,16 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     const Eigen::VectorXd coefs = regu.results().coefficients;
     const bool has_cons = coefs.size() == p + q + 1;
     res.b_full = coefs.head(p);
+    if (absorbed_target_mode) {
+        for (int c = 0; c < p; ++c) {
+            if (res.x1_absorbed[c] != 0) {
+                // The engine expands omitted coefficients as zero. Assign the
+                // constraint explicitly so callers cannot mistake signed zero
+                // or stale storage for an estimate.
+                res.b_full[c] = 0.0;
+            }
+        }
+    }
     const Eigen::VectorXd b2 = coefs.segment(p, q);
     const Eigen::MatrixXd V_hom = regu.results().covariance;
     const Eigen::VectorXd e = regu.results().residuals;
@@ -5220,7 +5402,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             }
         }
     }
-    res.n_obs = static_cast<long long>(n);
+    res.n_singletons_dropped =
+        static_cast<long long>(regu.results().num_singletons);
 
     // weights: wq = moment weight (aweights normalized to sum n), sf = score
     // factor for the sandwich meat, n_eff = effective observation count
@@ -5246,6 +5429,21 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             wq = w_raw * (static_cast<double>(n) / w_raw.sum());
             sf = wq;
         }
+    }
+    // Preserve the historical n_obs row-count contract (and the standard
+    // path's bit-identical output).  Report Stata's sum-of-fweights N through
+    // the explicit additive field used by human-facing displays.
+    res.n_obs = static_cast<long long>(n);
+    res.n_obs_effective = freq_weights && weights != nullptr
+                              ? static_cast<long long>(std::llround(n_eff))
+                              : static_cast<long long>(n);
+    if (absorbed_target_mode) {
+        res.absorbing_fe_index =
+            options.vce == GelbachVce::Cluster
+                ? gelbach_absorbing_cluster_fe(
+                      X1, options.absorbed_x1, fes, ccodes_ptr, n_clusters, wq)
+                : -1;
+        res.absorbed_target_inference_valid = res.absorbing_fe_index >= 0;
     }
 
     // ---- base model (X1 + constant, no FEs) ------------------------------
@@ -5279,6 +5477,39 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     const Eigen::MatrixXd P =
         (X1t.transpose() * X1tw).ldlt().solve(Eigen::MatrixXd::Identity(k1, k1));
 
+    // In absorbed-target mode total_j = b_base_j - 0 is literally the base
+    // coefficient estimator for every declared target. Its reported variance
+    // must therefore be the base-model variance under the requested VCE. Keep
+    // this calculation off the standard path and leave the established
+    // component stacked-GMM covariance untouched; only the authoritative
+    // target-target block of total_cov is replaced below.
+    Eigen::MatrixXd absorbed_base_cov;
+    if (absorbed_target_mode) {
+        const double df_base = n_eff - static_cast<double>(k1);
+        if (!(df_base > 0.0) || bco.size() != k1) {
+            throw std::runtime_error(
+                "gelbach: insufficient base-model residual degrees of freedom");
+        }
+        const Eigen::VectorXd u_base = y - X1t * bco;
+        if (options.vce == GelbachVce::Unadjusted) {
+            const double sigma2_base =
+                (wq.array() * u_base.array().square()).sum() / df_base;
+            absorbed_base_cov = sigma2_base * P;
+        } else {
+            const Eigen::VectorXd base_score = sf.cwiseProduct(u_base);
+            const Eigen::MatrixXd Zbase =
+                X1t.array().colwise() * base_score.array();
+            const Eigen::MatrixXd Mbase =
+                cluster_meat(Zbase, ccodes_ptr, n_clusters);
+            double correction = n_eff / df_base;
+            if (ccodes_ptr != nullptr) {
+                const double gc = static_cast<double>(n_clusters);
+                correction = (n_eff - 1.0) / df_base * gc / (gc - 1.0);
+            }
+            absorbed_base_cov = correction * (P * Mbase * P);
+        }
+    }
+
     std::vector<Eigen::VectorXd> H(G), vres(G), dvec(G);
     std::vector<Eigen::MatrixXd> gam(G);   // k1 x q_g; empty for FE blocks
     std::vector<std::pair<int, int>> span(G, {-1, -1});
@@ -5303,6 +5534,22 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     bool any_fe_block = !fes.empty();
     if (any_fe_block) {
         res.notes += "absorbed FE blocks use the aux-regression (gamma0) variance. ";
+    }
+    if (absorbed_target_mode) {
+        res.notes +=
+            "declared absorbed-target coefficients in the full model are "
+            "imposed at zero, not estimated. ";
+        if (res.absorbed_target_inference_valid) {
+            res.notes +=
+                "absorbed-target inference is clustered at an FE dimension "
+                "that absorbs every declared target. ";
+        } else {
+            res.notes +=
+                "WARNING: absorbed-target inference is not certified for this "
+                "VCE. Use vce(cluster) with clusters equal to an FE dimension "
+                "that absorbs every declared target; unadjusted, robust, or "
+                "crossed clustering can be anti-conservative. ";
+        }
     }
 
     // ---- covariance --------------------------------------------------------
@@ -5346,7 +5593,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             // one full absorber fit per column. XHDFE_GELBACH_WITHIN_BATCH=0
             // restores the per-column loop (its per-column stopping rule can
             // differ from the joint one at the solver-tolerance level).
-            Kx = p + q;
+            Kx = score_design_cols;
             W.resize(n, Kx);
             bool within_batch = true;
             if (const char* wb = std::getenv("XHDFE_GELBACH_WITHIN_BATCH")) {
@@ -5359,15 +5606,31 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             hw.tol = options.tol;
             hw.num_threads = recovery_threads;
             hw.weights_are_frequencies = freq_weights;
-            if (within_batch && W_pre.rows() == n && W_pre.cols() == Kx) {
+            if (Kx == 0) {
+                // A full model containing only absorbed FEs is valid in the
+                // absorbed-target mode. Its stacked score has no explicit
+                // slope block; the auxiliary Gelbach equations remain.
+                gprof_.mark("gel_within_batch");
+            } else if (within_batch && W_pre.rows() == n && W_pre.cols() == Kx) {
                 // Demeaned [x1, x2] already produced by the shared MLSMR
                 // absorption in the FE-recovery warm start above.
                 W = std::move(W_pre);
                 gprof_.mark("gel_within_batch");
             } else if (within_batch) {
                 Eigen::MatrixXd X1X2(n, Kx);
-                X1X2.leftCols(p) = X1;
-                X1X2.rightCols(q) = X2;
+                if (!absorbed_target_mode) {
+                    // Preserve the standard path's matrix construction.
+                    X1X2.leftCols(p) = X1;
+                    X1X2.rightCols(q) = X2;
+                } else {
+                    int out = 0;
+                    for (const int c : active_x1) {
+                        X1X2.col(out++) = X1.col(c);
+                    }
+                    if (q > 0) {
+                        X1X2.rightCols(q) = X2;
+                    }
+                }
                 v11::HdfeRegressorV11 wreg(hw);
                 const detail::AbsorptionResult ab = wreg.partial_out(
                     X1X2.col(0), X1X2.rightCols(Kx - 1), fes,
@@ -5377,11 +5640,26 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         gprof_.mark("gel_within_batch");
             } else {
                 Eigen::MatrixXd ones = Eigen::MatrixXd::Ones(n, 1);
-                for (int c = 0; c < Kx; ++c) {
-                    const Eigen::VectorXd col = c < p ? X1.col(c) : X2.col(c - p);
-                    v11::HdfeRegressorV11 wreg(hw);
-                    wreg.fit(col, ones, fes, weights != nullptr ? &w_raw : nullptr);
-                    W.col(c) = wreg.results().residuals;
+                if (!absorbed_target_mode) {
+                    for (int c = 0; c < Kx; ++c) {
+                        const Eigen::VectorXd col =
+                            c < p ? X1.col(c) : X2.col(c - p);
+                        v11::HdfeRegressorV11 wreg(hw);
+                        wreg.fit(col, ones, fes,
+                                 weights != nullptr ? &w_raw : nullptr);
+                        W.col(c) = wreg.results().residuals;
+                    }
+                } else {
+                    for (int c = 0; c < Kx; ++c) {
+                        const Eigen::VectorXd col =
+                            c < p_score
+                                ? X1.col(active_x1[static_cast<std::size_t>(c)])
+                                : X2.col(c - p_score);
+                        v11::HdfeRegressorV11 wreg(hw);
+                        wreg.fit(col, ones, fes,
+                                 weights != nullptr ? &w_raw : nullptr);
+                        W.col(c) = wreg.results().residuals;
+                    }
                 }
             }
         } else {
@@ -5391,10 +5669,12 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             if (q > 0) W.middleCols(p, q) = X2;
             W.col(Kx - 1).setOnes();
         }
-        const Eigen::MatrixXd Sw =
-            (W.transpose() * (wq.asDiagonal() * W))
-                .ldlt()
-                .solve(Eigen::MatrixXd::Identity(Kx, Kx));
+        Eigen::MatrixXd Sw(Kx, Kx);
+        if (Kx > 0) {
+            Sw = (W.transpose() * (wq.asDiagonal() * W))
+                     .ldlt()
+                     .solve(Eigen::MatrixXd::Identity(Kx, Kx));
+        }
         double q_big, q_vu;
         const double nd = n_eff;
         if (ccodes_ptr == nullptr) {
@@ -5433,18 +5713,27 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         const Eigen::MatrixXd C = q_big * (bread * M * bread);
         const Eigen::MatrixXd vu =
             q_vu * (Sw * M.topLeftCorner(Kx, Kx) * Sw);
+        // With absorbed targets the full-model score contains only the
+        // identified X1 columns, followed by X2. In the standard mode this
+        // remains exactly the historical offset p.
+        const int x2_score_offset = p_score;
         for (int g = 0; g < G; ++g) {
             for (int h = 0; h < G; ++h) {
                 Eigen::MatrixXd block = C.block(Kx + g * k1, Kx + h * k1, k1, k1);
                 if (!options.gamma0 && gam[g].size() > 0 && gam[h].size() > 0) {
                     const int s0 = span[g].first, sq = span[g].second - span[g].first;
                     const int t0 = span[h].first, tq = span[h].second - span[h].first;
-                    block += gam[g] * vu.block(p + s0, p + t0, sq, tq) * gam[h].transpose();
+                    block += gam[g] *
+                             vu.block(x2_score_offset + s0,
+                                      x2_score_offset + t0, sq, tq) *
+                             gam[h].transpose();
                     if (!options.cov0) {
                         const Eigen::MatrixXd cr =
-                            gam[g] * C.block(p + s0, Kx + h * k1, sq, k1);
+                            gam[g] * C.block(x2_score_offset + s0,
+                                             Kx + h * k1, sq, k1);
                         const Eigen::MatrixXd crT =
-                            (gam[h] * C.block(p + t0, Kx + g * k1, tq, k1)).transpose();
+                            (gam[h] * C.block(x2_score_offset + t0,
+                                              Kx + g * k1, tq, k1)).transpose();
                         block += cr + crT;
                     }
                 }
@@ -5465,6 +5754,13 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             res.total_cov += fullcov.block(g * k1, h * k1, k1, k1);
         }
     }
+    if (absorbed_target_mode) {
+        for (const int r : options.absorbed_x1) {
+            for (const int c : options.absorbed_x1) {
+                res.total_cov(r, c) = absorbed_base_cov(r, c);
+            }
+        }
+    }
     Eigen::VectorXd b_base_c(k1), b_full_c(k1);
     b_base_c.head(p) = res.b_base;
     b_base_c[p] = bco.size() == p + 1 ? bco[p] : 0.0;
@@ -5473,9 +5769,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     res.identity_gap = (b_base_c - b_full_c - res.total).cwiseAbs().maxCoeff();
     const bool gap_finite =
         res.identity_gap > -1e300 && res.identity_gap < 1e300;
+    const double base_scale =
+        res.b_base.size() > 0 ? res.b_base.cwiseAbs().maxCoeff() : 0.0;
     if (!gap_finite ||
-        res.identity_gap >
-            1e-6 * std::max(1.0, res.b_base.cwiseAbs().maxCoeff())) {
+        res.identity_gap > 1e-6 * std::max(1.0, base_scale)) {
         res.converged = false;
         res.notes += "identity gap above tolerance. ";
     }

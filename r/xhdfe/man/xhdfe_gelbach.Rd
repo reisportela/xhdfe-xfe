@@ -6,38 +6,94 @@
 \usage{
 xhdfe_gelbach(y, x1, x2_groups = NULL, fes = NULL, vce = "unadjusted",
   cluster = NULL, gamma0 = FALSE, cov0 = FALSE, tol = 1e-8,
-  num_threads = 0L, weights = NULL, fweights = FALSE)
+  num_threads = 0L, weights = NULL, fweights = FALSE,
+  absorbed_targets = NULL, focal = NULL)
 }
 \arguments{
-\item{y}{Numeric outcome, length n.}
+\item{y}{Finite numeric outcome of length n.}
 
-\item{x1}{Numeric matrix (n rows) of base covariates whose coefficient
-movement is decomposed.}
+\item{x1}{Finite numeric matrix or vector with n rows containing the base
+covariates whose coefficient movement is decomposed. Do not append a constant:
+the same intercept is implicit in both specifications.}
 
-\item{x2_groups}{Named list of numeric matrices (n rows), one entry per
-covariate group added in the full model.}
+\item{x2_groups}{Named list of finite numeric matrices or vectors with n rows.
+Each entry is one simultaneous observed-covariate block added in the full
+model.}
 
-\item{fes}{List of fixed-effect identifier vectors (integer, factor or
-character), each absorbed with the xhdfe backend and treated as its own
-group.}
+\item{fes}{Named list of length-n fixed-effect identifier vectors (integer,
+factor or character), each absorbed with the xhdfe backend and treated as its
+own group.}
 
 \item{vce}{\code{"unadjusted"} (default), \code{"robust"} or
 \code{"cluster"} (with \code{cluster}).}
 
-\item{cluster}{Cluster identifiers (used with \code{vce = "cluster"}).}
+\item{cluster}{Length-n cluster identifiers, required only with
+\code{vce = "cluster"}. Clustering is one-way and requires at least two
+clusters.}
 
-\item{gamma0, cov0}{Reproduce the corresponding options of Gelbach's
-\code{b1x2} reference implementation.}
+\item{gamma0}{Retain the auxiliary-regression component of the variance,
+matching Gelbach's \code{b1x2} \code{gamma0} option.}
+
+\item{cov0}{Omit robust stacked-system cross terms, matching \code{b1x2}; it
+is a no-op for unadjusted inference.}
 
 \item{tol}{Positive fixed-effect absorption tolerance. The default
-\code{1e-8} preserves the historical effective tolerance.}
+\code{1e-8} preserves the historical effective tolerance. This is the
+iterative-solver tolerance, not the separate FE-collinearity classification
+boundary.}
 
 \item{num_threads}{OpenMP threads (0 = library default).}
 
-\item{weights}{Optional analytic weights (aweights, b1x2 conventions).}
+\item{weights}{Optional finite, strictly positive analytic weights (b1x2
+conventions).}
 
 \item{fweights}{Set to TRUE to interpret \code{weights} as frequency
-weights instead.}
+weights instead; frequency weights must be positive integers.}
+
+\item{absorbed_targets}{Optional X1 column names, one-based indices, or a
+length-p logical mask. This activates the distinct absorbed-target allocation
+estimand. Every target must be collinear specifically with \code{fes}; its
+full-model coefficient is imposed at zero, not estimated.}
+
+\item{focal}{Optional X1 column names, one-based indices, or a length-p
+logical mask used only for reporting. All X1 columns remain in both models;
+this permits common controls to stay in the estimand while only focal
+coefficients are printed or tidied.}
+}
+\section{Specification and sample contract}{
+All X1 columns remain in both models. Every entry of \code{x2_groups} and
+\code{fes} is added simultaneously to the full model; list order does not
+define a sequential or path-dependent allocation. Block names must be unique
+and nonempty across both lists. At least one observed block or FE dimension is
+required.
+
+The R wrapper requires finite numeric inputs and does not silently remove
+missing rows. Construct one common complete-case sample before calling it.
+Recursive FE singleton removal can still occur inside the backend. Inspect
+\code{$n_obs_input}, \code{$n_obs}, \code{$n_obs_effective}, and
+\code{$n_singletons_dropped}. Under frequency weights, effective N is the sum
+of retained weights; \code{$n_obs} remains the retained row count. Base, full,
+and auxiliary projections use the same sample and weight inner product. Rank
+failures, cross-block dependencies, and undeclared omissions fail closed.
+}
+\section{Inference and covariance}{
+Observed-block inference reproduces \code{b1x2}'s random-design stacked-moment
+variance for unadjusted, robust, and one-way clustered VCEs. It includes
+uncertainty in the auxiliary projections and is not the smaller variance
+conditional on the realised design. Absorbed-FE blocks receive
+conditional/\code{gamma0} variance, so totals combining observed and FE blocks
+are labelled as mixed.
+
+For an absorbed target, \code{total_j = b_base_j - 0} is the base-coefficient
+estimator. Valid inference requires clustering at an FE dimension that absorbs
+that target. Other VCE choices remain available for descriptive accounting but
+warn and set \code{$absorbed_target_inference_valid = FALSE}.
+
+The joint \code{$cov} matrix is group-major. With
+\code{k1 = ncol(x1) + 1}, its ordering is
+\code{[group1:x1, group1:_cons, group2:x1, group2:_cons, ...]}.
+Use this matrix or \code{xhdfe_gelbach_contrast()} for sums and linear
+contrasts. Do not add component variances or SEs as if blocks were independent.
 }
 \value{
 An object of class \code{xhdfe_gelbach}: a list with the base and full
@@ -50,8 +106,59 @@ A small \code{$identity_gap} certifies the decomposition identity only —
 it is not evidence that the per-dimension FE split is accurate.
 \code{$fe_total} contains the aggregate absorbed-FE contribution and its
 conditional/\code{gamma0} covariance; \code{$se_type} labels inference by
-block. \code{$estimand} is \code{"coefficient_movement"} and
+block, and \code{$total_se_type} distinguishes full, conditional and mixed
+totals. \code{$n_obs_input}, \code{$n_singletons_dropped}, \code{$n_obs} and
+\code{$n_obs_effective} record the sample transition and effective weighted N.
+\code{$estimand} is
+\code{"coefficient_movement"} by default or
+\code{"absorbed_target_allocation"} in the opt-in constrained mode, and
 \code{$causal_interpretation} is always \code{FALSE}.
+The backend-authoritative \code{$absorbed_mask} is returned in X1 order;
+\code{$absorbed_targets} contains zero-based indices in every frontend, while
+\code{$absorbed_target_names} contains human-readable column names.
+\code{$x1_names}, \code{$focal_indices}, and \code{$focal_names} record the
+reporting selection; the indices are zero-based across all frontends.
+The FE-classification boundary is exposed as
+\code{$fe_collinear_ss_ratio_tol = 1e-9}, equivalently a relative residual
+norm of about \code{3.16e-5}. The historical \code{$n_obs} remains the
+retained row count; \code{$n_obs_effective} is the sum of retained frequency
+weights (and otherwise equals the row count) and is used by the printed N.
+
+The full programmatic schema is organized as follows:
+\itemize{
+\item coefficients and contributions: \code{$b_base}, \code{$b_full},
+  \code{$b_full_status}, \code{$delta}, \code{$se}, \code{$cov},
+  \code{$total}, \code{$total_se}, \code{$total_cov}, and optional
+  \code{$fe_total};
+\item names and reporting selectors: \code{$names}, \code{$group_kinds},
+  \code{$x1_names}, \code{$focal_indices}, \code{$focal_names}, and
+  \code{$focal_selection_explicit};
+\item estimand and identification: \code{$estimand}, \code{$identity_status},
+  \code{$absorbed_mask}, its legacy backend alias \code{$x1_absorbed},
+  \code{$absorbed_targets},
+  \code{$absorbed_target_names}, and \code{$focal_status};
+\item inference: \code{$vce}, \code{$gamma0}, \code{$cov0}, \code{$tol},
+  \code{$se_type}, \code{$total_se_type}, \code{$inference_status},
+  \code{$absorbed_target_inference_valid}, and
+  \code{$absorbing_fe_index};
+\item diagnostics: \code{$identity_gap}, \code{$converged}, \code{$notes},
+  \code{$df_full}, the four sample-count fields, and the squared-norm and
+  relative-norm FE-collinearity thresholds. \code{$causal_interpretation} is
+  always \code{FALSE}.
+}
+R accepts one-based selector indices but returns \code{$focal_indices},
+\code{$absorbed_targets}, and \code{$absorbing_fe_index} as zero-based
+cross-frontend metadata.
+}
+\section{Printing and reporting}{
+\code{print()} displays base and full coefficients, total movement and its SE,
+component contributions and SEs, and the normalization-safe FE subtotal. It
+respects the stored \code{focal} selector and accepts \code{digits}; an
+absorbed target's full coefficient is printed as \code{0 (imposed)}.
+
+\code{xhdfe_gelbach_tidy()} produces rectangular rows, confidence intervals,
+and signed shares. \code{xhdfe_gelbach_contrast()} computes linear
+combinations from the stored joint covariance.
 }
 \note{
 The default compiled path is the more-converged one: it resolves the
@@ -74,6 +181,28 @@ single connected mobility component the x1-row split is identified.
 
 Standard errors for absorbed-FE blocks are conditional/\code{gamma0}:
 uncertainty from estimating the absorbed effects is not fully included.
+Consequently a total that combines observed and FE blocks is labelled as a
+mixed conditional total rather than as full inference.
+
+The reported Gelbach covariance follows \code{b1x2}'s random-design stacked-
+moment variance and includes uncertainty in the auxiliary projections; it is
+not the smaller variance conditional on the realised design. For every
+declared absorbed target, \code{total_j = b_base_j - 0} is the base-coefficient
+estimator itself, so its target-target block in \code{$total_cov} is exactly
+the requested base-model VCE. Component covariances remain the documented
+mixed observed/conditional-FE decomposition.
+
+Inference for a target invariant within an absorbing FE must be clustered at
+that FE dimension. Other choices, including unadjusted, robust, or clustering
+on a crossed dimension, can be anti-conservative and therefore emit a runtime
+warning. Inspect \code{$absorbed_target_inference_valid},
+\code{$absorbing_fe_index}, and \code{$inference_status}.
+
+The default standard mode still rejects every omitted X1/X2 column. With
+\code{absorbed_targets}, only targets classified by the backend as collinear
+with the absorbed FEs are allowed; other rank failures remain errors. A target
+zero in \code{$b_full} has status \code{"imposed_zero"}, never
+\code{"estimated"}; the printed coefficient row says \code{0 (imposed)}.
 
 Severely near-collinear observed x2 blocks are flagged in \code{$notes}
 without changing values; their split SE can be rounding/tolerance sensitive.
@@ -91,14 +220,70 @@ errors per contribution. Numerical semantics follow Gelbach's \code{b1x2}
 (the reference implementation this function is validated against),
 including the aweight/fweight conventions.
 
+When \code{absorbed_targets} is supplied, the full model is explicitly
+constrained to zero on those FE-absorbed X1 columns and the reported object is
+an allocation of the base coefficient under that constraint, not the standard
+two-identified-coefficient comparison.
+
+The optional \code{focal} selector is reporting-only. Common controls must
+remain columns of \code{x1}; placing them among the added groups instead would
+change the base model and hence the decomposition. Publication-ready rows,
+signed shares, and joint-covariance contrasts are available through
+\code{\link{xhdfe_gelbach_tidy}} and \code{\link{xhdfe_gelbach_contrast}}.
+
 This is specification accounting, not causal mediation. Causal interpretation
 requires a separately justified research design; block names and causal roles
 are supplied by the researcher and are not validated by the function.
+}
+\section{Deliberate limits}{
+The R companion has no \code{gpu} argument and should be treated as a CPU
+interface. It does not implement IV/LATE allocation, multiway clustering,
+wild-cluster bootstrap, nonconditional recovered-FE covariance, a separate
+HDFE set common to base and full, dynamic-panel corrections, nonlinear or
+distributional decompositions, Oaxaca wrappers, or causal mediation.
+
+Explicit numeric columns can represent polynomials, bins, splines,
+interactions, and low-dimensional effects common to both specifications.
+Because an intercept is implicit, categorical indicators common to both models
+must use a full-rank reference coding rather than all category dummies.
+High-dimensional entries in \code{fes} are added full-model components.
 }
 \references{
 Gelbach, J. B. (2016). When do covariates matter? And which ones, and how
 much? \emph{Journal of Labor Economics} 34(2), 509-543.
 }
 \seealso{
+\code{\link{xhdfe_gelbach_tidy}}, \code{\link{xhdfe_gelbach_contrast}},
 \code{\link{xhdfe_akm_kss}}
+}
+\examples{
+\dontrun{
+# target and controls common to base and full; report only target
+fit <- xhdfe_gelbach(
+  y = dat$lwage,
+  x1 = cbind(target = dat$female, age = dat$age),
+  x2_groups = list(
+    human_capital = cbind(dat$educ, dat$educ_sq),
+    job = cbind(dat$tenure, dat$experience)
+  ),
+  fes = list(firm = dat$firm, occupation = dat$occupation),
+  vce = "cluster", cluster = dat$worker,
+  focal = "target"
+)
+rows <- xhdfe_gelbach_tidy(fit, share = "movement")
+observed <- xhdfe_gelbach_contrast(
+  fit, focal = "target", groups = c("human_capital", "job")
+)
+
+# distinct constrained estimand: target is invariant within worker
+absorbed <- xhdfe_gelbach(
+  y = dat$lwage,
+  x1 = cbind(target = dat$female, age = dat$age),
+  x2_groups = list(job = cbind(dat$tenure, dat$experience)),
+  fes = list(worker = dat$worker, firm = dat$firm),
+  vce = "cluster", cluster = dat$worker,
+  absorbed_targets = "target", focal = "target"
+)
+stopifnot(absorbed$b_full_status[["target"]] == "imposed_zero")
+}
 }

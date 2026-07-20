@@ -1,9 +1,31 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.18.2.20260715 LANGUAGES CXX)
+project(xhdfe VERSION 2.19.0.20260720 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Production artifacts are Release by default and must never inherit Eigen's
+# assertion-enabled ABI merely because a stale build directory once selected
+# Debug.  Diagnostic non-Release builds remain possible, but require an
+# explicit opt-out and are not shippable.
+option(XHDFE_ALLOW_NON_RELEASE_BUILD
+       "Allow assertion-enabled diagnostic builds (never use for release artifacts)."
+       OFF)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+if(NOT XHDFE_ALLOW_NON_RELEASE_BUILD)
+    if(CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_CONFIGURATION_TYPES "Release" CACHE STRING
+            "Supported configurations for certifiable artifacts" FORCE)
+    elseif(NOT CMAKE_BUILD_TYPE STREQUAL "Release")
+        message(FATAL_ERROR
+            "xhdfe production builds require CMAKE_BUILD_TYPE=Release. "
+            "Use -DXHDFE_ALLOW_NON_RELEASE_BUILD=ON only for local diagnostics.")
+    endif()
+    add_compile_definitions(NDEBUG)
+endif()
 
 include(FetchContent)
 include(CheckCXXCompilerFlag)
@@ -70,27 +92,18 @@ if(XHDFE_ENABLE_METAL)
     enable_language(OBJCXX)
 endif()
 
-# Eigen3
-find_package(Eigen3 3.3 QUIET)
-if(NOT Eigen3_FOUND)
-    if(EXISTS "${XHDFE_THIRD_PARTY_DIR}/eigen-3.4.0/Eigen/Dense")
-        message(STATUS "Eigen3 not found. Using vendored third_party/eigen-3.4.0.")
-        add_library(Eigen3::Eigen INTERFACE IMPORTED)
-        target_include_directories(Eigen3::Eigen INTERFACE "${XHDFE_THIRD_PARTY_DIR}/eigen-3.4.0")
-    else()
-        message(STATUS "Eigen3 not found. Fetching from source...")
-        FetchContent_Declare(
-            eigen3
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-            URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
-        )
-        FetchContent_MakeAvailable(eigen3)
-        if(NOT TARGET Eigen3::Eigen)
-            add_library(Eigen3::Eigen INTERFACE IMPORTED)
-            target_include_directories(Eigen3::Eigen INTERFACE ${eigen3_SOURCE_DIR})
-        endif()
-    endif()
+# Eigen3: pin provenance to the copy tracked inside this repository.  Never
+# allow find_package() to resolve an unrelated sibling checkout or host install.
+set(XHDFE_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/r/xhdfe/src/eigen"
+    CACHE PATH "In-repository Eigen 3.4.0 source directory")
+if(NOT EXISTS "${XHDFE_EIGEN_DIR}/Eigen/Dense")
+    message(FATAL_ERROR
+        "Vendored Eigen is missing at ${XHDFE_EIGEN_DIR}; refusing an "
+        "uncertifiable out-of-repository fallback.")
 endif()
+message(STATUS "Using pinned in-repository Eigen: ${XHDFE_EIGEN_DIR}")
+add_library(Eigen3::Eigen INTERFACE IMPORTED)
+target_include_directories(Eigen3::Eigen INTERFACE "${XHDFE_EIGEN_DIR}")
 
 # pybind11 (optional)
 if(XHDFE_BUILD_PYTHON)

@@ -21,6 +21,7 @@ local n_firms 60
 set obs `n'
 gen double ability = rnormal()
 gen double educ    = 0.5 * ability + rnormal()
+gen double age     = 35 + 3 * ability + 5 * rnormal()
 gen long   firm_id = 1 + int((`n_firms' - 1) * normal(0.4 * ability + rnormal()))
 gen double tenure  = rnormal() + 0.2 * ability
 gen double exper   = rnormal()
@@ -41,29 +42,31 @@ gen double y = 0.5 * educ + 0.8 * ability + 0.1 * tenure + firmpay + rnormal()
 *   - an ability block
 *   - a job-covariate block (tenure, exper)
 *   - a firm fixed-effect block (firm_id, absorbed with the xhdfe backend)
+* Age remains a common control in both models. focal(educ) changes only the
+* displayed/reported selection; it never removes age from x1().
 *------------------------------------------------------------------------------
-xhdfegelbach y, x1(educ) ///
+xhdfegelbach y, x1(educ age) focal(educ) ///
     x2groups("ability = ability : job_covariates = tenure exper") ///
-    fes(firm_id)
+    fes(firm_id) shares(movement)
 
-di as txt _n "Total movement in the educ coefficient (short - long):"
-matrix list r(total), noheader format(%9.5f)
-di as txt "Contribution of each declared block (delta):"
-matrix list r(delta), noheader format(%9.5f)
-di as txt "Standard errors:"
-matrix list r(se), noheader format(%9.5f)
-di as txt "summation identity residual = " as res %9.2e r(identity_gap)
-di as txt "absorbed-FE aggregate (conditional/gamma0 SE):"
-matrix list r(fe_total), noheader format(%9.5f)
-di as txt "interpretation: coefficient-movement accounting; not causal mediation"
+assert r(converged) == 1
+assert "`r(focal_names)'" == "educ"
+assert "`r(share_denominator)'" == "movement"
+* Full-precision objects remain available for downstream work:
+matrix educ_total = r(total)
+matrix educ_contributions = r(delta)
+matrix educ_contribution_se = r(se)
+matrix educ_fe_total = r(fe_total)
+matrix educ_movement_shares = r(share)
+assert abs(educ_movement_shares[1, 1] + educ_movement_shares[1, 2] + ///
+    educ_movement_shares[1, 3] - 1) < 1e-12
 
 *------------------------------------------------------------------------------
 * Cluster-robust inference by firm.
 *------------------------------------------------------------------------------
-xhdfegelbach y, x1(educ) ///
+xhdfegelbach y, x1(educ age) focal(educ) ///
     x2groups("ability = ability : job_covariates = tenure exper") ///
     fes(firm_id) vce(cluster) cluster(firm_id)
-di as txt _n "cluster-robust standard errors:"
-matrix list r(se), noheader format(%9.5f)
+assert r(converged) == 1
 
 di as txt _n "done."

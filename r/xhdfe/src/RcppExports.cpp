@@ -106,8 +106,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // xhdfe_cpp_gelbach
-Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y, Rcpp::NumericMatrix X1, SEXP X2, Rcpp::IntegerVector x2_group_sizes, Rcpp::List fes, SEXP cluster, std::string vce, bool gamma0, bool cov0, double tol, int num_threads, SEXP weights, bool fweights);
-RcppExport SEXP _xhdfe_xhdfe_cpp_gelbach(SEXP ySEXP, SEXP X1SEXP, SEXP X2SEXP, SEXP x2_group_sizesSEXP, SEXP fesSEXP, SEXP clusterSEXP, SEXP vceSEXP, SEXP gamma0SEXP, SEXP cov0SEXP, SEXP tolSEXP, SEXP num_threadsSEXP, SEXP weightsSEXP, SEXP fweightsSEXP) {
+Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y, Rcpp::NumericMatrix X1, SEXP X2, Rcpp::IntegerVector x2_group_sizes, Rcpp::List fes, SEXP cluster, std::string vce, bool gamma0, bool cov0, double tol, int num_threads, SEXP weights, bool fweights, Rcpp::IntegerVector absorbed_x1);
+RcppExport SEXP _xhdfe_xhdfe_cpp_gelbach(SEXP ySEXP, SEXP X1SEXP, SEXP X2SEXP, SEXP x2_group_sizesSEXP, SEXP fesSEXP, SEXP clusterSEXP, SEXP vceSEXP, SEXP gamma0SEXP, SEXP cov0SEXP, SEXP tolSEXP, SEXP num_threadsSEXP, SEXP weightsSEXP, SEXP fweightsSEXP, SEXP absorbed_x1SEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -124,7 +124,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< int >::type num_threads(num_threadsSEXP);
     Rcpp::traits::input_parameter< SEXP >::type weights(weightsSEXP);
     Rcpp::traits::input_parameter< bool >::type fweights(fweightsSEXP);
-    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_gelbach(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, weights, fweights));
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type absorbed_x1(absorbed_x1SEXP);
+    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_gelbach(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, weights, fweights, absorbed_x1));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -136,7 +137,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_xhdfe_xhdfe_cpp_build_info", (DL_FUNC) &_xhdfe_xhdfe_cpp_build_info, 0},
     {"_xhdfe_xhdfe_cpp_akm_leave_out_set", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_leave_out_set, 2},
     {"_xhdfe_xhdfe_cpp_akm_kss", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_kss, 6},
-    {"_xhdfe_xhdfe_cpp_gelbach", (DL_FUNC) &_xhdfe_xhdfe_cpp_gelbach, 13},
+    {"_xhdfe_xhdfe_cpp_gelbach", (DL_FUNC) &_xhdfe_xhdfe_cpp_gelbach, 14},
     {NULL, NULL, 0}
 };
 

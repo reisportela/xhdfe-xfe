@@ -1,6 +1,7 @@
 # xhdfe Python help
 
-Version: 2.16.0.20260710
+Published package version: 2.19.0.20260720. Use `python -m xhdfe --version`
+to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
 exposes the same compiled estimator that older scripts imported as
@@ -36,9 +37,10 @@ Python environments under Rosetta. The explicit safe-path workaround is:
 XHDFE_ENABLE_MARCH_NATIVE=OFF python -m pip install .
 ```
 
-CUDA builds require the source (build from a clone or `git+` URL, not a prebuilt
-wheel) and the NVIDIA toolkit. Set the arch to your GPU's compute capability
-(`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`, e.g. `9.0` maps to `90`):
+CUDA builds require the source (build from a clone or `git+` URL, not a
+prebuilt wheel) and the NVIDIA toolkit. Set the architecture to the GPU's
+compute capability (`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`;
+for example, `9.0` maps to `90`) and request CUDA with environment variables:
 
 ```bash
 XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
@@ -62,6 +64,20 @@ The legacy import remains available after installation:
 import py_hdfe_v11
 
 reg = py_hdfe_v11.HdfeRegressor()
+```
+
+Companion modules use the same compiled core:
+
+```python
+from xhdfe import akm, gelbach
+```
+
+For the complete Gelbach decomposition API, including absorbed targets, focal
+reporting, signed shares and contrasts, run:
+
+```bash
+python -m xhdfe gelbach
+xhdfe-help gelbach
 ```
 
 ## Minimal example
@@ -267,6 +283,14 @@ python -m xhdfe
 xhdfe-help
 ```
 
+List or open companion topics:
+
+```bash
+xhdfe-help --topics
+xhdfe-help gelbach
+python -m xhdfe gelbach
+```
+
 Print the help resource path:
 
 ```bash
@@ -279,4 +303,5 @@ Inside Python:
 import xhdfe
 
 print(xhdfe.help_text())
+print(xhdfe.help_text("gelbach"))
 ```

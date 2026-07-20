@@ -224,6 +224,11 @@ struct GelbachOptions {
     GelbachVce vce = GelbachVce::Unadjusted;
     bool gamma0 = false;
     bool cov0 = false;
+    // Zero-based X1 columns that the caller explicitly permits the full
+    // model to absorb. Every declared column must be classified by the HDFE
+    // fit as collinear with the absorbed FEs (omitted_reason == 1); all other
+    // X1/X2 columns remain subject to the standard fail-hard rank guard.
+    std::vector<int> absorbed_x1;
     double tol = 1e-8;
     int num_threads = 0;
     int verbose = 0;                     //!< 0 = silent; 1 = phase progress. Output only.
@@ -233,14 +238,21 @@ struct GelbachOptions {
 
 struct GelbachResult {
     Eigen::VectorXd b_base;   //!< Base-specification coefficients on X1.
-    Eigen::VectorXd b_full;   //!< Full-specification coefficients on X1.
+    Eigen::VectorXd b_full;   //!< Full coefficients on X1; declared absorbed targets are constrained to zero.
+    Eigen::VectorXi x1_absorbed; //!< 1 where b_full is imposed zero because X1 is absorbed; 0 where estimated.
     Eigen::MatrixXd delta;    //!< (p+1) x G contributions over [x1..., _cons]; group order = x2 groups then FE dims.
     Eigen::MatrixXd cov;      //!< (G*(p+1)) x (G*(p+1)) covariance of vec(delta).
     Eigen::VectorXd total;    //!< Summed contribution (= b_base - b_full over [x1, _cons]).
     Eigen::MatrixXd total_cov;
     double identity_gap = 0.0;
-    long long n_obs = 0;
+    long long n_obs_input = 0;
+    long long n_obs = 0;       //!< Retained row count (historical public field).
+    long long n_obs_effective = 0; //!< Retained rows normally; sum of retained fweights under frequency weighting.
+    long long n_singletons_dropped = 0;
     double df_full = 0.0;
+    double fe_collinear_ss_ratio_tol = 1e-9; //!< Backend FE-absorption classification boundary: ||M_D x||^2 / ||x||^2.
+    bool absorbed_target_inference_valid = true; //!< True unless absorbed-target inference is requested away from an absorbing FE cluster.
+    int absorbing_fe_index = -1; //!< Zero-based FE dimension matching the cluster and absorbing every target; -1 if unavailable/not applicable.
     bool converged = true;
     int threads_used = 1;
     bool gpu_used = false;

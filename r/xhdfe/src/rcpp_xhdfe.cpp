@@ -1058,7 +1058,8 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                              double tol,
                              int num_threads,
                              SEXP weights,
-                             bool fweights) {
+                             bool fweights,
+                             Rcpp::IntegerVector absorbed_x1) {
     const R_xlen_t n = y.size();
     if (X1.nrow() != n) {
         throw std::runtime_error("x1 must have the same number of rows as y");
@@ -1105,6 +1106,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     }
     opt.gamma0 = gamma0;
     opt.cov0 = cov0;
+    opt.absorbed_x1.assign(absorbed_x1.begin(), absorbed_x1.end());
     opt.tol = tol;
     opt.num_threads = num_threads;
     Eigen::VectorXd w_vec;
@@ -1127,13 +1129,24 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     Rcpp::List out;
     out["b_base"] = Rcpp::NumericVector(r.b_base.data(), r.b_base.data() + r.b_base.size());
     out["b_full"] = Rcpp::NumericVector(r.b_full.data(), r.b_full.data() + r.b_full.size());
+    out["x1_absorbed"] =
+        Rcpp::IntegerVector(r.x1_absorbed.data(),
+                            r.x1_absorbed.data() + r.x1_absorbed.size());
     out["delta"] = to_rmat(r.delta);
     out["cov"] = to_rmat(r.cov);
     out["total"] = Rcpp::NumericVector(r.total.data(), r.total.data() + r.total.size());
     out["total_cov"] = to_rmat(r.total_cov);
     out["identity_gap"] = r.identity_gap;
+    out["n_obs_input"] = static_cast<double>(r.n_obs_input);
     out["n_obs"] = static_cast<double>(r.n_obs);
+    out["n_obs_effective"] = static_cast<double>(r.n_obs_effective);
+    out["n_singletons_dropped"] =
+        static_cast<double>(r.n_singletons_dropped);
     out["df_full"] = r.df_full;
+    out["fe_collinear_ss_ratio_tol"] = r.fe_collinear_ss_ratio_tol;
+    out["absorbed_target_inference_valid"] =
+        r.absorbed_target_inference_valid;
+    out["absorbing_fe_index"] = r.absorbing_fe_index;
     out["converged"] = r.converged;
     out["notes"] = r.notes;
     return out;

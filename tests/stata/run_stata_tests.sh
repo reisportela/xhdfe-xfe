@@ -43,4 +43,40 @@ if ! grep -q "XHDFE STATA CERTIFICATION TESTS COMPLETED SUCCESSFULLY" "${LOG_FIL
   exit 1
 fi
 
+# Human-facing Gelbach output is a public contract: keep the integrated
+# coefficient/block layout and audible diagnostics from silently reverting to
+# separate raw matrix dumps or generic "see r(notes)" messages.
+gelbach_markers=(
+  "Gelbach decomposition of coefficient movement"
+  "Movement = base coefficient - full coefficient"
+  "Coefficient: x1"
+  "Covariate blocks"
+  "Absorbed fixed effects"
+  "All fixed effects (subtotal)"
+  "Total movement"
+  "Result status"
+  "0 (imposed)"
+  "Summation check (max absolute residual)"
+  "Interpretation: specification accounting, not causal mediation."
+  "Reported focal coefficient(s):"
+  "Shares: signed fraction of total movement"
+  "Share inference: delta method using the joint component covariance."
+  "observed x2 group 1 is severely ill-conditioned"
+  "absorbed-target inference is not certified for this VCE"
+)
+for marker in "${gelbach_markers[@]}"; do
+  if ! grep -Fq "${marker}" "${LOG_FILE}"; then
+    echo "Stata certification failed: missing Gelbach output marker: ${marker}" >&2
+    exit 1
+  fi
+done
+if grep -Fq "Gelbach inferential diagnostic; see r(notes)" "${LOG_FILE}"; then
+  echo "Stata certification failed: Gelbach warning regressed to a generic r(notes) pointer" >&2
+  exit 1
+fi
+if grep -Fq "Contributions (delta):" "${LOG_FILE}"; then
+  echo "Stata certification failed: Gelbach display regressed to separate raw matrix dumps" >&2
+  exit 1
+fi
+
 echo "Stata certification log: ${LOG_FILE}"

@@ -270,7 +270,7 @@ fi
 # macros stderr/stdin/stdout; use gnu++17 there so they are exposed. Linux/macOS
 # stay on strict c++17 (bit-identical to prior builds).
 if [[ "${TARGET}" == "windows" ]]; then CXX_STD="gnu++17"; else CXX_STD="c++17"; fi
-common_compile_flags=( "-std=${CXX_STD}" -O3 "-DSYSTEM=${SYSTEM_DEF}" )
+common_compile_flags=( "-std=${CXX_STD}" -O3 -DNDEBUG "-DSYSTEM=${SYSTEM_DEF}" )
 if [[ "${TARGET}" != "windows" ]]; then
   common_compile_flags+=( -fPIC -pthread )
   pthread_flag=( -pthread )
@@ -411,7 +411,7 @@ compile_plugin() {
     while true; do
       objs=()
       cxx_flags=( "${common_compile_flags[@]}" "${extra_flags[@]}" -DHDFE_USE_CUDA )
-      nvcc_flags=( -std=c++17 -O3 --expt-relaxed-constexpr -DHDFE_USE_CUDA "-DSYSTEM=${SYSTEM_DEF}" )
+      nvcc_flags=( -std=c++17 -O3 -DNDEBUG --expt-relaxed-constexpr -DHDFE_USE_CUDA "-DSYSTEM=${SYSTEM_DEF}" )
       nvcc_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
       nvcc_flags+=( -Xcompiler "-fPIC" )
       # ABI consistency: Eigen's EIGEN_MAX_ALIGN_BYTES tracks the SIMD width, so a
@@ -532,6 +532,17 @@ if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
     "${STRIP_BIN}" -x "${OUT_PLUGIN}" || true
   else
     "${STRIP_BIN}" "${OUT_PLUGIN}" || true
+  fi
+fi
+
+if [[ "${TARGET}" != "windows" && "${UNAME_S}" == "Linux" ]]; then
+  if nm -D "${OUT_PLUGIN}" | grep 'U __assert_fail' >/dev/null; then
+    echo "Error: ${OUT_PLUGIN} contains live assertion code; refusing artifact." >&2
+    exit 1
+  fi
+  if [[ "${OPENMP_MODE}" == "on" ]] && ! ldd "${OUT_PLUGIN}" | grep 'libgomp' >/dev/null; then
+    echo "Error: --openmp was requested but ${OUT_PLUGIN} does not link libgomp." >&2
+    exit 1
   fi
 fi
 

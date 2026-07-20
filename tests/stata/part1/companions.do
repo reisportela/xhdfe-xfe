@@ -104,6 +104,112 @@ assert `gel_gpu_used_compact' == 0
 assert `gel_gpu_code_compact' == 0
 assert "`gel_gpu_status_compact'" == "not_requested"
 
+* The empirical reporting layer is opt-in and numerically inert. A common
+* control remains in x1() while focal() selects only the paper-facing row.
+gen double common_control = 0.15 * x1 + rnormal()
+quietly xhdfegelbach y, x1(x1 common_control) focal(x1) ///
+    x2groups("observables = x2") fes(fe) shares(movement)
+assert r(converged) == 1
+assert r(focal_selection_explicit) == 1
+assert "`r(x1_names)'" == "x1 common_control"
+assert "`r(focal_indices)'" == "0"
+assert "`r(focal_names)'" == "x1"
+assert "`r(share_denominator)'" == "movement"
+assert "`r(share_se_type)'" == "joint_covariance_delta_method"
+assert "`r(share_units)'" == "fraction"
+matrix gel_reporting_delta = r(delta)
+matrix gel_movement_share = r(share)
+matrix gel_movement_share_se = r(share_se)
+assert abs(gel_movement_share[1, 1] + gel_movement_share[1, 2] - 1) < 1e-12
+assert !missing(gel_movement_share_se[1, 1])
+
+quietly xhdfegelbach y, x1(x1 common_control) ///
+    x2groups("observables = x2") fes(fe)
+matrix gel_reporting_default_delta = r(delta)
+xcert_assert_matrix_close gel_reporting_delta gel_reporting_default_delta, ///
+    tol(0) name("Gelbach focal reporting is numerically inert")
+
+quietly xhdfegelbach y, x1(x1 common_control) focal(x1) ///
+    x2groups("observables = x2") fes(fe) shares(base)
+matrix gel_base_share = r(share)
+matrix gel_base_share_se = r(share_se)
+assert !missing(gel_base_share[1, 1])
+assert missing(gel_base_share_se[1, 1])
+assert "`r(share_se_type)'" == "not_available_joint_base_covariance"
+
+quietly xhdfegelbach y, x1(x1 common_control) focal(x1) ///
+    x2groups("observables = x2") fes(fe) shares(base_fixed)
+matrix gel_fixed_share_se = r(share_se)
+assert !missing(gel_fixed_share_se[1, 1])
+assert "`r(share_se_type)'" == "fixed_base_denominator_scaling"
+
+capture noisily xhdfegelbach y, x1(x1 common_control) focal(x2) ///
+    x2groups("observables = x2") fes(fe)
+assert _rc == 198
+capture noisily xhdfegelbach y, x1(x1 common_control) ///
+    x2groups("observables = x2") fes(fe) shares(unknown)
+assert _rc == 198
+
+* A worker-invariant X1 target is rejected by the standard estimand.  The
+* explicit absorbed-target mode constrains only that coefficient to zero and
+* labels it as imposed rather than estimated.
+gen byte female = mod(worker, 2)
+capture noisily xhdfegelbach y, x1(female x1) ///
+    x2groups("observables = x2") fes(worker)
+assert _rc != 0
+xhdfegelbach y, x1(female x1) x2groups("observables = x2") ///
+    fes(worker) absorbedtargets(female) vce(cluster) cluster(worker)
+local gel_abs_estimand "`r(estimand)'"
+local gel_abs_identity "`r(identity_status)'"
+local gel_abs_targets "`r(absorbed_targets)'"
+local gel_abs_target_names "`r(absorbed_target_names)'"
+local gel_abs_bstatus "`r(b_full_status)'"
+local gel_abs_fstatus "`r(focal_status)'"
+local gel_abs_total_se_type "`r(total_se_type)'"
+local gel_abs_inference_status "`r(inference_status)'"
+local gel_abs_inference_valid = r(absorbed_target_inference_valid)
+local gel_abs_fe_index = r(absorbing_fe_index)
+local gel_abs_feclass_tol = r(fe_collinear_ss_ratio_tol)
+matrix gel_abs_bbase = r(b_base)
+matrix gel_abs_bfull = r(b_full)
+matrix gel_abs_total = r(total)
+matrix gel_abs_mask = r(absorbed_mask)
+assert r(converged) == 1
+assert r(identity_gap) < 1e-10
+assert r(n_obs_input) == 600
+assert r(n_singletons_dropped) == 0
+assert "`gel_abs_estimand'" == "absorbed_target_allocation"
+assert "`gel_abs_identity'" == "exact_ols_constrained"
+assert "`gel_abs_targets'" == "0"
+assert "`gel_abs_target_names'" == "female"
+assert "`gel_abs_bstatus'" == "imposed_zero estimated"
+assert "`gel_abs_fstatus'" == "absorbed identified"
+assert "`gel_abs_total_se_type'" == "target_exact_base_vce_mixed_components"
+assert "`gel_abs_inference_status'" == "clustered_at_absorbing_fe"
+assert `gel_abs_inference_valid' == 1
+assert `gel_abs_fe_index' == 0
+assert `gel_abs_feclass_tol' == 1e-9
+assert gel_abs_mask[1, 1] == 1 & gel_abs_mask[1, 2] == 0
+assert gel_abs_bfull[1, 1] == 0
+assert abs(gel_abs_total[1, 1] - gel_abs_bbase[1, 1]) < 1e-10
+quietly regress y female x1, vce(cluster worker)
+assert abs(gel_abs_total[1, 2] - _se[female]) < 1e-12
+
+* Robust/crossed inference is deliberately retained for point-accounting but
+* must warn loudly because the target is invariant at the worker FE level.
+capture noisily xhdfegelbach y, x1(female x1) ///
+    x2groups("observables = x2") fes(worker) absorbedtargets(female) vce(robust)
+assert _rc == 0
+assert r(absorbed_target_inference_valid) == 0
+assert "`r(inference_status)'" == "warning_unsupported_vce_or_cluster"
+assert strpos("`r(notes)'", "WARNING:") > 0
+capture noisily xhdfegelbach y, x1(female x1) ///
+    x2groups("observables = x2") fes(worker) absorbedtargets(female x1)
+assert _rc != 0
+capture noisily xhdfegelbach y, x1(female x1) ///
+    x2groups("observables = x2") fes(worker) absorbedtargets(x2)
+assert _rc == 198
+
 * A severely near-collinear observed block can retain a valid identity while
 * its split SE is tolerance/rounding sensitive; require an audible note.
 gen double x2_near = x2 + 1.2e-6 * rnormal()

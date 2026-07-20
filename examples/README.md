@@ -9,6 +9,7 @@ anywhere the package is installed — no data files needed.
 |---|---|---|---|
 | AKM + leave-out (KSS) | [`akm_kss_example.do`](akm_kss_example.do) | [`akm_kss_example.py`](akm_kss_example.py) | [`akm_kss_example.R`](akm_kss_example.R) |
 | Gelbach decomposition | [`gelbach_example.do`](gelbach_example.do) | [`gelbach_example.py`](gelbach_example.py) | [`gelbach_example.R`](gelbach_example.R) |
+| Gelbach absorbed target | [`gelbach_absorbed_target.do`](gelbach_absorbed_target.do) | [`gelbach_absorbed_target.py`](gelbach_absorbed_target.py) | [`gelbach_absorbed_target.R`](gelbach_absorbed_target.R) |
 
 ## What they show
 
@@ -21,10 +22,13 @@ weak-identification confidence intervals, controls partialled out by FWL, the
 JLA leverage approximation, and (Python) the Andrews-Gill-Schank-Upward
 subsampling diagnostic and export to the `pytwoway` / LeaveOutTwoWay format.
 
-**Gelbach** — decomposing the movement of a base coefficient (a return to
-education) between a short and a long regression into an additive,
-order-invariant contribution per declared block, with unadjusted and cluster-robust
-inference.
+**Gelbach** — decomposing the movement of a focal base coefficient between a
+short and a long regression into an additive, order-invariant contribution per
+declared block, while retaining common controls in both models. The examples
+cover unadjusted and one-way cluster-robust inference, observed and absorbed-FE
+blocks, focal reporting, signed shares, covariance-aware contrasts, and the
+distinct constrained estimand for a target absorbed by an added FE. The latter
+prints and stores its full-model zero as imposed, not estimated.
 
 ## Running them
 
@@ -34,6 +38,7 @@ Stata (from the repository root, with the plugin built or installed):
 adopath ++ "`c(pwd)'/stata"
 do examples/akm_kss_example.do
 do examples/gelbach_example.do
+do examples/gelbach_absorbed_target.do
 ```
 
 Python (with the compiled extension installed, `pip install .`):
@@ -41,6 +46,7 @@ Python (with the compiled extension installed, `pip install .`):
 ```bash
 python examples/akm_kss_example.py
 python examples/gelbach_example.py
+python examples/gelbach_absorbed_target.py
 ```
 
 R (with the installed `xhdfe` package):
@@ -48,6 +54,7 @@ R (with the installed `xhdfe` package):
 ```bash
 Rscript examples/akm_kss_example.R
 Rscript examples/gelbach_example.R
+Rscript examples/gelbach_absorbed_target.R
 ```
 
 For the GPU (CUDA) path, add `gpu` (Stata) / `gpu=True` (Python) / `gpu=TRUE`
@@ -64,5 +71,7 @@ implemented in Saggio's LeaveOutTwoWay (the canonical KSS reference), and the
 Gelbach decomposition follows Gelbach (2016) / his `b1x2`. See
 [`docs/akm-kss.md`](../docs/akm-kss.md) for a felsdvsimul walkthrough and the
 package help (`help xhdfeakm`, `help xhdfeconnected`, `help xhdfegelbach`;
-`?xhdfe_akm_kss` in R; `help(xhdfe.akm.akm_kss)` in Python) for the full
-option and return reference.
+`?xhdfe_akm_kss`, `?xhdfe_gelbach`, `?xhdfe_gelbach_tidy`, and
+`?xhdfe_gelbach_contrast` in R; `help(xhdfe.akm.akm_kss)` and
+`xhdfe-help gelbach` in Python) for the full option, result, inference, and
+limitation reference.

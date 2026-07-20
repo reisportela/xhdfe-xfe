@@ -33,6 +33,9 @@ r/**/*.html
 release_assets/
 *.zip
 
+# Copyright-restricted research PDFs are local evidence only.
+literature/
+
 # Editor / OS
 .DS_Store
 .idea/

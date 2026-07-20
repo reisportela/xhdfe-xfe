@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.18.2.
+#' effects regression via a C++ backend." Version 2.19.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -1041,7 +1041,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.18.2.
+#' effects regression via a C++ backend." Version 2.19.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

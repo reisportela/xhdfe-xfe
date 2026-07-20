@@ -95,12 +95,15 @@ GPU (environment variables, still supported):
   XHDFE_CUDA_ARCHS=...   CUDA SM targets for fatbin builds (comma/space/semicolon list).
                          Example: "75,80,86,89". Overrides XHDFE_CUDA_ARCH when set.
   XHDFE_ENABLE_METAL=ON  Enable Metal (macOS native builds only).
+  XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA=ON
+                         Allow --march-native when CUDA is enabled.
 EOF
 }
 
 TARGET="${XHDFE_TARGET:-}"
 OPENMP_MODE="${XHDFE_OPENMP:-}"
 MARCH_NATIVE_MODE="${XHDFE_ENABLE_MARCH_NATIVE:-}"
+FORCE_MARCH_NATIVE_WITH_CUDA="${XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA:-}"
 CUDA_MODE="${XHDFE_CUDA_MODE:-}"
 CUDA_ARCH_CLI=""
 CUDA_ARCHS_CLI=""
@@ -131,6 +134,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-march-native)
       MARCH_NATIVE_MODE="off"
+      shift
+      ;;
+    --force-march-native-with-cuda)
+      FORCE_MARCH_NATIVE_WITH_CUDA="on"
       shift
       ;;
     --cuda)
@@ -263,7 +270,7 @@ fi
 # macros stderr/stdin/stdout; use gnu++17 there so they are exposed. Linux/macOS
 # stay on strict c++17 (bit-identical to prior builds).
 if [[ "${TARGET}" == "windows" ]]; then CXX_STD="gnu++17"; else CXX_STD="c++17"; fi
-common_compile_flags=( "-std=${CXX_STD}" -O3 "-DSYSTEM=${SYSTEM_DEF}" )
+common_compile_flags=( "-std=${CXX_STD}" -O3 -DNDEBUG "-DSYSTEM=${SYSTEM_DEF}" )
 if [[ "${TARGET}" != "windows" ]]; then
   common_compile_flags+=( -fPIC -pthread )
   pthread_flag=( -pthread )
@@ -277,10 +284,10 @@ common_compile_flags+=( -ffast-math -funroll-loops )
 if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" != "windows" ]]; then
   # NOTE: with CUDA-enabled plugin builds we've observed runtime instability when compiling host
   # code with -march=native. Keep it CPU-only unless explicitly requested by disabling CUDA.
-  if [[ ! "${XHDFE_ENABLE_CUDA:-0}" =~ ^(1|ON|on|true|yes)$ ]]; then
+  if [[ ! "${XHDFE_ENABLE_CUDA:-0}" =~ ^(1|ON|on|true|yes)$ || "${FORCE_MARCH_NATIVE_WITH_CUDA}" =~ ^(1|ON|on|true|yes)$ ]]; then
     common_compile_flags+=( -march=native -mtune=native )
   else
-    echo "Warning: ignoring --march-native because XHDFE_ENABLE_CUDA=ON; build without CUDA to use -march=native." >&2
+    echo "Warning: ignoring --march-native because XHDFE_ENABLE_CUDA=ON. Set XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA=ON to override." >&2
   fi
 fi
 common_link_flags=( "${link_flag}" )
@@ -403,9 +410,13 @@ compile_plugin() {
     while true; do
       objs=()
       cxx_flags=( "${common_compile_flags[@]}" "${extra_flags[@]}" -DHDFE_USE_CUDA )
-      nvcc_flags=( -std=c++17 -O3 --expt-relaxed-constexpr -DHDFE_USE_CUDA "-DSYSTEM=${SYSTEM_DEF}" )
+      nvcc_flags=( -std=c++17 -O3 -DNDEBUG --expt-relaxed-constexpr -DHDFE_USE_CUDA "-DSYSTEM=${SYSTEM_DEF}" )
       nvcc_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
       nvcc_flags+=( -Xcompiler "-fPIC" )
+      # Keep Eigen-bearing host/CUDA layouts identical when the local Release
+      # build combines AVX-512 (-march=native) with nvcc host compilation.
+      cxx_flags+=( -DEIGEN_MAX_ALIGN_BYTES=64 -DEIGEN_MAX_STATIC_ALIGN_BYTES=64 )
+      nvcc_flags+=( -DEIGEN_MAX_ALIGN_BYTES=64 -DEIGEN_MAX_STATIC_ALIGN_BYTES=64 )
       if [[ "${build_openmp}" -eq 1 ]]; then
         cxx_flags+=( -DHDFE_USE_OPENMP -fopenmp )
         nvcc_flags+=( -Xcompiler "-fopenmp" )
@@ -493,6 +504,17 @@ if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
     "${STRIP_BIN}" -x "${OUT_PLUGIN}" || true
   else
     "${STRIP_BIN}" "${OUT_PLUGIN}" || true
+  fi
+fi
+
+if [[ "${TARGET}" != "windows" && "${UNAME_S}" == "Linux" ]]; then
+  if nm -D "${OUT_PLUGIN}" | grep 'U __assert_fail' >/dev/null; then
+    echo "Error: ${OUT_PLUGIN} contains live assertion code; refusing artifact." >&2
+    exit 1
+  fi
+  if [[ "${OPENMP_MODE}" == "on" ]] && ! ldd "${OUT_PLUGIN}" | grep 'libgomp' >/dev/null; then
+    echo "Error: --openmp was requested but ${OUT_PLUGIN} does not link libgomp." >&2
+    exit 1
   fi
 fi
 

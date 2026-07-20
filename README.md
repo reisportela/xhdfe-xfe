@@ -57,7 +57,10 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 - **Mobility groups** and connected-component diagnostics.
 - **Optional GPU** — CUDA absorber with explicit request and status reporting; fail-closed (never a silent CPU fallback).
 - **AKM / worker-firm post-estimation** — leave-out (KSS) variance decomposition with plug-in, AGSU and KSS corrections, exact and Johnson-Lindenstrauss leverages, component standard errors, Andrews-Mikusheva weak-identification confidence intervals, fweights, and a leave-one-out connected-set utility (`xhdfeakm` / `xhdfeconnected` in Stata, `xhdfe.akm` in Python, `xhdfe_akm_kss()` in R); validated against Saggio's LeaveOutTwoWay (the canonical KSS implementation) and pytwoway. See [`docs/akm-kss.md`](docs/akm-kss.md).
-- **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` / `xhdfe_gelbach()`, validated against Gelbach's `b1x2`.
+- **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` /
+  `xhdfe_gelbach()`, validated against Gelbach's `b1x2`, with an opt-in
+  absorbed-target estimand, focal reporting, signed shares, and
+  joint-covariance contrasts.
 
 ---
 
@@ -333,6 +336,16 @@ g   <- xhdfe_gelbach(y, x1 = educ, x2_groups = list(skill = ability),
                      fes = list(firm = firm))
 ```
 
+Gelbach's standard mode accounts for the movement from one base linear model
+to one full model. The separate absorbed-target mode covers a declared X1
+target that belongs to an added FE span: its full coefficient is imposed at
+zero and explicitly labelled, never treated as an estimated within-FE effect.
+Inference for that target must be clustered at the absorbing FE dimension.
+Run `help xhdfegelbach`, `python -m xhdfe gelbach`, or
+`?xhdfe_gelbach` for the complete estimands, covariance layout, warnings,
+reporting helpers, examples, and deliberate limits. The decomposition is
+specification accounting, not evidence of causal mediation.
+
 The plug-in, AGSU (homoskedastic) and KSS (heteroskedasticity-robust leave-out)
 decompositions report the variance of worker effects, of firm effects, their
 covariance and correlation, and the shares of wage variance; with `se`/`ci`
@@ -362,7 +375,9 @@ in [`docs/akm-kss.md`](docs/akm-kss.md).
 
 - **Quickstart & overview:** [`docs/quickstart.md`](docs/quickstart.md), [`docs/overview.md`](docs/overview.md).
 - **GPU (CUDA):** [`docs/gpu.md`](docs/gpu.md) — install-with-GPU, request, and verify in Stata/Python/R.
-- **AKM + leave-out (KSS) & Gelbach:** [`docs/akm-kss.md`](docs/akm-kss.md); `help xhdfeakm`, `help xhdfeconnected`, `help xhdfegelbach`.
+- **AKM + leave-out (KSS) & Gelbach:** [`docs/akm-kss.md`](docs/akm-kss.md);
+  `help xhdfeakm`, `help xhdfeconnected`, `help xhdfegelbach`,
+  `python -m xhdfe gelbach`, and `?xhdfe_gelbach`.
 - **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
 - **Stata:** `help xhdfe`, `help xfe`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
