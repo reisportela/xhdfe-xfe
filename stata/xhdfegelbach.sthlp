@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.18.2  15jul2026}{...}
+{* *! version 2.19.0  20jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {title:Title}
@@ -7,6 +7,11 @@
 {p2colset 5 22 24 2}{...}
 {p2col :{cmd:xhdfegelbach} {hline 2}}Gelbach (2016) conditional decomposition of coefficient movements{p_end}
 {p2colreset}{...}
+
+{pstd}
+{bf:Version 1.3.0 (20jul2026), distributed with shared package
+2.19.0.20260720.} This release adds the opt-in absorbed-target estimand and
+the focal/share reporting layer.{p_end}
 
 
 {title:Syntax}
@@ -22,6 +27,11 @@
 {synopt :{opt x1(varlist)}}base covariates whose coefficient movement is decomposed; {bf:required}{p_end}
 {synopt :{opt x2groups(spec)}}named covariate groups added in the full model{p_end}
 {synopt :{opth fes(varlist)}}fixed-effect dimensions added in the full model{p_end}
+{synopt :{opt absorbedtargets(varlist)}}opt-in X1 targets absorbed by {opt fes()}; full coefficients imposed at zero{p_end}
+{synopt :{opt focal(varlist)}}subset of {opt x1()} displayed as focal; reporting only{p_end}
+{synopt :{opt shares(type)}}signed shares of {cmd:movement}, {cmd:base}, or {cmd:base_fixed}{p_end}
+{synopt :{opt sharetol(#)}}absolute denominator threshold for shares; default {cmd:1e-12}{p_end}
+{synopt :{opt level(#)}}confidence level used for share intervals; default {cmd:95}{p_end}
 {synopt :{opt vce(vcetype)}}{cmd:unadjusted} (default), {cmd:robust}, or {cmd:cluster}{p_end}
 {synopt :{opth cluster(varname)}}cluster identifier (with {cmd:vce(cluster)}){p_end}
 {synopt :{opt gamma0}}reproduce b1x2's {cmd:gamma0} variant{p_end}
@@ -56,6 +66,16 @@ fweight conventions. Fixed-effect groups are absorbed with the xhdfe backend,
 so high-dimensional FE groups are practical. Shares the compiled backend with
 the Python {cmd:xhdfe.gelbach.decompose} and R {cmd:xhdfe_gelbach} front-ends.
 
+{pstd}
+The default is the standard Gelbach estimand and continues to reject every
+rank-deficient {opt x1()} or X2 column. {opt absorbedtargets()} activates a
+different, constrained estimand for named {opt x1()} columns that belong to
+the span of the added FE (for example, a worker-invariant group indicator with
+worker FE). Every declared target must be classified by the backend
+specifically as collinear with {opt fes()}; its full-model coefficient is
+imposed at zero, not estimated. Undeclared omissions and other rank failures
+remain errors. The result is labelled {cmd:absorbed_target_allocation}.{p_end}
+
 {pstd}{bf:Interpretation warning.} This is a decomposition of coefficient
 movement for two declared specifications, not causal mediation. Causal
 interpretation requires a separately justified research design. Adding
@@ -64,10 +84,77 @@ comparisons can change the estimand or introduce bias. Block names and causal
 roles are supplied by the researcher and are not validated by the command.{p_end}
 
 
+{title:Specification and sample contract}
+
+{pstd}
+The decomposition always uses one jointly declared full model. Every
+{opt x2groups()} block and every {opt fes()} dimension is added simultaneously;
+their order does not create a sequential or path-dependent allocation. Group
+names must be valid, unique Stata names. Observed variables may appear in only
+one block and may not overlap {opt x1()}. Empty groups, duplicate variables,
+cross-block rank dependencies and undeclared omissions fail closed.{p_end}
+
+{pstd}
+Stata constructs one common complete-case sample using the outcome, all X1/X2
+columns, FE identifiers, cluster identifier and weight. The backend can then
+drop recursive FE singletons. Base, full and auxiliary projections use exactly
+that retained sample and the same weight inner product. Inspect
+{cmd:r(n_obs_input)}, {cmd:r(n_obs)}, {cmd:r(n_obs_effective)} and
+{cmd:r(n_singletons_dropped)}. With {cmd:fweight}, the displayed and effective
+N is the sum of retained weights; {cmd:r(n_obs)} remains the retained row
+count.{p_end}
+
+{pstd}
+The implicit intercept belongs to both models. Do not include a manually
+generated constant in {opt x1()}. The matrices {cmd:r(delta)}, {cmd:r(se)} and
+{cmd:r(total)} nevertheless contain an explicit final {cmd:_cons} row so the
+normalization shift is auditable.{p_end}
+
+
+{title:Displayed output}
+
+{pstd}
+The default display is organized as one panel for each coefficient in
+{opt x1()}, followed by the intercept. Each {opt x1()} panel first reports the
+base-model coefficient, full-model coefficient, total movement
+({it:base minus full}), and its standard error. It then reports each declared
+covariate and absorbed-FE block with its contribution and standard error. When
+{opt fes()} is used, an FE subtotal is shown without adding it again to the
+overall total.{p_end}
+
+{pstd}
+In absorbed-target mode, the display identifies the constrained targets next
+to the estimand. The full-coefficient cell itself reads {cmd:0 (imposed)} so
+the restriction remains visible when a row is transcribed without its header.
+It must not be described as an estimated within-FE coefficient.{p_end}
+
+{pstd}
+With {opt focal()}, only the selected coefficient panels are printed; all
+variables in {opt x1()} remain in both the base and full models and all
+full-precision rows remain in {cmd:r()}. This separates the empirical focal
+coefficient from low-dimensional controls common to both specifications
+without changing the estimand. With {opt shares()}, the table adds signed
+percentages. Negative shares and totals above 100 percent are deliberately
+preserved and never renormalized.{p_end}
+
+{pstd}
+The final status panel reports convergence and the maximum residual from the
+summation identity. This residual is a consistency check, not an accuracy or
+causal-identification certificate. Displayed values use compact significant-
+digit formatting; all matrices in {cmd:r()} retain their full double-precision
+values. Solver and inferential warnings are printed in full immediately and
+are also retained in {cmd:r(notes)}.{p_end}
+
+
 {title:Options}
 
 {phang}{opt x1(varlist)} lists the base covariates whose coefficient movement
 is decomposed. {bf:Required}.
+
+{phang}{cmd:aweight} and {cmd:fweight} apply the same strictly positive weight
+to the base, full and auxiliary projections. Frequency weights must be positive
+integers; their sum defines {cmd:r(n_obs_effective)}. Probability, importance
+and survey weights are not implemented by this command.{p_end}
 
 {phang}{opt x2groups(spec)} names the covariate groups added in the full model
 with the b1x2-style syntax {cmd:x2groups("A = a1 a2 : B = b1 b2 b3")} (groups
@@ -80,6 +167,51 @@ treated as its own group (always gamma0-style). Raw codes outside the signed
 32-bit range, and non-integer numeric labels, are compacted internally without
 changing category membership or results.
 
+{phang}{opt absorbedtargets(varlist)} must be a subset of {opt x1()} and
+requires {opt fes()}. It is an explicit request for absorbed-target allocation,
+not an instruction to ignore arbitrary collinearity. Each named target must be
+omitted because it is in the FE span; if it remains identified, is omitted for
+another rank dependency, or any undeclared X1/X2 column is omitted, the command
+fails. {cmd:r(b_full_status)} labels each X1 entry as {cmd:estimated} or
+{cmd:imposed_zero}.{p_end}
+
+{phang}{opt focal(varlist)} selects a nonempty subset of {opt x1()} for the
+human-facing panels and share table. It is reporting metadata only. In
+particular, a common control must remain in {opt x1()} even when it is omitted
+from {opt focal()}; moving it into {opt x2groups()} changes the base model and
+therefore changes the decomposition.{p_end}
+
+{phang}{opt shares(type)} adds signed share estimates and stores their
+full-precision matrices. {cmd:shares(movement)} divides each contribution by
+the total movement and computes ratio SEs by the delta method from the joint
+component covariance. {cmd:shares(base)} divides by the base coefficient, the
+normalization used in several applications, but leaves share SEs missing:
+the public covariance contract does not yet contain
+{it:Cov(delta,b_base)}. {cmd:shares(base_fixed)} is an explicit descriptive
+convention that scales component SEs while holding the reported base
+coefficient fixed; it is labelled
+{cmd:fixed_base_denominator_scaling} and must not be presented as full ratio
+inference. Contributions in levels remain the primary result.{p_end}
+
+{phang}{opt sharetol(#)} sets the absolute threshold below which a share
+denominator is treated as undefined. It must be finite and nonnegative; the
+default is {cmd:1e-12}. Undefined shares are missing and generate a warning.
+This protects against unstable percentages when the gap or movement is nearly
+zero.{p_end}
+
+{phang}{opt level(#)} sets the normal-approximation confidence level for share
+intervals. It has no effect unless {opt shares()} is specified and never
+changes the underlying Gelbach fit.{p_end}
+
+{pstd}{it:Common fixed effects and generated terms.} Low-dimensional effects
+common to base and full can be entered as explicit indicator columns in
+{opt x1()} and hidden from the display with {opt focal()}. High-dimensional
+effects in {opt fes()} are, at present, added components of the full model;
+there is no claim that the command absorbs a separate HDFE set common to both
+models. Polynomial, spline, factor, and interaction blocks are supported after
+the researcher generates the corresponding numeric columns and groups those
+columns explicitly. This keeps the exact design matrix auditable.{p_end}
+
 {pstd}For absorbed FE blocks, the reported standard errors are conditional/
 {cmd:gamma0}: uncertainty from estimating the absorbed effects is not fully
 included. {cmd:r(fe_total)} reports the aggregate of all absorbed-FE dimensions;
@@ -90,12 +222,41 @@ components.{p_end}
 (default), {cmd:robust}, or {cmd:cluster} (supply {opth cluster(varname)}).
 The cluster identifier is compacted under the same exact categorical rule.
 
-{phang}{opt gamma0} and {opt cov0} reproduce the corresponding options of
-Gelbach's {cmd:b1x2}.
+{pstd}{bf:Absorbed-target inference.} For a declared target,
+{it:total_j = b_base_j - 0} is the base-coefficient estimator itself. Its
+target-target entry in {cmd:r(total_cov)} is therefore exactly the requested
+base-model VCE. Inference for a target invariant within an absorbing FE must
+be clustered at that FE dimension. {cmd:unadjusted}, {cmd:robust}, or
+clustering on a crossed dimension can be anti-conservative; these choices are
+retained for descriptive accounting but print a loud warning and set
+{cmd:r(absorbed_target_inference_valid)} to 0. Inspect
+{cmd:r(inference_status)} and {cmd:r(absorbing_fe_index)}.{p_end}
+
+{pstd}The Gelbach covariance follows {cmd:b1x2}'s random-design stacked-
+moment variance, including uncertainty in the auxiliary projections. It is
+not the smaller variance conditional on the realised covariate design.
+Absorbed-FE component covariances remain conditional/{cmd:gamma0}; hence an
+absorbed-target total is labelled
+{cmd:target_exact_base_vce_mixed_components}.{p_end}
+
+{phang}{opt gamma0} retains the auxiliary-regression part of the component
+variance and omits the sampling variance of the full-model added coefficients,
+matching Gelbach's {cmd:b1x2}. Absorbed-FE components always carry this
+conditional/{cmd:gamma0} treatment because their full sampling covariance is
+not available.{p_end}
+
+{phang}{opt cov0} removes the robust stacked-system cross terms, matching
+{cmd:b1x2}. It affects robust or clustered covariance and is a no-op for
+{cmd:vce(unadjusted)}. {cmd:r(observed_se_type)} and
+{cmd:r(total_se_type)} disclose the effective inference contract.{p_end}
 
 {phang}{opt tol(#)} sets the fixed-effect absorption tolerance. It must be
 finite and strictly positive; the default {cmd:1e-8} preserves the historical
-effective tolerance.
+effective tolerance. It does not control the separate absorption-
+classification boundary. The backend classifies an X1 column as FE-collinear
+when {it:||M_D x||^2 / ||x||^2 <= 1e-9} (relative norm about 3.16e-5) and
+returns that exact squared-norm threshold in
+{cmd:r(fe_collinear_ss_ratio_tol)}.{p_end}
 
 {phang}{opt threads(#)} sets OpenMP threads (0 = library default).
 
@@ -142,7 +303,8 @@ Gelbach summation identity can be exact while columns inside one
 {opt x2groups()} block are so nearly collinear that the block's standard
 errors depend materially on solver/ISA rounding. The backend runs a
 bounded-cost normalized-Gram diagnostic and writes a warning to
-{cmd:r(notes)} for severe cases; point estimates are not altered. In the
+the Results window and {cmd:r(notes)} for severe cases; point estimates are not
+altered. In the
 11jul2026 adversarial fixture (correlation 0.9999999999995), the default
 tolerance agreed with a dense oracle within 0.024%, but alternative tight
 tolerances moved the ill-conditioned block SE by as much as 7%, while a
@@ -174,27 +336,97 @@ connected mobility component the x1-row split is identified. A small
 evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 
 
+{title:Programmatic matrix layout}
+
+{pstd}
+Rows of {cmd:r(delta)} and {cmd:r(se)} are {opt x1()} in declared order followed
+by {cmd:_cons}. Columns are all observed groups in {opt x2groups()} order,
+followed by the FE dimensions in {opt fes()} order. {cmd:r(total)} has the same
+rows and columns {cmd:delta} and {cmd:se}. {cmd:r(b_base)}, {cmd:r(b_full)} and
+{cmd:r(absorbed_mask)} contain only the X1 columns, not the intercept.{p_end}
+
+{pstd}
+{cmd:r(cov)} is group-major. If {it:k1 = number of X1 columns + 1}, its ordering
+is
+{cmd:[group1:X1, group1:_cons, group2:X1, group2:_cons, ...]}.
+This is the authoritative object for sums and linear contrasts because it
+retains every cross-component covariance. Do not add component variances or
+SEs as if blocks were independent. Python's {cmd:gelbach.contrast()} and R's
+{cmd:xhdfe_gelbach_contrast()} provide convenience wrappers around the same
+algebra; Stata users can construct the corresponding weight vector against
+{cmd:r(cov)}.{p_end}
+
+{pstd}
+When {opt shares()} is requested, {cmd:r(share)}, {cmd:r(share_se)} and the two
+CI matrices have the same shape and names as {cmd:r(delta)}. Under
+{cmd:shares(base)}, share SEs and intervals are missing by design. The
+one-column {cmd:r(share_defined)} marks usable denominators.
+{cmd:r(residual_share)} is defined only for X1 rows under a base-coefficient
+denominator; it is missing for movement shares and for undefined denominators.
+Stored shares are fractions even though the display multiplies them by 100.{p_end}
+
+
+{title:Deliberate limits}
+
+{pstd}
+The current command supports linear OLS coefficient-movement accounting with
+unadjusted, robust or one-way clustered inference. It does not implement
+multiway clustering, wild-cluster bootstrap, IV/2SLS or LATE allocation,
+split-panel/dynamic corrections, nonconditional recovered-FE covariance,
+kernel/MM-quantile/KHB/GLM/distributional decompositions, Oaxaca wrappers, or
+causal-mediation estimands. These require separate estimators and must not be
+approximated by relabelling the OLS output.{p_end}
+
+{pstd}
+Low-dimensional FE common to base and full may be represented by explicit
+indicators in {opt x1()} and hidden with {opt focal()}. Every HDFE dimension in
+{opt fes()} is currently an added full-model component; a separate HDFE set
+absorbed in both specifications is not implemented. Stata factor-variable
+notation is not expanded inside {opt x1()} or {opt x2groups()}; generate the
+numeric indicators, powers, bins, splines and interactions explicitly. Because
+the intercept is implicit, common categorical indicators must use a full-rank
+reference coding rather than all category dummies.{p_end}
+
+
 {title:Stored results}
 
 {pstd}{cmd:xhdfegelbach} stores the following in {cmd:r()}:
+{cmd:r(fe_total)} exists only with {opt fes()}; share matrices and share macros
+exist only with {opt shares()}; {cmd:r(notes)} exists only when the backend
+emits a note or warning.{p_end}
 
 {synoptset 20 tabbed}{...}
 {p2col 5 20 24 2: Matrices}{p_end}
-{synopt:{cmd:r(delta)}}contributions, one row per {opt x1()} variable, one column per group{p_end}
+{synopt:{cmd:r(delta)}}contributions, rows for {opt x1()} plus {cmd:_cons}, one column per group{p_end}
 {synopt:{cmd:r(se)}}standard errors matching {cmd:r(delta)}{p_end}
-{synopt:{cmd:r(total)}}total movement per {opt x1()} variable (base minus full) with its SE{p_end}
+{synopt:{cmd:r(total)}}total movement for {opt x1()} plus {cmd:_cons}; columns {cmd:delta} and {cmd:se}{p_end}
 {synopt:{cmd:r(b_base)}}base-model coefficients on {opt x1()}{p_end}
-{synopt:{cmd:r(b_full)}}full-model coefficients on {opt x1()}{p_end}
+{synopt:{cmd:r(b_full)}}full-model coefficients on {opt x1()}; absorbed targets are imposed zero{p_end}
+{synopt:{cmd:r(absorbed_mask)}}backend classification mask in X1 order (1 = imposed absorbed target){p_end}
 {synopt:{cmd:r(cov)}}joint covariance of all group contributions{p_end}
 {synopt:{cmd:r(total_cov)}}covariance of the total movement{p_end}
-{synopt:{cmd:r(fe_total)}}aggregate absorbed-FE contribution and conditional SE (when {opt fes()} is used){p_end}
+{synopt:{cmd:r(fe_total)}}aggregate absorbed-FE contribution and conditional SE for {opt x1()} plus {cmd:_cons}{p_end}
+{synopt:{cmd:r(share)}}signed component shares; returned only with {opt shares()}{p_end}
+{synopt:{cmd:r(share_se)}}share SEs; missing for {cmd:shares(base)}{p_end}
+{synopt:{cmd:r(share_ci_low)}, {cmd:r(share_ci_high)}}share confidence limits{p_end}
+{synopt:{cmd:r(share_defined)}}row indicator that the denominator exceeds {opt sharetol()}{p_end}
+{synopt:{cmd:r(residual_share)}}full-model residual divided by the base coefficient, when defined{p_end}
 
 {p2col 5 20 24 2: Scalars}{p_end}
 {synopt:{cmd:r(identity_gap)}}residual of the summation identity (should be ~0){p_end}
-{synopt:{cmd:r(n_obs)}}number of observations{p_end}
+{synopt:{cmd:r(n_obs_input)}}observations entering the backend after Stata markout{p_end}
+{synopt:{cmd:r(n_obs)}}retained row count (historical field){p_end}
+{synopt:{cmd:r(n_obs_effective)}}reported N: retained rows normally, sum of retained weights under {cmd:fweight}{p_end}
+{synopt:{cmd:r(n_singletons_dropped)}}observations removed by recursive FE singleton dropping{p_end}
 {synopt:{cmd:r(df_full)}}residual degrees of freedom of the full model{p_end}
 {synopt:{cmd:r(converged)}}1 if the computation converged{p_end}
 {synopt:{cmd:r(tol)}}fixed-effect absorption tolerance used{p_end}
+{synopt:{cmd:r(focal_selection_explicit)}}1 when {opt focal()} was specified{p_end}
+{synopt:{cmd:r(conf_level)}}requested {opt level()} as a fraction; returned even without shares{p_end}
+{synopt:{cmd:r(share_tol)}}requested denominator threshold; returned even without shares{p_end}
+{synopt:{cmd:r(fe_collinear_ss_ratio_tol)}}squared-norm FE-classification threshold ({cmd:1e-9}){p_end}
+{synopt:{cmd:r(absorbed_target_inference_valid)}}1 only when absorbed-target inference is clustered at a matching absorbing FE{p_end}
+{synopt:{cmd:r(absorbing_fe_index)}}zero-based matching FE dimension, or -1{p_end}
 {synopt:{cmd:r(threads_used)}}effective thread count reported by the backend{p_end}
 {synopt:{cmd:r(gpu_requested)}}1 when {opt gpu} was specified{p_end}
 {synopt:{cmd:r(gpu_used)}}1 only if CUDA was actually used{p_end}
@@ -206,8 +438,22 @@ evidence that the per-dimension split is accurate; check {cmd:r(converged)}.
 {p2col 5 20 24 2: Macros}{p_end}
 {synopt:{cmd:r(vce)}}the variance estimator used{p_end}
 {synopt:{cmd:r(groups)}}the group names{p_end}
+{synopt:{cmd:r(x1_names)}}all {opt x1()} variable names in design order{p_end}
+{synopt:{cmd:r(focal_indices)}}zero-based reporting indices; all X1 indices when {opt focal()} is omitted{p_end}
+{synopt:{cmd:r(focal_names)}}reporting names; all X1 names when {opt focal()} is omitted{p_end}
+{synopt:{cmd:r(share_denominator)}}{cmd:movement}, {cmd:base}, or {cmd:base_fixed}{p_end}
+{synopt:{cmd:r(share_se_type)}}joint delta method, unavailable base covariance, or fixed-denominator scaling{p_end}
+{synopt:{cmd:r(share_units)}}{cmd:fraction}; the display multiplies by 100{p_end}
 {synopt:{cmd:r(notes)}}any solver notes{p_end}
-{synopt:{cmd:r(estimand)}}{cmd:coefficient_movement}{p_end}
+{synopt:{cmd:r(estimand)}}{cmd:coefficient_movement} or {cmd:absorbed_target_allocation}{p_end}
+{synopt:{cmd:r(identity_status)}}{cmd:exact_ols} or {cmd:exact_ols_constrained}{p_end}
+{synopt:{cmd:r(absorbed_targets)}}zero-based backend-classified absorbed X1 indices, consistent across frontends{p_end}
+{synopt:{cmd:r(absorbed_target_names)}}backend-classified absorbed X1 variable names{p_end}
+{synopt:{cmd:r(b_full_status)}}per-X1 {cmd:estimated}/{cmd:imposed_zero} labels, in X1 order{p_end}
+{synopt:{cmd:r(focal_status)}}per-X1 identification labels, {cmd:identified} or {cmd:absorbed}; unrelated to the reporting selector{p_end}
+{synopt:{cmd:r(observed_se_type)}}{cmd:full}, {cmd:gamma0}, or {cmd:cov0}{p_end}
+{synopt:{cmd:r(total_se_type)}}whether total inference is full, conditional, or mixed{p_end}
+{synopt:{cmd:r(inference_status)}}absorbed-target clustering status or {cmd:not_applicable}{p_end}
 {synopt:{cmd:r(causal_interpretation)}}{cmd:no}{p_end}
 {synopt:{cmd:r(fe_se_type)}}{cmd:conditional_gamma0}{p_end}
 {synopt:{cmd:r(gpu_backend)}}effective backend, {cmd:cuda} or {cmd:cpu}{p_end}
@@ -226,12 +472,32 @@ block, a job-covariate block and a firm fixed-effect block:{p_end}
 {pstd}Cluster-robust inference by firm:{p_end}
 {phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") vce(cluster) cluster(firm_id)}{p_end}
 
+{pstd}Keep age and year indicators common to both models, report only education,
+and obtain signed shares of the coefficient movement:{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(educ age y2005 y2006) focal(educ) x2groups("ability = ability : job = tenure exper") fes(firm_id) shares(movement)}{p_end}
+{phang2}{cmd:. matrix list r(share)}{p_end}
+{phang2}{cmd:. matrix list r(share_se)}{p_end}
+{phang2}{cmd:. matrix list r(share_ci_low)}{p_end}
+
+{pstd}Report descriptive shares of the base coefficient. Their SE matrix is
+missing until the public contract exposes {it:Cov(delta,b_base)}:{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(educ age) focal(educ) x2groups("job = tenure exper") fes(firm_id) shares(base)}{p_end}
+{phang2}{cmd:. matrix list r(share)}{p_end}
+{phang2}{cmd:. matrix list r(share_se)}{p_end}
+
+{pstd}Allocate a worker-invariant group coefficient after worker FE absorb it.
+The zero in {cmd:r(b_full)} is imposed and is labelled accordingly:{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(female age) x2groups("job = tenure exper") fes(worker_id firm_id) absorbedtargets(female) vce(cluster) cluster(worker_id)}{p_end}
+{phang2}{cmd:. di "`r(estimand)'  `r(b_full_status)'"}{p_end}
+
 {pstd}Request real CUDA absorption and show phase progress:{p_end}
 {phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(firm_id year) vce(cluster) cluster(worker_id) gpu verbose}{p_end}
 {phang2}{cmd:. return list}{p_end}
 
-{pstd}A fuller walkthrough (Stata/Python/R) ships as
-{bf:examples/gelbach_example.do}.{p_end}
+{pstd}The executable standard and absorbed-target walkthroughs ship in
+{bf:examples/gelbach_example.do} and
+{bf:examples/gelbach_absorbed_target.do}; equivalent Python and R files are in
+the same directory.{p_end}
 
 
 {title:References}
