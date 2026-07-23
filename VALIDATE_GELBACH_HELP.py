@@ -57,7 +57,7 @@ def validate_python_help() -> None:
     require(parameter_names(gelbach.decompose) == [
         "y", "x1", "x2_groups", "fes", "vce", "cluster", "gamma0",
         "cov0", "tol", "num_threads", "weights", "fweights",
-        "absorbed_targets", "x1_names", "focal",
+        "absorbed_targets", "x1_names", "focal", "gpu",
     ], "unexpected Python decompose signature")
     require(parameter_names(gelbach.tidy) == [
         "result", "focal", "include_intercept", "include_total",
@@ -69,12 +69,19 @@ def validate_python_help() -> None:
 
     require_tokens(topic_help, [
         "absorbed_targets", "x1_names", "focal", "x2_groups", "fes",
-        "gamma0", "cov0", "num_threads", "weights", "fweights",
+        "gamma0", "cov0", "num_threads", "weights", "fweights", "gpu",
         "n_obs_input", "n_obs_effective", "n_singletons_dropped",
-        "b_full_status", "absorbed_target_inference_valid",
-        "absorbing_fe_index", "fe_collinear_ss_ratio_tol", "identity_gap",
+        "b_full_status", "gamma", "base_cov", "cov_delta_bbase",
+        "cov_total_bbase", "absorbed_target_inference_valid",
+        "absorbing_fe_index", "x1_fe_collinear_ratio",
+        "x1_near_collinear_mask", "fe_collinear_ss_ratio_tol",
+        "near_fe_collinear_ss_ratio_warn_upper",
+        "few_cluster_warning_threshold", "df_base", "n_clusters",
+        "threads_used", "gpu_requested", "gpu_used", "gpu_status",
+        "identity_gap",
         "total_se_type", "conditional_gamma0", "group-major",
         "movement", "base_fixed", "full_model_residual", "contrast",
+        "joint_base_covariance_delta_method", "linear probability model",
         "random-design", "Deliberate boundaries", "not causal mediation",
         "examples/gelbach_example.py", "examples/gelbach_absorbed_target.py",
     ], "Python Gelbach help")
@@ -120,10 +127,15 @@ def validate_stata_help() -> None:
 
     stored_results = [
         "delta", "se", "total", "total_cov", "cov", "b_full", "b_base",
-        "absorbed_mask", "fe_total", "share", "share_se", "share_ci_low",
+        "absorbed_mask", "x1_fe_collinear_ratio",
+        "x1_near_collinear_mask", "gamma", "base_cov",
+        "cov_delta_bbase", "cov_total_bbase", "fe_total",
+        "share", "share_se", "share_ci_low",
         "share_ci_high", "share_defined", "residual_share", "identity_gap",
         "n_obs_input", "n_obs", "n_obs_effective", "n_singletons_dropped",
-        "df_full", "fe_collinear_ss_ratio_tol",
+        "df_full", "df_base", "n_clusters", "fe_collinear_ss_ratio_tol",
+        "near_fe_warn_upper",
+        "few_cluster_warning_threshold",
         "absorbed_target_inference_valid", "absorbing_fe_index", "converged",
         "tol", "focal_selection_explicit", "conf_level", "share_tol",
         "threads_used", "gpu_requested", "gpu_used", "gpu_status_code",
@@ -141,6 +153,7 @@ def validate_stata_help() -> None:
         "Specification and sample contract", "Displayed output",
         "Programmatic matrix layout", "Deliberate limits", "Stored results",
         "0 (imposed)", "random-design", "group-major", "one-way clustered",
+        "linear probability model", "joint_base_covariance_delta_method",
         "examples/gelbach_example.do", "examples/gelbach_absorbed_target.do",
     ], "Stata Gelbach help")
 

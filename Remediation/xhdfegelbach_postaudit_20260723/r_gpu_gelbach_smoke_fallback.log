@@ -1,0 +1,1 @@
+mode=fallback gpu_requested=TRUE gpu_used=FALSE backend=cpu status=unavailable status_code=2 attempted=FALSE converged=TRUE iterations=0 notes=GPU requested but unavailable; full-model absorption used CPU. absorbed FE blocks use the aux-regression (gamma0) variance. 

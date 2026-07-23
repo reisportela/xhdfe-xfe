@@ -1,0 +1,57 @@
+{
+  "label": "candidate",
+  "backend": "cpu",
+  "mode": "standard",
+  "round": 6,
+  "command": [
+    "/home/mangelo/miniconda3/bin/python",
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/repros/performance_ab_30pct.py",
+    "worker",
+    "--module",
+    "/home/mangelo/Documents/GitHub/xhdfe/build/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+    "--backend",
+    "cpu",
+    "--mode",
+    "standard",
+    "--round",
+    "6",
+    "--n",
+    "500000",
+    "--threads",
+    "16",
+    "--inner-reps",
+    "3",
+    "--output",
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/performance_30pct_20260723/cpu8_confirmatory/cpu/standard/pair_07_candidate.json"
+  ],
+  "returncode": 0,
+  "wall_seconds": 3.8831918872892857,
+  "before": {
+    "timestamp": "2026-07-23T09:24:48+0100",
+    "load": [
+      33.7,
+      32.58,
+      32.99
+    ],
+    "cpu_busy_pct_0p5s": 49.76939203354298,
+    "gpu": {
+      "ok": false,
+      "error": "CalledProcessError(9, ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw', '--format=csv,noheader,nounits'])"
+    }
+  },
+  "after": {
+    "timestamp": "2026-07-23T09:24:52+0100",
+    "load": [
+      33.08,
+      32.47,
+      32.96
+    ],
+    "cpu_busy_pct_0p5s": 57.56688963210702,
+    "gpu": {
+      "ok": false,
+      "error": "CalledProcessError(9, ['nvidia-smi', '--query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,power.draw', '--format=csv,noheader,nounits'])"
+    }
+  },
+  "stdout": "",
+  "stderr": ""
+}

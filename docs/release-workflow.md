@@ -30,3 +30,20 @@ net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe
 
 The generated `.pkg` files use Stata `g` lines so Stata downloads the plugin
 matching the user's OS.
+
+## Autonomous source and offline bundles
+
+The release workflow also publishes `xhdfe-src.zip` and
+`xhdfe-offline-bundle.zip`. These archives contain the shared C++ core, all
+three frontend sources, Stata plugin build inputs, Eigen, pybind11, and the
+unmodified official `Rcpp_1.1.2.tar.gz` CRAN source archive. The latter lets an
+R user install the package into a local library with networking disabled; its
+upstream URL, license, version, and certified SHA-256 are recorded in
+`third_party/RCPP_SOURCE_PROVENANCE.md`.
+
+`tools/make_source_dist_zip.sh` fails if the resulting archive is not closed.
+Its independent `tools/validate_source_dist_zip.sh` check verifies ZIP
+integrity, required dependency entries, the Rcpp SHA-256, and the package name
+and version inside the Rcpp tarball. The release workflow runs that validator
+again and confirms that both the archive and provenance survive nesting inside
+the autonomous offline bundle.

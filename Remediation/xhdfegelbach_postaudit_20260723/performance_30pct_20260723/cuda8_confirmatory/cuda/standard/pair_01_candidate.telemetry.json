@@ -1,0 +1,57 @@
+{
+  "label": "candidate",
+  "backend": "cuda",
+  "mode": "standard",
+  "round": 0,
+  "command": [
+    "/home/mangelo/miniconda3/bin/python",
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/repros/performance_ab_30pct.py",
+    "worker",
+    "--module",
+    "/home/mangelo/Documents/GitHub/xhdfe/build_cuda/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+    "--backend",
+    "cuda",
+    "--mode",
+    "standard",
+    "--round",
+    "0",
+    "--n",
+    "500000",
+    "--threads",
+    "16",
+    "--inner-reps",
+    "3",
+    "--output",
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/performance_30pct_20260723/cuda8_confirmatory/cuda/standard/pair_01_candidate.json"
+  ],
+  "returncode": 0,
+  "wall_seconds": 3.323762968182564,
+  "before": {
+    "timestamp": "2026-07-23T09:26:27+0100",
+    "load": [
+      31.58,
+      31.81,
+      32.65
+    ],
+    "cpu_busy_pct_0p5s": 52.83256399496433,
+    "gpu": {
+      "ok": true,
+      "raw": "0, 0, 15, 95830, 94.59"
+    }
+  },
+  "after": {
+    "timestamp": "2026-07-23T09:26:30+0100",
+    "load": [
+      31.22,
+      31.73,
+      32.62
+    ],
+    "cpu_busy_pct_0p5s": 57.5073191133417,
+    "gpu": {
+      "ok": true,
+      "raw": "0, 0, 15, 95830, 93.65"
+    }
+  },
+  "stdout": "",
+  "stderr": ""
+}

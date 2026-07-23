@@ -1,0 +1,139 @@
+{
+  "schema": 1,
+  "analysis": "pooled_complete_runs_no_pair_exclusions",
+  "margin_candidate_over_baseline": 1.3,
+  "input_directories": [
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/performance_30pct_20260723/cpu5_retry2",
+    "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/performance_30pct_20260723/cpu8_confirmatory"
+  ],
+  "backends": {
+    "cpu": {
+      "standard_ab": {
+        "unadjusted/unw": {
+          "run_pair_counts": [
+            5,
+            8
+          ],
+          "pair_ratios_candidate_over_baseline": [
+            0.5233782819874354,
+            1.0578676511392076,
+            0.9941556173036825,
+            0.9505573256089678,
+            1.1196229019945123,
+            1.077936554806653,
+            0.7229544478209927,
+            1.3053416908746955,
+            1.6384861390354075,
+            1.300034470310981,
+            1.0505372743450359,
+            1.0712124929877005,
+            0.883162064892575
+          ],
+          "n_pairs": 13,
+          "n_below_1p30": 10,
+          "median_ratio": 1.0578676511392076,
+          "bootstrap_95pct_ci": [
+            0.9505573256089678,
+            1.1196229019945123
+          ],
+          "one_sided_sign_p_median_below_1p30": 0.046142578125,
+          "one_sided_sign_p_median_above_1p30": 0.98876953125,
+          "decision": "rules_out_regression_ge_30pct"
+        },
+        "unadjusted/w": {
+          "run_pair_counts": [
+            5,
+            8
+          ],
+          "pair_ratios_candidate_over_baseline": [
+            0.699540246258533,
+            0.9997848597609652,
+            0.9830982843806233,
+            0.9510694832947597,
+            1.0177786877948434,
+            0.9601965171310006,
+            0.8903513308597966,
+            1.249580166512658,
+            1.7307670135643705,
+            0.8175420701990946,
+            1.1702922069402568,
+            1.0149300434181106,
+            1.153319378939793
+          ],
+          "n_pairs": 13,
+          "n_below_1p30": 12,
+          "median_ratio": 0.9997848597609652,
+          "bootstrap_95pct_ci": [
+            0.9510694832947597,
+            1.153319378939793
+          ],
+          "one_sided_sign_p_median_below_1p30": 0.001708984375,
+          "one_sided_sign_p_median_above_1p30": 0.9998779296875,
+          "decision": "rules_out_regression_ge_30pct"
+        },
+        "cluster/unw": {
+          "run_pair_counts": [
+            5,
+            8
+          ],
+          "pair_ratios_candidate_over_baseline": [
+            0.8253771348807031,
+            0.9545602127127021,
+            1.0079182004250071,
+            0.9935240604587703,
+            1.976150252923954,
+            1.204806227264003,
+            0.8056932904716815,
+            0.6901281228756905,
+            1.6415552275701049,
+            1.00987588591544,
+            1.0022238093686182,
+            1.0085722604291028,
+            1.1330356467613432
+          ],
+          "n_pairs": 13,
+          "n_below_1p30": 11,
+          "median_ratio": 1.0079182004250071,
+          "bootstrap_95pct_ci": [
+            0.9545602127127021,
+            1.1330356467613432
+          ],
+          "one_sided_sign_p_median_below_1p30": 0.01123046875,
+          "one_sided_sign_p_median_above_1p30": 0.998291015625,
+          "decision": "rules_out_regression_ge_30pct"
+        },
+        "cluster/w": {
+          "run_pair_counts": [
+            5,
+            8
+          ],
+          "pair_ratios_candidate_over_baseline": [
+            0.8554612472692099,
+            1.043706271024551,
+            1.0529329605397786,
+            0.9383162000477064,
+            1.0202461614280498,
+            1.2350980479967029,
+            0.8636791499961844,
+            0.9016502031809978,
+            1.2911877489590016,
+            1.0507901552618775,
+            0.8695549804189653,
+            0.7551513716624387,
+            0.9290813460911754
+          ],
+          "n_pairs": 13,
+          "n_below_1p30": 13,
+          "median_ratio": 0.9383162000477064,
+          "bootstrap_95pct_ci": [
+            0.8695549804189653,
+            1.0507901552618775
+          ],
+          "one_sided_sign_p_median_below_1p30": 0.0001220703125,
+          "one_sided_sign_p_median_above_1p30": 1.0,
+          "decision": "rules_out_regression_ge_30pct"
+        }
+      }
+    }
+  }
+}

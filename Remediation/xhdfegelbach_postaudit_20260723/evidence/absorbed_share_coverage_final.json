@@ -1,0 +1,16 @@
+{
+  "extension": "/home/mangelo/Documents/GitHub/xhdfe/build/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+  "reps": 5000,
+  "seed0": 90000,
+  "workers_or_clusters": 150,
+  "periods": 5,
+  "population_share_job_over_base": 0.3333333333333333,
+  "mean_estimate": 0.34221895560731347,
+  "bias": 0.008885622273980154,
+  "empirical_sd": 0.08305496815677603,
+  "mean_reported_se": 0.08329497220483503,
+  "se_to_sd_ratio": 1.0028897012832028,
+  "coverage": 0.954,
+  "coverage_mc_se": 0.0029625664549508433,
+  "max_total_se_base_se_identity_error": 0.0
+}

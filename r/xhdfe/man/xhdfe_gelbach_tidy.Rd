@@ -34,9 +34,9 @@ When \code{share} is requested, the result also contains \code{share},
 \description{
 Pure post-processing of the stored Gelbach point estimates and covariance; no
 model is re-estimated. \code{share = "movement"} uses the joint covariance and
-the delta method. \code{share = "base"} reports descriptive points but leaves
-SEs missing because \eqn{Cov(\delta,b_{base})} is not in the public contract.
-\code{share = "base_fixed"} explicitly labels fixed-denominator scaling.
+the delta method. \code{share = "base"} also uses denominator uncertainty and
+\eqn{Cov(\delta,b_{base})}. \code{share = "base_fixed"} explicitly labels
+fixed-denominator scaling.
 Signed shares are never truncated or renormalized.
 }
 \section{Share contract}{
@@ -44,9 +44,12 @@ Signed shares are never truncated or renormalized.
 movement. Ratio uncertainty uses the full joint component covariance and the
 delta method; the appended total share is one with SE zero.
 
-\code{share = "base"} divides by \code{b_base}. It reports descriptive share
-points but leaves ratio SEs and confidence limits missing because
-\code{Cov(delta, b_base)} is not in the public result contract.
+\code{share = "base"} divides by \code{b_base} and reports full delta-method
+inference. For component \eqn{g},
+\deqn{Var(\delta_g/b)=Var(\delta_g)/b^2+
+\delta_g^2 Var(b)/b^4-2\delta_g Cov(\delta_g,b)/b^3.}
+The total row uses the analogous \code{Cov(total, b_base)} expression and is
+labelled \code{joint_base_covariance_delta_method}.
 
 \code{share = "base_fixed"} is an explicit descriptive convention that
 scales component SEs while holding the reported base coefficient fixed. It is
@@ -54,7 +57,8 @@ labelled \code{fixed_base_denominator_scaling}, not full ratio inference.
 
 Shares are fractions, remain signed, and may be negative or exceed one. They
 are never truncated or renormalized. A denominator whose absolute value is at
-or below \code{share_tol} is marked undefined and its shares are missing.
+or below \code{share_tol} is marked undefined, emits one visible warning for
+the call, and its shares and confidence intervals are missing.
 Base-based shares are also undefined for the implicit intercept because
 \code{b_base} contains X1 coefficients only.
 }

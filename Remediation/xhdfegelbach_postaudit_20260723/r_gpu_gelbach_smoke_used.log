@@ -1,0 +1,1 @@
+mode=used gpu_requested=TRUE gpu_used=TRUE backend=cuda status=used attempted=TRUE converged=TRUE iterations=3 threads=8 max_b=9.9920072216264089e-16 max_delta=3.3306690738754696e-16 max_cov=1.0164395367051604e-20 max_total_cov=1.1858461261560205e-20 env_after=cpu

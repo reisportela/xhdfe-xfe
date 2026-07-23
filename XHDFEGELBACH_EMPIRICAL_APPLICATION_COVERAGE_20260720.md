@@ -226,7 +226,8 @@ clusteriza-se no worker FE que o absorve. O zero full é imposto, nunca estimado
 - `VALIDATE_GELBACH.py`: **PASS**, incluindo focal inerte, shares, contraste,
   common-controls/LSDV e oracle externo absorbed-target;
 - `VALIDATE_GELBACH_FRONTENDS.py`: **PASS**, paridade standard e absorbed entre
-  Python, Stata e R, shares incluídas, e os seis exemplos reais;
+  Python, Stata e R, shares incluídas, e os exemplos standard e
+  absorbed-target executados nos três frontends;
 - suite Stata: **PASS**, 28 ficheiros;
 - suite R completa: **PASS**, um skip CUDA esperado na build CPU-only e três
   warnings AKM já documentados;

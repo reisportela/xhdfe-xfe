@@ -2,9 +2,10 @@ name: release-binaries
 
 # Builds the prebuilt Stata plugin bundles for Linux, Windows and macOS
 # (Apple Silicon) on real GitHub-hosted runners and attaches them to the
-# draft release. Run manually with the exact, already-pushed tag; publish the
-# draft only after this workflow succeeds and its assets are verified. Every
-# platform is mandatory.
+# draft release. A version-tag push runs the complete release transaction:
+# validate tag, create the draft, build and verify every mandatory platform,
+# publish the net-install site, and publish the release only after all gates
+# succeed. Manual dispatch remains available for an exact, already-pushed tag.
 #
 # CPU only, by design: CUDA/Metal binaries are not distributed — GPU is an
 # opt-in optimization built from source. The plugins are COMPILED on each
@@ -13,6 +14,9 @@ name: release-binaries
 # workstation and reported in the release notes.
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -23,7 +27,7 @@ permissions:
   contents: write
 
 env:
-  TAG: ${{ github.event.inputs.tag }}
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   validate-tag:
@@ -43,6 +47,23 @@ jobs:
           grep -Fqx "v ${expected%.*}" stata/xhdfe.pkg
           grep -Fq "project(xhdfe VERSION $expected " CMakeLists.txt
           echo "release tag verified: $TAG -> $(git rev-parse HEAD)"
+      - name: Create draft release before any asset upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "release already exists: $TAG"
+          else
+            notes="RELEASE_NOTES_${TAG#v}.md"
+            test -f "$notes"
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --title "$TAG" \
+              --notes-file "$notes" \
+              --repo "${{ github.repository }}"
+          fi
 
   # ---- Linux x86-64 (native, OpenMP) -------------------------------------
   linux:
@@ -214,6 +235,7 @@ jobs:
           # anyone can use to rebuild offline. Published into the net-install
           # site so it lands at <gh-pages>/stata/xhdfe-src.zip.
           bash tools/make_source_dist_zip.sh netinstall_site/stata/xhdfe-src.zip
+          bash tools/validate_source_dist_zip.sh netinstall_site/stata/xhdfe-src.zip
           gh release upload "$TAG" netinstall_site/stata/xhdfe-src.zip --clobber --repo "${{ github.repository }}"
       - name: Build autonomous offline bundle (installables + sources)
         env:
@@ -226,8 +248,17 @@ jobs:
           cp -a netinstall_site/. "_offline/$root/installable/"
           unzip -q netinstall_site/stata/xhdfe-src.zip -d "_offline/$root/sources"
           cp "RELEASE_NOTES_${TAG#v}.md" "_offline/$root/README.md"
+          rcpp="_offline/$root/sources/xhdfe-src/third_party/Rcpp_1.1.2.tar.gz"
+          test -f "$rcpp"
+          echo "2746cf2fb188e5f0a84dbf5c8f68915b54564ed33e5754572f174e7b32e7f4f3  $rcpp" \
+            | sha256sum --check -
           ( cd _offline && zip -q -r -X ../xhdfe-offline-bundle.zip "$root" )
           unzip -t xhdfe-offline-bundle.zip
+          unzip -Z1 xhdfe-offline-bundle.zip > _offline_bundle_listing.txt
+          grep -Fxq "$root/sources/xhdfe-src/third_party/Rcpp_1.1.2.tar.gz" \
+            _offline_bundle_listing.txt
+          grep -Fxq "$root/sources/xhdfe-src/third_party/RCPP_SOURCE_PROVENANCE.md" \
+            _offline_bundle_listing.txt
           gh release upload "$TAG" xhdfe-offline-bundle.zip --clobber --repo "${{ github.repository }}"
       - name: Attach net-install site snapshot to release
         env:
@@ -245,3 +276,12 @@ jobs:
           publish_branch: gh-pages
           publish_dir: ./netinstall_site
           commit_message: Publish Stata net-install site for ${{ env.TAG }}
+      - name: Publish release after all build, archive, and site gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" \
+            --draft=false \
+            --latest \
+            --repo "${{ github.repository }}"

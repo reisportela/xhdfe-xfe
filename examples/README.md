@@ -29,6 +29,9 @@ cover unadjusted and one-way cluster-robust inference, observed and absorbed-FE
 blocks, focal reporting, signed shares, covariance-aware contrasts, and the
 distinct constrained estimand for a target absorbed by an added FE. The latter
 prints and stores its full-model zero as imposed, not estimated.
+The help surfaces additionally document joint `share=base` inference,
+near-FE-collinearity and few-cluster warnings, full-model block coefficients,
+degrees of freedom, and CPU/CUDA backend diagnostics.
 
 ## Running them
 
@@ -58,9 +61,10 @@ Rscript examples/gelbach_absorbed_target.R
 ```
 
 For the GPU (CUDA) path, add `gpu` (Stata) / `gpu=True` (Python) / `gpu=TRUE`
-(R) to the AKM calls when the plugin/extension was built with CUDA support.
-In Stata, `xhdfegelbach, gpu verbose` accelerates the full HDFE absorption and
-shows phase progress; `xhdfeconnected, gpu verbose` uses deterministic CUDA
+(R) to the relevant AKM or Gelbach call when the plugin/extension was built
+with CUDA support. In Stata, `xhdfegelbach, gpu verbose` accelerates only the
+full-model HDFE absorption and shows phase progress;
+`xhdfeconnected, gpu verbose` uses deterministic CUDA
 radix sorting on graphs at or above its measured 10-million-row profitability
 gate and reports the effective backend in `r(gpu_status)`.
 

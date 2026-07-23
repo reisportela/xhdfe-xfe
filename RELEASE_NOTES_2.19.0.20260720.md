@@ -43,9 +43,9 @@ accounting; the command does not identify causal mediation or mechanisms.
 - Cross-frontend metadata now uses one contract: zero-based backend indices,
   presentation names, an absorbed mask, identification status, inference
   status, effective N, and singleton counts.
-- Six executable examples cover standard and absorbed-target applications in
-  Python, R, and Stata. Help files document every option, result object,
-  estimand, covariance layout, example, warning, and deliberate limitation.
+- The standard and absorbed-target examples execute in each of Python, R, and
+  Stata. Help files document every option, result object, estimand, covariance
+  layout, example, warning, and deliberate limitation.
 
 ## Correctness and provenance hardening
 

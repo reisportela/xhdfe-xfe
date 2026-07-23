@@ -27,6 +27,14 @@ cluster_base_cov <- function(y, x1, cluster) {
   ((n - 1) / (n - k)) * (g / (g - 1)) * P %*% crossprod(sums) %*% P
 }
 
+unadjusted_base_cov <- function(y, x1) {
+  X <- cbind(x1, 1)
+  P <- solve(crossprod(X))
+  b <- drop(P %*% crossprod(X, y))
+  u <- drop(y - X %*% b)
+  drop(crossprod(u)) / (nrow(X) - ncol(X)) * P
+}
+
 test_that("decomposition identity and shapes", {
   d <- sim_gelb()
   r <- xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
@@ -38,6 +46,30 @@ test_that("decomposition identity and shapes", {
   expect_identical(r$estimand, "coefficient_movement")
   expect_false(r$causal_interpretation)
   expect_equal(r$tol, 1e-8)
+  expect_equal(r$df_base, nrow(d$x1) - ncol(d$x1) - 1, tolerance = 0)
+  expect_equal(r$n_clusters, 0L, tolerance = 0)
+  expect_equal(dim(r$gamma), c(1L, 1L))
+  expect_identical(colnames(r$gamma), "OBS")
+  expect_equal(unname(r$gamma[1, 1]),
+               unname(lm.fit(cbind(d$x1, d$z,
+                                   model.matrix(~ factor(d$firm))),
+                             d$y)$
+                      coefficients[3]),
+               tolerance = 1e-10)
+  expect_equal(unname(r$base_cov),
+               unname(unadjusted_base_cov(d$y, d$x1)),
+               tolerance = 1e-12)
+  expect_equal(dim(r$cov_delta_bbase), c(6L, 3L))
+  expect_equal(dim(r$cov_total_bbase), c(3L, 3L))
+  expect_identical(names(r$x1_near_collinear_mask), r$x1_names)
+  expect_identical(names(r$x1_fe_collinear_ratio), r$x1_names)
+  expect_equal(r$near_fe_collinear_ss_ratio_warn_upper, 1e-4,
+               tolerance = 0)
+  expect_equal(r$few_cluster_warning_threshold, 30L, tolerance = 0)
+  expect_gte(r$threads_used, 1L)
+  expect_false(r$gpu_requested)
+  expect_false(r$gpu_used)
+  expect_identical(r$gpu_backend, "cpu")
   expect_identical(r$se_type[["FIRM"]], "conditional_gamma0")
   expect_equal(unname(r$fe_total$coef), unname(r$delta[, "FIRM"]),
                tolerance = 1e-12)
@@ -74,21 +106,66 @@ test_that("ambiguous blocks, rank failures and invalid tolerances fail closed", 
                   x2_groups = list(A = d$z)),
     "at least one focal column"
   )
+  expect_error(
+    xhdfe_gelbach(d$y, d$x1, x2_groups = list(A = d$z),
+                  vce = "cluster", cluster = rep(1:4, length.out = 20)),
+    "same length as y"
+  )
+  expect_error(
+    xhdfe_gelbach(d$y, d$x1, x2_groups = list(A = d$z),
+                  weights = rep("bad", length(d$y))),
+    "numeric vector"
+  )
+  expect_error(
+    xhdfe_gelbach(d$y, d$x1, x2_groups = list(A = factor(d$firm))),
+    "generate full-rank indicators"
+  )
+  expect_error(
+    xhdfe_gelbach(d$y, d$x1, x2_groups = list(A = d$z), gpu = NA),
+    "non-missing logical"
+  )
+
+  grid <- seq(-1, 1, length.out = 5)
+  expect_error(
+    xhdfe_gelbach(grid, cbind(grid),
+                  x2_groups = list(saturated = cbind(grid^2, grid^3, grid^4))),
+    "residual degrees of freedom"
+  )
 })
 
 test_that("vce modes run and gamma0 shrinks the observed-group variance model", {
   d <- sim_gelb()
   rr <- xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
                       fes = list(FIRM = d$firm), vce = "robust")
-  rc <- xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
-                      fes = list(FIRM = d$firm), vce = "cluster",
-                      cluster = d$firm)
+  expect_warning(
+    rc <- xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
+                        fes = list(FIRM = d$firm), vce = "cluster",
+                        cluster = d$firm),
+    "few clusters"
+  )
   g0 <- xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
                       fes = list(FIRM = d$firm), gamma0 = TRUE)
   expect_true(all(is.finite(rr$se)) && all(is.finite(rc$se)))
+  expect_equal(rc$n_clusters, length(unique(d$firm)), tolerance = 0)
+  expect_match(rc$notes, "few clusters", ignore.case = TRUE)
   # deltas are identical across vce choices; only the variances change
   expect_identical(rr$delta, rc$delta)
   expect_identical(rr$delta, g0$delta)
+
+  many_cluster <- expect_silent(
+    xhdfe_gelbach(d$y, d$x1, x2_groups = list(OBS = d$z),
+                  vce = "cluster",
+                  cluster = rep(seq_len(50L), length.out = length(d$y)))
+  )
+  expect_equal(many_cluster$n_clusters, 50L, tolerance = 0)
+
+  gpu_no_fe <- xhdfe_gelbach(
+    d$y, d$x1, x2_groups = list(OBS = d$z), gpu = TRUE
+  )
+  expect_true(gpu_no_fe$gpu_requested)
+  expect_false(gpu_no_fe$gpu_used)
+  expect_identical(gpu_no_fe$gpu_backend, "cpu")
+  expect_identical(gpu_no_fe$gpu_status, "not_applicable")
 })
 
 test_that("absorbed targets are opt-in constraints and standard rank guards remain", {
@@ -130,6 +207,20 @@ test_that("absorbed targets are opt-in constraints and standard rank guards rema
   expect_equal(r$fe_collinear_ss_ratio_tol, 1e-9, tolerance = 0)
   base_cov <- cluster_base_cov(y, x1, worker)
   expect_equal(r$total_cov[1, 1], base_cov[1, 1], tolerance = 1e-12)
+  expect_equal(r$base_cov[1, 1], base_cov[1, 1], tolerance = 1e-12)
+  expect_equal(r$cov_total_bbase[1, 1], r$base_cov[1, 1],
+               tolerance = 0)
+  absorbed_share <- xhdfe_gelbach_tidy(
+    r, share = "base", include_total = TRUE, include_full = FALSE
+  )
+  absorbed_total <- (
+    absorbed_share$component == "total_movement" &
+      absorbed_share$coefficient %in% r$absorbed_target_names
+  )
+  expect_identical(
+    unname(absorbed_share$share_std_error[absorbed_total]),
+    0
+  )
   expect_equal(r$n_obs_input, length(y))
   expect_equal(r$n_singletons_dropped, 0)
   expect_true(all(is.finite(r$cov)))
@@ -184,8 +275,16 @@ test_that("focal reporting, signed shares and contrasts preserve the estimand", 
     d$y, d$x1, x2_groups = list(OBS = d$z),
     fes = list(FIRM = d$firm), focal = "target"
   )
+  positional_legacy <- do.call(
+    xhdfe_gelbach,
+    list(d$y, d$x1, list(OBS = d$z), list(FIRM = d$firm),
+         "unadjusted", NULL, FALSE, FALSE, 1e-8, 0L,
+         NULL, FALSE, NULL, NULL)
+  )
 
   expect_identical(focal$delta, base$delta)
+  expect_identical(positional_legacy$delta, base$delta)
+  expect_false(positional_legacy$gpu_requested)
   expect_identical(focal$cov, base$cov)
   expect_identical(focal$total, base$total)
   expect_true(focal$focal_selection_explicit)
@@ -206,9 +305,34 @@ test_that("focal reporting, signed shares and contrasts preserve the estimand", 
     include_full = FALSE
   )
   expect_true(all(is.finite(base_share$share)))
-  expect_true(all(is.na(base_share$share_std_error)))
+  expect_true(all(is.finite(base_share$share_std_error)))
   expect_identical(unique(base_share$share_se_type),
-                   "not_available_joint_base_covariance")
+                   "joint_base_covariance_delta_method")
+  k1 <- nrow(focal$delta)
+  for (g in seq_along(focal$names)) {
+    d_g <- focal$delta[1, g]
+    b <- focal$b_base[1]
+    v_g <- focal$cov[(g - 1L) * k1 + 1L,
+                     (g - 1L) * k1 + 1L]
+    c_gb <- focal$cov_delta_bbase[(g - 1L) * k1 + 1L, 1L]
+    oracle <- sqrt(max(0, v_g / b^2 +
+      d_g^2 * focal$base_cov[1, 1] / b^4 -
+      2 * d_g * c_gb / b^3))
+    expect_equal(base_share$share_std_error[g], oracle, tolerance = 1e-14)
+  }
+
+  base_share_total <- xhdfe_gelbach_tidy(
+    focal, share = "base", include_total = TRUE,
+    include_full = FALSE
+  )
+  total_row <- base_share_total$component == "total_movement"
+  total <- focal$total[1]
+  b <- focal$b_base[1]
+  total_oracle <- sqrt(max(0, focal$total_cov[1, 1] / b^2 +
+    total^2 * focal$base_cov[1, 1] / b^4 -
+    2 * total * focal$cov_total_bbase[1, 1] / b^3))
+  expect_equal(base_share_total$share_std_error[total_row], total_oracle,
+               tolerance = 1e-14)
 
   fixed_share <- xhdfe_gelbach_tidy(
     focal, share = "base_fixed", include_total = FALSE,
@@ -217,6 +341,23 @@ test_that("focal reporting, signed shares and contrasts preserve the estimand", 
   expect_true(all(is.finite(fixed_share$share_std_error)))
   expect_identical(unique(fixed_share$share_se_type),
                    "fixed_base_denominator_scaling")
+
+  undefined <- focal
+  undefined$b_base[1] <- 0
+  warning_count <- 0L
+  undefined_rows <- withCallingHandlers(
+    xhdfe_gelbach_tidy(
+      undefined, share = "base", include_total = FALSE,
+      include_full = FALSE
+    ),
+    warning = function(w) {
+      warning_count <<- warning_count + 1L
+      expect_match(conditionMessage(w), "denominator is undefined")
+      invokeRestart("muffleWarning")
+    }
+  )
+  expect_equal(warning_count, 1L)
+  expect_true(all(is.na(undefined_rows$share)))
 
   total_contrast <- xhdfe_gelbach_contrast(
     focal, "target", c("OBS", "FIRM")

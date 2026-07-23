@@ -61,6 +61,10 @@ gelbach_markers=(
   "Reported focal coefficient(s):"
   "Shares: signed fraction of total movement"
   "Share inference: delta method using the joint component covariance."
+  "Share inference: full delta method using Var(b_base) and Cov(delta,b_base)."
+  "near-FE-collinear focal"
+  "few clusters (G < 30)"
+  "requested share denominator is within sharetol()"
   "observed x2 group 1 is severely ill-conditioned"
   "absorbed-target inference is not certified for this VCE"
 )

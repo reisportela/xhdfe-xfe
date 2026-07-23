@@ -224,6 +224,7 @@ struct GelbachOptions {
     GelbachVce vce = GelbachVce::Unadjusted;
     bool gamma0 = false;
     bool cov0 = false;
+    bool use_gpu = false;                 //!< Request CUDA for the full-model absorption phase; CPU remains the default/reference.
     // Zero-based X1 columns that the caller explicitly permits the full
     // model to absorb. Every declared column must be classified by the HDFE
     // fit as collinear with the absorbed FEs (omitted_reason == 1); all other
@@ -240,8 +241,14 @@ struct GelbachResult {
     Eigen::VectorXd b_base;   //!< Base-specification coefficients on X1.
     Eigen::VectorXd b_full;   //!< Full coefficients on X1; declared absorbed targets are constrained to zero.
     Eigen::VectorXi x1_absorbed; //!< 1 where b_full is imposed zero because X1 is absorbed; 0 where estimated.
+    Eigen::VectorXd x1_fe_collinear_ratio; //!< Per-X1 ||M_D x||^2 / ||x||^2 from the full-fit classifier.
+    Eigen::VectorXi x1_near_collinear_mask; //!< 1 where the ratio is in the documented warning band above the omission boundary.
+    Eigen::MatrixXd gamma;        //!< Full-model X2 coefficients, padded by block: rows=max block width, cols=observed blocks.
     Eigen::MatrixXd delta;    //!< (p+1) x G contributions over [x1..., _cons]; group order = x2 groups then FE dims.
     Eigen::MatrixXd cov;      //!< (G*(p+1)) x (G*(p+1)) covariance of vec(delta).
+    Eigen::MatrixXd base_cov; //!< Requested-VCE covariance of [b_base, base intercept].
+    Eigen::MatrixXd cov_delta_bbase; //!< Cov(vec(delta), [b_base, base intercept]).
+    Eigen::MatrixXd cov_total_bbase; //!< Cov(sum_g delta_g, [b_base, base intercept]).
     Eigen::VectorXd total;    //!< Summed contribution (= b_base - b_full over [x1, _cons]).
     Eigen::MatrixXd total_cov;
     double identity_gap = 0.0;
@@ -250,13 +257,20 @@ struct GelbachResult {
     long long n_obs_effective = 0; //!< Retained rows normally; sum of retained fweights under frequency weighting.
     long long n_singletons_dropped = 0;
     double df_full = 0.0;
+    double df_base = 0.0;
+    int n_clusters = 0;          //!< Independent retained-sample clusters for cluster VCE; 0 otherwise.
     double fe_collinear_ss_ratio_tol = 1e-9; //!< Backend FE-absorption classification boundary: ||M_D x||^2 / ||x||^2.
+    double near_fe_collinear_ss_ratio_warn_upper = 1e-4; //!< Inclusive upper edge of the diagnostic-only warning band.
+    int few_cluster_warning_threshold = 30; //!< Warn when one-way cluster count is below this value.
     bool absorbed_target_inference_valid = true; //!< True unless absorbed-target inference is requested away from an absorbing FE cluster.
     int absorbing_fe_index = -1; //!< Zero-based FE dimension matching the cluster and absorbing every target; -1 if unavailable/not applicable.
     bool converged = true;
     int threads_used = 1;
+    bool gpu_requested = false;
     bool gpu_used = false;
     int gpu_status_code = 0;
+    std::string gpu_backend = "cpu";
+    std::string gpu_status = "not_requested";
     bool gpu_attempted = false;
     bool gpu_absorption_converged = false;
     int gpu_absorption_iterations = 0;

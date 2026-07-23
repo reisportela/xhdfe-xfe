@@ -3,6 +3,9 @@
 
 Checks `xhdfe.gelbach.decompose` against:
   (c) a hand-computed omitted-variables-bias decomposition (always);
+  (d) an independent dense stacked-score oracle for base-model covariance,
+      Cov(delta, b_base), Cov(total, b_base), gamma, G and df_base across
+      iid/robust/cluster VCEs, weights, and designs with/without one FE;
   (a) Gelbach's b1x2 (Stata) exactly, no absorbed effects — deltas, totals,
       default and gamma0 SEs;                       [needs --b1x2-dir]
   (b) the strong HDFE test: firm effects as explicit LSDV dummies fed to
@@ -35,6 +38,14 @@ def check(name, a, b, tol):
     d = float(np.max(np.abs(np.asarray(a, dtype=float) - np.asarray(b, dtype=float))))
     ok = d <= tol
     print(f"[{'PASS' if ok else 'FAIL'}] {name}: max|diff|={d:.2e} (tol {tol:g})")
+    if not ok:
+        FAILURES.append(name)
+
+
+def check_condition(name, condition, detail=""):
+    ok = bool(condition)
+    suffix = f": {detail}" if detail else ""
+    print(f"[{'PASS' if ok else 'FAIL'}] {name}{suffix}")
     if not ok:
         FAILURES.append(name)
 
@@ -82,6 +93,28 @@ def absorbed_target_fixture(seed=123, n_workers=80, periods=5):
     y = (0.4 * focal + 0.1 * within + 0.7 * z +
          rng.normal(size=n_workers)[worker] + rng.normal(scale=0.4, size=n))
     return y, np.column_stack([focal, within]), z, worker
+
+
+def near_fe_fixture(target_ratio, seed=20260723, n_groups=60, periods=20):
+    """Construct an X1 column with an exact pre-fit within/total SS ratio."""
+    rng = np.random.default_rng(seed)
+    fe = np.repeat(np.arange(n_groups), periods)
+    signal = rng.normal(size=n_groups)[fe]
+    within_noise = rng.normal(size=fe.size)
+    within_noise -= np.bincount(
+        fe, weights=within_noise, minlength=n_groups)[fe] / periods
+    signal_ss = float(signal @ signal)
+    noise_ss = float(within_noise @ within_noise)
+    scale = np.sqrt(
+        target_ratio * signal_ss / (noise_ss * (1.0 - target_ratio))
+    )
+    focal = signal + scale * within_noise
+    z = rng.normal(size=fe.size)
+    y = (
+        0.8 * focal + 0.5 * z + rng.normal(size=n_groups)[fe]
+        + rng.normal(scale=0.4, size=fe.size)
+    )
+    return y, focal, z, fe
 
 
 def absorbed_target_oracle(y, x1, z, fe, df_full, vce="cluster",
@@ -375,6 +408,191 @@ def base_ols_cov(y, x1, vce="unadjusted", cluster=None,
     return b, correction * (p @ meat @ p)
 
 
+def stacked_base_cross_oracle(y, x1, x2_groups, *, fe=None,
+                              vce="unadjusted", cluster=None,
+                              weights=None, fweights=False, df_full=None,
+                              gamma0=False):
+    """Independent dense oracle for Cov(delta, b_base).
+
+    This deliberately assembles explicit weighted LSDV normal equations and
+    the augmented [full score, auxiliary scores, base score] system in NumPy.
+    For robust/cluster VCEs, the direct and full-coefficient cross terms both
+    receive b1x2's ``q_big`` multiplier.  ``q_vu`` belongs only to the
+    component-component full-coefficient covariance and therefore never
+    enters this cross block.  Under ``gamma0`` the full-coefficient cross term
+    is omitted, while the direct auxiliary/base term remains.
+    """
+    y = np.asarray(y, dtype=float)
+    x1 = np.asarray(x1, dtype=float)
+    if x1.ndim == 1:
+        x1 = x1[:, None]
+    groups = []
+    group_sizes = []
+    for value in x2_groups.values():
+        arr = np.asarray(value, dtype=float)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        groups.append(arr)
+        group_sizes.append(arr.shape[1])
+    x2 = np.column_stack(groups)
+    n, p = x1.shape
+    q = x2.shape[1]
+    x1t = np.column_stack([x1, np.ones(n)])
+    k1 = p + 1
+
+    if weights is None:
+        wq = np.ones(n)
+        sf = np.ones(n)
+        n_eff = float(n)
+    else:
+        raw = np.asarray(weights, dtype=float)
+        if fweights:
+            wq = raw
+            sf = raw if vce == "cluster" else np.sqrt(raw)
+            n_eff = float(raw.sum())
+        else:
+            wq = raw * (n / raw.sum())
+            sf = wq
+            n_eff = float(n)
+    sw = np.sqrt(wq)
+
+    base_gram = x1t.T @ (wq[:, None] * x1t)
+    P = np.linalg.inv(base_gram)
+    b_base = np.linalg.solve(base_gram, x1t.T @ (wq * y))
+    u_base = y - x1t @ b_base
+    df_base = n_eff - k1
+
+    if fe is None:
+        full_design = np.column_stack([x1, x2, np.ones(n)])
+        full_coef = np.linalg.lstsq(
+            full_design * sw[:, None], y * sw, rcond=None)[0]
+        full_resid = y - full_design @ full_coef
+        b2 = full_coef[p:p + q]
+        W = full_design
+        Kx = p + q + 1
+        fe_effect = None
+    else:
+        _, fe_codes = np.unique(np.asarray(fe), return_inverse=True)
+        n_fe = int(fe_codes.max()) + 1
+        dummies = np.eye(n_fe)[fe_codes, 1:]
+        full_design = np.column_stack([x1, x2, np.ones(n), dummies])
+        full_coef = np.linalg.lstsq(
+            full_design * sw[:, None], y * sw, rcond=None)[0]
+        full_resid = y - full_design @ full_coef
+        b2 = full_coef[p:p + q]
+        # The constant is part of the recovered FE contribution.  Its
+        # normalization affects only the auxiliary intercept, not residuals.
+        fe_effect = (
+            np.full(n, full_coef[p + q])
+            + dummies @ full_coef[p + q + 1:]
+        )
+        explicit = np.column_stack([x1, x2])
+        group_w = np.bincount(fe_codes, weights=wq, minlength=n_fe)
+        group_sum = np.zeros((n_fe, explicit.shape[1]))
+        np.add.at(group_sum, fe_codes, wq[:, None] * explicit)
+        W = explicit - group_sum[fe_codes] / group_w[fe_codes, None]
+        Kx = p + q
+
+    if df_full is None:
+        df_full = n_eff - np.linalg.matrix_rank(
+            full_design * sw[:, None])
+    Sw = np.linalg.inv(W.T @ (wq[:, None] * W))
+
+    effects = []
+    aux_gamma = []
+    cursor = 0
+    for width in group_sizes:
+        x2g = x2[:, cursor:cursor + width]
+        effects.append(x2g @ b2[cursor:cursor + width])
+        aux_gamma.append(P @ (x1t.T @ (wq[:, None] * x2g)))
+        cursor += width
+    if fe_effect is not None:
+        effects.append(fe_effect)
+        aux_gamma.append(None)
+
+    delta = [P @ (x1t.T @ (wq * effect)) for effect in effects]
+    vres = [effect - x1t @ d for effect, d in zip(effects, delta)]
+    G = len(effects)
+
+    _, base_cov = base_ols_cov(
+        y, x1, vce=vce, cluster=cluster, weights=weights,
+        fweights=fweights)
+    cross = np.zeros((G * k1, k1))
+    n_clusters = 0
+    if vce == "unadjusted":
+        centered_base = u_base - (wq @ u_base) / wq.sum()
+        for g in range(G):
+            cov_v_base = (
+                np.sum(wq * vres[g] * centered_base) / df_full
+            )
+            cross[g * k1:(g + 1) * k1, :] = cov_v_base * P
+    else:
+        full_score = W * (sf * full_resid)[:, None]
+        aux_scores = [
+            x1t * (sf * vres_g)[:, None] for vres_g in vres
+        ]
+        base_score = x1t * (sf * u_base)[:, None]
+        system_score = np.column_stack([full_score] + aux_scores)
+        if vce == "cluster":
+            if cluster is None:
+                raise ValueError("cluster ids are required")
+            _, cluster_codes = np.unique(
+                np.asarray(cluster), return_inverse=True)
+            n_clusters = int(cluster_codes.max()) + 1
+            system_sums = np.zeros((n_clusters, system_score.shape[1]))
+            base_sums = np.zeros((n_clusters, k1))
+            np.add.at(system_sums, cluster_codes, system_score)
+            np.add.at(base_sums, cluster_codes, base_score)
+            score_cross = system_sums.T @ base_sums
+            q_big = n_clusters / (n_clusters - 1.0)
+        elif vce == "robust":
+            score_cross = system_score.T @ base_score
+            q_big = n_eff / (n_eff - 1.0)
+        else:
+            raise ValueError(f"unknown vce: {vce}")
+
+        bread = np.zeros((Kx + G * k1, Kx + G * k1))
+        bread[:Kx, :Kx] = Sw
+        for g in range(G):
+            bread[Kx + g * k1:Kx + (g + 1) * k1,
+                  Kx + g * k1:Kx + (g + 1) * k1] = P
+        system_base_cov = q_big * bread @ score_cross @ P
+        cursor = 0
+        for g, width in enumerate(group_sizes):
+            block = system_base_cov[
+                Kx + g * k1:Kx + (g + 1) * k1, :
+            ].copy()
+            if not gamma0:
+                block += (
+                    aux_gamma[g]
+                    @ system_base_cov[
+                        p + cursor:p + cursor + width, :
+                    ]
+                )
+            cross[g * k1:(g + 1) * k1, :] = block
+            cursor += width
+        if fe_effect is not None:
+            g = G - 1
+            cross[g * k1:(g + 1) * k1, :] = system_base_cov[
+                Kx + g * k1:Kx + (g + 1) * k1, :
+            ]
+
+    return {
+        "base_cov": base_cov,
+        "cov_delta_bbase": cross,
+        "cov_total_bbase": sum(
+            (cross[g * k1:(g + 1) * k1, :] for g in range(G)),
+            np.zeros((k1, k1)),
+        ),
+        "gamma": [
+            b2[sum(group_sizes[:g]):sum(group_sizes[:g + 1])].copy()
+            for g in range(len(group_sizes))
+        ],
+        "df_base": df_base,
+        "n_clusters": n_clusters,
+    }
+
+
 def run_external_absorbed_oracle(args, gb, y, x1, z, worker):
     """Validate the new estimand against Stata's built-in constrained LSDV."""
     mode = args.external_absorbed_oracle
@@ -539,24 +757,63 @@ def main():
 
     base_rows = gb.tidy(
         named, share="base", include_total=False, include_full=False)
-    if (all(np.isfinite(row["share"]) for row in base_rows) and
-            all(np.isnan(row["share_std_error"]) for row in base_rows) and
-            all(row["share_se_type"] ==
-                "not_available_joint_base_covariance" for row in base_rows)):
-        print("[PASS] reporting:base-share-does-not-invent-inference")
-    else:
-        print("[FAIL] reporting:base-share-does-not-invent-inference")
-        FAILURES.append("reporting:base-share-does-not-invent-inference")
+    base_denom = float(named["b_base"][0])
+    base_var = float(named["base_cov"][0, 0])
+    manual_base_se = []
+    for g, group in enumerate(named["names"]):
+        delta_g = float(named["delta"][group]["coef"][0])
+        var_delta = float(named["cov"][g * 3, g * 3])
+        cov_delta_base = float(named["cov_delta_bbase"][g * 3, 0])
+        manual_base_se.append(np.sqrt(max(
+            0.0,
+            var_delta / base_denom ** 2
+            + delta_g ** 2 * base_var / base_denom ** 4
+            - 2.0 * delta_g * cov_delta_base / base_denom ** 3,
+        )))
+    check("reporting:base-share-points-unchanged",
+          [row["share"] for row in base_rows],
+          [named["delta"][group]["coef"][0] / base_denom
+           for group in named["names"]], 0.0)
+    check("reporting:base-share-joint-delta-method",
+          [row["share_std_error"] for row in base_rows],
+          manual_base_se, 2e-15)
+    check_condition(
+        "reporting:base-share-joint-inference-labelled",
+        all(np.isfinite(row["share_std_error"]) for row in base_rows)
+        and all(row["share_se_type"] ==
+                "joint_base_covariance_delta_method" for row in base_rows),
+    )
+
+    with warnings.catch_warnings(record=True) as caught_undefined:
+        warnings.simplefilter("always", RuntimeWarning)
+        undefined_rows = gb.tidy(
+            named, share="base", share_tol=1e100,
+            include_total=False, include_full=False)
+    undefined_messages = [
+        str(item.message) for item in caught_undefined
+        if issubclass(item.category, RuntimeWarning)
+    ]
+    check_condition(
+        "reporting:undefined-base-share-warns-once",
+        len(undefined_messages) == 1
+        and "share denominator is undefined" in undefined_messages[0]
+        and all(not row["share_defined"] for row in undefined_rows)
+        and all(np.isnan(row["share"]) for row in undefined_rows),
+        f"warnings={undefined_messages}",
+    )
 
     fixed_rows = gb.tidy(
         named, share="base_fixed", include_total=False, include_full=False)
-    if (all(np.isfinite(row["share_std_error"]) for row in fixed_rows) and
-            all(row["share_se_type"] == "fixed_base_denominator_scaling"
-                for row in fixed_rows)):
-        print("[PASS] reporting:fixed-base-convention-labelled")
-    else:
-        print("[FAIL] reporting:fixed-base-convention-labelled")
-        FAILURES.append("reporting:fixed-base-convention-labelled")
+    check("reporting:fixed-base-convention-unchanged",
+          [row["share_std_error"] for row in fixed_rows],
+          [named["delta"][group]["se"][0] / abs(base_denom)
+           for group in named["names"]], 0.0)
+    check_condition(
+        "reporting:fixed-base-convention-labelled",
+        all(np.isfinite(row["share_std_error"]) for row in fixed_rows)
+        and all(row["share_se_type"] == "fixed_base_denominator_scaling"
+                for row in fixed_rows),
+    )
 
     all_groups = gb.contrast(named, "target", ["A", "B"])
     check("reporting:all-group-contrast-is-total:estimate",
@@ -625,6 +882,91 @@ def main():
     check("reporting:common-controls:added-hdfe-lsdv",
           common_fit["delta"]["firm"]["coef"][:-1],
           fe_oracle[:-1], 3e-12)
+
+    # Independent stacked-score oracle for the additive Gate-2 contract.
+    # This covers every VCE, aweights/fweights, designs with/without one FE,
+    # and gamma0's deliberate removal of only the full-coefficient cross term.
+    rng_cross = np.random.default_rng(20260723)
+    ng = 480
+    fe_cross = np.repeat(np.arange(12), ng // 12)
+    cluster_cross = np.arange(ng) % 40
+    x1_cross = np.column_stack([
+        rng_cross.normal(size=ng) + 0.2 * rng_cross.normal(size=12)[fe_cross],
+        rng_cross.normal(size=ng),
+    ])
+    x2a_cross = np.column_stack([
+        0.35 * x1_cross[:, 0] + rng_cross.normal(size=ng),
+        -0.20 * x1_cross[:, 1] + rng_cross.normal(size=ng),
+    ])
+    x2b_cross = (
+        0.15 * x1_cross[:, 0] - 0.10 * x1_cross[:, 1]
+        + rng_cross.normal(size=ng)
+    )
+    y_cross = (
+        x1_cross @ np.array([0.9, -0.4])
+        + x2a_cross @ np.array([0.7, -0.3])
+        + 0.5 * x2b_cross
+        + rng_cross.normal(scale=0.6, size=12)[fe_cross]
+        + rng_cross.normal(scale=0.5, size=ng)
+    )
+    aw_cross = rng_cross.uniform(0.25, 2.75, size=ng)
+    fw_cross = rng_cross.integers(1, 5, size=ng)
+    x2_cross = {"A": x2a_cross, "B": x2b_cross}
+    for design, fe_arg in (("no-fe", None), ("one-fe", fe_cross)):
+        fes_arg = None if fe_arg is None else {"firm": fe_arg}
+        for vce_cross in ("unadjusted", "robust", "cluster"):
+            vce_args = (
+                {"cluster": cluster_cross}
+                if vce_cross == "cluster" else {}
+            )
+            for weight_tag, weight_args in (
+                    ("unweighted", {}),
+                    ("aweight", {"weights": aw_cross}),
+                    ("fweight", {"weights": fw_cross,
+                                 "fweights": True})):
+                gamma_modes = (False, True) if weight_tag == "unweighted" else (False,)
+                for gamma0_cross in gamma_modes:
+                    got_cross = gb.decompose(
+                        y_cross, x1_cross, x2_cross, fes=fes_arg,
+                        vce=vce_cross, gamma0=gamma0_cross,
+                        **vce_args, **weight_args)
+                    oracle_cross = stacked_base_cross_oracle(
+                        y_cross, x1_cross, x2_cross, fe=fe_arg,
+                        vce=vce_cross, gamma0=gamma0_cross,
+                        df_full=got_cross["df_full"],
+                        **vce_args, **weight_args)
+                    stem = (
+                        f"base-cross:{design}:{vce_cross}:{weight_tag}:"
+                        f"{'gamma0' if gamma0_cross else 'default'}"
+                    )
+                    check(f"{stem}:base-cov", got_cross["base_cov"],
+                          oracle_cross["base_cov"], 1e-14)
+                    check(f"{stem}:cov-delta-base",
+                          got_cross["cov_delta_bbase"],
+                          oracle_cross["cov_delta_bbase"], 1e-14)
+                    check(f"{stem}:cov-total-base",
+                          got_cross["cov_total_bbase"],
+                          oracle_cross["cov_total_bbase"], 1e-14)
+                    for group_no, group_name in enumerate(("A", "B")):
+                        check(f"{stem}:gamma:{group_name}",
+                              got_cross["gamma"][group_name],
+                              oracle_cross["gamma"][group_no], 1e-14)
+                    check(f"{stem}:df-base", got_cross["df_base"],
+                          oracle_cross["df_base"], 0.0)
+                    check(f"{stem}:cluster-count",
+                          got_cross["n_clusters"],
+                          oracle_cross["n_clusters"], 0.0)
+                    if (weight_tag == "unweighted"
+                            and not gamma0_cross
+                            and vce_cross != "unadjusted"):
+                        cov0_cross = gb.decompose(
+                            y_cross, x1_cross, x2_cross, fes=fes_arg,
+                            vce=vce_cross, cov0=True, **vce_args)
+                        check(
+                            f"{stem}:cov0-does-not-change-base-cross",
+                            cov0_cross["cov_delta_bbase"],
+                            got_cross["cov_delta_bbase"], 0.0)
+
     check_raises(
         "guard:duplicate-block-name",
         lambda: gb.decompose(y, x1, x2_groups={"same": x2a},
@@ -660,8 +1002,117 @@ def main():
             y, np.empty((n, 0)), x2=x2a[:, :1], x2_group_sizes=[1],
             fes=[], cluster=None, vce="unadjusted", gamma0=False,
             cov0=False, tol=1e-8, num_threads=0, weights=None,
-            fweights=False, absorbed_x1=[]),
+            fweights=False, absorbed_x1=[], gpu=False),
         "at least one focal column",
+    )
+
+    # Saturation is a catchable input error, never converged output carrying
+    # NaN/Inf inference.  Exercise both the public wrapper and Release core,
+    # then prove that the process remains usable.
+    rng_sat = np.random.default_rng(1707)
+    n_sat = 5
+    x1_sat = rng_sat.normal(size=n_sat)
+    x2_sat = rng_sat.normal(size=(n_sat, 3))
+    y_sat = rng_sat.normal(size=n_sat)
+    check_raises(
+        "guard:saturated-full-model-python",
+        lambda: gb.decompose(y_sat, x1_sat, {"saturated": x2_sat}),
+        "df_full must be positive",
+    )
+    check_raises(
+        "guard:saturated-full-model-release-core",
+        lambda: core.gelbach_decompose(
+            y_sat, x1_sat[:, None], x2=x2_sat, x2_group_sizes=[3],
+            fes=[], cluster=None, vce="unadjusted", gamma0=False,
+            cov0=False, tol=1e-8, num_threads=0, weights=None,
+            fweights=False, absorbed_x1=[], gpu=False),
+        "df_full must be positive",
+    )
+    post_sat = gb.decompose(y, x1, x2_groups={"A": x2a})
+    check_condition(
+        "guard:saturated-error-process-stays-alive",
+        post_sat["converged"] and np.all(np.isfinite(post_sat["cov"])),
+    )
+
+    # F-01 warning-band straddle.  The construction targets the exact
+    # within/total SS ratio, while the assertions use the ratio returned by
+    # the backend classifier (the single source of truth).
+    y_near, x_near, z_near, fe_near = near_fe_fixture(4e-9)
+    with warnings.catch_warnings(record=True) as caught_near:
+        warnings.simplefilter("always", RuntimeWarning)
+        near = gb.decompose(
+            y_near, x_near, {"observed": z_near}, {"firm": fe_near})
+    near_messages = [str(item.message) for item in caught_near]
+    near_note = "near-FE-collinear focal"
+    check_condition(
+        "diagnostic:near-fe-band-warns-and-marks",
+        near["converged"]
+        and near["fe_collinear_ss_ratio_tol"]
+        < near["x1_fe_collinear_ratio"][0]
+        <= near["near_fe_collinear_ss_ratio_warn_upper"]
+        and near["x1_near_collinear_mask"] == [True]
+        and near_note in near["notes"]
+        and any(near_note in message for message in near_messages),
+        (f"ratio={near['x1_fe_collinear_ratio'][0]:.3e}, "
+         f"notes={near['notes']!r}"),
+    )
+
+    y_far, x_far, z_far, fe_far = near_fe_fixture(2e-2, seed=20260724)
+    with warnings.catch_warnings(record=True) as caught_far:
+        warnings.simplefilter("always", RuntimeWarning)
+        far = gb.decompose(
+            y_far, x_far, {"observed": z_far}, {"firm": fe_far})
+    check_condition(
+        "diagnostic:well-identified-focal-is-silent",
+        far["converged"]
+        and far["x1_fe_collinear_ratio"][0] >= 1e-2
+        and far["x1_near_collinear_mask"] == [False]
+        and near_note not in far["notes"]
+        and not any(near_note in str(item.message) for item in caught_far),
+        f"ratio={far['x1_fe_collinear_ratio'][0]:.3e}",
+    )
+
+    y_abs, x_abs, z_abs, fe_abs = near_fe_fixture(0.0, seed=20260725)
+    absorbed_side = gb.decompose(
+        y_abs, x_abs, {"observed": z_abs}, {"firm": fe_abs},
+        vce="cluster", cluster=fe_abs, absorbed_targets=[0])
+    check_condition(
+        "diagnostic:absorbed-side-classification-unchanged",
+        absorbed_side["absorbed_mask"] == [True]
+        and absorbed_side["x1_fe_collinear_ratio"][0]
+        <= absorbed_side["fe_collinear_ss_ratio_tol"]
+        and absorbed_side["x1_near_collinear_mask"] == [False],
+        f"ratio={absorbed_side['x1_fe_collinear_ratio'][0]:.3e}",
+    )
+
+    # G is computed on the retained sample; the warning threshold is
+    # documented and additive.  A 3-cluster design warns, a 50-cluster design
+    # remains silent.
+    cluster3 = np.arange(n) % 3
+    with warnings.catch_warnings(record=True) as caught_g3:
+        warnings.simplefilter("always", RuntimeWarning)
+        g3 = gb.decompose(
+            y, x1, {"A": x2a}, vce="cluster", cluster=cluster3)
+    few_note = "few clusters (G < 30)"
+    check_condition(
+        "diagnostic:few-cluster-warning-and-count",
+        g3["n_clusters"] == np.unique(cluster3).size
+        and g3["few_cluster_warning_threshold"] == 30
+        and few_note in g3["notes"]
+        and any(few_note in str(item.message) for item in caught_g3),
+        f"G={g3['n_clusters']}, notes={g3['notes']!r}",
+    )
+    cluster50 = np.arange(n) % 50
+    with warnings.catch_warnings(record=True) as caught_g50:
+        warnings.simplefilter("always", RuntimeWarning)
+        g50 = gb.decompose(
+            y, x1, {"A": x2a}, vce="cluster", cluster=cluster50)
+    check_condition(
+        "diagnostic:many-cluster-design-is-silent",
+        g50["n_clusters"] == np.unique(cluster50).size
+        and few_note not in g50["notes"]
+        and not any(few_note in str(item.message) for item in caught_g50),
+        f"G={g50['n_clusters']}",
     )
 
     # Severe within-block collinearity is not necessarily rank deficiency:
@@ -758,8 +1209,21 @@ def main():
     check("absorbed-target:identity", ra["identity_gap"], 0.0, 1e-11)
     check("absorbed-target:target-total-is-base-minus-zero",
           ra["total"]["coef"][0], ra["b_base"][0], 1e-11)
+    check("absorbed-target:total-base-cross-is-base-vce",
+          ra["cov_total_bbase"][0, :], ra["base_cov"][0, :], 0.0)
     check("absorbed-target:n-input", ra["n_obs_input"], ya.size, 0.0)
     check("absorbed-target:n-singletons", ra["n_singletons_dropped"], 0, 0.0)
+    absorbed_share_total = [
+        row for row in gb.tidy(
+            ra, focal=0, share="base", include_full=False)
+        if row["component"] == "total_movement"
+    ][0]
+    check("absorbed-target:total-base-share-floating-identity",
+          absorbed_share_total["share"], 1.0,
+          64.0 * np.finfo(float).eps)
+    check("absorbed-target:total-base-share-numerical-zero-se",
+          absorbed_share_total["share_std_error"], 0.0,
+          2.0 * np.sqrt(np.finfo(float).eps))
     for option, kwargs in (("gamma0", {"gamma0": True}),
                            ("cov0", {"cov0": True})):
         altered = gb.decompose(

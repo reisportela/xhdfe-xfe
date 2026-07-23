@@ -40,6 +40,29 @@ variables that work identically from R (set before the fit):
 - `Rlib/`, `Rlib_cuda/` — local install libraries used during development and
   validation (CPU and CUDA builds respectively); not part of the package.
 
+## Offline install
+
+`Rcpp` is an `Imports`/`LinkingTo` dependency. Autonomous release media
+include the unmodified, version-pinned CRAN source archive
+`third_party/Rcpp_1.1.2.tar.gz`. From the repository or unpacked bundle root,
+install both packages into a local library with networking disabled:
+
+```bash
+mkdir -p r/Rlib
+R_PROFILE_USER=/dev/null R_LIBS_USER="$PWD/r/Rlib" \
+  R CMD INSTALL --library="$PWD/r/Rlib" third_party/Rcpp_1.1.2.tar.gz
+R_PROFILE_USER=/dev/null R_LIBS_USER="$PWD/r/Rlib" \
+  XHDFE_ENABLE_CUDA=OFF XHDFE_MARCH=native \
+  R CMD INSTALL --library="$PWD/r/Rlib" r/xhdfe
+R_PROFILE_USER=/dev/null R_LIBS_USER="$PWD/r/Rlib" \
+  Rscript -e 'stopifnot(nzchar(find.package("Rcpp")))'
+```
+
+`r/Rlib` is generated locally and is not distributed. The portable input is
+the source archive, whose URL, license, version, and SHA-256 are recorded in
+`third_party/RCPP_SOURCE_PROVENANCE.md`. A minimal source checkout that omits
+`third_party/` must instead obtain a compatible Rcpp package separately.
+
 ## Install (CPU)
 
 From this directory:
@@ -119,6 +142,13 @@ fit$weak_id      # Andrews-Mikusheva confidence intervals
 xhdfe_gelbach(y, x1 = educ, x2_groups = list(skill = ability),
               fes = list(firm = firm))
 ```
+
+The Gelbach result includes the observed-block full-model coefficients,
+`df_base`, `df_full`, retained-cluster counts, per-X1 FE-collinearity
+diagnostics, and truthful GPU diagnostics. `xhdfe_gelbach_tidy(...,
+share = "base")` uses the exposed `Cov(delta, b_base)` block for full
+ratio delta-method inference; `share = "base_fixed"` retains the earlier
+descriptive fixed-denominator convention.
 
 See `?xhdfe` for the full documentation (it mirrors the Stata help file
 section by section), `?xhdfe_akm_kss` / `?xhdfe_gelbach` for the worker-firm

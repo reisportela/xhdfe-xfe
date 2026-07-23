@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "module": "/home/mangelo/Documents/GitHub/xhdfe/build_cuda/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+  "module_sha256": "4e642d5eae1f2e43a5adcc898533019f9be398196c683e0dcef430b4d6fa12a1",
+  "backend_requested": "cuda",
+  "mode": "standard",
+  "round": 0,
+  "n": 500000,
+  "threads": 16,
+  "inner_reps": 3,
+  "load_at_end": [
+    31.22,
+    31.73,
+    32.62
+  ],
+  "samples": {
+    "unadjusted/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.1306603141129017,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.12389412149786949,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.12906136363744736,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "unadjusted/w": [
+      {
+        "inner": 0,
+        "seconds": 0.1517014354467392,
+        "identity_gap": 1.0459189070388675e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.14075789600610733,
+        "identity_gap": 1.0459189070388675e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.19708122685551643,
+        "identity_gap": 1.0473399925103877e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "cluster/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.15593118965625763,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.1585114374756813,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.17178123071789742,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "cluster/w": [
+      {
+        "inner": 0,
+        "seconds": 0.17388523742556572,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.1629292480647564,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.2173646166920662,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ]
+  }
+}

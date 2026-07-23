@@ -4,10 +4,10 @@
 # Python package, and the R package --- for CPU and GPU (CUDA), on a machine
 # WITHOUT internet access.
 #
-# Every package-side dependency is vendored (Eigen, pybind11, Stata's stplugin
-# inputs), so no network download is needed. Only a system toolchain is
-# required at build time (C++ compiler, CMake, Python + dev headers, R + Rcpp,
-# and the CUDA toolkit/driver for GPU builds).
+# Every package-side dependency is vendored (Eigen, pybind11, Rcpp, and Stata's
+# stplugin inputs), so no network download is needed. Only a system toolchain
+# is required at build time (C++ compiler, CMake, Python + dev headers, R, and
+# the CUDA toolkit/driver for GPU builds).
 #
 # The archive is published to the gh-pages net-install site and fetched by the
 # `xhdfegpu` Stata command, which builds a CUDA plugin for the local GPU and
@@ -73,6 +73,10 @@ copy_tree "${ROOT_DIR}/python" "${PKG}/python"
 copy_tree "${ROOT_DIR}/xhdfe"  "${PKG}/xhdfe"
 cp -a "${ROOT_DIR}/setup.py" "${ROOT_DIR}/pyproject.toml" "${ROOT_DIR}/CMakeLists.txt" "${PKG}/"
 
+# ---- Project documentation and notices -----------------------------------
+cp -a "${ROOT_DIR}/README.md" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/NOTICE" \
+      "${ROOT_DIR}/CITATION.cff" "${PKG}/"
+
 # ---- R package (self-contained: src mirror + its own vendored Eigen) ------
 copy_tree "${ROOT_DIR}/r/xhdfe" "${PKG}/r/xhdfe"
 
@@ -80,21 +84,30 @@ copy_tree "${ROOT_DIR}/r/xhdfe" "${PKG}/r/xhdfe"
 copy_tree "${ROOT_DIR}/third_party/eigen-3.4.0"      "${PKG}/third_party/eigen-3.4.0"
 copy_tree "${ROOT_DIR}/third_party/pybind11-2.11.1"  "${PKG}/third_party/pybind11-2.11.1"
 
+# ---- Vendored R dependency (official CRAN source, offline) ----------------
+# Keep Rcpp as its upstream source archive rather than unpacking or modifying
+# it. BUILD_OFFLINE.md installs that exact archive into a local R library.
+cp -a "${ROOT_DIR}/third_party/Rcpp_1.1.2.tar.gz" \
+      "${ROOT_DIR}/third_party/RCPP_SOURCE_PROVENANCE.md" \
+      "${PKG}/third_party/"
+
 printf '%s\n' "${VERSION}" > "${PKG}/VERSION"
 
 cat > "${PKG}/BUILD_OFFLINE.md" <<EOF
 # xhdfe / xfe --- offline source distribution (version ${VERSION})
 
 Self-contained sources to build every component for CPU and GPU with **no
-internet access**. All package dependencies are vendored (Eigen, pybind11,
-Stata \`stplugin\` inputs).
+internet access**. All package-side dependencies are vendored (Eigen,
+pybind11, the official Rcpp 1.1.2 CRAN source archive, and Stata
+\`stplugin\` inputs).
 
 ## System requirements (not bundled)
 
 - A C++17 compiler (GCC/Clang; MSVC on Windows).
 - For GPU: the NVIDIA CUDA toolkit (\`nvcc\`) and a compatible driver.
 - Python builds: Python >= 3.9 with development headers and CMake >= 3.18.
-- R builds: R >= 4.0 with the \`Rcpp\` package.
+- R builds: R >= 4.0 and its source-package build toolchain. Rcpp itself is
+  bundled and does not need to be downloaded or preinstalled.
 - Stata builds: none beyond the C++ (and CUDA) toolchain.
 
 ## Stata plugin
@@ -121,9 +134,30 @@ XHDFE_ENABLE_CUDA=auto python -m pip install .   # GPU
 ## R package
 
 \`\`\`bash
-R CMD INSTALL r/xhdfe                                    # CPU
-XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe             # GPU
+mkdir -p r/Rlib
+
+# Install the pinned dependency locally, with user/site startup files disabled.
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \\
+  R_LIBS_USER="\$PWD/r/Rlib" \\
+  R CMD INSTALL --library="\$PWD/r/Rlib" third_party/Rcpp_1.1.2.tar.gz
+
+# CPU
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \\
+  R_LIBS_USER="\$PWD/r/Rlib" XHDFE_ENABLE_CUDA=OFF \\
+  R CMD INSTALL --library="\$PWD/r/Rlib" r/xhdfe
+
+# GPU (optional; install into a separate local library if both builds are kept)
+mkdir -p r/Rlib_cuda
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \\
+  R_LIBS_USER="\$PWD/r/Rlib_cuda" \\
+  R CMD INSTALL --library="\$PWD/r/Rlib_cuda" third_party/Rcpp_1.1.2.tar.gz
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \\
+  R_LIBS_USER="\$PWD/r/Rlib_cuda" XHDFE_ENABLE_CUDA=auto \\
+  R CMD INSTALL --library="\$PWD/r/Rlib_cuda" r/xhdfe
 \`\`\`
+
+The unmodified Rcpp archive's URL, license, version, and SHA-256 are recorded
+in \`third_party/RCPP_SOURCE_PROVENANCE.md\`.
 
 CPU is the reference backend. GPU builds auto-detect the local compute
 capability via \`nvidia-smi\`; set \`XHDFE_CUDA_ARCH=90\` to force a target.
@@ -131,4 +165,5 @@ EOF
 
 rm -f "${OUT_ZIP}"
 ( cd "${STAGE}" && zip -q -r -X "${OUT_ZIP}" xhdfe-src )
+bash "${ROOT_DIR}/tools/validate_source_dist_zip.sh" "${OUT_ZIP}"
 echo "Wrote ${OUT_ZIP} (version ${VERSION}); $(du -h "${OUT_ZIP}" | cut -f1)"

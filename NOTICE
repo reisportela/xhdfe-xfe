@@ -18,3 +18,14 @@ Eigen 3.4.0 (third_party/eigen-3.4.0/ and, mirrored, r/xhdfe/src/eigen/)
   The default configuration used here relies only on the MPL-2.0 / BSD /
   Apache-2.0 parts of Eigen.
   Homepage: https://eigen.tuxfamily.org
+
+Rcpp 1.1.2 (third_party/Rcpp_1.1.2.tar.gz)
+  The official, unmodified CRAN source archive is carried in autonomous
+  source/offline release media so the xhdfe R package can be installed with
+  networking disabled.
+  Copyright (c) the Rcpp authors.
+  License: GPL (>= 2), as recorded in the archive's DESCRIPTION. The archive
+  contains the complete upstream source and license metadata.
+  Provenance and certified SHA-256:
+    third_party/RCPP_SOURCE_PROVENANCE.md
+  Homepage: https://www.rcpp.org

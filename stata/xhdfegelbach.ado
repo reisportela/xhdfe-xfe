@@ -1,4 +1,4 @@
-*! version 1.3.0  20jul2026
+*! version 1.4.0  23jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -174,6 +174,11 @@ program define xhdfegelbach, rclass sortpreserve
     local nfe : word count `fes'
     local k1 = `p' + 1
     local G : word count `gnames'
+    local nx2g = `G' - `nfe'
+    local gamma_rows 0
+    foreach gsize of local gsizes {
+        if (`gsize' > `gamma_rows') local gamma_rows = `gsize'
+    }
     local focal_indices
     foreach target of local focal {
         local pos : list posof "`target'" in x1
@@ -193,6 +198,7 @@ program define xhdfegelbach, rclass sortpreserve
     local absorbed_indices_csv : subinstr local absorbed_indices_csv " " "", all
 
     tempname D SE TOT BBASE BFULL ABS COV TOTCOV FEAGG
+    tempname FERATIO NEARMASK BASECOV COVDB COVTB GAMMA
     matrix `D' = J(`k1', `G', .)
     matrix `SE' = J(`k1', `G', .)
     matrix `TOT' = J(`k1', 2, .)
@@ -201,6 +207,12 @@ program define xhdfegelbach, rclass sortpreserve
     matrix `ABS' = J(1, `p', .)
     matrix `COV' = J(`G' * `k1', `G' * `k1', .)
     matrix `TOTCOV' = J(`k1', `k1', .)
+    matrix `FERATIO' = J(1, `p', .)
+    matrix `NEARMASK' = J(1, `p', .)
+    matrix `BASECOV' = J(`k1', `k1', .)
+    matrix `COVDB' = J(`G' * `k1', `k1', .)
+    matrix `COVTB' = J(`k1', `k1', .)
+    if (`nx2g' > 0) matrix `GAMMA' = J(`gamma_rows', `nx2g', .)
 
     local cfg "cfg=task=gelbach;p=`p';q=`q';nfe=`nfe';has_cluster=`=("`cluster'"!="")';"
     local cfg "`cfg'has_weight=`has_weight';weight_type=`weight';"
@@ -210,6 +222,9 @@ program define xhdfegelbach, rclass sortpreserve
     local cfg "`cfg'use_gpu=`=("`gpu'"!="")';verbose=`=("`verbose'"!="")';"
     local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';bbasemat=`BBASE';bfullmat=`BFULL';"
     local cfg "`cfg'absmat=`ABS';covmat=`COV';totcovmat=`TOTCOV';"
+    local cfg "`cfg'feratiomat=`FERATIO';nearmaskmat=`NEARMASK';"
+    local cfg "`cfg'basecovmat=`BASECOV';covdbmat=`COVDB';covtbmat=`COVTB';"
+    if (`nx2g' > 0) local cfg "`cfg'gammamat=`GAMMA';"
 
     quietly findfile xhdfe.ado
     local plugin_path "`r(fn)'"
@@ -257,6 +272,8 @@ program define xhdfegelbach, rclass sortpreserve
     matrix colnames `BBASE' = `x1'
     matrix colnames `BFULL' = `x1'
     matrix colnames `ABS' = `x1'
+    matrix colnames `FERATIO' = `x1'
+    matrix colnames `NEARMASK' = `x1'
 
     // The backend classification is authoritative.  Never infer an imposed
     // zero merely from the user's request: a shared-core classification bug
@@ -285,6 +302,25 @@ program define xhdfegelbach, rclass sortpreserve
     matrix colnames `COV' = `covnames'
     matrix rownames `TOTCOV' = `x1' _cons
     matrix colnames `TOTCOV' = `x1' _cons
+    matrix rownames `BASECOV' = `x1' _cons
+    matrix colnames `BASECOV' = `x1' _cons
+    matrix rownames `COVDB' = `covnames'
+    matrix colnames `COVDB' = `x1' _cons
+    matrix rownames `COVTB' = `x1' _cons
+    matrix colnames `COVTB' = `x1' _cons
+    if (`nx2g' > 0) {
+        local gamma_rownames
+        forvalues c = 1/`gamma_rows' {
+            local gamma_rownames "`gamma_rownames' coefficient`c'"
+        }
+        local gamma_colnames
+        forvalues g = 1/`nx2g' {
+            local gname : word `g' of `gnames'
+            local gamma_colnames "`gamma_colnames' `gname'"
+        }
+        matrix rownames `GAMMA' = `gamma_rownames'
+        matrix colnames `GAMMA' = `gamma_colnames'
+    }
 
     if (`nfe' > 0) {
         matrix `FEAGG' = J(`k1', 2, .)
@@ -324,7 +360,7 @@ program define xhdfegelbach, rclass sortpreserve
         local alpha = (100 - `level') / 200
         local zcrit = invnormal(1 - `alpha')
         if ("`shares'" == "base") ///
-            local share_se_type "not_available_joint_base_covariance"
+            local share_se_type "joint_base_covariance_delta_method"
         else if ("`shares'" == "base_fixed") ///
             local share_se_type "fixed_base_denominator_scaling"
         else local share_se_type "joint_covariance_delta_method"
@@ -343,6 +379,19 @@ program define xhdfegelbach, rclass sortpreserve
                     matrix `SHARE'[`r', `g'] = `D'[`r', `g'] / `denom'
                     if ("`shares'" == "base_fixed") {
                         matrix `SHARESE'[`r', `g'] = `SE'[`r', `g'] / abs(`denom')
+                    }
+                    else if ("`shares'" == "base") {
+                        tempname sharevar
+                        local gr = (`g' - 1) * `k1' + `r'
+                        scalar `sharevar' = ///
+                            `COV'[`gr', `gr'] / (`denom' * `denom') + ///
+                            (`D'[`r', `g'] * `D'[`r', `g'] * ///
+                                `BASECOV'[`r', `r']) / ///
+                                (`denom' * `denom' * `denom' * `denom') - ///
+                            (2 * `D'[`r', `g'] * `COVDB'[`gr', `r']) / ///
+                                (`denom' * `denom' * `denom')
+                        matrix `SHARESE'[`r', `g'] = ///
+                            sqrt(max(0, scalar(`sharevar')))
                     }
                     else if ("`shares'" == "movement") {
                         tempname sharevar
@@ -383,7 +432,6 @@ program define xhdfegelbach, rclass sortpreserve
     // Human-facing display.  Keep the numerical API entirely in r(); this
     // panel only reorganizes the same matrices into one readable block per
     // coefficient and therefore has no estimator or precision side effects.
-    local nx2g = `G' - `nfe'
     local coefnames "`x1' _cons"
     local display_coefs "`coefnames'"
     if (`focal_requested') local display_coefs "`focal'"
@@ -441,7 +489,7 @@ program define xhdfegelbach, rclass sortpreserve
         di as txt "Shares: signed fraction of " as res "`share_label'" ///
             as txt "; displayed as percent; never truncated or renormalized."
         if ("`shares'" == "base") {
-            di as txt "Share inference: unavailable until Cov(delta,b_base) is exposed; point shares only."
+            di as txt "Share inference: full delta method using Var(b_base) and Cov(delta,b_base)."
         }
         else if ("`shares'" == "base_fixed") {
             di as txt "Share inference: component SE scaled holding the reported base coefficient fixed."
@@ -550,7 +598,9 @@ program define xhdfegelbach, rclass sortpreserve
         }
     }
     if (`share_undefined') {
-        di as err "warning: at least one requested share denominator is within sharetol(); its shares are missing"
+        local share_note "WARNING: at least one requested share denominator is within sharetol(); its shares and confidence intervals are undefined and returned missing."
+        if ("`xgel_notes'" == "") local xgel_notes "`share_note'"
+        else local xgel_notes "`xgel_notes' `share_note'"
     }
 
     di as txt _n "Result status"
@@ -581,7 +631,13 @@ program define xhdfegelbach, rclass sortpreserve
     return scalar n_obs_effective = scalar(__xgel_n_obs_eff)
     return scalar n_singletons_dropped = scalar(__xgel_n_singletons_dropped)
     return scalar df_full = scalar(__xgel_df_full)
+    return scalar df_base = scalar(__xgel_df_base)
+    return scalar n_clusters = scalar(__xgel_n_clusters)
     return scalar fe_collinear_ss_ratio_tol = scalar(__xgel_feclass_tol)
+    return scalar near_fe_warn_upper = ///
+        scalar(__xgel_near_fe_warn_upper)
+    return scalar few_cluster_warning_threshold = ///
+        scalar(__xgel_fewG_threshold)
     return scalar absorbed_target_inference_valid = scalar(__xgel_abs_inf_valid)
     return scalar absorbing_fe_index = scalar(__xgel_abs_fe_index)
     return scalar converged = scalar(__xgel_converged)
@@ -594,10 +650,12 @@ program define xhdfegelbach, rclass sortpreserve
         return scalar `name' = scalar(__xgel_`name')
         capture scalar drop __xgel_`name'
     }
-    return scalar gpu_requested = ("`gpu'" != "")
+    return scalar gpu_requested = scalar(__xgel_gpu_requested)
     capture scalar drop __xgel_identity_gap __xgel_n_obs_input __xgel_n_obs ///
         __xgel_n_obs_eff ///
-        __xgel_n_singletons_dropped __xgel_df_full __xgel_feclass_tol ///
+        __xgel_n_singletons_dropped __xgel_df_full __xgel_df_base ///
+        __xgel_n_clusters __xgel_feclass_tol __xgel_near_fe_warn_upper ///
+        __xgel_fewG_threshold __xgel_gpu_requested ///
         __xgel_abs_inf_valid __xgel_abs_fe_index __xgel_converged
     return local vce "`vce'"
     return local groups "`gnames'"
@@ -671,10 +729,16 @@ program define xhdfegelbach, rclass sortpreserve
     if ("`xgel_notes'" != "") return local notes "`xgel_notes'"
     return matrix total = `TOT'
     return matrix total_cov = `TOTCOV'
+    return matrix cov_total_bbase = `COVTB'
+    return matrix cov_delta_bbase = `COVDB'
+    return matrix base_cov = `BASECOV'
     return matrix cov = `COV'
+    if (`nx2g' > 0) return matrix gamma = `GAMMA'
     return matrix b_full = `BFULL'
     return matrix b_base = `BBASE'
     return matrix absorbed_mask = `ABS'
+    return matrix x1_near_collinear_mask = `NEARMASK'
+    return matrix x1_fe_collinear_ratio = `FERATIO'
     if (`nfe' > 0) return matrix fe_total = `FEAGG'
     return matrix se = `SE'
     return matrix delta = `D'

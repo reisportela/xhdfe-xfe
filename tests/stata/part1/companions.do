@@ -89,20 +89,54 @@ matrix gel_se_compact = r(se)
 matrix gel_total_compact = r(total)
 matrix gel_cov_compact = r(cov)
 matrix gel_total_cov_compact = r(total_cov)
+matrix gel_base_cov_compact = r(base_cov)
+matrix gel_cov_db_compact = r(cov_delta_bbase)
+matrix gel_cov_tb_compact = r(cov_total_bbase)
+matrix gel_gamma_compact = r(gamma)
+matrix gel_fe_ratio_compact = r(x1_fe_collinear_ratio)
+matrix gel_near_mask_compact = r(x1_near_collinear_mask)
 matrix gel_b_base_compact = r(b_base)
 matrix gel_b_full_compact = r(b_full)
 matrix gel_fe_total_compact = r(fe_total)
 scalar gel_gap_compact = r(identity_gap)
 assert rowsof(gel_cov_compact) == 4 & colsof(gel_cov_compact) == 4
 assert rowsof(gel_total_cov_compact) == 2 & colsof(gel_total_cov_compact) == 2
+assert rowsof(gel_base_cov_compact) == 2 & colsof(gel_base_cov_compact) == 2
+assert rowsof(gel_cov_db_compact) == 4 & colsof(gel_cov_db_compact) == 2
+assert rowsof(gel_cov_tb_compact) == 2 & colsof(gel_cov_tb_compact) == 2
+assert rowsof(gel_gamma_compact) == 1 & colsof(gel_gamma_compact) == 1
+assert rowsof(gel_fe_ratio_compact) == 1 & colsof(gel_fe_ratio_compact) == 1
+assert rowsof(gel_near_mask_compact) == 1 & colsof(gel_near_mask_compact) == 1
+assert !missing(gel_gamma_compact[1, 1])
+assert gel_near_mask_compact[1, 1] == 0
 assert colsof(gel_b_base_compact) == 1 & colsof(gel_b_full_compact) == 1
 assert abs(gel_fe_total_compact[1, 1] - gel_delta_compact[1, 2]) <= 1e-12
+assert r(df_base) > 0 & r(df_full) > 0
+assert r(n_clusters) == 18
+assert r(few_cluster_warning_threshold) == 30
+assert r(near_fe_warn_upper) == 1e-4
+assert strpos("`r(notes)'", "few clusters") > 0
+assert strpos("`r(notes)'", "near-FE-collinear focal") == 0
+forvalues rr = 1/2 {
+    forvalues cc = 1/2 {
+        assert abs(gel_cov_tb_compact[`rr', `cc'] - ///
+            gel_cov_db_compact[`rr', `cc'] - ///
+            gel_cov_db_compact[2 + `rr', `cc']) < 1e-12
+    }
+}
 assert "`gel_estimand_compact'" == "coefficient_movement"
 assert "`gel_causal_compact'" == "no"
 assert `gel_gpu_requested_compact' == 0
 assert `gel_gpu_used_compact' == 0
 assert `gel_gpu_code_compact' == 0
 assert "`gel_gpu_status_compact'" == "not_requested"
+quietly regress y x1 x2 i.fe
+assert abs(gel_gamma_compact[1, 1] - _b[x2]) < 1e-10
+gen long cluster50 = mod(_n - 1, 50) + 1
+quietly xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///
+    vce(cluster) cluster(cluster50)
+assert r(n_clusters) == 50
+assert strpos("`r(notes)'", "few clusters") == 0
 
 * The empirical reporting layer is opt-in and numerically inert. A common
 * control remains in x1() while focal() selects only the paper-facing row.
@@ -129,13 +163,39 @@ matrix gel_reporting_default_delta = r(delta)
 xcert_assert_matrix_close gel_reporting_delta gel_reporting_default_delta, ///
     tol(0) name("Gelbach focal reporting is numerically inert")
 
-quietly xhdfegelbach y, x1(x1 common_control) focal(x1) ///
+xhdfegelbach y, x1(x1 common_control) focal(x1) ///
     x2groups("observables = x2") fes(fe) shares(base)
 matrix gel_base_share = r(share)
 matrix gel_base_share_se = r(share_se)
+matrix gel_base_share_lo = r(share_ci_low)
+matrix gel_base_share_hi = r(share_ci_high)
+matrix gel_base_share_delta = r(delta)
+matrix gel_base_share_cov = r(cov)
+matrix gel_base_share_base_cov = r(base_cov)
+matrix gel_base_share_cov_db = r(cov_delta_bbase)
+matrix gel_base_share_b = r(b_base)
 assert !missing(gel_base_share[1, 1])
-assert missing(gel_base_share_se[1, 1])
-assert "`r(share_se_type)'" == "not_available_joint_base_covariance"
+assert !missing(gel_base_share_se[1, 1])
+assert !missing(gel_base_share_lo[1, 1])
+assert !missing(gel_base_share_hi[1, 1])
+assert gel_base_share_lo[1, 1] < gel_base_share_hi[1, 1]
+assert "`r(share_se_type)'" == "joint_base_covariance_delta_method"
+scalar gel_share_manual_var = ///
+    gel_base_share_cov[1, 1] / (gel_base_share_b[1, 1]^2) + ///
+    (gel_base_share_delta[1, 1]^2 * gel_base_share_base_cov[1, 1]) / ///
+        (gel_base_share_b[1, 1]^4) - ///
+    (2 * gel_base_share_delta[1, 1] * gel_base_share_cov_db[1, 1]) / ///
+        (gel_base_share_b[1, 1]^3)
+assert abs(gel_base_share_se[1, 1] - sqrt(max(0, gel_share_manual_var))) < 1e-12
+
+capture noisily xhdfegelbach y, x1(x1 common_control) focal(x1) ///
+    x2groups("observables = x2") fes(fe) shares(base) sharetol(1e20)
+assert _rc == 0
+matrix gel_undefined_share = r(share)
+matrix gel_undefined_share_se = r(share_se)
+assert missing(gel_undefined_share[1, 1])
+assert missing(gel_undefined_share_se[1, 1])
+assert strpos("`r(notes)'", "share denominator") > 0
 
 quietly xhdfegelbach y, x1(x1 common_control) focal(x1) ///
     x2groups("observables = x2") fes(fe) shares(base_fixed)
@@ -173,7 +233,12 @@ local gel_abs_feclass_tol = r(fe_collinear_ss_ratio_tol)
 matrix gel_abs_bbase = r(b_base)
 matrix gel_abs_bfull = r(b_full)
 matrix gel_abs_total = r(total)
+matrix gel_abs_total_cov = r(total_cov)
+matrix gel_abs_base_cov = r(base_cov)
+matrix gel_abs_cov_tb = r(cov_total_bbase)
 matrix gel_abs_mask = r(absorbed_mask)
+matrix gel_abs_fe_ratio = r(x1_fe_collinear_ratio)
+matrix gel_abs_near_mask = r(x1_near_collinear_mask)
 assert r(converged) == 1
 assert r(identity_gap) < 1e-10
 assert r(n_obs_input) == 600
@@ -190,8 +255,14 @@ assert `gel_abs_inference_valid' == 1
 assert `gel_abs_fe_index' == 0
 assert `gel_abs_feclass_tol' == 1e-9
 assert gel_abs_mask[1, 1] == 1 & gel_abs_mask[1, 2] == 0
+assert gel_abs_fe_ratio[1, 1] <= r(fe_collinear_ss_ratio_tol)
+assert gel_abs_near_mask[1, 1] == 0
 assert gel_abs_bfull[1, 1] == 0
 assert abs(gel_abs_total[1, 1] - gel_abs_bbase[1, 1]) < 1e-10
+forvalues cc = 1/3 {
+    assert abs(gel_abs_cov_tb[1, `cc'] - gel_abs_base_cov[1, `cc']) < 1e-12
+}
+assert abs(gel_abs_total_cov[1, 1] - gel_abs_base_cov[1, 1]) < 1e-12
 quietly regress y female x1, vce(cluster worker)
 assert abs(gel_abs_total[1, 2] - _se[female]) < 1e-12
 
@@ -219,6 +290,17 @@ local gel_near_converged = r(converged)
 local gel_near_notes "`r(notes)'"
 assert `gel_near_converged' == 1
 assert strpos("`gel_near_notes'", "x2 group 1 is severely ill-conditioned") > 0
+
+* A focal column just above the FE-omission boundary stays in the standard
+* estimand but carries an explicit per-column diagnostic and a loud warning.
+gen double x1_near_fe = fe + 1e-3 * rnormal()
+xhdfegelbach y, x1(x1_near_fe) x2groups("observables = x2") fes(fe)
+matrix gel_x1_fe_ratio = r(x1_fe_collinear_ratio)
+matrix gel_x1_near_mask = r(x1_near_collinear_mask)
+assert gel_x1_fe_ratio[1, 1] > r(fe_collinear_ss_ratio_tol)
+assert gel_x1_fe_ratio[1, 1] <= r(near_fe_warn_upper)
+assert gel_x1_near_mask[1, 1] == 1
+assert strpos("`r(notes)'", "near-FE-collinear focal") > 0
 
 * Verbose is output-only: same configuration must preserve every returned
 * number, including the certified FE split and covariance.
@@ -278,6 +360,21 @@ xcert_assert_matrix_close gel_delta_compact gel_delta_large, tol(1e-12) name("Ge
 xcert_assert_matrix_close gel_se_compact gel_se_large, tol(1e-12) name("Gelbach SE after id relabelling")
 xcert_assert_matrix_close gel_total_compact gel_total_large, tol(1e-12) name("Gelbach total after id relabelling")
 assert abs(gel_gap_compact - gel_gap_large) <= 1e-12
+
+* A saturated full model must fail through Stata's catchable return code,
+* never terminate the host process or return a non-finite covariance.
+preserve
+clear
+set obs 5
+gen double sat_x1 = _n
+gen double sat_z1 = (_n == 1)
+gen double sat_z2 = (_n == 2)
+gen double sat_z3 = (_n == 3)
+gen double sat_y = 2 * sat_x1 + 3 * sat_z1 - sat_z2 + 0.5 * sat_z3
+capture noisily xhdfegelbach sat_y, x1(sat_x1) ///
+    x2groups("saturated = sat_z1 sat_z2 sat_z3")
+assert _rc != 0
+restore
 
 * xhdfeconnected has the same public categorical contract.
 capture noisily xhdfeconnected worker firm, generate(keep_bad_threads) threads(-1)

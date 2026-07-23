@@ -7,7 +7,7 @@
 xhdfe_gelbach(y, x1, x2_groups = NULL, fes = NULL, vce = "unadjusted",
   cluster = NULL, gamma0 = FALSE, cov0 = FALSE, tol = 1e-8,
   num_threads = 0L, weights = NULL, fweights = FALSE,
-  absorbed_targets = NULL, focal = NULL)
+  absorbed_targets = NULL, focal = NULL, gpu = FALSE)
 }
 \arguments{
 \item{y}{Finite numeric outcome of length n.}
@@ -42,7 +42,11 @@ is a no-op for unadjusted inference.}
 iterative-solver tolerance, not the separate FE-collinearity classification
 boundary.}
 
-\item{num_threads}{OpenMP threads (0 = library default).}
+\item{num_threads}{OpenMP thread request/cap for supported CPU phases
+(0 = library default). Individual phases may choose fewer threads;
+\code{$threads_used} reports the maximum effective absorber/recovery team,
+not a promise that every auxiliary or covariance phase used that count.
+GPU kernels do not use this OpenMP setting.}
 
 \item{weights}{Optional finite, strictly positive analytic weights (b1x2
 conventions).}
@@ -59,6 +63,12 @@ full-model coefficient is imposed at zero, not estimated.}
 logical mask used only for reporting. All X1 columns remain in both models;
 this permits common controls to stay in the estimand while only focal
 coefficients are printed or tidied.}
+
+\item{gpu}{Logical scalar. With \code{TRUE}, request CUDA for the full-model
+FE-absorption phase. The decomposition and covariance calculations remain on
+the CPU. A CPU-only build or unavailable device falls back truthfully; inspect
+the \code{$gpu_*} diagnostics. This argument is last to preserve the
+positional contract of earlier releases.}
 }
 \section{Specification and sample contract}{
 All X1 columns remain in both models. Every entry of \code{x2_groups} and
@@ -94,6 +104,11 @@ The joint \code{$cov} matrix is group-major. With
 \code{[group1:x1, group1:_cons, group2:x1, group2:_cons, ...]}.
 Use this matrix or \code{xhdfe_gelbach_contrast()} for sums and linear
 contrasts. Do not add component variances or SEs as if blocks were independent.
+\code{$base_cov}, \code{$cov_delta_bbase}, and
+\code{$cov_total_bbase} complete the covariance contract needed for
+base-coefficient-denominator shares. \code{xhdfe_gelbach_tidy(...,
+share = "base")} uses denominator uncertainty and every cross-covariance
+term; it is distinct from the descriptive \code{share = "base_fixed"}.
 }
 \value{
 An object of class \code{xhdfe_gelbach}: a list with the base and full
@@ -127,9 +142,10 @@ weights (and otherwise equals the row count) and is used by the printed N.
 The full programmatic schema is organized as follows:
 \itemize{
 \item coefficients and contributions: \code{$b_base}, \code{$b_full},
-  \code{$b_full_status}, \code{$delta}, \code{$se}, \code{$cov},
-  \code{$total}, \code{$total_se}, \code{$total_cov}, and optional
-  \code{$fe_total};
+  \code{$b_full_status}, \code{$gamma}, \code{$delta}, \code{$se},
+  \code{$cov}, \code{$base_cov}, \code{$cov_delta_bbase},
+  \code{$cov_total_bbase}, \code{$total}, \code{$total_se},
+  \code{$total_cov}, and optional \code{$fe_total};
 \item names and reporting selectors: \code{$names}, \code{$group_kinds},
   \code{$x1_names}, \code{$focal_indices}, \code{$focal_names}, and
   \code{$focal_selection_explicit};
@@ -142,10 +158,15 @@ The full programmatic schema is organized as follows:
   \code{$absorbed_target_inference_valid}, and
   \code{$absorbing_fe_index};
 \item diagnostics: \code{$identity_gap}, \code{$converged}, \code{$notes},
-  \code{$df_full}, the four sample-count fields, and the squared-norm and
-  relative-norm FE-collinearity thresholds. \code{$causal_interpretation} is
+  \code{$df_base}, \code{$df_full}, \code{$n_clusters}, the four
+  sample-count fields, \code{$x1_fe_collinear_ratio},
+  \code{$x1_near_collinear_mask}, the FE-collinearity boundary and warning
+  upper limit, \code{$few_cluster_warning_threshold}, \code{$threads_used},
+  and the truthful \code{$gpu_*} fields. \code{$causal_interpretation} is
   always \code{FALSE}.
 }
+\code{$gamma} has one column per observed block and is padded with
+non-finite entries to the widest block.
 R accepts one-based selector indices but returns \code{$focal_indices},
 \code{$absorbed_targets}, and \code{$absorbing_fe_index} as zero-based
 cross-frontend metadata.
@@ -206,6 +227,12 @@ zero in \code{$b_full} has status \code{"imposed_zero"}, never
 
 Severely near-collinear observed x2 blocks are flagged in \code{$notes}
 without changing values; their split SE can be rounding/tolerance sensitive.
+A separate per-X1 diagnostic warns, without changing any number, when
+\code{||M_D x1_j||^2 / ||x1_j||^2} lies above the backend omission boundary
+and at or below the documented warning-band upper limit. Such a focal is
+nearly FE-collinear; inspect \code{$x1_fe_collinear_ratio} and
+\code{$x1_near_collinear_mask}, and consider \code{absorbed_targets} only
+when it is conceptually FE-invariant.
 For clustered VCE, streamed-meat FMA may differ from the former materialized
 path by one last-place unit in well-conditioned cells, while coefficients and
 deltas remain bit-identical. Inferential notes raise \code{warning()} even
@@ -236,17 +263,33 @@ requires a separately justified research design; block names and causal roles
 are supplied by the researcher and are not validated by the function.
 }
 \section{Deliberate limits}{
-The R companion has no \code{gpu} argument and should be treated as a CPU
-interface. It does not implement IV/LATE allocation, multiway clustering,
+The optional \code{gpu = TRUE} request applies only to full-model FE
+absorption; auxiliary regressions, covariance construction, and reporting
+remain CPU work. It does not implement IV/LATE allocation, multiway clustering,
 wild-cluster bootstrap, nonconditional recovered-FE covariance, a separate
 HDFE set common to base and full, dynamic-panel corrections, nonlinear or
 distributional decompositions, Oaxaca wrappers, or causal mediation.
 
-Explicit numeric columns can represent polynomials, bins, splines,
-interactions, and low-dimensional effects common to both specifications.
-Because an intercept is implicit, categorical indicators common to both models
-must use a full-rank reference coding rather than all category dummies.
+A binary outcome is estimated as a linear probability model; a decomposition
+on a logit or other nonlinear scale is a separate estimator. Explicit numeric
+columns can represent polynomials, bins, splines, interactions, and
+low-dimensional effects common to both specifications. Factor objects are
+deliberately refused: use \code{model.matrix()} (or explicit generated
+indicators), drop its intercept and one reference category, and pass the
+resulting full-rank numeric columns. Because an intercept is implicit,
+categorical indicators common to both models must not include all category
+dummies.
 High-dimensional entries in \code{fes} are added full-model components.
+}
+\section{Offline validation bundles}{
+The source package declares Rcpp as an \code{Imports}/\code{LinkingTo}
+dependency. In an offline repository validation bundle that includes
+\code{r/Rlib/Rcpp}, set \code{R_PROFILE_USER=/dev/null} and
+\code{R_LIBS_USER} to the bundle's \code{r/Rlib} before installation, and
+verify the dependency with \code{find.package("Rcpp")}. \code{r/Rlib} is a
+local development/validation library, not part of the CRAN-style source
+package or guaranteed to be present in every clone; otherwise supply Rcpp
+from offline media first.
 }
 \references{
 Gelbach, J. B. (2016). When do covariates matter? And which ones, and how

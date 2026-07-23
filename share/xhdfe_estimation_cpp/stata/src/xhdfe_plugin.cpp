@@ -1653,17 +1653,10 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     if (auto val = args.get_optional("use_gpu")) {
         use_gpu = parse_bool(*val, "use_gpu");
     }
+    options.use_gpu = use_gpu;
     if (auto val = args.get_optional("verbose")) {
         options.verbose = parse_int(*val, "verbose");
         if (options.verbose > 0) options.progress = &akm_progress_to_stata;
-    }
-
-    // Use the same scoped backend selection as the main xhdfe task.  The
-    // environment is restored on every exit path; no later command inherits
-    // this request.
-    std::optional<ScopedEnvVar> gpu_env;
-    if (use_gpu) {
-        gpu_env.emplace("XHDFE_GPU_BACKEND", "cuda");
     }
 
     const hdfe::gelbach::GelbachResult res = hdfe::gelbach::decompose(
@@ -1680,6 +1673,11 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     const std::string absmat = args.get_required("absmat");
     const std::string covmat = args.get_required("covmat");
     const std::string totcovmat = args.get_required("totcovmat");
+    const std::string feratiomat = args.get_required("feratiomat");
+    const std::string nearmaskmat = args.get_required("nearmaskmat");
+    const std::string basecovmat = args.get_required("basecovmat");
+    const std::string covdbmat = args.get_required("covdbmat");
+    const std::string covtbmat = args.get_required("covtbmat");
     for (int g = 0; g < G; ++g) {
         for (int r = 0; r < k1; ++r) {
             SF_mat_store(const_cast<char*>(dmat.c_str()), r + 1, g + 1, res.delta(r, g));
@@ -1710,6 +1708,19 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
                          res.total_cov(r, c));
         }
     }
+    store_row_vector(feratiomat, res.x1_fe_collinear_ratio);
+    {
+        Eigen::MatrixXd near_mask(1, res.x1_near_collinear_mask.size());
+        near_mask.row(0) =
+            res.x1_near_collinear_mask.cast<double>().transpose();
+        store_matrix(nearmaskmat, near_mask);
+    }
+    store_matrix(basecovmat, res.base_cov);
+    store_matrix(covdbmat, res.cov_delta_bbase);
+    store_matrix(covtbmat, res.cov_total_bbase);
+    if (auto gammamat = args.get_optional("gammamat")) {
+        store_matrix(*gammamat, res.gamma);
+    }
     akm_save_scalar("__xgel_identity_gap", res.identity_gap);
     akm_save_scalar("__xgel_n_obs_input", static_cast<double>(res.n_obs_input));
     akm_save_scalar("__xgel_n_obs", static_cast<double>(res.n_obs));
@@ -1718,17 +1729,25 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     akm_save_scalar("__xgel_n_singletons_dropped",
                     static_cast<double>(res.n_singletons_dropped));
     akm_save_scalar("__xgel_df_full", res.df_full);
+    akm_save_scalar("__xgel_df_base", res.df_base);
+    akm_save_scalar("__xgel_n_clusters",
+                    static_cast<double>(res.n_clusters));
     akm_save_scalar("__xgel_feclass_tol", res.fe_collinear_ss_ratio_tol);
+    akm_save_scalar("__xgel_near_fe_warn_upper",
+                    res.near_fe_collinear_ss_ratio_warn_upper);
+    akm_save_scalar("__xgel_fewG_threshold",
+                    static_cast<double>(res.few_cluster_warning_threshold));
     akm_save_scalar("__xgel_abs_inf_valid",
                     res.absorbed_target_inference_valid ? 1.0 : 0.0);
     akm_save_scalar("__xgel_abs_fe_index",
                     static_cast<double>(res.absorbing_fe_index));
     akm_save_scalar("__xgel_converged", res.converged ? 1.0 : 0.0);
     akm_save_scalar("__xgel_threads_used", static_cast<double>(res.threads_used));
+    akm_save_scalar("__xgel_gpu_requested",
+                    res.gpu_requested ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_used", res.gpu_used ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_status_code",
-                    static_cast<double>(use_gpu && nfe == 0 ? 6
-                                                           : res.gpu_status_code));
+                    static_cast<double>(res.gpu_status_code));
     akm_save_scalar("__xgel_gpu_attempted", res.gpu_attempted ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_absorption_converged",
                     res.gpu_absorption_converged ? 1.0 : 0.0);

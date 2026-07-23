@@ -1,0 +1,131 @@
+* installing *source* package ‘xhdfe’ ...
+** this is package ‘xhdfe’ version ‘2.20.0.20260723’
+** using staged installation
+** libs
+specified C++17
+using C++ compiler: ‘g++ (GCC) 11.5.0 20240719 (Red Hat 11.5.0-11)’
+using C++17
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c akm_kss.cpp -o akm_kss.o
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c fe_absorption.cpp -o fe_absorption.o
+fe_absorption.cpp: In function ‘void hdfe::detail::{anonymous}::demean_inplace_contiguous(Eigen::VectorXd&, Eigen::MatrixXd&, const hdfe::detail::{anonymous}::FeIndexer&, hdfe::detail::{anonymous}::FeWorkspace&, const double*, bool, int, bool, double*, double, double*, double*, double*)’:
+fe_absorption.cpp:1821:15: warning: unused variable ‘n’ [-Wunused-variable]
+ 1821 |     const int n = static_cast<int>(y.size());
+      |               ^
+fe_absorption.cpp: In function ‘void hdfe::detail::{anonymous}::demean_inplace(Eigen::VectorXd&, Eigen::MatrixXd&, const hdfe::detail::{anonymous}::FeIndexer&, hdfe::detail::{anonymous}::FeWorkspace&, const double*, bool, int, bool, double*, double, double*, double*, double*)’:
+fe_absorption.cpp:2110:19: warning: unused variable ‘x_rows’ [-Wunused-variable]
+ 2110 |         const int x_rows = static_cast<int>(X.rows());
+      |                   ^~~~~~
+fe_absorption.cpp: In function ‘void hdfe::detail::{anonymous}::slope_project_inplace(Eigen::VectorXd&, Eigen::MatrixXd&, const hdfe::detail::HeterogeneousSlopeTerm&, hdfe::detail::{anonymous}::HeteroSlopeWorkspace&, const double*, bool, int, bool, double*)’:
+fe_absorption.cpp:3412:15: warning: unused variable ‘n’ [-Wunused-variable]
+ 3412 |     const int n = static_cast<int>(y.size());
+      |               ^
+fe_absorption.cpp: In lambda function:
+fe_absorption.cpp:6203:27: warning: unused variable ‘dim_threads’ [-Wunused-variable]
+ 6203 |                 const int dim_threads = threads_by_dim[dim];
+      |                           ^~~~~~~~~~~
+fe_absorption.cpp: In lambda function:
+fe_absorption.cpp:8543:53: warning: comparison of integer expressions of different signedness: ‘std::vector<int>::size_type’ {aka ‘long unsigned int’} and ‘int’ [-Wsign-compare]
+ 8543 |             if (options.sweep_order_override.size() == static_cast<int>(dims) && dims > 0) {
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~
+fe_absorption.cpp: At global scope:
+fe_absorption.cpp:3196:8: warning: ‘double hdfe::detail::{anonymous}::packed_mean_reldif_update_error(const VectorXd&, const VectorXd&, int, int, const VectorXd*, int)’ defined but not used [-Wunused-function]
+ 3196 | double packed_mean_reldif_update_error(const Eigen::VectorXd& newer,
+      |        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+fe_absorption.cpp:3109:6: warning: ‘bool hdfe::detail::{anonymous}::convergence_reached(const hdfe::HdfeOptions&, double, double)’ defined but not used [-Wunused-function]
+ 3109 | bool convergence_reached(const HdfeOptions& options,
+      |      ^~~~~~~~~~~~~~~~~~~
+fe_absorption.cpp:3083:6: warning: ‘bool hdfe::detail::{anonymous}::needs_reghdfe_update_check(const hdfe::HdfeOptions&)’ defined but not used [-Wunused-function]
+ 3083 | bool needs_reghdfe_update_check(const HdfeOptions& options) {
+      |      ^~~~~~~~~~~~~~~~~~~~~~~~~~
+fe_absorption.cpp:310:11: warning: ‘hdfe::detail::{anonymous}::FeIndexer hdfe::detail::{anonymous}::build_indexer_from_groups(const std::vector<int>&, int)’ defined but not used [-Wunused-function]
+  310 | FeIndexer build_indexer_from_groups(const std::vector<int>& group_ids, int expected_levels) {
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c hdfe_regressor_v11.cpp -o hdfe_regressor_v11.o
+hdfe_regressor_v11.cpp:5970:8: warning: ‘double hdfe::v11::{anonymous}::normal_critical_value(double)’ defined but not used [-Wunused-function]
+ 5970 | double normal_critical_value(double level_percent) {
+      |        ^~~~~~~~~~~~~~~~~~~~~
+hdfe_regressor_v11.cpp:5830:5: warning: ‘int hdfe::v11::{anonymous}::find_matching_fe_index(const VectorXi&, const std::vector<Eigen::Matrix<int, -1, 1> >&)’ defined but not used [-Wunused-function]
+ 5830 | int find_matching_fe_index(const Eigen::VectorXi& clusters,
+      |     ^~~~~~~~~~~~~~~~~~~~~~
+hdfe_regressor_v11.cpp:2246:33: warning: ‘std::optional<hdfe::AbsorptionMethod> hdfe::v11::{anonymous}::select_method_pilot(const Eigen::Ref<const Eigen::Matrix<double, -1, 1> >&, const Eigen::Ref<const Eigen::Matrix<double, -1, -1> >&, const std::vector<Eigen::Matrix<int, -1, 1> >&, const VectorXd*, const hdfe::HdfeOptions&)’ defined but not used [-Wunused-function]
+ 2246 | std::optional<AbsorptionMethod> select_method_pilot(
+      |                                 ^~~~~~~~~~~~~~~~~~~
+hdfe_regressor_v11.cpp:1561:15: warning: ‘uint64_t hdfe::v11::{anonymous}::hash_fe_signature_sample_filtered(const std::vector<Eigen::Matrix<int, -1, 1> >&, const std::vector<int>*, bool)’ defined but not used [-Wunused-function]
+ 1561 | std::uint64_t hash_fe_signature_sample_filtered(const std::vector<Eigen::VectorXi>& fes,
+      |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c iv.cpp -o iv.o
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c ols.cpp -o ols.o
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c RcppExports.cpp -o RcppExports.o
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c rcpp_xhdfe.cpp -o rcpp_xhdfe.o
+g++ -std=gnu++17 -I"/usr/include/R" -DNDEBUG -I. -Iinclude -Ieigen -DNDEBUG -DHDFE_USE_OPENMP -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' -DXHDFE_R_MARCH='"native"' -DXHDFE_R_CUDA_ARCH='""' -I'/home/mangelo/Documents/GitHub/xhdfe/r/Rlib/Rcpp/include' -I/usr/local/include   -fopenmp -fpic  -O3 -Wall -march=native -ffast-math -funroll-loops -ftree-vectorize -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math  -c schwarz_demean.cpp -o schwarz_demean.o
+schwarz_demean.cpp: In function ‘bool xhdfe::{anonymous}::schwarz_impl(double*, double*, int64_t, int, const std::vector<const int*>&, const std::vector<int>&, double, int, int*, int)’:
+schwarz_demean.cpp:101:17: warning: this ‘if’ clause does not guard... [-Wmisleading-indentation]
+  101 |                 if (j >= deg) j = deg - 1; if (j == i) j = (i + 1) % deg; int ui = nbu[i], uj = nbu[j]; if (ui == uj) continue;
+      |                 ^~
+schwarz_demean.cpp:101:44: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘if’
+  101 |                 if (j >= deg) j = deg - 1; if (j == i) j = (i + 1) % deg; int ui = nbu[i], uj = nbu[j]; if (ui == uj) continue;
+      |                                            ^~
+schwarz_demean.cpp: In lambda function:
+schwarz_demean.cpp:125:9: warning: this ‘for’ clause does not guard... [-Wmisleading-indentation]
+  125 |         for (int i = 0; i < nlv; ++i) lptr[i + 1] += lptr[i]; lnodes.resize(N);
+      |         ^~~
+schwarz_demean.cpp:125:63: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘for’
+  125 |         for (int i = 0; i < nlv; ++i) lptr[i + 1] += lptr[i]; lnodes.resize(N);
+      |                                                               ^~~~~~
+schwarz_demean.cpp: In lambda function:
+schwarz_demean.cpp:139:9: warning: this ‘for’ clause does not guard... [-Wmisleading-indentation]
+  139 |         for (int64_t g = 0; g < lv; ++g) ptr[g + 1] += ptr[g]; idx.resize(n);
+      |         ^~~
+schwarz_demean.cpp:139:64: note: ...this statement, but the latter is misleadingly indented as if it were guarded by the ‘for’
+  139 |         for (int64_t g = 0; g < lv; ++g) ptr[g + 1] += ptr[g]; idx.resize(n);
+      |                                                                ^~~
+schwarz_demean.cpp: In function ‘_ZN5xhdfe12_GLOBAL__N_112schwarz_implILi8EEEbPdS2_liRKSt6vectorIPKiSaIS5_EERKS3_IiSaIiEEdiPii._omp_fn.11’:
+schwarz_demean.cpp:359:20: warning: ‘du_’ may be used uninitialized [-Wmaybe-uninitialized]
+  359 |         Y[i] -= du_[0]; for (int c = 1; c < NC; ++c) X[(int64_t)(c - 1) * n + i] -= du_[c]; }
+      |                 ~~~^
+schwarz_demean.cpp:357:16: note: ‘du_’ declared here
+  357 |         double du_[S]; for (int c = 0; c < NC; ++c) du_[c] = xa[c] + xf[c];
+      |                ^~~
+schwarz_demean.cpp: In function ‘_ZN5xhdfe12_GLOBAL__N_112schwarz_implILi12EEEbPdS2_liRKSt6vectorIPKiSaIS5_EERKS3_IiSaIiEEdiPii._omp_fn.11’:
+schwarz_demean.cpp:359:20: warning: ‘du_’ may be used uninitialized [-Wmaybe-uninitialized]
+  359 |         Y[i] -= du_[0]; for (int c = 1; c < NC; ++c) X[(int64_t)(c - 1) * n + i] -= du_[c]; }
+      |                 ~~~^
+schwarz_demean.cpp:357:16: note: ‘du_’ declared here
+  357 |         double du_[S]; for (int c = 0; c < NC; ++c) du_[c] = xa[c] + xf[c];
+      |                ^~~
+schwarz_demean.cpp: In function ‘_ZN5xhdfe12_GLOBAL__N_112schwarz_implILi16EEEbPdS2_liRKSt6vectorIPKiSaIS5_EERKS3_IiSaIiEEdiPii._omp_fn.11’:
+schwarz_demean.cpp:359:20: warning: ‘du_’ may be used uninitialized [-Wmaybe-uninitialized]
+  359 |         Y[i] -= du_[0]; for (int c = 1; c < NC; ++c) X[(int64_t)(c - 1) * n + i] -= du_[c]; }
+      |                 ~~~^
+schwarz_demean.cpp:357:16: note: ‘du_’ declared here
+  357 |         double du_[S]; for (int c = 0; c < NC; ++c) du_[c] = xa[c] + xf[c];
+      |                ^~~
+g++ -std=gnu++17 -shared -L/usr/lib64/R/lib -Wl,-z,relro -Wl,--as-needed -Wl,-z,now -specs=/usr/lib/rpm/redhat/redhat-hardened-ld -specs=/usr/lib/rpm/redhat/redhat-annobin-cc1 -o xhdfe.so akm_kss.o fe_absorption.o hdfe_regressor_v11.o iv.o ols.o RcppExports.o rcpp_xhdfe.o schwarz_demean.o -fopenmp -L/usr/lib64/R/lib -lR
+installing to /home/mangelo/Documents/GitHub/xhdfe/r/Rlib/00LOCK-xhdfe/00new/xhdfe/libs
+** R
+** inst
+** byte-compile and prepare package for lazy loading
+** help
+*** installing help indices
+  converting help for package ‘xhdfe’
+    finding HTML links ... done
+    fixef.xhdfe                             html  
+    predict.xhdfe                           html  
+    xhdfe-methods                           html  
+    xhdfe-package                           html  
+    xhdfe                                   html  
+    xhdfe_akm_kss                           html  
+    xhdfe_akm_leave_out_set                 html  
+    xhdfe_demean                            html  
+    xhdfe_fit                               html  
+    xhdfe_gelbach                           html  
+    xhdfe_gelbach_contrast                  html  
+    xhdfe_gelbach_tidy                      html  
+    xhdfe_group_fes                         html  
+    xhdfe_info                              html  
+** building package indices
+** testing if installed package can be loaded from temporary location
+** checking absolute paths in shared objects and dynamic libraries
+** testing if installed package can be loaded from final location
+** testing if installed package keeps a record of temporary installation path
+* DONE (xhdfe)

@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.18.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.20.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -60,7 +60,12 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 - **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` /
   `xhdfe_gelbach()`, validated against Gelbach's `b1x2`, with an opt-in
   absorbed-target estimand, focal reporting, signed shares, and
-  joint-covariance contrasts.
+  joint-covariance contrasts. `xhdfegelbach` 1.4.0 adds full
+  joint-covariance delta-method inference for shares of the base coefficient,
+  per-X1 FE-collinearity diagnostics, retained-cluster and residual-DoF
+  metadata, observed-block full-model coefficients, and truthful GPU-use
+  diagnostics. See
+  [`RELEASE_NOTES_2.20.0.20260723.md`](RELEASE_NOTES_2.20.0.20260723.md).
 
 ---
 
@@ -127,8 +132,9 @@ xhdfegpu, zip("/path/to/xhdfe-src.zip")
 ```
 
 `xhdfegpu` needs the NVIDIA CUDA toolkit (`nvcc`) and a C++ compiler; see
-`help xhdfegpu`. The zip is self-contained (Eigen, pybind11 and Stata's plugin
-headers are vendored) so the build needs no further downloads.
+`help xhdfegpu`. The zip is self-contained: Eigen, pybind11, the official
+version-pinned Rcpp source archive, and Stata's plugin inputs are vendored, so
+the package-side build needs no further downloads.
 
 #### Install from a release ZIP (offline, no GitHub)
 
@@ -269,6 +275,22 @@ explicit target, set `XHDFE_CUDA_ARCH=90`.
 GPU use is then per call via `backend = "cuda"` (fail-closed if unavailable);
 `xhdfe_info()` reports the CUDA arch the package was built for.
 
+For a network-disabled installation from `xhdfe-src.zip` or the autonomous
+offline bundle, install the pinned Rcpp source into a local library first:
+
+```bash
+mkdir -p r/Rlib
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \
+  R_LIBS_USER="$PWD/r/Rlib" \
+  R CMD INSTALL --library="$PWD/r/Rlib" third_party/Rcpp_1.1.2.tar.gz
+R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \
+  R_LIBS_USER="$PWD/r/Rlib" XHDFE_ENABLE_CUDA=OFF \
+  R CMD INSTALL --library="$PWD/r/Rlib" r/xhdfe
+```
+
+The unmodified CRAN archive's URL, license, version, and SHA-256 are recorded
+in `third_party/RCPP_SOURCE_PROVENANCE.md`.
+
 Minimal example (a small simulated worker–firm panel):
 
 ```r
@@ -341,6 +363,17 @@ to one full model. The separate absorbed-target mode covers a declared X1
 target that belongs to an added FE span: its full coefficient is imposed at
 zero and explicitly labelled, never treated as an estimated within-FE effect.
 Inference for that target must be clustered at the absorbing FE dimension.
+
+Version 1.4.0 exposes the covariance between every contribution and the base
+coefficient. Therefore `shares(base)` in Stata and `share = "base"` in
+Python/R use the complete ratio delta method, including denominator uncertainty
+and the cross-covariance term. The earlier `base_fixed` convention remains
+available, unchanged, as explicitly descriptive fixed-denominator scaling.
+Results also expose per-X1 residual-norm ratios after FE absorption and warn
+near the classification boundary, report retained cluster counts (with a
+few-cluster caution), `df_base`, `df_full`, observed-block full-model
+coefficients, and whether an opt-in CUDA request was actually used.
+
 Run `help xhdfegelbach`, `python -m xhdfe gelbach`, or
 `?xhdfe_gelbach` for the complete estimands, covariance layout, warnings,
 reporting helpers, examples, and deliberate limits. The decomposition is
@@ -361,7 +394,7 @@ in [`docs/akm-kss.md`](docs/akm-kss.md).
 
 | Path | Contents |
 | --- | --- |
-| `src/`, `include/`, `third_party/eigen-3.4.0/` | The shared C++ core (MAP absorber plus Krylov / Schwarz / LSMR variants) and header-only Eigen. |
+| `src/`, `include/`, `third_party/` | The shared C++ core and vendored build inputs: Eigen and pybind11 sources plus the pinned official Rcpp source archive used by autonomous offline release media. |
 | `python/`, `xhdfe/` | Python package (`import xhdfe`; the `HdfeRegressor` class). |
 | `r/` | R package (`r/xhdfe/`), examples, and helper tools. |
 | `stata/` | Stata package: `xhdfe.ado`, `xfe.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
@@ -402,14 +435,17 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.18.2.
+> effects regression via a C++ backend.* Version 2.20.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
 
 MIT — see [`LICENSE`](LICENSE). `xhdfe` bundles the Eigen 3.4.0 headers
 (primarily MPL-2.0, with parts under BSD-3-Clause and Apache-2.0); see
-[`NOTICE`](NOTICE).
+[`NOTICE`](NOTICE). Autonomous release media also carry the unmodified official
+Rcpp 1.1.2 source archive under its upstream GPL (>= 2) license solely as the
+R package's offline build dependency; see
+[`third_party/RCPP_SOURCE_PROVENANCE.md`](third_party/RCPP_SOURCE_PROVENANCE.md).
 
 ## Authors
 

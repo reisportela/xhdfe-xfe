@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "module": "/home/mangelo/Documents/GitHub/xhdfe/build_cuda/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+  "module_sha256": "4e642d5eae1f2e43a5adcc898533019f9be398196c683e0dcef430b4d6fa12a1",
+  "backend_requested": "cuda",
+  "mode": "absorbed",
+  "round": 0,
+  "n": 500000,
+  "threads": 16,
+  "inner_reps": 3,
+  "load_at_end": [
+    32.56,
+    32.0,
+    32.7
+  ],
+  "samples": {
+    "unadjusted/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.17058314755558968,
+        "identity_gap": 1.1937117960769683e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.15548330172896385,
+        "identity_gap": 1.1937117960769683e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.15430498123168945,
+        "identity_gap": 1.1937117960769683e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "unadjusted/w": [
+      {
+        "inner": 0,
+        "seconds": 0.16338970139622688,
+        "identity_gap": 1.7897905379982149e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.17174992337822914,
+        "identity_gap": 1.7900680937543711e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.1664072424173355,
+        "identity_gap": 1.7908452498716088e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. WARNING: absorbed-target inference is not certified for this VCE. Use vce(cluster) with clusters equal to an FE dimension that absorbs every declared target; unadjusted, robust, or crossed clustering can be anti-conservative. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "cluster/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.21230893582105637,
+        "identity_gap": 1.1368683772161603e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.21853602305054665,
+        "identity_gap": 1.1368683772161603e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.21293475851416588,
+        "identity_gap": 1.1368683772161603e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ],
+    "cluster/w": [
+      {
+        "inner": 0,
+        "seconds": 0.2213178053498268,
+        "identity_gap": 1.7910672944765338e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 1,
+        "seconds": 0.2177838794887066,
+        "identity_gap": 1.7908452498716088e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      },
+      {
+        "inner": 2,
+        "seconds": 0.2166881114244461,
+        "identity_gap": 1.7916224059888464e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. declared absorbed-target coefficients in the full model are imposed at zero, not estimated. absorbed-target inference is clustered at an FE dimension that absorbs every declared target. ",
+        "gpu_requested": true,
+        "gpu_used": true,
+        "gpu_backend": "cuda",
+        "gpu_status": "used"
+      }
+    ]
+  }
+}

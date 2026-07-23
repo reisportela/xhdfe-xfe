@@ -28,7 +28,11 @@
 #'   \code{1e-8} preserves the historical effective tolerance. This does not
 #'   control FE-collinearity classification, whose separate squared-norm rule
 #'   is \code{||M_D x||^2 / ||x||^2 <= 1e-9} and is returned as metadata.
-#' @param num_threads OpenMP threads (0 = library default).
+#' @param num_threads OpenMP thread request/cap for supported CPU phases
+#'   (0 = library default). Individual phases may choose fewer threads;
+#'   \code{$threads_used} reports the maximum effective absorber/recovery
+#'   team, not a promise that every auxiliary or covariance phase used that
+#'   count. GPU kernels do not use this OpenMP setting.
 #' @param weights Optional finite, strictly positive Stata-style weights:
 #'   analytic by default, frequency when \code{fweights = TRUE}.
 #' @param fweights Treat \code{weights} as positive integer frequency weights.
@@ -40,6 +44,11 @@
 #'   logical mask used only to select focal rows for reporting. Every X1
 #'   column remains in both specifications, so common controls can be included
 #'   in \code{x1} without crowding the empirical table.
+#' @param gpu Logical scalar. With \code{TRUE}, request CUDA for the
+#'   full-model FE-absorption phase. The decomposition and covariance
+#'   calculations remain on the CPU. A CPU-only build or unavailable device
+#'   falls back truthfully; inspect the \code{$gpu_*} diagnostics. This
+#'   argument is last to preserve the positional contract of earlier releases.
 #'
 #' @section Specification and sample contract:
 #' All X1 columns remain in both models. Every \code{x2_groups} and \code{fes}
@@ -70,12 +79,19 @@
 #' \code{[group1:x1, group1:_cons, group2:x1, group2:_cons, ...]}.
 #' Use this object, or \code{xhdfe_gelbach_contrast()}, for sums and contrasts;
 #' component SEs must not be added as if the blocks were independent.
+#' \code{$base_cov}, \code{$cov_delta_bbase}, and
+#' \code{$cov_total_bbase} complete the covariance contract needed for
+#' base-coefficient-denominator shares. \code{xhdfe_gelbach_tidy(...,
+#' share = "base")} uses all denominator and cross-covariance terms; it is
+#' distinct from the retained descriptive \code{share = "base_fixed"}.
 #'
 #' @section Result schema:
 #' Coefficients and contributions are in \code{$b_base}, \code{$b_full},
-#' \code{$b_full_status}, \code{$delta}, \code{$se}, \code{$cov},
-#' \code{$total}, \code{$total_se}, \code{$total_cov}, and optional
-#' \code{$fe_total}. Names and selectors are in \code{$names},
+#' \code{$b_full_status}, \code{$gamma}, \code{$delta}, \code{$se},
+#' \code{$cov}, \code{$base_cov}, \code{$cov_delta_bbase},
+#' \code{$cov_total_bbase}, \code{$total}, \code{$total_se},
+#' \code{$total_cov}, and optional \code{$fe_total}. Names and selectors are
+#' in \code{$names},
 #' \code{$group_kinds}, \code{$x1_names}, \code{$focal_indices}, and
 #' \code{$focal_names}. Estimand and identification metadata are in
 #' \code{$estimand}, \code{$identity_status}, \code{$absorbed_mask}, the legacy
@@ -86,9 +102,14 @@
 #' \code{$total_se_type}, \code{$inference_status},
 #' \code{$absorbed_target_inference_valid}, and
 #' \code{$absorbing_fe_index}. Diagnostics include \code{$identity_gap},
-#' \code{$converged}, \code{$notes}, \code{$df_full}, the sample counts, and
-#' both FE-collinearity thresholds; \code{$causal_interpretation} is always
-#' \code{FALSE}. R accepts one-based selector indices but
+#' \code{$converged}, \code{$notes}, \code{$df_base}, \code{$df_full},
+#' \code{$n_clusters}, the sample counts, per-X1
+#' \code{$x1_fe_collinear_ratio}/\code{$x1_near_collinear_mask}, both
+#' FE-collinearity thresholds, \code{$few_cluster_warning_threshold},
+#' \code{$threads_used}, and the truthful \code{$gpu_*} fields.
+#' \code{$gamma} has one column per observed block and is padded with
+#' non-finite entries to the widest block. \code{$causal_interpretation} is
+#' always \code{FALSE}. R accepts one-based selector indices but
 #' returns \code{$focal_indices}, \code{$absorbed_targets}, and
 #' \code{$absorbing_fe_index} as zero-based cross-frontend metadata.
 #'
@@ -105,6 +126,11 @@
 #' A bounded-cost normalized-Gram check records a warning in \code{$notes}
 #' when an observed x2 block is severely near-collinear; values are not
 #' altered, but that block's split SE can be rounding/tolerance sensitive.
+#' A separate per-X1 diagnostic warns, without changing any number, when
+#' \code{||M_D x1_j||^2 / ||x1_j||^2} lies above the backend omission
+#' boundary and at or below the documented warning-band upper limit. Such a
+#' focal is nearly FE-collinear; inspect the mask and consider
+#' \code{absorbed_targets} only when it is conceptually FE-invariant.
 #' Cluster-meat FMA may differ from the former materialized path by one
 #' last-place unit in well-conditioned cells, with coefficients/deltas
 #' bit-identical. Inferential notes raise \code{warning()} even when the
@@ -113,15 +139,32 @@
 #' identity only.
 #'
 #' @section Deliberate limits:
-#' The R companion has no \code{gpu} argument and should be treated as a CPU
-#' interface. It does not implement IV/LATE allocation, multiway clustering,
+#' The optional \code{gpu = TRUE} request applies only to full-model
+#' FE absorption; auxiliary regressions, covariance construction, and
+#' reporting remain CPU work. It does not implement IV/LATE allocation,
+#' multiway clustering,
 #' wild-cluster bootstrap, nonconditional recovered-FE covariance, a separate
 #' HDFE set common to base and full, dynamic-panel corrections, nonlinear or
 #' distributional decompositions, Oaxaca wrappers, or causal mediation.
+#' A binary outcome is estimated as a linear probability model; a
+#' decomposition on a logit or other nonlinear scale is a separate estimator.
 #' Explicit numeric columns can represent polynomials, bins, splines,
 #' interactions, and low-dimensional effects common to both specifications.
-#' Because an intercept is implicit, categorical indicators common to both
-#' models must use a full-rank reference coding rather than all category dummies.
+#' Factor objects are deliberately refused: use \code{model.matrix()} (or
+#' explicit generated indicators), drop its intercept and one reference
+#' category, and pass the resulting full-rank numeric columns. Because an
+#' intercept is implicit, categorical indicators common to both models must
+#' not include all category dummies.
+#'
+#' @section Offline validation bundles:
+#' The source package declares Rcpp as an \code{Imports}/\code{LinkingTo}
+#' dependency. In an offline repository validation bundle that includes
+#' \code{r/Rlib/Rcpp}, set \code{R_PROFILE_USER=/dev/null} and
+#' \code{R_LIBS_USER} to the bundle's \code{r/Rlib} before installation, and
+#' verify the dependency with \code{find.package("Rcpp")}. \code{r/Rlib} is a
+#' local development/validation library, not part of the CRAN-style source
+#' package or guaranteed to be present in every clone; otherwise supply Rcpp
+#' from offline media first.
 #'
 #' @return An object of class \code{xhdfe_gelbach}. Contributions and their
 #'   SEs have rows \code{[x1..., _cons]} and columns in observed-group then FE
@@ -165,8 +208,19 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
                           gamma0 = FALSE, cov0 = FALSE, tol = 1e-8,
                           num_threads = 0L,
                           weights = NULL, fweights = FALSE,
-                          absorbed_targets = NULL, focal = NULL) {
+                          absorbed_targets = NULL, focal = NULL,
+                          gpu = FALSE) {
   y <- as.numeric(y)
+  x1_is_numeric <- if (is.data.frame(x1)) {
+    all(vapply(x1, function(z) is.numeric(z) && !is.factor(z), logical(1)))
+  } else {
+    is.numeric(x1) && !is.factor(x1)
+  }
+  if (!x1_is_numeric) {
+    stop("x1 must contain explicit numeric columns; generate a full-rank ",
+         "indicator matrix first (for example with model.matrix(), dropping ",
+         "its intercept and one reference level)", call. = FALSE)
+  }
   x1 <- as.matrix(x1)
   storage.mode(x1) <- "double"
   if (ncol(x1) == 0L) {
@@ -195,6 +249,9 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   focal_idx <- .gelbach_focal_indices(focal, x1_names, ncol(x1))
   if (length(tol) != 1L || !is.finite(tol) || tol <= 0) {
     stop("tol must be finite and strictly positive", call. = FALSE)
+  }
+  if (length(gpu) != 1L || is.na(gpu) || !is.logical(gpu)) {
+    stop("gpu must be one non-missing logical value", call. = FALSE)
   }
   x2_groups <- as.list(x2_groups %||% list())
   fes <- as.list(fes %||% list())
@@ -254,6 +311,16 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   sizes <- integer(0)
   X2 <- NULL
   for (g in x2_groups) {
+    group_is_numeric <- if (is.data.frame(g)) {
+      all(vapply(g, function(z) is.numeric(z) && !is.factor(z), logical(1)))
+    } else {
+      is.numeric(g) && !is.factor(g)
+    }
+    if (!group_is_numeric) {
+      stop("x2 groups must contain explicit numeric columns; generate ",
+           "full-rank indicators first (for example with model.matrix(), ",
+           "dropping its intercept and one reference level)", call. = FALSE)
+    }
     g <- as.matrix(g)
     storage.mode(g) <- "double"
     if (nrow(g) != length(y)) stop("x2 group has wrong length", call. = FALSE)
@@ -269,9 +336,15 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   if (identical(vce, "cluster") && is.null(cluster)) {
     stop("vce = \"cluster\" requires cluster ids", call. = FALSE)
   }
+  if (!is.null(cluster) && length(cluster) != length(y)) {
+    stop("cluster must have the same length as y", call. = FALSE)
+  }
   cl <- if (is.null(cluster)) NULL else .akm_id_codes(cluster, "cluster")
   if (!is.null(cl) && length(unique(cl)) < 2L) {
     stop("vce = \"cluster\" requires at least two clusters", call. = FALSE)
+  }
+  if (!is.null(weights) && !is.numeric(weights)) {
+    stop("weights must be a numeric vector", call. = FALSE)
   }
   w <- if (is.null(weights)) NULL else as.numeric(weights)
   if (!is.null(w)) {
@@ -286,12 +359,14 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   }
   out <- .xhdfe_cpp_gelbach(y, x1, X2, as.integer(sizes), fe_list, cl,
                             as.character(vce), isTRUE(gamma0), isTRUE(cov0),
-                            as.numeric(tol), as.integer(num_threads), w,
+                            as.numeric(tol), as.integer(num_threads),
+                            isTRUE(gpu), w,
                             isTRUE(fweights), as.integer(absorbed_idx - 1L))
   k1 <- ncol(x1) + 1L
+  coefficient_names <- c(x1_names, "_cons")
   delta <- out$delta
   colnames(delta) <- nm
-  rownames(delta) <- c(x1_names, "_cons")
+  rownames(delta) <- coefficient_names
   se <- vapply(seq_along(nm), function(g) {
     idx <- ((g - 1L) * k1 + 1L):(g * k1)
     sqrt(diag(out$cov[idx, idx, drop = FALSE]))
@@ -300,6 +375,19 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   out$delta <- delta
   out$se <- se
   out$total_se <- sqrt(diag(out$total_cov))
+  dimnames(out$base_cov) <- list(coefficient_names, coefficient_names)
+  dimnames(out$cov_total_bbase) <- list(coefficient_names,
+                                        coefficient_names)
+  if (length(nm)) {
+    cross_rows <- unlist(lapply(nm, function(group) {
+      paste(group, coefficient_names, sep = ":")
+    }), use.names = FALSE)
+    dimnames(out$cov_delta_bbase) <- list(cross_rows, coefficient_names)
+  }
+  if (length(x2_groups)) {
+    colnames(out$gamma) <- names(x2_groups)
+    rownames(out$gamma) <- paste0("within_block_", seq_len(nrow(out$gamma)))
+  }
   out$names <- nm
   out$x1_names <- unname(x1_names)
   out$focal_indices <- unname(as.integer(focal_idx - 1L))
@@ -337,6 +425,9 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   }
   out$vce <- vce
   out$tol <- as.numeric(tol)
+  out$gpu <- isTRUE(gpu)
+  names(out$x1_fe_collinear_ratio) <- x1_names
+  names(out$x1_near_collinear_mask) <- x1_names
   absorbed_mask <- as.logical(out$x1_absorbed)
   out$absorbed_mask <- unname(absorbed_mask)
   out$absorbed_targets <- unname(which(absorbed_mask) - 1L)
@@ -431,6 +522,19 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
   cat(sprintf("n = %s, vce = %s%s\n",
               format(x$n_obs_effective, big.mark = ","),
               x$vce, if (isTRUE(x$gamma0)) " (gamma0)" else ""))
+  if (identical(x$vce, "cluster")) {
+    cat(sprintf("Clusters: %d%s\n", x$n_clusters,
+                if (x$n_clusters < x$few_cluster_warning_threshold) {
+                  sprintf(" (fewer than %d; use cluster-robust inference with caution)",
+                          x$few_cluster_warning_threshold)
+                } else ""))
+  }
+  if (isTRUE(x$gpu_requested)) {
+    cat(sprintf("GPU absorption: %s (backend=%s, used=%s, iterations=%d)\n",
+                x$gpu_status, x$gpu_backend,
+                if (isTRUE(x$gpu_used)) "yes" else "no",
+                x$gpu_absorption_iterations))
+  }
   p <- length(x$b_base)
   selected <- if (isTRUE(x$focal_selection_explicit)) {
     x$focal_indices + 1L
@@ -513,6 +617,16 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
     V <- .gelbach_row_cov(x, row)
     if (identical(denominator, "base_fixed")) {
       se[row, ] <- sqrt(pmax(0, diag(V))) / abs(denom)
+    } else if (identical(denominator, "base")) {
+      base_var <- x$base_cov[row, row]
+      for (g in seq_len(G)) {
+        pos <- (g - 1L) * k1 + row
+        cross <- x$cov_delta_bbase[pos, row]
+        ratio_var <- (V[g, g] / denom^2 +
+                      d[g]^2 * base_var / denom^4 -
+                      2 * d[g] * cross / denom^3)
+        se[row, g] <- sqrt(max(0, ratio_var))
+      }
     } else if (identical(denominator, "movement")) {
       for (g in seq_len(G)) {
         grad <- rep(-d[g] / denom^2, G)
@@ -523,7 +637,7 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
   }
   list(coef = ans, se = se, defined = defined, denominator = denominator,
        se_type = if (identical(denominator, "base")) {
-         "not_available_joint_base_covariance"
+         "joint_base_covariance_delta_method"
        } else if (identical(denominator, "base_fixed")) {
          "fixed_base_denominator_scaling"
        } else {
@@ -535,9 +649,9 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
 #'
 #' This is reporting-only post-processing of an \code{xhdfe_gelbach} result.
 #' No model is re-estimated. With \code{share = "movement"}, ratio uncertainty
-#' uses the full joint covariance and the delta method. Because the public
-#' result does not yet contain covariance with the base coefficient,
-#' \code{share = "base"} leaves ratio SEs missing. The explicit
+#' uses the full joint covariance and the delta method. With
+#' \code{share = "base"}, the delta method also uses denominator uncertainty
+#' and \code{Cov(delta, b_base)}. The explicit
 #' \code{share = "base_fixed"} reproduces fixed-denominator scaling and labels
 #' that convention in the output.
 #'
@@ -563,9 +677,10 @@ print.xhdfe_gelbach <- function(x, digits = 6, ...) {
 #' @section Share contract:
 #' \code{share = "movement"} divides by total coefficient movement and uses
 #' the full joint component covariance with the delta method; the total share
-#' is one with SE zero. \code{share = "base"} reports descriptive points but
-#' leaves ratio SEs and confidence limits missing because
-#' \code{Cov(delta, b_base)} is not in the public result contract.
+#' is one with SE zero. For \code{share = "base"}, the component formula is
+#' \code{Var(delta_g / b) = Var(delta_g) / b^2 +
+#' delta_g^2 Var(b) / b^4 - 2 delta_g Cov(delta_g, b) / b^3}; the total row
+#' uses the analogous \code{Cov(total, b_base)} expression.
 #' \code{share = "base_fixed"} is an explicit descriptive convention that
 #' scales component SEs while holding the reported base coefficient fixed.
 #' Shares are fractions, remain signed, and are never truncated or
@@ -601,6 +716,17 @@ xhdfe_gelbach_tidy <- function(x, focal = NULL, include_intercept = FALSE,
   selected <- .gelbach_result_rows(x, focal, include_intercept)
   zcrit <- stats::qnorm(0.5 + conf_level / 2)
   sh <- if (is.null(share)) NULL else .gelbach_share_rows(x, share, share_tol)
+  if (!is.null(sh) && any(!sh$defined[selected])) {
+    undefined <- ifelse(selected <= length(x$b_base),
+                        x$x1_names[pmin(selected, length(x$b_base))],
+                        "_cons")
+    undefined <- unique(undefined[!sh$defined[selected]])
+    warning("xhdfe_gelbach_tidy: requested share denominator is undefined ",
+            "(non-finite, an unavailable base intercept, or absolute value ",
+            "<= share_tol) for: ", paste(undefined, collapse = ", "),
+            ". Shares and intervals are returned as NA.",
+            call. = FALSE)
+  }
   records <- list(); cursor <- 0L; p <- length(x$b_base)
   add <- function(record) {
     cursor <<- cursor + 1L
@@ -640,7 +766,20 @@ xhdfe_gelbach_tidy <- function(x, focal = NULL, include_intercept = FALSE,
         } else if (share %in% c("base", "base_fixed") &&
                    row <= p && sh$defined[row]) {
           s <- est / x$b_base[row]
-          ss <- if (identical(share, "base_fixed")) serr / abs(x$b_base[row]) else NA_real_
+          if (identical(share, "base_fixed")) {
+            ss <- serr / abs(x$b_base[row])
+          } else if (isTRUE(x$absorbed_mask[row])) {
+            # For a declared absorbed target, total and b_base are the same
+            # estimator. Preserve the point value while imposing the exact
+            # zero variance of their ratio.
+            ss <- 0
+          } else {
+            denom <- x$b_base[row]
+            ratio_var <- (x$total_cov[row, row] / denom^2 +
+                          est^2 * x$base_cov[row, row] / denom^4 -
+                          2 * est * x$cov_total_bbase[row, row] / denom^3)
+            ss <- sqrt(max(0, ratio_var))
+          }
         } else {
           s <- ss <- NA_real_
         }

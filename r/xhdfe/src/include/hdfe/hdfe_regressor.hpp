@@ -60,6 +60,7 @@ struct HdfeOptions {
     int num_threads = 0;                                   //!< Threads for absorption (0 = library default / auto).
     bool drop_singletons = true;                           //!< When true, iteratively drop singleton observations before estimation (reghdfe default).
     bool weights_are_frequencies = false;                  //!< Interpret weights as frequency weights for N/df bookkeeping.
+    bool capture_fe_collinear_ss_ratio = false;             //!< Retain the already-computed FE-collinearity ratios for diagnostic consumers.
     bool retain_fixed_effects = false;                     //!< When true, recover and cache observation-level fixed effects.
     bool refine_stored_residuals = false;                  //!< When true, recompute stored residuals via a final absorption of y-Xb.
     int savefe_fastpath_max_cols = 8;                      //!< Max X columns to enable savefe alpha accumulation during absorption.
@@ -99,6 +100,7 @@ struct HdfeResults {
     Eigen::MatrixXd covariance;    //!< Variance-covariance matrix corresponding to the stored coefficients.
     Eigen::VectorXd residuals;     //!< Regression residuals after absorbing fixed effects.
     std::vector<int> omitted_reason; //!< Omitted-regressor reason codes (0=kept, 1=collinear with FEs, 2=other collinearity).
+    Eigen::VectorXd fe_collinear_ss_ratio; //!< Per-slope ||M_D x||^2 / ||x||^2 used by the FE-collinearity classifier.
     int nobs = 0;                  //!< Number of observations used in estimation.
     int nobs_full = 0;             //!< Number of observations prior to singleton dropping (if enabled).
     int num_singletons = 0;        //!< Number of singleton observations dropped prior to estimation.

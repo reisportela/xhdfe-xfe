@@ -1,7 +1,7 @@
 # xhdfe Gelbach decomposition help
 
-Release status: the absorbed-target and empirical-reporting extensions are
-available in xhdfe 2.19.0.20260720 (`xhdfegelbach` 1.3.0). Inspect the installed
+Release status: the post-audit inference and diagnostic extensions are
+available in xhdfe 2.20.0.20260723 (`xhdfegelbach` 1.4.0). Inspect the installed
 package version with `python -m xhdfe --version`.
 
 `xhdfe.gelbach` implements Gelbach's order-invariant accounting of the movement
@@ -94,6 +94,7 @@ gelbach.decompose(
     absorbed_targets=None,
     x1_names=None,
     focal=None,
+    gpu=False,
 )
 ```
 
@@ -115,20 +116,36 @@ Arguments:
   unadjusted inference.
 - `tol`: positive FE-absorption tolerance. It does not control the separate
   FE-collinearity classifier.
-- `num_threads`: OpenMP thread request; zero uses the library default.
+- `num_threads`: OpenMP team-size request for each computational phase; zero
+  uses the library default. Phases execute sequentially: this is the team cap
+  for an active phase, not a sum of simultaneously reserved teams.
+  `threads_used` reports the largest team actually used by a phase.
 - `weights`: finite, strictly positive analytic weights by default.
 - `fweights`: interpret `weights` as positive integer frequency weights.
-- `absorbed_targets`: zero-based X1 indices or a length-p Boolean mask. Every
-  declared target must be classified as FE-absorbed by the backend.
+- `absorbed_targets`: X1 names, zero-based indices, or a length-p Boolean
+  mask. Names are resolved against `x1_names` (or the generated `x1_1`, ...
+  labels). Every declared target must be classified as FE-absorbed by the
+  backend.
 - `x1_names`: p unique, nonempty names; `_cons` is reserved. Names affect
   labels and selectors only, never the design matrix.
 - `focal`: X1 names, zero-based indices, or a length-p Boolean mask selecting
   one or more reporting targets. It never removes an X1 column from a model.
+- `gpu`: request CUDA for the full-model FE-absorption phase only. The base
+  regression, component construction and covariance calculations remain CPU
+  work. The request is opt-in and a non-use/fallback is reported truthfully in
+  the returned diagnostics.
 
 At least one observed group or FE dimension is required. All block names must
 be unique across `x2_groups` and `fes`. The full design must pass every rank
 guard. Polynomials, factor indicators, splines, bins and interactions are
-supported as explicit numeric columns grouped by the researcher.
+supported as explicit numeric columns grouped by the researcher. Formula or
+factor-variable notation is not parsed: generate a full-rank set of numeric
+indicator/interaction columns first, omit a reference category, and pass
+those columns as one or more named blocks.
+
+With a binary outcome this command estimates a linear probability model;
+decomposition on a logit or other nonlinear scale is a separate estimator and
+is not supplied here.
 
 ### Sample and weights
 
@@ -151,12 +168,20 @@ Coefficient and component objects:
 
 - `b_base`, `b_full`: length-p X1 coefficient arrays;
 - `b_full_status`: `estimated` or `imposed_zero` per X1 column;
+- `gamma`: mapping from each observed block name to its full-model coefficient
+  vector, in the same column order supplied for that block. Absorbed FE blocks
+  have no finite-dimensional `gamma` entry.
 - `delta[name]`: `coef`, `se`, and `se_type` arrays over
   `[x1 columns..., _cons]`;
 - `total`: `coef`, `se`, `cov`, and `se_type` for total movement;
 - `total_cov`: top-level alias of `total["cov"]`;
 - `cov`: joint covariance of every component. Its order is group-major:
   `[group_1:x1..., group_1:_cons, group_2:x1..., group_2:_cons, ...]`;
+- `base_cov`: requested-VCE covariance of `[b_base..., base intercept]`;
+- `cov_delta_bbase`: cross-covariance between the group-major component vector
+  and `[b_base..., base intercept]`;
+- `cov_total_bbase`: cross-covariance between total movement and
+  `[b_base..., base intercept]`;
 - `fe_total`: aggregate FE `members`, `coef`, `se`, `cov`, and `se_type`, or
   `None` when there are no FE groups.
 
@@ -172,16 +197,37 @@ Names and classification:
 
 Inference and diagnostics:
 
-- `vce`, `gamma0`, `cov0`, `tol`, `df_full`;
+- `vce`, `gamma0`, `cov0`, `tol`, `df_base`, `df_full`, and `n_clusters`
+  (`0` outside clustered inference);
 - `total_se_type`, `inference_status`;
 - `absorbed_target_inference_valid`, `absorbing_fe_index`;
-- `fe_collinear_ss_ratio_tol` and `fe_collinear_relative_norm_tol`;
+- `x1_fe_collinear_ratio`, `x1_near_collinear_mask`,
+  `fe_collinear_ss_ratio_tol`, `fe_collinear_relative_norm_tol`, and
+  `near_fe_collinear_ss_ratio_warn_upper`;
+- `few_cluster_warning_threshold`;
+- `threads_requested` and `threads_used`;
+- `gpu_requested`, `gpu_attempted`, `gpu_used`, `gpu_backend`, `gpu_status`,
+  `gpu_status_code`, `gpu_absorption_converged`, and
+  `gpu_absorption_iterations`;
 - `identity_gap`, `converged`, and `notes`;
 - the four sample-count fields documented above.
 
 Always require `converged is True` and inspect `notes`. `identity_gap` is only a
 summation consistency check; it does not certify each FE split, inference, or
 causal interpretation.
+
+The FE-collinearity classifier imposes the absorbed-target boundary at
+`ratio <= 1e-9`. A focal with `1e-9 < ratio <= 1e-4` remains in the standard
+estimand but is marked in `x1_near_collinear_mask` and emits a warning because
+its component split and SEs may be numerically fragile. The
+`XHDFE_GELBACH_NEAR_COLLINEAR_WARN=0` environment switch suppresses that
+warning only; it does not change classification, coefficients, SEs, or any
+rank guard.
+
+For one-way clustered inference, `n_clusters` below
+`few_cluster_warning_threshold` (30) produces a recorded and visible warning.
+This is a caution flag, not an automatic finite-cluster correction or
+wild-cluster bootstrap.
 
 ## Inference contract
 
@@ -246,14 +292,21 @@ Share meanings:
 
 - `movement`: `delta_g / sum_h(delta_h)`. Its SE uses the full joint component
   covariance and the delta method. The total share is one with SE zero.
-- `base`: `delta_g / b_base`. Points are returned, but ratio SEs and intervals
-  are missing because `Cov(delta, b_base)` is not public.
+- `base`: `delta_g / b_base`. Its full delta-method variance is
+  `Var(delta_g)/b_base^2 + delta_g^2 Var(b_base)/b_base^4
+  - 2 delta_g Cov(delta_g,b_base)/b_base^3`, using `base_cov` and
+  `cov_delta_bbase`. The total row uses `cov_total_bbase`; rows are labelled
+  `joint_base_covariance_delta_method`.
 - `base_fixed`: the explicit descriptive convention that scales component SEs
   while holding the reported base coefficient fixed. It is labelled
   `fixed_base_denominator_scaling`, not full ratio inference.
 
 Shares remain signed. Negative values and totals above 100 percent are never
 truncated or renormalized. Contributions in original units remain primary.
+If a selected denominator is nonfinite or no larger than `share_tol`,
+`tidy()` emits one `RuntimeWarning` for that call and returns NaN share fields
+for the affected coefficient. Base-denominator shares are defined for X1 rows,
+not the optional `_cons` reporting row.
 
 ## `contrast`
 
@@ -294,11 +347,14 @@ assert result["absorbed_target_inference_valid"]
 
 ## CPU, CUDA and frontends
 
-The Python `gelbach.decompose` signature currently has no `gpu=` switch and
-should be treated as the CPU companion interface. The Stata `xhdfegelbach`
-command exposes explicit `gpu` and backend diagnostics. All frontends share the
-same estimator implementation and are validated for numerical parity on their
-common feature surface.
+Python accepts `gpu=True` as an opt-in request for CUDA in the full-model
+FE-absorption phase. It does not promise that CUDA will be profitable or
+available: always inspect `gpu_requested`, `gpu_attempted`, `gpu_used`,
+`gpu_backend`, and `gpu_status`. In particular, `gpu_backend == "cuda"` is
+reported only when CUDA was actually used; a hidden or unavailable device is
+reported as CPU/non-used rather than silently labelled CUDA. All frontends
+share the same estimator implementation and are validated for numerical
+parity on their common feature surface.
 
 Index conventions:
 
@@ -329,7 +385,8 @@ High-dimensional entries in `fes` are added full-model components.
 - `examples/gelbach_example.py`: standard focal/common-control/HDFE workflow;
 - `examples/gelbach_absorbed_target.py`: imposed-zero target workflow;
 - `VALIDATE_GELBACH.py`: b1x2, LSDV and absorbed-target oracles;
-- `VALIDATE_GELBACH_FRONTENDS.py`: Python/Stata/R parity and example gates;
+- `VALIDATE_GELBACH_FRONTENDS.py`: Python/Stata/R parity and gates executing
+  the standard and absorbed-target examples in each of the three frontends;
 - `XHDFEGELBACH_EMPIRICAL_APPLICATION_COVERAGE_20260720.md`: paper-by-paper
   coverage and scientific boundaries.
 

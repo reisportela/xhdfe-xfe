@@ -82,6 +82,12 @@ can be tolerance/rounding sensitive. For clustered VCE, the streamed meat may
 use FMA and differ from the former materialized path by one last-place unit in
 well-conditioned cells; coefficients and deltas remain bit-identical.
 
+Separately, each focal X1 column reports its FE-residual squared-norm ratio.
+The backend classifies it as absorbed at a ratio no larger than 1e-9; the
+diagnostic-only band immediately above that boundary through 1e-4 emits a
+``RuntimeWarning`` and sets ``x1_near_collinear_mask`` without changing any
+estimate, covariance, or rank decision.
+
 Note on interpretation: with two or more mobility components, the split of
 the combined FE contribution into per-FE-dimension deltas depends on a
 normalization convention (the component mean-shift documented above); the
@@ -168,7 +174,7 @@ def _focal_indices(focal, p, labels):
 def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
               gamma0=False, cov0=False, tol=1e-8, num_threads=0,
               weights=None, fweights=False, absorbed_targets=None,
-              x1_names=None, focal=None):
+              x1_names=None, focal=None, gpu=False):
     """Gelbach decomposition of the coefficient movement b_base - b_full.
 
     The result is an accounting identity for the declared base and full
@@ -196,11 +202,14 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         returned as metadata.
     num_threads : nonnegative OpenMP thread request; zero uses the library
         default.
+    gpu : bool — request CUDA for the full-model absorption phase. This is
+        opt-in; CPU remains the reference and any fallback is reported in the
+        returned GPU diagnostics.
     weights : optional positive analytic or frequency weights.
     fweights : interpret ``weights`` as positive integer frequency weights.
-    absorbed_targets : optional zero-based X1 column indices or a length-p
-        boolean mask. This activates a distinct, constrained estimand for
-        targets that are fully absorbed by ``fes``. Every declared target
+    absorbed_targets : optional X1 names, zero-based column indices, or a
+        length-p boolean mask. This activates a distinct, constrained estimand
+        for targets that are fully absorbed by ``fes``. Every declared target
         must be classified by the backend as collinear with the absorbed FEs;
         its full-model coefficient is imposed at zero, not estimated. The
         standard rank guard is unchanged when this argument is omitted.
@@ -216,11 +225,13 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     -------
     dict with 'b_base', 'b_full', per-group 'delta' (contribution over
     [x1..., _cons] with 'se'), 'total' (with SE), 'cov', 'identity_gap',
-    sample sizes and notes. The total covariance is available both as
-    ``total['cov']`` and the cross-language top-level alias ``total_cov``.
-    ``fe_total`` is the normalization-safe aggregate FE object. Always inspect
-    ``converged``, ``notes``, ``total_se_type`` and, in absorbed-target mode,
-    ``absorbed_target_inference_valid``.
+    full-model observed-block 'gamma', sample sizes and notes. The total
+    covariance is available both as ``total['cov']`` and the cross-language
+    top-level alias ``total_cov``. ``base_cov``, ``cov_delta_bbase`` and
+    ``cov_total_bbase`` support joint base-share inference. ``fe_total`` is the
+    normalization-safe aggregate FE object. Always inspect ``converged``,
+    ``notes``, ``total_se_type``, the GPU diagnostics when ``gpu=True`` and,
+    in absorbed-target mode, ``absorbed_target_inference_valid``.
 
     See Also
     --------
@@ -244,6 +255,8 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         raise ValueError("y and x1 must contain only finite values")
     if not np.isfinite(tol) or tol <= 0:
         raise ValueError("tol must be finite and strictly positive")
+    if not isinstance(gpu, (bool, np.bool_)):
+        raise TypeError("gpu must be True or False")
     if vce not in ("unadjusted", "robust", "cluster"):
         raise ValueError("vce must be 'unadjusted', 'robust' or 'cluster'")
     if vce == "cluster":
@@ -282,8 +295,27 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         if target_arr.ndim == 0:
             target_arr = target_arr.reshape(1)
         if target_arr.ndim != 1:
-            raise ValueError("absorbed_targets must be a one-dimensional mask or index list")
-        if np.issubdtype(target_arr.dtype, np.bool_):
+            raise ValueError(
+                "absorbed_targets must be a one-dimensional name/index "
+                "selector or boolean mask"
+            )
+        target_values = target_arr.tolist()
+        if all(isinstance(value, str) for value in target_values):
+            unknown = [value for value in target_values
+                       if value not in x1_labels]
+            if unknown:
+                raise ValueError(
+                    f"absorbed_targets contains unknown x1 name(s): {unknown}"
+                )
+            absorbed_x1 = [x1_labels.index(value) for value in target_values]
+            if len(set(absorbed_x1)) != len(absorbed_x1):
+                raise ValueError("absorbed_targets names must be unique")
+        elif any(isinstance(value, str) for value in target_values):
+            raise ValueError(
+                "absorbed_targets must contain names, indices, or a boolean "
+                "mask, not a mixture"
+            )
+        elif np.issubdtype(target_arr.dtype, np.bool_):
             if target_arr.size != p:
                 raise ValueError("an absorbed_targets boolean mask must have length p")
             absorbed_x1 = np.flatnonzero(target_arr).astype(int).tolist()
@@ -359,7 +391,8 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                                tol=float(tol), num_threads=num_threads,
                                weights=w,
                                fweights=bool(fweights),
-                               absorbed_x1=absorbed_x1)
+                               absorbed_x1=absorbed_x1,
+                               gpu=bool(gpu))
 
     p_ = x1.shape[1]
     k1 = p_ + 1
@@ -371,6 +404,11 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
             [g for g, (_, kind, _d) in enumerate(groups) if kind == "fe"]
     names = [groups[g][0] for g in order]
     kinds = [groups[g][1] for g in order]
+    gamma_raw = np.asarray(r["gamma"], dtype=float)
+    gamma = {
+        names[g]: gamma_raw[:width, g].copy()
+        for g, width in enumerate(x2_sizes)
+    }
     labels = x1_labels + ["_cons"]
     observed_se_type = (
         "gamma0" if gamma0 else
@@ -418,6 +456,7 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "b_base": np.asarray(r["b_base"]),
         "b_full": np.asarray(r["b_full"]),
         "b_full_status": b_full_status,
+        "gamma": gamma,
         "focal_status": focal_status,
         "absorbed_mask": absorbed_mask.astype(bool).tolist(),
         "absorbed_targets": np.flatnonzero(absorbed_mask).astype(int).tolist(),
@@ -435,13 +474,30 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                   "se_type": total_se_type},
         "total_cov": total_cov,
         "cov": fullcov,
+        "base_cov": np.asarray(r["base_cov"]),
+        "cov_delta_bbase": np.asarray(r["cov_delta_bbase"]),
+        "cov_total_bbase": np.asarray(r["cov_total_bbase"]),
         "identity_gap": float(r["identity_gap"]),
         "n_obs_input": int(r["n_obs_input"]),
         "n_obs": int(r["n_obs"]),
         "n_obs_effective": int(r["n_obs_effective"]),
         "n_singletons_dropped": int(r["n_singletons_dropped"]),
         "df_full": float(r["df_full"]),
+        "df_base": float(r["df_base"]),
+        "n_clusters": int(r["n_clusters"]),
+        "x1_fe_collinear_ratio": np.asarray(
+            r["x1_fe_collinear_ratio"], dtype=float
+        ),
+        "x1_near_collinear_mask": np.asarray(
+            r["x1_near_collinear_mask"], dtype=bool
+        ).tolist(),
         "fe_collinear_ss_ratio_tol": float(r["fe_collinear_ss_ratio_tol"]),
+        "near_fe_collinear_ss_ratio_warn_upper": float(
+            r["near_fe_collinear_ss_ratio_warn_upper"]
+        ),
+        "few_cluster_warning_threshold": int(
+            r["few_cluster_warning_threshold"]
+        ),
         "fe_collinear_relative_norm_tol": float(
             np.sqrt(r["fe_collinear_ss_ratio_tol"])
         ),
@@ -454,6 +510,20 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "gamma0": bool(gamma0),
         "cov0": bool(cov0),
         "tol": float(tol),
+        "threads_requested": int(num_threads),
+        "threads_used": int(r["threads_used"]),
+        "gpu_requested": bool(r["gpu_requested"]),
+        "gpu_used": bool(r["gpu_used"]),
+        "gpu_status_code": int(r["gpu_status_code"]),
+        "gpu_backend": str(r["gpu_backend"]),
+        "gpu_status": str(r["gpu_status"]),
+        "gpu_attempted": bool(r["gpu_attempted"]),
+        "gpu_absorption_converged": bool(
+            r["gpu_absorption_converged"]
+        ),
+        "gpu_absorption_iterations": int(
+            r["gpu_absorption_iterations"]
+        ),
         "estimand": ("absorbed_target_allocation" if absorbed_mode else
                      "coefficient_movement"),
         "identity_status": ("exact_ols_constrained" if absorbed_mode else
@@ -554,9 +624,24 @@ def _share_rows(result, denominator, share_tol):
         if denominator == "base_fixed":
             # This is the reporting convention used in several applications:
             # scale Gelbach's component SE by the reported base coefficient.
-            # The denominator's sampling uncertainty is not available in the
-            # current public covariance contract, so label it explicitly.
+            # Deliberately hold the denominator fixed even though the joint
+            # covariance is now public, and label that convention explicitly.
             se[row, :] = np.sqrt(np.maximum(0.0, np.diag(V))) / abs(denom)
+        elif denominator == "base":
+            base_cov = np.asarray(result["base_cov"])
+            cross = np.asarray(result["cov_delta_bbase"])
+            var_base = float(base_cov[row, row])
+            for g in range(G):
+                cov_delta_base = float(cross[g * k1 + row, row])
+                variance = (
+                    float(V[g, g]) / (denom * denom)
+                    + d[g] * d[g] * var_base / (denom ** 4)
+                    - 2.0 * d[g] * cov_delta_base / (denom ** 3)
+                )
+                se[row, g] = (
+                    np.sqrt(max(0.0, variance))
+                    if np.isfinite(variance) else np.nan
+                )
         elif denominator == "movement":
             # The movement is exactly sum_g delta_g, so the joint covariance
             # already contains everything needed for the ratio delta method.
@@ -569,7 +654,7 @@ def _share_rows(result, denominator, share_tol):
         "se": se,
         "defined": defined,
         "denominator": denominator,
-        "se_type": ("not_available_joint_base_covariance" if denominator == "base"
+        "se_type": ("joint_base_covariance_delta_method" if denominator == "base"
                     else ("fixed_base_denominator_scaling"
                           if denominator == "base_fixed" else
                           "joint_covariance_delta_method")),
@@ -584,12 +669,12 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
 
     The result is a list of dictionaries, so it can be passed directly to
     pandas, Polars or a CSV writer without adding a package dependency.
-    ``share='base'`` reports the common descriptive convention
-    ``delta / b_base`` but leaves its SE missing because the public result does
-    not yet contain covariance with ``b_base``. ``share='base_fixed'``
-    additionally reproduces the widespread fixed-denominator scaling
-    convention, labelled as such. ``share='movement'`` uses the full joint
-    covariance and the delta method for ``delta / sum(delta)``.
+    ``share='base'`` reports the common ``delta / b_base`` convention and
+    obtains full ratio inference from ``base_cov`` and
+    ``cov_delta_bbase``. ``share='base_fixed'`` preserves the widespread
+    fixed-denominator scaling convention, labelled as such.
+    ``share='movement'`` uses the full joint covariance and the delta method
+    for ``delta / sum(delta)``.
     Signed shares are never truncated or renormalized.
 
     Parameters
@@ -615,6 +700,22 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
     rows = _result_focal_indices(result, focal, include_intercept)
     zcrit = NormalDist().inv_cdf(0.5 + conf_level / 2.0)
     share_stats = None if share is None else _share_rows(result, share, share_tol)
+    if share_stats is not None:
+        undefined = [
+            result["labels"][row]
+            for row in rows
+            if not share_stats["defined"][row]
+        ]
+        if undefined:
+            import warnings
+
+            warnings.warn(
+                "xhdfe.gelbach.tidy: requested share denominator is "
+                "undefined at the selected share_tol for "
+                f"{', '.join(undefined)}; share fields are NaN.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     output = []
     p = len(result["b_base"])
 
@@ -670,8 +771,29 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                 elif share in ("base", "base_fixed") and row < p and share_stats["defined"][row]:
                     denom = float(result["b_base"][row])
                     sval = estimate / denom
-                    sse = (std_error / abs(denom) if share == "base_fixed"
-                           else float("nan"))
+                    if share == "base_fixed":
+                        sse = std_error / abs(denom)
+                    elif row in result["absorbed_targets"]:
+                        # A declared absorbed target has total == b_base as
+                        # an estimator.  Preserve the already-published point
+                        # value (which can differ by last-bit summation noise)
+                        # while imposing its exact ratio-variance identity.
+                        sse = 0.0
+                    else:
+                        base_cov = np.asarray(result["base_cov"])
+                        total_cross = np.asarray(result["cov_total_bbase"])
+                        variance = (
+                            float(result["total"]["cov"][row, row])
+                            / (denom * denom)
+                            + estimate * estimate *
+                            float(base_cov[row, row]) / (denom ** 4)
+                            - 2.0 * estimate *
+                            float(total_cross[row, row]) / (denom ** 3)
+                        )
+                        sse = (
+                            np.sqrt(max(0.0, variance))
+                            if np.isfinite(variance) else float("nan")
+                        )
                 else:
                     sval = sse = float("nan")
                 item.update({

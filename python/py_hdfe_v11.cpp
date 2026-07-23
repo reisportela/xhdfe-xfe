@@ -1474,7 +1474,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
            std::vector<int> x2_group_sizes, py::object fes_obj,
            py::object cluster_obj, const std::string& vce, bool gamma0,
            bool cov0, double tol, int num_threads, py::object weights_obj,
-           bool fweights, std::vector<int> absorbed_x1) {
+           bool fweights, std::vector<int> absorbed_x1, bool gpu) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
                 throw std::runtime_error("y must be a 1-D array");
@@ -1529,6 +1529,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             opt.absorbed_x1 = std::move(absorbed_x1);
             opt.tol = tol;
             opt.num_threads = num_threads;
+            opt.use_gpu = gpu;
             std::optional<Eigen::VectorXd> w_vec;
             if (!weights_obj.is_none()) {
                 auto w_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(
@@ -1550,8 +1551,14 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["b_base"] = r.b_base;
             d["b_full"] = r.b_full;
             d["x1_absorbed"] = r.x1_absorbed;
+            d["x1_fe_collinear_ratio"] = r.x1_fe_collinear_ratio;
+            d["x1_near_collinear_mask"] = r.x1_near_collinear_mask;
+            d["gamma"] = r.gamma;
             d["delta"] = r.delta;
             d["cov"] = r.cov;
+            d["base_cov"] = r.base_cov;
+            d["cov_delta_bbase"] = r.cov_delta_bbase;
+            d["cov_total_bbase"] = r.cov_total_bbase;
             d["total"] = r.total;
             d["total_cov"] = r.total_cov;
             d["identity_gap"] = r.identity_gap;
@@ -1560,10 +1567,27 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["n_obs_effective"] = r.n_obs_effective;
             d["n_singletons_dropped"] = r.n_singletons_dropped;
             d["df_full"] = r.df_full;
+            d["df_base"] = r.df_base;
+            d["n_clusters"] = r.n_clusters;
             d["fe_collinear_ss_ratio_tol"] = r.fe_collinear_ss_ratio_tol;
+            d["near_fe_collinear_ss_ratio_warn_upper"] =
+                r.near_fe_collinear_ss_ratio_warn_upper;
+            d["few_cluster_warning_threshold"] =
+                r.few_cluster_warning_threshold;
             d["absorbed_target_inference_valid"] =
                 r.absorbed_target_inference_valid;
             d["absorbing_fe_index"] = r.absorbing_fe_index;
+            d["threads_used"] = r.threads_used;
+            d["gpu_requested"] = r.gpu_requested;
+            d["gpu_used"] = r.gpu_used;
+            d["gpu_status_code"] = r.gpu_status_code;
+            d["gpu_backend"] = r.gpu_backend;
+            d["gpu_status"] = r.gpu_status;
+            d["gpu_attempted"] = r.gpu_attempted;
+            d["gpu_absorption_converged"] =
+                r.gpu_absorption_converged;
+            d["gpu_absorption_iterations"] =
+                r.gpu_absorption_iterations;
             d["converged"] = r.converged;
             d["notes"] = r.notes;
             return d;
@@ -1576,6 +1600,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         py::arg("weights") = py::none(),
         py::arg("fweights") = false,
         py::arg("absorbed_x1") = std::vector<int>{},
+        py::arg("gpu") = false,
         "Gelbach (2016) conditional decomposition, HDFE-aware (see "
         "xhdfe.gelbach for the friendly wrapper). Opt-in; does not affect "
         "any existing estimation path.");

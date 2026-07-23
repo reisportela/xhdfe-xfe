@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "module": "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/baseline/artifacts/build_cpu_py_hdfe_v11.so",
+  "module_sha256": "5956fae18f5c8a1d06a6b3778c8aa3acf37a6b41693030cd507c11a642437edd",
+  "backend_requested": "cpu",
+  "mode": "standard",
+  "round": 3,
+  "n": 500000,
+  "threads": 16,
+  "inner_reps": 3,
+  "load_at_end": [
+    32.51,
+    32.25,
+    32.9
+  ],
+  "samples": {
+    "unadjusted/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.16431082412600517,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 1,
+        "seconds": 0.1739029698073864,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 2,
+        "seconds": 0.16204695031046867,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      }
+    ],
+    "unadjusted/w": [
+      {
+        "inner": 0,
+        "seconds": 0.18055409938097,
+        "identity_gap": 1.0473399925103877e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 1,
+        "seconds": 0.1859208457171917,
+        "identity_gap": 1.0473399925103877e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 2,
+        "seconds": 0.16964468732476234,
+        "identity_gap": 1.0473399925103877e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      }
+    ],
+    "cluster/unw": [
+      {
+        "inner": 0,
+        "seconds": 0.25837652012705803,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 1,
+        "seconds": 0.1941906325519085,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 2,
+        "seconds": 0.18032720312476158,
+        "identity_gap": 1.0942358130705543e-12,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      }
+    ],
+    "cluster/w": [
+      {
+        "inner": 0,
+        "seconds": 0.1818828359246254,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 1,
+        "seconds": 0.17557624727487564,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      },
+      {
+        "inner": 2,
+        "seconds": 0.2140868864953518,
+        "identity_gap": 1.0587086762825493e-11,
+        "notes": "absorbed FE blocks use the aux-regression (gamma0) variance. "
+      }
+    ]
+  }
+}

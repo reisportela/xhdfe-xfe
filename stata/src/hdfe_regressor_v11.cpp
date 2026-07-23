@@ -6319,6 +6319,7 @@ void HdfeRegressorV11::apply_common_postprocessing(const Eigen::Ref<const Eigen:
     results_.covariance = ols_result.covariance;
     results_.residuals = ols_result.residuals;
     results_.omitted_reason.clear();
+    results_.fe_collinear_ss_ratio.resize(0);
     results_.nobs = static_cast<int>(y.size());
     results_.nobs_full = results_.nobs;
     results_.num_singletons = 0;
@@ -7088,12 +7089,23 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         std::vector<int> omitted_slope_cols;
         std::vector<int> omitted_fe_slope_cols;
         std::vector<int> omitted_rank_slope_cols;
+        Eigen::VectorXd fe_collinear_ss_ratio;
+        if (options_.capture_fe_collinear_ss_ratio) {
+            fe_collinear_ss_ratio.resize(transformed_slope_cols);
+        }
         kept_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
         omitted_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
         const auto collinearity_t0 = std::chrono::steady_clock::now();
         for (int j = 0; j < transformed_slope_cols; ++j) {
             const double raw_ss = X_use.col(j).squaredNorm();
             const double tilde_ss = transformed_X.col(j).squaredNorm();
+            if (options_.capture_fe_collinear_ss_ratio) {
+                fe_collinear_ss_ratio[j] =
+                    raw_ss > 0.0 ? tilde_ss / raw_ss
+                                 : (tilde_ss <= kFeCollinearTol
+                                        ? 0.0
+                                        : std::numeric_limits<double>::infinity());
+            }
             const bool finite = std::isfinite(raw_ss) && std::isfinite(tilde_ss);
             const bool collinear =
                 finite && (raw_ss <= 0.0 ? (tilde_ss <= kFeCollinearTol)
@@ -7871,6 +7883,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         const int omit_cols = static_cast<int>(results_.coefficients.size());
         results_.omitted_reason.assign(static_cast<std::size_t>(omit_cols), 0);
+        results_.fe_collinear_ss_ratio =
+            options_.capture_fe_collinear_ss_ratio
+                ? fe_collinear_ss_ratio
+                : Eigen::VectorXd();
         for (const int idx : omitted_fe_slope_cols) {
             if (idx >= 0 && idx < omit_cols) {
                 results_.omitted_reason[static_cast<std::size_t>(idx)] = 1;
@@ -8709,6 +8725,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.covariance.resize(0, 0);
         results_.residuals.resize(0);
         results_.omitted_reason.clear();
+        results_.fe_collinear_ss_ratio.resize(0);
         results_.nobs = static_cast<int>(y_use.size());
         results_.nobs_full = results_.nobs;
         results_.num_singletons = 0;
@@ -9313,11 +9330,22 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     std::vector<int> omitted_slope_cols;
     std::vector<int> omitted_fe_slope_cols;
     std::vector<int> omitted_rank_slope_cols;
+    Eigen::VectorXd fe_collinear_ss_ratio;
+    if (options_.capture_fe_collinear_ss_ratio) {
+        fe_collinear_ss_ratio.resize(transformed_slope_cols);
+    }
     kept_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
     omitted_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
     for (int j = 0; j < transformed_slope_cols; ++j) {
         const double raw_ss = X_work.col(j).squaredNorm();
         const double tilde_ss = transformed_X.col(j).squaredNorm();
+        if (options_.capture_fe_collinear_ss_ratio) {
+            fe_collinear_ss_ratio[j] =
+                raw_ss > 0.0 ? tilde_ss / raw_ss
+                             : (tilde_ss <= kFeCollinearTol
+                                    ? 0.0
+                                    : std::numeric_limits<double>::infinity());
+        }
         const bool finite = std::isfinite(raw_ss) && std::isfinite(tilde_ss);
         const bool collinear =
             finite && (raw_ss <= 0.0 ? (tilde_ss <= kFeCollinearTol)
@@ -9613,6 +9641,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     const int omit_cols = static_cast<int>(results_.coefficients.size());
     results_.omitted_reason.assign(static_cast<std::size_t>(omit_cols), 0);
+    results_.fe_collinear_ss_ratio =
+        options_.capture_fe_collinear_ss_ratio
+            ? fe_collinear_ss_ratio
+            : Eigen::VectorXd();
     for (const int idx : omitted_fe_slope_cols) {
         if (idx >= 0 && idx < omit_cols) {
             results_.omitted_reason[static_cast<std::size_t>(idx)] = 1;

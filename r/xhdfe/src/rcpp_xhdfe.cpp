@@ -1057,6 +1057,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                              bool cov0,
                              double tol,
                              int num_threads,
+                             bool gpu,
                              SEXP weights,
                              bool fweights,
                              Rcpp::IntegerVector absorbed_x1) {
@@ -1109,6 +1110,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     opt.absorbed_x1.assign(absorbed_x1.begin(), absorbed_x1.end());
     opt.tol = tol;
     opt.num_threads = num_threads;
+    opt.use_gpu = gpu;
     Eigen::VectorXd w_vec;
     const Eigen::VectorXd* w_ptr = nullptr;
     if (!Rf_isNull(weights)) {
@@ -1132,8 +1134,20 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     out["x1_absorbed"] =
         Rcpp::IntegerVector(r.x1_absorbed.data(),
                             r.x1_absorbed.data() + r.x1_absorbed.size());
+    out["x1_fe_collinear_ratio"] =
+        Rcpp::NumericVector(r.x1_fe_collinear_ratio.data(),
+                            r.x1_fe_collinear_ratio.data() +
+                                r.x1_fe_collinear_ratio.size());
+    out["x1_near_collinear_mask"] =
+        Rcpp::IntegerVector(r.x1_near_collinear_mask.data(),
+                            r.x1_near_collinear_mask.data() +
+                                r.x1_near_collinear_mask.size());
+    out["gamma"] = to_rmat(r.gamma);
     out["delta"] = to_rmat(r.delta);
     out["cov"] = to_rmat(r.cov);
+    out["base_cov"] = to_rmat(r.base_cov);
+    out["cov_delta_bbase"] = to_rmat(r.cov_delta_bbase);
+    out["cov_total_bbase"] = to_rmat(r.cov_total_bbase);
     out["total"] = Rcpp::NumericVector(r.total.data(), r.total.data() + r.total.size());
     out["total_cov"] = to_rmat(r.total_cov);
     out["identity_gap"] = r.identity_gap;
@@ -1143,11 +1157,26 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     out["n_singletons_dropped"] =
         static_cast<double>(r.n_singletons_dropped);
     out["df_full"] = r.df_full;
+    out["df_base"] = r.df_base;
+    out["n_clusters"] = r.n_clusters;
     out["fe_collinear_ss_ratio_tol"] = r.fe_collinear_ss_ratio_tol;
+    out["near_fe_collinear_ss_ratio_warn_upper"] =
+        r.near_fe_collinear_ss_ratio_warn_upper;
+    out["few_cluster_warning_threshold"] =
+        r.few_cluster_warning_threshold;
     out["absorbed_target_inference_valid"] =
         r.absorbed_target_inference_valid;
     out["absorbing_fe_index"] = r.absorbing_fe_index;
     out["converged"] = r.converged;
+    out["threads_used"] = r.threads_used;
+    out["gpu_requested"] = r.gpu_requested;
+    out["gpu_used"] = r.gpu_used;
+    out["gpu_status_code"] = r.gpu_status_code;
+    out["gpu_backend"] = r.gpu_backend;
+    out["gpu_status"] = r.gpu_status;
+    out["gpu_attempted"] = r.gpu_attempted;
+    out["gpu_absorption_converged"] = r.gpu_absorption_converged;
+    out["gpu_absorption_iterations"] = r.gpu_absorption_iterations;
     out["notes"] = r.notes;
     return out;
 }

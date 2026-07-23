@@ -1,0 +1,22 @@
+{
+  "cpu": {
+    "baseline": {
+      "path": "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/baseline/artifacts/build_cpu_py_hdfe_v11.so",
+      "sha256": "5956fae18f5c8a1d06a6b3778c8aa3acf37a6b41693030cd507c11a642437edd"
+    },
+    "candidate": {
+      "path": "/home/mangelo/Documents/GitHub/xhdfe/build/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+      "sha256": "126e65b187fa017766ecdb43e70e34ad75ce8545722555bad8f525d115de31c8"
+    }
+  },
+  "cuda": {
+    "baseline": {
+      "path": "/home/mangelo/Documents/GitHub/xhdfe/Remediation/xhdfegelbach_postaudit_20260723/baseline/artifacts/build_cuda_py_hdfe_v11.so",
+      "sha256": "b203f7a3d957bfe55dae9e8179685ddee039b23cf1154b87b0c5c9368b5f3926"
+    },
+    "candidate": {
+      "path": "/home/mangelo/Documents/GitHub/xhdfe/build_cuda/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+      "sha256": "4e642d5eae1f2e43a5adcc898533019f9be398196c683e0dcef430b4d6fa12a1"
+    }
+  }
+}

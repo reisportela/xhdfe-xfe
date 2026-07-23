@@ -25,6 +25,6 @@
     .Call(`_xhdfe_xhdfe_cpp_akm_kss`, y, worker, firm, X, opts, fweights)
 }
 
-.xhdfe_cpp_gelbach <- function(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, weights, fweights, absorbed_x1) {
-    .Call(`_xhdfe_xhdfe_cpp_gelbach`, y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, weights, fweights, absorbed_x1)
+.xhdfe_cpp_gelbach <- function(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1) {
+    .Call(`_xhdfe_xhdfe_cpp_gelbach`, y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1)
 }
