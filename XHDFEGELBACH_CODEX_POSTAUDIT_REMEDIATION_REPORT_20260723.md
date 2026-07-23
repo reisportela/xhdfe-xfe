@@ -16,10 +16,11 @@ The Gelbach estimand, decomposition identity, b1x2 stacked-GMM conventions,
 classification boundary, solver tolerances, convergence criteria, and standard
 non-Gelbach `xhdfe` path were not changed.
 
-This document is not yet a final online-release certificate. The interleaved
-30% catastrophic-performance-regression triage is complete and passes for CPU
-and CUDA. Private/public byte propagation, commits, tags, release assets,
-public CI, and live net-install verification remain the sole operational gate.
+This is the final online-release certificate. The interleaved 30%
+catastrophic-performance-regression triage passes for CPU and CUDA. The
+private/public propagation, immutable tags, CI builds, release assets,
+`gh-pages` sites, downloaded public binaries, and live net-install surface
+were independently checked after publication.
 
 | Gate | Current status |
 |---|---|
@@ -33,12 +34,12 @@ public CI, and live net-install verification remain the sole operational gate.
 | Full Stata suite | **PASS: 28 blocks** |
 | Full R CPU/CUDA suites | **PASS: 0 failures** |
 | Performance triage | **PASS at the pre-specified 30% catastrophic-regression margin** |
-| Private/public propagation and online release | **PENDING** |
+| Private/public propagation and online release | **PASS** |
 
 The appropriate present verdict is therefore:
 
-> **TECHNICAL REMEDIATION AND 30% PERFORMANCE TRIAGE GREEN; ONLINE RELEASE
-> CERTIFICATION PENDING PUBLICATION GATES.**
+> **FINAL GO — TECHNICAL REMEDIATION, 30% PERFORMANCE TRIAGE, PACKAGED
+> ARTIFACTS, AND ONLINE RELEASE CERTIFIED.**
 
 ## 2. Scope, evidence discipline, and invariants
 
@@ -458,8 +459,9 @@ The complete active-artifact manifest appears in §7.
 - the in-tree Python module is byte-identical to the CPU `build/` module;
 - current CMake caches identify Release and the in-repository Eigen path.
 
-The publication half of F-11 remains **PENDING** until these hashes are
-included in the final private/public release evidence.
+The publication half of F-11 is **PASS**. Immutable commits, tags, workflow
+runs, release URLs, downloadable-asset hashes, and live-site evidence appear
+in §11.
 
 ### 4.8 F-14 — Python name-based `absorbed_targets`
 
@@ -705,9 +707,8 @@ The staged plugin hashes are:
 | CPU/OpenMP default | `55a980ba5c4865128cf740359a905eb724f6f020846046957c6e0d3e8711b03e` | `5ac4d248752c797473d601de8f8a706ddd04540c97d37243cce9885eb80e07fd` |
 | CUDA H100 sm_90 | `a76ea1f92bd796048c6221576c1021b20c6273227d6b3a5910bdad4c4b07e7f3` | `2fe4d0d55c4fed994b5dc9a7bd9c8283bdfb7067d8d945dd9060a4bc9cddeaea` |
 
-The final ZIP checksum will be inserted with the release-asset evidence in
-§11 after the final report/evidence files are copied into the stage and its
-manifest is regenerated.
+The final autonomous ZIP, its internal manifest, upload digest, and release
+asset identifiers are recorded in §11.4.
 
 ## 8. Monte Carlo evidence and limits
 
@@ -820,41 +821,126 @@ code change is Gelbach-scoped and the standard non-Gelbach numerical path is
 bit-identical, but any broader performance claim remains bounded by the
 measurement actually run.
 
-## 11. Private/public propagation and release — PENDING
+## 11. Private/public propagation and release — PASS
 
-The following actions were not complete when this draft was written:
+### 11.1 Immutable repository and workflow evidence
 
-- selective private commit on `main`;
-- private push and `v2.20.0.20260723` tag/release;
-- propagation of production-facing source, Python, R, and Stata text files to
-  the public `reisportela/xhdfe-xfe` repository;
-- byte-identity comparison for every required production file;
-- public commit/push/tag;
-- CPU-only Linux/Windows/macOS public plugin CI;
-- release asset and SHA256 verification;
-- `gh-pages`/net-install publication;
-- clean-install `help xhdfegelbach` version verification.
+| Surface | Immutable evidence |
+|---|---|
+| Private implementation commit | `860b5c949b18a6a06d6a75ab906aa3336ae0136e` |
+| Private release-gate commit / tag target | `78a4ee068ac7e604612545e67f625fc56c0682ba` |
+| Private tag | `v2.20.0.20260723` (annotated tag object `d40672dba2b8be3ecd5082f9bc838160075a63c5`) |
+| Private release workflow | run `29995499245`, `success`, 09:29:02–09:48:51 UTC |
+| Private release | `https://github.com/reisportela/xhdfe/releases/tag/v2.20.0.20260723`, release id `358586522`, `draft=false`, published 09:48:49 UTC |
+| Public commit / tag target | `a30d4be74669cacc0cccf15b61ce736135121888` |
+| Public tag | `v2.20.0.20260723` |
+| Public main CI | run `29994682694`, `success`, 09:17:26–09:28:12 UTC |
+| Public release workflow | run `29995521358`, `success`, 09:29:21–09:36:27 UTC |
+| Public release | `https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.20.0.20260723`, release id `358576555`, `draft=false`, published 09:36:24 UTC |
 
-The public repo's distinct `xhdfe/__init__.py` must be patched rather than
-overwritten. Private CUDA `sm_90` plugins and public CI-built CPU-only plugins
-are the documented binary divergence; their source must be identical.
+The private workflow passed its Linux CPU/OpenMP, CUDA fatbin
+(`sm_75/80/86/89/90` plus forward-compatible PTX), Windows cross-build,
+macOS universal, artifact-assembly, and site-publication jobs. The public
+workflow passed tag/version validation, mandatory native Linux, Windows and
+macOS builds, source/offline archive closure, net-install staging, and final
+publication.
 
-**PENDING FINAL INSERT:**
+### 11.2 Two-repository and live-site identity
+
+An explicit SHA-256 comparison covered 2,569 production source, mirror,
+Python, R, Stata text, validation, and vendored-dependency files copied from
+the private release state to the fresh public clone: zero files were missing
+and zero differed. The intentionally distinct public `xhdfe/__init__.py`,
+public README/release automation, and compiled plugin binaries were excluded.
+Neither public plugin nor the public `xhdfe/__init__.py` was overwritten.
+
+The public `gh-pages` ref changed from
+`35b399c11af68401c04d303da0efffeaab2d19ac` to
+`eb92c60e85c4075f31b24c314656535808028faa`; the private ref changed from
+`d8978ab2c72b77a76c74e0164a77269edae8e7e6` to
+`2db6b9b2e9420bd101c9485915820ec4488a665f`.
+The live public `xhdfegelbach.ado` and `.sthlp` are byte-identical to the
+tagged files and display `1.4.0`, `23jul2026`, and shared package
+`2.20.0.20260723`. The live `xhdfe.pkg` reports `v 2.20.0`; its only expected
+departure from the repository package is the generated platform-specific
+`g` mapping for Linux, macOS, and Windows plugins.
+
+From a fresh extraction of the exact public Linux release bundle,
+`which xhdfegelbach` resolved inside that bundle and printed:
 
 ```text
-private commit:
-private tag/release URL:
-public commit:
-public tag/release URL:
-production-file byte-identity count:
-public CI runs and conclusions:
-release asset list and checksums:
-gh-pages/net-install verification:
-installed help/version output:
+*! version 1.4.0  23jul2026
 ```
 
-Until this evidence is present, the local version bump must not be described as
-the live public release.
+The corresponding help file resolved from the same extracted directory.
+
+### 11.3 Public release assets
+
+Every public asset was downloaded after publication, matched the GitHub API
+SHA-256, and passed `unzip -t`:
+
+| Asset | Bytes | SHA-256 |
+|---|---:|---|
+| `xhdfe-offline-bundle.zip` | 37,309,873 | `00f7782bf7683494756e721af22c10b366dbb5e065f76c12dd62098bbe7cb6e7` |
+| `xhdfe-src.zip` | 11,811,642 | `36205d06a14bcea2ce8ca54567996f9b91f94adf8064230a3ff8106215f46723` |
+| `xhdfe-stata-linux-x86_64-cpu.zip` | 5,291,307 | `65256d4ab1823787b97ac4d4614bda71ba3d80bbdae30e56c720b03acac2243a` |
+| `xhdfe-stata-macos-universal-cpu.zip` | 4,028,527 | `10085291aec83c182167b2bef91871fcf57f5d1acdd6bff31fbb4303f70e4ca8` |
+| `xhdfe-stata-netinstall-site.zip` | 25,281,900 | `d8bee62bbe95ee39dbdcede166cbff7e5850b2140967c60e4fe06e0413a01101` |
+| `xhdfe-stata-windows-x86_64-cpu.zip` | 4,417,957 | `ffebf78dac20b96408b181cd3aa7564328de30f5b8bacf8f37e739b194000d6a` |
+
+The downloaded source archive passed the independent closure validator. Its
+embedded official `Rcpp_1.1.2.tar.gz` has SHA-256
+`2746cf2fb188e5f0a84dbf5c8f68915b54564ed33e5754572f174e7b32e7f4f3`;
+the autonomous bundle contains that archive and its provenance file.
+
+The exact downloaded public Linux plugins have hashes
+`80e2959356ee118606a3de7703d3c7b4b2f73ffd7a95e0516aac1750aa73ff0f`
+(`xhdfe`) and
+`47376e3f142f1de2144fe18c2cae1d7c542baad5f3b6e67681b7d0dafcef665b`
+(`xfe`). Both have zero `U __assert_fail` references and link `libgomp`.
+The complete frontend validator was rerun using those exact shipped plugins:
+all Python/Stata/R matrices and metadata matched, and the standard and
+absorbed-target examples passed in all three frontends.
+
+### 11.4 Private assets and stale-asset fail-closed remediation
+
+The private release publishes the following CI-built assets:
+
+| Asset | SHA-256 |
+|---|---|
+| `xfe-linux-cuda.plugin` | `2bc482955a437e14a8a5948694450c3e4d501a13ebf8f189f3704ebb527e88f7` |
+| `xhdfe-linux-cuda.plugin` | `4c5c7867a18021962e7a2f9b102e3421b7aeddd3895341fcbfc939095aca6aff` |
+| `xhdfe_xfe-stata-linux-cpu.zip` | `119dffa95e4a550196986020682e7682154c8aa0ec6f11f390ea895040b3dbea` |
+| `xhdfe_xfe-stata-linux-cuda.zip` | `7b29aeca03f7fc1bf8dc50ef0a431f7af0a853e9aeaf3ba3e62dbedfece18dc7` |
+| `xhdfe_xfe-stata-macos-universal.zip` | `247ca3bcddcaa16abbbd3010b741c368af65501dbaf4a033b46bb69c34a378d9` |
+| `xhdfe_xfe-stata-netinstall-site.zip` | `2116a06b9cfe89dbe8e233a9cecf8b2753d8a7812d035a707a619a3848941539` |
+| `xhdfe_xfe-stata-windows-cpu.zip` | `0c07fdff78c0dd71656cdcc66e19df64a37ed578580746ad6b4fe3e1938541aa` |
+
+Post-publication inspection caught that the old workflow had selected the
+first wildcard match under `dist/` and attached the historical
+`xhdfe_xfe_distribution_20260211_135845_bc45685.zip` (asset id `487026115`).
+It was removed from this release by exact id/name; no other asset changed, and
+the historical source file remains recoverable in repository history. The
+workflow was changed to refuse arbitrary `dist/*.zip` provenance. The
+locally recertified 2.20 autonomous bundle is uploaded explicitly only after
+its internal manifest and final archive hash are generated. Its bundled copy
+of this report deliberately does not claim the hash of the ZIP that contains
+it; the post-creation root report and GitHub asset manifest are the
+authoritative records of that enclosing archive.
+
+The definitive asset is
+`xhdfe_xfe_distribution_20260723_postaudit_220_certified_autonomous.zip`
+(asset id `487037857`, 39,866,890 bytes), SHA-256
+`ca128a7af85c506e3e713a9d98d48f35ffa0785202d785c521e81ddedbe1ce18`.
+Its checksum sidecar is asset id `487037854`, SHA-256
+`187233b98597f57c49b74f4bf6006df2c61b7ee47370d67f6f8d3b48423d810e`.
+The archive passed `unzip -t`; all 2,630 internal manifest entries passed
+`sha256sum --check`; its CPU/OpenMP and CUDA-sm_90 plugin hashes are exactly
+the recertified hashes in §7.5; every included plugin has zero
+`__assert_fail`, links `libgomp`, and the CUDA plugins contain `sm_90` only.
+The official Rcpp archive also re-matched its pinned SHA-256. The bundled
+release notes state the final `GO` and the bundled report contains no pending
+or self-referential archive-hash placeholder.
 
 ## 12. Files changed by functional area
 
@@ -904,17 +990,8 @@ canonical core and all required mirrors.
 
 ## 13. Final handoff
 
-The local implementation and 30% performance triage are complete. The
-conditions for final online-release certification are:
-
-1. re-run a short correctness smoke if any production artifact is rebuilt;
-2. propagate exact production bytes to the public repository, respecting only
-   the documented binary and packaging divergences;
-3. obtain green public CI and verify the installed net-install help/version;
-4. replace the remaining **PENDING** release block in this report with immutable commit, run,
-   URL, and checksum evidence.
-
-If that publication gate passes without changing the certified
-source/artifact state, the post-audit candidate can move to final release
-**GO**. If it fails, the correct outcome is to retain this report as a local
-remediation record and not claim the 2.20.0 release complete.
+All required implementation, correctness, inference, frontend, artifact,
+performance-triage, two-repository, packaged-release, and live-site gates have
+passed. No estimator, default, tolerance, convergence criterion, or standard
+non-Gelbach result was changed. The post-audit remediation and release verdict
+is **FINAL GO**.

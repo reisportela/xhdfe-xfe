@@ -89,7 +89,8 @@ subcommand.
 - Stata `xfe`: `1.10.1` (number unchanged).
 - All production Stata files carry the common release date `23jul2026`.
 
-Release acceptance remains conditional on the rebuilt-Release validation
-gates and artifact hashes recorded in
-`XHDFEGELBACH_CODEX_POSTAUDIT_REMEDIATION_REPORT_20260723.md`; these release
-notes do not anticipate those test results.
+All rebuilt-Release, oracle, frontend, artifact, standard-path,
+performance-triage, two-repository, packaged-asset, and live net-install gates
+passed. Immutable evidence and artifact hashes are recorded in
+`XHDFEGELBACH_CODEX_POSTAUDIT_REMEDIATION_REPORT_20260723.md`; the final
+release verdict is **GO**.
