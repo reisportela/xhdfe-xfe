@@ -1060,7 +1060,11 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                              bool gpu,
                              SEXP weights,
                              bool fweights,
-                             Rcpp::IntegerVector absorbed_x1) {
+                             Rcpp::IntegerVector absorbed_x1,
+                             Rcpp::IntegerVector connectivity_fe_pair,
+                             bool require_connected,
+                             int n_common_fes,
+                             bool sample_info) {
     const R_xlen_t n = y.size();
     if (X1.nrow() != n) {
         throw std::runtime_error("x1 must have the same number of rows as y");
@@ -1108,9 +1112,14 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     opt.gamma0 = gamma0;
     opt.cov0 = cov0;
     opt.absorbed_x1.assign(absorbed_x1.begin(), absorbed_x1.end());
+    opt.connectivity_fe_pair.assign(connectivity_fe_pair.begin(),
+                                    connectivity_fe_pair.end());
+    opt.require_connected_fe_split = require_connected;
     opt.tol = tol;
     opt.num_threads = num_threads;
     opt.use_gpu = gpu;
+    opt.capture_sample_provenance = sample_info;
+    opt.return_sample_index = sample_info;
     Eigen::VectorXd w_vec;
     const Eigen::VectorXd* w_ptr = nullptr;
     if (!Rf_isNull(weights)) {
@@ -1121,10 +1130,17 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
         w_ptr = &w_vec;
     }
     const hdfe::gelbach::GelbachResult r =
-        hdfe::gelbach::decompose(y_vec, X1_mat, X2_mat, sizes, fe_list, cl_ptr, opt,
-                                 w_ptr, fweights);
+        hdfe::gelbach::decompose(
+            y_vec, X1_mat, X2_mat, sizes, fe_list, n_common_fes, cl_ptr, opt,
+            w_ptr, fweights);
     const auto to_rmat = [](const Eigen::MatrixXd& m) {
         Rcpp::NumericMatrix out(static_cast<int>(m.rows()), static_cast<int>(m.cols()));
+        std::copy(m.data(), m.data() + m.size(), out.begin());
+        return out;
+    };
+    const auto to_rimat = [](const Eigen::MatrixXi& m) {
+        Rcpp::IntegerMatrix out(static_cast<int>(m.rows()),
+                                static_cast<int>(m.cols()));
         std::copy(m.data(), m.data() + m.size(), out.begin());
         return out;
     };
@@ -1143,6 +1159,50 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                             r.x1_near_collinear_mask.data() +
                                 r.x1_near_collinear_mask.size());
     out["gamma"] = to_rmat(r.gamma);
+    out["beta2"] =
+        Rcpp::NumericVector(r.beta2.data(), r.beta2.data() + r.beta2.size());
+    out["beta2_cov"] = to_rmat(r.beta2_cov);
+    out["auxiliary_loadings"] = to_rmat(r.auxiliary_loadings);
+    out["auxiliary_loading_ss_ratio"] =
+        Rcpp::NumericVector(r.auxiliary_loading_ss_ratio.data(),
+                            r.auxiliary_loading_ss_ratio.data() +
+                                r.auxiliary_loading_ss_ratio.size());
+    out["auxiliary_loading_rank"] =
+        Rcpp::IntegerVector(r.auxiliary_loading_rank.data(),
+                            r.auxiliary_loading_rank.data() +
+                                r.auxiliary_loading_rank.size());
+    out["auxiliary_loading_condition_number"] =
+        Rcpp::NumericVector(r.auxiliary_loading_condition_number.data(),
+                            r.auxiliary_loading_condition_number.data() +
+                                r.auxiliary_loading_condition_number.size());
+    out["auxiliary_loading_max_abs_z"] =
+        to_rmat(r.auxiliary_loading_max_abs_z);
+    out["auxiliary_loading_pvalue"] =
+        to_rmat(r.auxiliary_loading_pvalue);
+    out["auxiliary_loading_test_evaluated"] =
+        to_rimat(r.auxiliary_loading_test_evaluated);
+    out["beta2_wald_stat"] =
+        Rcpp::NumericVector(r.beta2_wald_stat.data(),
+                            r.beta2_wald_stat.data() +
+                                r.beta2_wald_stat.size());
+    out["beta2_wald_df"] =
+        Rcpp::IntegerVector(r.beta2_wald_df.data(),
+                            r.beta2_wald_df.data() +
+                                r.beta2_wald_df.size());
+    out["beta2_wald_pvalue"] =
+        Rcpp::NumericVector(r.beta2_wald_pvalue.data(),
+                            r.beta2_wald_pvalue.data() +
+                                r.beta2_wald_pvalue.size());
+    out["contribution_gradient_norm"] =
+        to_rmat(r.contribution_gradient_norm);
+    out["regular_inference_valid"] =
+        to_rimat(r.regular_inference_valid);
+    out["regular_inference_status"] =
+        Rcpp::wrap(r.regular_inference_status);
+    out["regular_inference_all_valid"] =
+        r.regular_inference_all_valid;
+    out["regularity_test_alpha"] =
+        r.regularity_test_alpha;
     out["delta"] = to_rmat(r.delta);
     out["cov"] = to_rmat(r.cov);
     out["base_cov"] = to_rmat(r.base_cov);
@@ -1150,12 +1210,42 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     out["cov_total_bbase"] = to_rmat(r.cov_total_bbase);
     out["total"] = Rcpp::NumericVector(r.total.data(), r.total.data() + r.total.size());
     out["total_cov"] = to_rmat(r.total_cov);
+    out["n_common_fes"] = r.n_common_fes;
+    out["common_fes_applied"] = r.common_fes_applied;
+    out["intercept_inference_available"] =
+        r.intercept_inference_available;
+    out["intercept_status"] = r.intercept_status;
     out["identity_gap"] = r.identity_gap;
     out["n_obs_input"] = static_cast<double>(r.n_obs_input);
     out["n_obs"] = static_cast<double>(r.n_obs);
     out["n_obs_effective"] = static_cast<double>(r.n_obs_effective);
     out["n_singletons_dropped"] =
         static_cast<double>(r.n_singletons_dropped);
+    out["sample_index"] =
+        Rcpp::IntegerVector(r.sample_index.data(),
+                            r.sample_index.data() +
+                                r.sample_index.size());
+    out["sample_hash"] = r.sample_hash;
+    out["sample_hash_algorithm"] = r.sample_hash_algorithm;
+    out["sample_index_scope"] = r.sample_index_scope;
+    out["n_mobility_components"] = r.n_mobility_components;
+    out["largest_mobility_component_n_obs"] =
+        static_cast<double>(r.largest_mobility_component_n_obs);
+    out["largest_mobility_component_share"] =
+        r.largest_mobility_component_share;
+    out["largest_mobility_component_weight_share"] =
+        r.largest_mobility_component_weight_share;
+    out["fe_split_identified"] = r.fe_split_identified;
+    out["fe_split_status"] = r.fe_split_status;
+    out["connectivity_fe_index1"] = r.connectivity_fe_index1;
+    out["connectivity_fe_index2"] = r.connectivity_fe_index2;
+    out["connectivity_pair_explicit"] =
+        r.connectivity_pair_explicit;
+    out["connectivity_pair_status"] =
+        r.connectivity_pair_status;
+    out["connected_mode"] = r.connected_mode;
+    out["mobility_component_scope"] =
+        r.mobility_component_scope;
     out["df_full"] = r.df_full;
     out["df_base"] = r.df_base;
     out["n_clusters"] = r.n_clusters;

@@ -1,7 +1,7 @@
 Package: xhdfe
 Type: Package
 Title: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend
-Version: 2.20.0.20260723
+Version: 2.21.0.20260725
 Authors@R: c(
     person("Miguel", "Portela", email = "miguel.portela@eeg.uminho.pt", role = c("aut", "cre")),
     person("Tiago", "Tavares", email = "tgstavares@eeg.uminho.pt", role = "aut"))
@@ -13,7 +13,10 @@ Description: Estimates linear models with multiple high-dimensional fixed
     clustered standard errors, 'reghdfe'-style singleton dropping and
     degrees-of-freedom adjustments, 'fixest'-style small-sample corrections,
     fixed-effect recovery, group-level outcomes with individual fixed effects,
-    and an optional CUDA GPU absorber. CPU behavior is the reference; results
+    and an optional CUDA GPU absorber. Also provides Gelbach coefficient-
+    movement decompositions with observed and absorbed fixed-effect blocks,
+    covariance-aware contrasts, full-refit pairs bootstrap inference, tables,
+    and identity-preserving waterfall plots. CPU behavior is the reference; results
     mirror 'reghdfe' (Correia, 2016) at the same nominal tolerance under the
     default 'reghdfe-comparable' tolerance mode.
 License: MIT + file LICENSE
@@ -28,8 +31,8 @@ SystemRequirements: C++17 compiler (GCC, Clang/AppleClang, or Rtools/MinGW),
     GNU make or Rtools make, optional OpenMP; optionally the NVIDIA CUDA
     toolkit for the Linux GPU absorber (build with XHDFE_ENABLE_CUDA=ON).
 Depends: R (>= 4.0.0)
-Imports: Rcpp (>= 1.0.0), stats, utils
+Imports: Rcpp (>= 1.0.0), graphics, parallel, stats, utils
 LinkingTo: Rcpp
-Suggests: testthat (>= 3.0.0), fixest, jsonlite, haven, nanoparquet, knitr
+Suggests: testthat (>= 3.0.0), fixest, jsonlite, haven, nanoparquet, knitr, gt
 Config/testthat/edition: 3
 RoxygenNote: 8.0.0

@@ -610,6 +610,20 @@ void maybe_save_gpu_diagnostics(const std::optional<std::string>& s_gpu_status_c
                       gpu_absorption_iterations);
 }
 
+double stata_value_or_missing(double value) {
+    // The production plugin is compiled with -ffast-math. Under that contract
+    // std::isfinite/NaN comparisons may be optimized on the assumption that
+    // non-finite values do not exist, even though public diagnostic matrices
+    // deliberately use NaN for unavailable cells. Inspect the IEEE-754
+    // exponent bits instead so Python/R NaN becomes a genuine Stata missing
+    // value without changing any finite number.
+    std::uint64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value), "unexpected double width");
+    std::memcpy(&bits, &value, sizeof(bits));
+    constexpr std::uint64_t exponent_mask = UINT64_C(0x7ff0000000000000);
+    return (bits & exponent_mask) == exponent_mask ? SV_missval : value;
+}
+
 void store_matrix(const std::string& mat, const Eigen::MatrixXd& m) {
     const int want_r = static_cast<int>(m.rows());
     const int want_c = static_cast<int>(m.cols());
@@ -625,7 +639,7 @@ void store_matrix(const std::string& mat, const Eigen::MatrixXd& m) {
 
     for (int i = 0; i < want_r; ++i) {
         for (int j = 0; j < want_c; ++j) {
-            const double val = std::isfinite(m(i, j)) ? m(i, j) : SV_missval;
+            const double val = stata_value_or_missing(m(i, j));
             const ST_retcode rc =
                 SF_mat_store(const_cast<char*>(mat.c_str()), i + 1, j + 1, val);
             if (rc) {
@@ -1552,8 +1566,21 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     const int p = parse_int(args.get_required("p"), "p");
     const int q = parse_int(args.get_required("q"), "q");
     const int nfe = parse_int(args.get_required("nfe"), "nfe");
+    const int ncommonfe = args.has("ncommonfe")
+        ? parse_int(args.get_required("ncommonfe"), "ncommonfe")
+        : 0;
+    if (ncommonfe < 0 || nfe < 0) {
+        throw_with_prefix(
+            "xhdfe plugin: ", "ncommonfe and nfe must be nonnegative");
+    }
+    const int nfe_union = ncommonfe + nfe;
     const bool has_cluster = parse_bool(args.get_required("has_cluster"), "has_cluster");
     const bool has_weight = parse_bool(args.get_required("has_weight"), "has_weight");
+    const bool has_sample_output =
+        args.has("has_sample_output")
+            ? parse_bool(args.get_required("has_sample_output"),
+                         "has_sample_output")
+            : false;
     const bool freq_weights = has_weight &&
         to_lower(args.get_required("weight_type")).rfind("fw", 0) == 0;
 
@@ -1568,7 +1595,12 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         if (!buf.empty()) sizes.push_back(std::stoi(buf));
     }
 
-    const int expected_vars = 1 + p + q + nfe + (has_cluster ? 1 : 0) + (has_weight ? 1 : 0);
+    const int input_vars =
+        1 + p + q + nfe_union + (has_cluster ? 1 : 0) +
+        (has_weight ? 1 : 0);
+    const int expected_vars = input_vars + (has_sample_output ? 1 : 0);
+    const int sample_output_var =
+        has_sample_output ? input_vars + 1 : -1;
     if (SF_nvars() != expected_vars) {
         throw_with_prefix("xhdfe plugin: ",
                           "varlist has wrong length (have " + std::to_string(SF_nvars()) +
@@ -1605,7 +1637,8 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     Eigen::VectorXd y(n);
     Eigen::MatrixXd X1(n, p);
     Eigen::MatrixXd X2(n, q);
-    std::vector<Eigen::VectorXi> fes(static_cast<std::size_t>(nfe));
+    std::vector<Eigen::VectorXi> fes(
+        static_cast<std::size_t>(nfe_union));
     for (auto& f : fes) f.resize(n);
     Eigen::VectorXi cl;
     if (has_cluster) cl.resize(n);
@@ -1616,9 +1649,17 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         y[i] = read_numeric(1, row);
         for (int c = 0; c < p; ++c) X1(i, c) = read_numeric(2 + c, row);
         for (int c = 0; c < q; ++c) X2(i, c) = read_numeric(2 + p + c, row);
-        for (int d = 0; d < nfe; ++d) fes[static_cast<std::size_t>(d)][i] = read_id(2 + p + q + d, row);
-        if (has_cluster) cl[i] = read_id(2 + p + q + nfe, row);
-        if (has_weight) wvec[i] = read_numeric(2 + p + q + nfe + (has_cluster ? 1 : 0), row);
+        for (int d = 0; d < nfe_union; ++d) {
+            fes[static_cast<std::size_t>(d)][i] =
+                read_id(2 + p + q + d, row);
+        }
+        if (has_cluster) {
+            cl[i] = read_id(2 + p + q + nfe_union, row);
+        }
+        if (has_weight) {
+            wvec[i] = read_numeric(
+                2 + p + q + nfe_union + (has_cluster ? 1 : 0), row);
+        }
     }
 
     hdfe::gelbach::GelbachOptions options;
@@ -1645,6 +1686,26 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         }
         if (!buf.empty()) options.absorbed_x1.push_back(std::stoi(buf));
     }
+    if (auto val = args.get_optional("connectivity_fe_pair")) {
+        std::string buf;
+        for (const char c : *val) {
+            if (c == ',') {
+                if (!buf.empty()) {
+                    options.connectivity_fe_pair.push_back(std::stoi(buf));
+                    buf.clear();
+                }
+            } else {
+                buf.push_back(c);
+            }
+        }
+        if (!buf.empty()) {
+            options.connectivity_fe_pair.push_back(std::stoi(buf));
+        }
+    }
+    if (auto val = args.get_optional("require_connected")) {
+        options.require_connected_fe_split =
+            parse_bool(*val, "require_connected");
+    }
     options.tol = parse_double(args.get_required("tol"), "tol");
     if (auto val = args.get_optional("num_threads")) {
         options.num_threads = parse_int(*val, "num_threads");
@@ -1654,14 +1715,41 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         use_gpu = parse_bool(*val, "use_gpu");
     }
     options.use_gpu = use_gpu;
+    if (auto val = args.get_optional("capture_sample_provenance")) {
+        options.capture_sample_provenance =
+            parse_bool(*val, "capture_sample_provenance");
+    }
+    options.return_sample_index = has_sample_output;
     if (auto val = args.get_optional("verbose")) {
         options.verbose = parse_int(*val, "verbose");
         if (options.verbose > 0) options.progress = &akm_progress_to_stata;
     }
 
     const hdfe::gelbach::GelbachResult res = hdfe::gelbach::decompose(
-        y, X1, X2, sizes, fes, has_cluster ? &cl : nullptr, options,
+        y, X1, X2, sizes, fes, ncommonfe,
+        has_cluster ? &cl : nullptr, options,
         has_weight ? &wvec : nullptr, freq_weights);
+
+    if (has_sample_output) {
+        if (res.sample_index.size() != res.n_obs) {
+            throw_with_prefix(
+                "xhdfe plugin: ",
+                "Gelbach retained-sample index has the wrong length");
+        }
+        for (Eigen::Index i = 0; i < res.sample_index.size(); ++i) {
+            const int input_row = res.sample_index[i];
+            if (input_row < 0 || input_row >= n) {
+                throw_with_prefix(
+                    "xhdfe plugin: ",
+                    "Gelbach retained-sample index is out of range");
+            }
+            if (SF_vstore(sample_output_var, obs.obs_no(input_row), 1.0)) {
+                throw_with_prefix(
+                    "xhdfe plugin: ",
+                    "failed to write Gelbach retained-sample indicator");
+            }
+        }
+    }
 
     const int G = static_cast<int>(res.delta.cols());
     const int k1 = p + 1;
@@ -1680,15 +1768,23 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     const std::string covtbmat = args.get_required("covtbmat");
     for (int g = 0; g < G; ++g) {
         for (int r = 0; r < k1; ++r) {
-            SF_mat_store(const_cast<char*>(dmat.c_str()), r + 1, g + 1, res.delta(r, g));
+            const double delta_value =
+                stata_value_or_missing(res.delta(r, g));
+            SF_mat_store(
+                const_cast<char*>(dmat.c_str()), r + 1, g + 1,
+                delta_value);
+            const double variance = res.cov(g * k1 + r, g * k1 + r);
             SF_mat_store(const_cast<char*>(semat.c_str()), r + 1, g + 1,
-                         std::sqrt(res.cov(g * k1 + r, g * k1 + r)));
+                         stata_value_or_missing(std::sqrt(variance)));
         }
     }
     for (int r = 0; r < k1; ++r) {
-        SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 1, res.total[r]);
+        SF_mat_store(
+            const_cast<char*>(totmat.c_str()), r + 1, 1,
+            stata_value_or_missing(res.total[r]));
+        const double variance = res.total_cov(r, r);
         SF_mat_store(const_cast<char*>(totmat.c_str()), r + 1, 2,
-                     std::sqrt(res.total_cov(r, r)));
+                     stata_value_or_missing(std::sqrt(variance)));
     }
     for (int c = 0; c < p; ++c) {
         SF_mat_store(const_cast<char*>(bbasemat.c_str()), 1, c + 1, res.b_base[c]);
@@ -1699,13 +1795,13 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     for (int r = 0; r < G * k1; ++r) {
         for (int c = 0; c < G * k1; ++c) {
             SF_mat_store(const_cast<char*>(covmat.c_str()), r + 1, c + 1,
-                         res.cov(r, c));
+                         stata_value_or_missing(res.cov(r, c)));
         }
     }
     for (int r = 0; r < k1; ++r) {
         for (int c = 0; c < k1; ++c) {
             SF_mat_store(const_cast<char*>(totcovmat.c_str()), r + 1, c + 1,
-                         res.total_cov(r, c));
+                         stata_value_or_missing(res.total_cov(r, c)));
         }
     }
     store_row_vector(feratiomat, res.x1_fe_collinear_ratio);
@@ -1721,13 +1817,106 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     if (auto gammamat = args.get_optional("gammamat")) {
         store_matrix(*gammamat, res.gamma);
     }
+    if (auto beta2mat = args.get_optional("beta2mat")) {
+        store_row_vector(*beta2mat, res.beta2);
+    }
+    if (auto beta2covmat = args.get_optional("beta2covmat")) {
+        store_matrix(*beta2covmat, res.beta2_cov);
+    }
+    if (auto auxloadmat = args.get_optional("auxloadmat")) {
+        store_matrix(*auxloadmat, res.auxiliary_loadings);
+    }
+    if (auto loaddiagmat = args.get_optional("loaddiagmat")) {
+        Eigen::MatrixXd diag(res.auxiliary_loading_ss_ratio.size(), 3);
+        for (Eigen::Index g = 0;
+             g < res.auxiliary_loading_ss_ratio.size(); ++g) {
+            diag(g, 0) = res.auxiliary_loading_ss_ratio[g];
+            diag(g, 1) =
+                static_cast<double>(res.auxiliary_loading_rank[g]);
+            diag(g, 2) =
+                res.auxiliary_loading_condition_number[g];
+        }
+        store_matrix(*loaddiagmat, diag);
+    }
+    if (auto loadzmat = args.get_optional("loadzmat")) {
+        store_matrix(*loadzmat, res.auxiliary_loading_max_abs_z);
+    }
+    if (auto loadpmat = args.get_optional("loadpmat")) {
+        store_matrix(*loadpmat, res.auxiliary_loading_pvalue);
+    }
+    if (auto loadevalmat = args.get_optional("loadevalmat")) {
+        store_matrix(
+            *loadevalmat,
+            res.auxiliary_loading_test_evaluated.cast<double>());
+    }
+    if (auto beta2waldmat = args.get_optional("beta2waldmat")) {
+        Eigen::MatrixXd wald(res.beta2_wald_stat.size(), 3);
+        for (Eigen::Index g = 0; g < res.beta2_wald_stat.size(); ++g) {
+            wald(g, 0) = res.beta2_wald_stat[g];
+            wald(g, 1) = static_cast<double>(res.beta2_wald_df[g]);
+            wald(g, 2) = res.beta2_wald_pvalue[g];
+        }
+        store_matrix(*beta2waldmat, wald);
+    }
+    if (auto gradnormmat = args.get_optional("gradnormmat")) {
+        store_matrix(*gradnormmat, res.contribution_gradient_norm);
+    }
+    if (auto regvalidmat = args.get_optional("regvalidmat")) {
+        store_matrix(*regvalidmat,
+                     res.regular_inference_valid.cast<double>());
+    }
+    if (auto regstatusmat = args.get_optional("regstatusmat")) {
+        Eigen::MatrixXd status =
+            Eigen::MatrixXd::Constant(k1, sizes.size(), -1.0);
+        std::string status_words;
+        for (std::size_t i = 0; i < res.regular_inference_status.size(); ++i) {
+            const std::string& value = res.regular_inference_status[i];
+            double code = -1.0;
+            if (value == "not_applicable_common_fe_intercept") code = -2.0;
+            else if (value == "nonregular_not_ruled_out") code = 0.0;
+            else if (value == "regular_beta_nonzero") code = 1.0;
+            else if (value == "regular_loading_nonzero") code = 2.0;
+            const int g = static_cast<int>(i) / k1;
+            const int r = static_cast<int>(i) % k1;
+            status(r, g) = code;
+            if (!status_words.empty()) status_words.push_back(' ');
+            status_words += value;
+        }
+        store_matrix(*regstatusmat, status);
+        SF_macro_save(
+            const_cast<char*>("_xgel_regular_inference_status"),
+            const_cast<char*>(status_words.c_str()));
+    }
     akm_save_scalar("__xgel_identity_gap", res.identity_gap);
+    akm_save_scalar("__xgel_n_common_fes",
+                    static_cast<double>(res.n_common_fes));
+    akm_save_scalar("__xgel_common_fes_applied",
+                    res.common_fes_applied ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_intercept_inf",
+                    res.intercept_inference_available ? 1.0 : 0.0);
     akm_save_scalar("__xgel_n_obs_input", static_cast<double>(res.n_obs_input));
     akm_save_scalar("__xgel_n_obs", static_cast<double>(res.n_obs));
     akm_save_scalar("__xgel_n_obs_eff",
                     static_cast<double>(res.n_obs_effective));
     akm_save_scalar("__xgel_n_singletons_dropped",
                     static_cast<double>(res.n_singletons_dropped));
+    akm_save_scalar("__xgel_n_mobility_components",
+                    static_cast<double>(res.n_mobility_components));
+    akm_save_scalar("__xgel_largest_mob_n",
+                    static_cast<double>(
+                        res.largest_mobility_component_n_obs));
+    akm_save_scalar("__xgel_largest_mob_share",
+                    res.largest_mobility_component_share);
+    akm_save_scalar("__xgel_largest_mob_wshare",
+                    res.largest_mobility_component_weight_share);
+    akm_save_scalar("__xgel_fe_split_identified",
+                    res.fe_split_identified ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_connectivity_fe1",
+                    static_cast<double>(res.connectivity_fe_index1));
+    akm_save_scalar("__xgel_connectivity_fe2",
+                    static_cast<double>(res.connectivity_fe_index2));
+    akm_save_scalar("__xgel_connectivity_explicit",
+                    res.connectivity_pair_explicit ? 1.0 : 0.0);
     akm_save_scalar("__xgel_df_full", res.df_full);
     akm_save_scalar("__xgel_df_base", res.df_base);
     akm_save_scalar("__xgel_n_clusters",
@@ -1741,6 +1930,10 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
                     res.absorbed_target_inference_valid ? 1.0 : 0.0);
     akm_save_scalar("__xgel_abs_fe_index",
                     static_cast<double>(res.absorbing_fe_index));
+    akm_save_scalar("__xgel_regular_all_valid",
+                    res.regular_inference_all_valid ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_regularity_alpha",
+                    res.regularity_test_alpha);
     akm_save_scalar("__xgel_converged", res.converged ? 1.0 : 0.0);
     akm_save_scalar("__xgel_threads_used", static_cast<double>(res.threads_used));
     akm_save_scalar("__xgel_gpu_requested",
@@ -1753,6 +1946,30 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
                     res.gpu_absorption_converged ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_absorption_iterations",
                     static_cast<double>(res.gpu_absorption_iterations));
+    SF_macro_save(const_cast<char*>("_xgel_fe_split_status"),
+                  const_cast<char*>(res.fe_split_status.c_str()));
+    SF_macro_save(const_cast<char*>("_xgel_connectivity_pair_status"),
+                  const_cast<char*>(
+                      res.connectivity_pair_status.c_str()));
+    SF_macro_save(const_cast<char*>("_xgel_connected_mode"),
+                  const_cast<char*>(res.connected_mode.c_str()));
+    SF_macro_save(const_cast<char*>("_xgel_mobility_component_scope"),
+                  const_cast<char*>(
+                      res.mobility_component_scope.c_str()));
+    SF_macro_save(const_cast<char*>("_xgel_intercept_status"),
+                  const_cast<char*>(res.intercept_status.c_str()));
+    if (!res.sample_hash.empty()) {
+        SF_macro_save(
+            const_cast<char*>("_xgel_sample_hash"),
+            const_cast<char*>(res.sample_hash.c_str()));
+        SF_macro_save(
+            const_cast<char*>("_xgel_sample_hash_algorithm"),
+            const_cast<char*>(
+                res.sample_hash_algorithm.c_str()));
+        SF_macro_save(
+            const_cast<char*>("_xgel_sample_index_scope"),
+            const_cast<char*>(res.sample_index_scope.c_str()));
+    }
     if (!res.notes.empty()) {
         SF_macro_save(const_cast<char*>("_xgel_notes"), const_cast<char*>(res.notes.c_str()));
     }

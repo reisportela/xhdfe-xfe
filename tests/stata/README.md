@@ -32,7 +32,14 @@ To build the local plugin before running the tests:
 XHDFE_BUILD_STATA_PLUGIN=1 tests/stata/run_stata_tests.sh
 ```
 
-Logs are written under `tests/stata/output/`.
+Logs are written under `tests/stata/output/`. The runner also executes the
+separate `xhdfegelbach_bootstrap_smoke.do` gate and requires its explicit PASS
+marker.
+
+`xhdfegelbach_bootstrap_cuda_smoke.do` is the opt-in H100/CUDA gate. It
+requires affirmative CUDA use for the point estimate and every valid
+observation-pairs and declared-cluster-pairs replication; it is intentionally
+not part of the CPU/default runner.
 
 ## Coverage
 
@@ -61,6 +68,10 @@ Logs are written under `tests/stata/output/`.
   replay, `test`, `estat vce`, and heterogeneous-slope predictions
 - `predict` parity for `xb`, `d`, `xbd`, residuals, and `dresiduals`
 - singleton/drop and convergence-option behavior
+- Gelbach iid/declared-cluster full-refit bootstrap reproducibility, manual
+  first-draw and basic-CI oracles, analytic weights, added/common FEs,
+  fail-closed validation, multi-format escaped tables and
+  identity-preserving waterfall filtering
 
 ## Upstream notice
 

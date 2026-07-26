@@ -150,6 +150,11 @@ share = "base")` uses the exposed `Cov(delta, b_base)` block for full
 ratio delta-method inference; `share = "base_fixed"` retains the earlier
 descriptive fixed-denominator convention.
 
+Release 2.21.0.20260725 also provides full-refit iid or declared cluster-pairs
+inference with `xhdfe_gelbach_bootstrap()`, multi-format panels with
+`xhdfe_gelbach_etable()`, and identity-preserving waterfall data/plots with
+`xhdfe_gelbach_waterfall_data()` and `xhdfe_gelbach_coefplot()`.
+
 See `?xhdfe` for the full documentation (it mirrors the Stata help file
 section by section), `?xhdfe_akm_kss` / `?xhdfe_gelbach` for the worker-firm
 layer, and `examples/xhdfe_r_showcase.qmd` plus the top-level `examples/`

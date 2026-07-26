@@ -1474,7 +1474,9 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
            std::vector<int> x2_group_sizes, py::object fes_obj,
            py::object cluster_obj, const std::string& vce, bool gamma0,
            bool cov0, double tol, int num_threads, py::object weights_obj,
-           bool fweights, std::vector<int> absorbed_x1, bool gpu) {
+           bool fweights, std::vector<int> absorbed_x1, bool gpu,
+           std::vector<int> connectivity_fe_pair,
+           bool require_connected, int n_common_fes, bool sample_info) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
                 throw std::runtime_error("y must be a 1-D array");
@@ -1527,9 +1529,14 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             opt.gamma0 = gamma0;
             opt.cov0 = cov0;
             opt.absorbed_x1 = std::move(absorbed_x1);
+            opt.connectivity_fe_pair =
+                std::move(connectivity_fe_pair);
+            opt.require_connected_fe_split = require_connected;
             opt.tol = tol;
             opt.num_threads = num_threads;
             opt.use_gpu = gpu;
+            opt.capture_sample_provenance = sample_info;
+            opt.return_sample_index = sample_info;
             std::optional<Eigen::VectorXd> w_vec;
             if (!weights_obj.is_none()) {
                 auto w_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(
@@ -1543,9 +1550,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             hdfe::gelbach::GelbachResult r;
             {
                 py::gil_scoped_release release;
-                r = hdfe::gelbach::decompose(y_vec, X1, X2, x2_group_sizes, fes,
-                                             cl ? &(*cl) : nullptr, opt,
-                                             w_vec ? &(*w_vec) : nullptr, fweights);
+                r = hdfe::gelbach::decompose(
+                    y_vec, X1, X2, x2_group_sizes, fes, n_common_fes,
+                    cl ? &(*cl) : nullptr, opt,
+                    w_vec ? &(*w_vec) : nullptr, fweights);
             }
             py::dict d;
             d["b_base"] = r.b_base;
@@ -1554,6 +1562,34 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["x1_fe_collinear_ratio"] = r.x1_fe_collinear_ratio;
             d["x1_near_collinear_mask"] = r.x1_near_collinear_mask;
             d["gamma"] = r.gamma;
+            d["beta2"] = r.beta2;
+            d["beta2_cov"] = r.beta2_cov;
+            d["auxiliary_loadings"] = r.auxiliary_loadings;
+            d["auxiliary_loading_ss_ratio"] =
+                r.auxiliary_loading_ss_ratio;
+            d["auxiliary_loading_rank"] =
+                r.auxiliary_loading_rank;
+            d["auxiliary_loading_condition_number"] =
+                r.auxiliary_loading_condition_number;
+            d["auxiliary_loading_max_abs_z"] =
+                r.auxiliary_loading_max_abs_z;
+            d["auxiliary_loading_pvalue"] =
+                r.auxiliary_loading_pvalue;
+            d["auxiliary_loading_test_evaluated"] =
+                r.auxiliary_loading_test_evaluated;
+            d["beta2_wald_stat"] = r.beta2_wald_stat;
+            d["beta2_wald_df"] = r.beta2_wald_df;
+            d["beta2_wald_pvalue"] = r.beta2_wald_pvalue;
+            d["contribution_gradient_norm"] =
+                r.contribution_gradient_norm;
+            d["regular_inference_valid"] =
+                r.regular_inference_valid;
+            d["regular_inference_status"] =
+                r.regular_inference_status;
+            d["regular_inference_all_valid"] =
+                r.regular_inference_all_valid;
+            d["regularity_test_alpha"] =
+                r.regularity_test_alpha;
             d["delta"] = r.delta;
             d["cov"] = r.cov;
             d["base_cov"] = r.base_cov;
@@ -1561,11 +1597,41 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["cov_total_bbase"] = r.cov_total_bbase;
             d["total"] = r.total;
             d["total_cov"] = r.total_cov;
+            d["n_common_fes"] = r.n_common_fes;
+            d["common_fes_applied"] = r.common_fes_applied;
+            d["intercept_inference_available"] =
+                r.intercept_inference_available;
+            d["intercept_status"] = r.intercept_status;
             d["identity_gap"] = r.identity_gap;
             d["n_obs_input"] = r.n_obs_input;
             d["n_obs"] = r.n_obs;
             d["n_obs_effective"] = r.n_obs_effective;
             d["n_singletons_dropped"] = r.n_singletons_dropped;
+            d["sample_index"] = r.sample_index;
+            d["sample_hash"] = r.sample_hash;
+            d["sample_hash_algorithm"] =
+                r.sample_hash_algorithm;
+            d["sample_index_scope"] = r.sample_index_scope;
+            d["n_mobility_components"] = r.n_mobility_components;
+            d["largest_mobility_component_n_obs"] =
+                r.largest_mobility_component_n_obs;
+            d["largest_mobility_component_share"] =
+                r.largest_mobility_component_share;
+            d["largest_mobility_component_weight_share"] =
+                r.largest_mobility_component_weight_share;
+            d["fe_split_identified"] = r.fe_split_identified;
+            d["fe_split_status"] = r.fe_split_status;
+            d["connectivity_fe_index1"] =
+                r.connectivity_fe_index1;
+            d["connectivity_fe_index2"] =
+                r.connectivity_fe_index2;
+            d["connectivity_pair_explicit"] =
+                r.connectivity_pair_explicit;
+            d["connectivity_pair_status"] =
+                r.connectivity_pair_status;
+            d["connected_mode"] = r.connected_mode;
+            d["mobility_component_scope"] =
+                r.mobility_component_scope;
             d["df_full"] = r.df_full;
             d["df_base"] = r.df_base;
             d["n_clusters"] = r.n_clusters;
@@ -1601,6 +1667,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         py::arg("fweights") = false,
         py::arg("absorbed_x1") = std::vector<int>{},
         py::arg("gpu") = false,
+        py::arg("connectivity_fe_pair") = std::vector<int>{},
+        py::arg("require_connected") = false,
+        py::arg("n_common_fes") = 0,
+        py::arg("sample_info") = false,
         "Gelbach (2016) conditional decomposition, HDFE-aware (see "
         "xhdfe.gelbach for the friendly wrapper). Opt-in; does not affect "
         "any existing estimation path.");

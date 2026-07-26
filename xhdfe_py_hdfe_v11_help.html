@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>xhdfe_help</title>
+  <style>
+    html {
+      line-height: 1.5;
+      font-family: Georgia, serif;
+      font-size: 20px;
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      word-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 1em;
+      }
+    }
+    @media print {
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, 'Lucida Console', Consolas, monospace;
+      font-size: 85%;
+      margin: 0;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">xhdfe_help</h1>
+</header>
+<h1 id="xhdfe-py_hdfe_v11-help">xhdfe (py_hdfe_v11) help</h1>
+<p><strong>Version:</strong> 2.21.0.20260725 (25jul2026)</p>
+<p>Python bindings for the v11 C++ HDFE estimator. Defaults mirror reghdfe-style behavior: singleton dropping, fixed-effect DoF adjustments, and robust/cluster inference options.</p>
+<p>The v11 notebook uses these environment variables (they override the defaults below):</p>
+<ul>
+<li><code>HDFE_V11_TOL_NLSWORK</code>, <code>HDFE_V11_MAX_ITER_NLSWORK</code></li>
+<li><code>HDFE_V11_TOL_PANEL</code>, <code>HDFE_V11_MAX_ITER_PANEL</code></li>
+</ul>
+<p>The notebook expects <code>py_hdfe_v11</code> to be built into <code>build/</code> at the repo root (or <code>../build/</code> when executed from <code>notebook/</code>). If you use a versioned build directory (e.g., <code>build_cpp_v11</code>), adjust the path accordingly.</p>
+<h2 id="constructor-options">Constructor options</h2>
+<ul>
+<li><code>se_type</code> (default <code>"unadjusted"</code>): covariance estimator. Accepted values:
+<ul>
+<li>Homoskedastic: <code>"unadjusted"</code>, <code>"homoskedastic"</code>, <code>"classical"</code>, <code>"unadj"</code>, <code>"ols"</code></li>
+<li>Robust: <code>"robust"</code>, <code>"hc1"</code>, <code>"heteroskedastic"</code></li>
+<li>Cluster: <code>"cluster"</code>, <code>"clustered"</code> (requires <code>clusters</code> in <code>fit</code>)</li>
+</ul></li>
+<li><code>tol</code> (default <code>1e-8</code>): convergence tolerance for the FE absorber.</li>
+<li><code>max_iter</code> (default <code>150</code>): max absorption iterations.</li>
+<li><code>check_interval</code> (default <code>1</code>): check convergence every k absorption iterations.</li>
+<li><code>fit_intercept</code> (default <code>True</code>): append intercept to <code>X</code>. With absorbed FEs and no IV, the intercept is computed after absorption and its inference entries are <code>NaN</code>.</li>
+<li><code>num_threads</code> (default <code>0</code>): if &gt; 0, force that many threads. If 0, auto-threading is used.</li>
+<li><code>default_threads</code> (default <code>0</code>): base thread count for auto-threading (0 = OpenMP max / hardware).</li>
+<li><code>max_threads</code> (default <code>0</code>): cap for auto-threading (0 = no cap).</li>
+<li><code>min_parallel_rows</code> (default <code>20000</code>): below this, auto-threading runs single-threaded.</li>
+<li><code>target_rows_per_thread</code> (default <code>500000</code>): auto-thread heuristic for row-to-thread ratio.</li>
+<li><code>drop_singletons</code> (default <code>True</code>): drop singleton observations before estimation.</li>
+<li><code>keepsingletons</code> (default <code>None</code>): if supplied, overrides <code>drop_singletons</code> (reghdfe compatible). Keeping singletons can bias inference in clustered designs; see http://scorreia.com/reghdfe/nested_within_cluster.pdf.</li>
+<li><code>retain_fes</code> (default <code>False</code>): recover FE contributions after estimation. When feasible, cached alphas are accumulated during absorption to avoid a second recovery pass; otherwise a store-alphas MAP recovery is used (not allowed with group/individual mode).</li>
+<li><code>symmetric_sweep</code> (default <code>False</code>): enable symmetric sweeps in the absorber and auto-method logic.</li>
+<li><code>absorption_method</code> (default <code>"auto"</code>): <code>"auto"</code>, <code>"gauss-seidel"</code>/<code>"gauss_seidel"</code>/<code>"gs"</code>, <code>"symmetric"</code>/<code>"sym"</code>/<code>"symgs"</code>/<code>"symmetric_gauss_seidel"</code>, or <code>"jacobi"</code>.</li>
+<li><code>jacobi_relaxation</code> (default <code>0.0</code>): relaxation parameter for Jacobi; <code>&lt;= 0</code> uses the default <code>2/(J+1)</code> rule.</li>
+<li><code>level</code> (default <code>95.0</code>): confidence interval level (percent). If in (0, 1], treated as a fraction.</li>
+<li><code>dofadjustments</code> (default <code>None</code>): reghdfe-style DoF adjustments. Accepts a string or list of: <code>all</code>, <code>none</code>, <code>firstpair</code>, <code>pairwise</code>, <code>clusters</code>, <code>continuous</code>. When provided, only the listed tokens are enabled (like Stata).</li>
+<li><code>groupvar</code> (default <code>None</code>): when truthy, compute the first mobility group and store in <code>groupvar_</code> (requires <code>dofadjustments</code> not set to <code>none</code> and at least two FEs).</li>
+<li><code>ssc_k_adj</code> (default <code>None</code>): fixest-style K adjustment <code>(N-1)/(N-K)</code>.</li>
+<li><code>ssc_k_fixef</code> (default <code>None</code>): how to count FE DoF in K (<code>"full"</code>, <code>"none"</code>, <code>"nonnested"</code>).</li>
+<li><code>ssc_k_exact</code> (default <code>None</code>): use exact FE rank for K (<code>df_a_exact</code>) instead of level counts.</li>
+<li><code>ssc_g_adj</code> (default <code>None</code>): fixest-style G adjustment for clustered SEs <code>G/(G-1)</code>.</li>
+<li><code>ssc_g_df</code> (default <code>None</code>): multiway cluster df rule (<code>"min"</code> or <code>"conventional"</code>).</li>
+<li><code>ssc_t_df</code> (default <code>None</code>): override t degrees of freedom (&lt;= 0 disables override).</li>
+</ul>
+<p>When <code>ssc_*</code> arguments are left as <code>None</code>, the defaults are <code>K.adj=True</code>, <code>K.fixef="full"</code>, <code>K.exact=True</code>, <code>G.adj=True</code>, <code>G.df="min"</code>, and <code>t.df</code> disabled.</p>
+<h2 id="module-enums">Module enums</h2>
+<ul>
+<li><code>StandardErrorType</code>: <code>homoskedastic</code>, <code>robust</code>, <code>cluster</code>.</li>
+<li><code>AbsorptionMethod</code>: <code>auto</code>, <code>gauss_seidel</code>, <code>symmetric_gauss_seidel</code>, <code>jacobi</code>.</li>
+</ul>
+<h2 id="threading-behavior">Threading behavior</h2>
+<p>Auto-threading is enabled when <code>num_threads == 0</code> and OpenMP is available:</p>
+<ul>
+<li>If <code>n_rows &lt; min_parallel_rows</code>, use 1 thread.</li>
+<li>Else use <code>default_threads</code> (or OpenMP max / hardware concurrency if 0).</li>
+<li>Clamp by <code>target_rows_per_thread</code> and <code>max_threads</code>.</li>
+</ul>
+<p>If OpenMP is not enabled, the estimator runs single-threaded unless <code>num_threads &gt; 0</code>.</p>
+<h2 id="gpu-backend-selection">GPU backend selection</h2>
+<p>GPU acceleration targets only the fixed-effect absorber. The CPU estimator remains the canonical path for all other computations.</p>
+<p>Build-time options (CMake):</p>
+<ul>
+<li><code>-DXHDFE_ENABLE_CUDA=ON</code> to compile the CUDA backend.</li>
+<li><code>-DXHDFE_ENABLE_METAL=ON</code> to compile the Metal backend (macOS only).</li>
+<li><code>-DXHDFE_GPU_BACKEND_DEFAULT=cuda|metal|cpu</code> to change the compiled default.</li>
+</ul>
+<p>Runtime override:</p>
+<ul>
+<li><code>XHDFE_GPU_BACKEND=cpu|cuda|metal</code> forces the backend selection.</li>
+<li>If the requested backend is unavailable (not compiled, or no GPU), the code falls back to CPU.</li>
+</ul>
+<h2 id="runtime-environment-variables">Runtime environment variables</h2>
+<p>These optional environment variables control caching, diagnostics, and advanced backend behavior:</p>
+<ul>
+<li><code>XHDFE_MOBILITY_PROFILE</code>: path to a mobility profile file; enables reuse when signatures match.</li>
+<li><code>XHDFE_MOBILITY_MODE</code>: <code>off</code>, <code>auto</code>, <code>read</code>, or <code>write</code>.</li>
+<li><code>XHDFE_ABSORPTION_CACHE</code>: path to an absorption cache file (transformed y/X).</li>
+<li><code>XHDFE_ABSORPTION_CACHE_MODE</code>: <code>off</code>, <code>auto</code>, <code>read</code>, or <code>write</code>.</li>
+<li><code>XHDFE_FE_STRUCTURE_CACHE</code>: path to a fixed-effect structure cache (FE ids + singleton filters).</li>
+<li><code>XHDFE_FE_STRUCTURE_MODE</code>: <code>off</code>, <code>auto</code>, <code>read</code>, or <code>write</code>.</li>
+<li><code>XHDFE_FE_DIAG_FILE</code>: append fixed-effect diagnostics to the given text file.</li>
+<li><code>XHDFE_USE_KRYLOV</code>: set to <code>1</code> to allow Krylov-based absorption when available.</li>
+<li><code>XHDFE_DEBUG_SOLVER</code>: set to <code>1</code> to emit solver debug logs.</li>
+</ul>
+<p>Cache and profile files are only reused when data signatures match exactly; otherwise they are ignored.</p>
+<h2 id="fit-arguments">Fit arguments</h2>
+<p><code>fit(y, X, fes=None, weights=None, clusters=None, instruments=None, endogenous_idx=[], group=None, individual=None, aggregation="mean")</code></p>
+<ul>
+<li><code>y</code>: 1-D array of length n.</li>
+<li><code>X</code>: 2-D array (n x p).</li>
+<li><code>fes</code>: sequence of 1-D integer arrays (each length n). Empty or <code>None</code> means no fixed effects.</li>
+<li><code>weights</code>: optional 1-D array (length n); must sum to a positive value.</li>
+<li><code>clusters</code>: optional cluster IDs. Accepted forms:
+<ul>
+<li>1-D array (length n) for one-way clustering</li>
+<li>2-D array (n x q) for q-way clustering</li>
+<li>sequence of 1-D arrays (each length n)</li>
+</ul></li>
+<li><code>instruments</code>: optional 2-D array (n x q), required for IV/2SLS.</li>
+<li><code>endogenous_idx</code>: 0-based column indices in <code>X</code> (slope columns only; intercept is never indexed).</li>
+<li><code>group</code>: optional 1-D array (length n). When set, data are collapsed by group and a grouped estimator is used.</li>
+<li><code>individual</code>: optional 1-D array (length n). Requires <code>group</code> and that <code>individual</code> is also one of the FE arrays in <code>fes</code>. Enables group/individual absorber.</li>
+<li><code>aggregation</code>: <code>"mean"</code> (default; aliases <code>"avg"</code>/<code>"average"</code>) or <code>"sum"</code> for group aggregation.</li>
+</ul>
+<h2 id="group-and-individual-mode">Group and individual mode</h2>
+<p>Setting <code>group</code> (and optionally <code>individual</code>) triggers a grouped workflow:</p>
+<ul>
+<li><code>group</code> without <code>individual</code>: collapses data to group level and runs standard FE absorption on the collapsed data.</li>
+<li><code>group</code> with <code>individual</code>: requires <code>individual</code> to be included in <code>fes</code>. This uses the group/individual absorber (reghdfe-style) and <strong>does not</strong> support <code>retain_fes</code>.</li>
+<li><code>aggregation</code> controls whether group-level variables are averaged or summed.</li>
+<li><code>drop_singletons</code> applies to group/individual structure (group singletons are removed).</li>
+</ul>
+<h2 id="iv-2sls-support">IV / 2SLS support</h2>
+<p>Provide both <code>instruments</code> and <code>endogenous_idx</code> to run 2SLS. Errors are raised if one is provided without the other. IV is not available when <code>group</code> is specified (with or without <code>individual</code>).</p>
+<h2 id="collinearity-handling">Collinearity handling</h2>
+<p>After partialling-out, slope regressors with near-zero variation are omitted (relative tolerance <code>1e-9</code>); additional rank-collinearity checks use <code>max(1e-7, tol * 10)</code>. The output arrays are expanded back to the original column layout:</p>
+<ul>
+<li>omitted slopes get <code>coef = 0</code></li>
+<li>inference entries (<code>stderr</code>, <code>tvalues</code>, <code>pvalues</code>, <code>conf_int</code>, <code>covariance</code>) are <code>NaN</code></li>
+</ul>
+<p>Collinearity handling applies to both OLS and IV; in IV, <code>endogenous_idx</code> is remapped to kept slope columns (and IV errors if nothing remains).</p>
+<h2 id="output-attributes">Output attributes</h2>
+<p>After <code>fit</code>, the regressor exposes:</p>
+<ul>
+<li><code>summary()</code> returns a formatted text table.</li>
+<li>Estimates: <code>coef_</code>, <code>stderr_</code>, <code>tvalues_</code>, <code>pvalues_</code>, <code>conf_int_</code>, <code>covariance_</code>, <code>residuals_</code>.</li>
+<li>Sample stats: <code>nobs_</code>, <code>nobs_full_</code>, <code>num_singletons_</code>, <code>sample_index_</code> (0-based indices of kept rows; empty in grouped fits).</li>
+<li>DoF stats: <code>df_resid_</code>, <code>df_resid_unadj_</code>, <code>df_m_</code>, <code>df_a_</code>, <code>df_a_levels_</code>, <code>df_a_exact_</code>, <code>df_a_nested_</code>.</li>
+<li>DoF notes: <code>df_a_</code> uses the exact FE rank (<code>df_a_exact_</code>) and does not follow <code>ssc_k_*</code>. <code>df_resid_unadj_ = n - k - df_a_</code>, while <code>df_resid_</code> reflects SSC or <code>ssc_t_df</code>.</li>
+<li>Fit stats: <code>r2_</code>, <code>r2_within_</code>, <code>rss_</code>, <code>tss_</code>, <code>tss_within_</code>, <code>num_iterations_</code>, <code>converged_</code>.</li>
+<li>FE stats: <code>fe_num_levels_</code>, <code>groupvar_</code> (1-based mobility group IDs, if enabled).</li>
+<li>Cluster stats: <code>num_clusters_</code>, <code>cluster_counts_</code>, <code>cluster_combo_counts_</code>, <code>cluster_scale_</code>.</li>
+<li>Runtime: <code>threads_used_</code>, <code>absorption_method_used</code> (<code>AbsorptionMethod</code> enum).</li>
+</ul>
+<h2 id="fixed-effect-recovery">Fixed-effect recovery</h2>
+<p>Set <code>retain_fes=True</code> in the constructor to recover FE contributions:</p>
+<ul>
+<li><code>fe_effects_</code>: list of per-observation FE contributions (one vector per FE dimension).</li>
+<li><code>fe_recovery_iterations_</code>, <code>fe_recovery_max_delta_</code>, <code>fe_recovery_converged_</code>.</li>
+</ul>
+<p>When cached alphas are available, FE recovery does not run an extra pass and reports <code>fe_recovery_iterations_ = 0</code> and <code>fe_recovery_max_delta_ = 0</code>. Otherwise, the recovery uses a store-alphas MAP sweep on the partial residual <code>y - X beta</code>.</p>
+<p>Set <code>XHDFE_FE_DIAG_FILE</code> to append per-run FE diagnostics (partial residual stats, FE totals, residual consistency) to a text file.</p>
+<p>FE recovery is not supported when both <code>group</code> and <code>individual</code> are specified; group-only fits use the collapsed sample.</p>
+<h2 id="extract_group_individual_fes">extract_group_individual_fes</h2>
+<p><code>extract_group_individual_fes(y, X, fes, group, individual, weights=None, aggregation="mean", ...)</code></p>
+<p>Computes group/individual FE effects using the most recent <code>fit()</code> coefficients.</p>
+<p>Arguments:</p>
+<ul>
+<li><code>fes</code>: 1-D array, 2-D array (n x k), or a sequence of 1-D arrays (each length n).</li>
+<li><code>group</code>, <code>individual</code>: 1-D arrays (length n).</li>
+<li><code>weights</code>: optional 1-D array (length n); must sum to a positive value.</li>
+<li><code>aggregation</code>: <code>"mean"</code> (default; aliases <code>"avg"</code>/<code>"average"</code>) or <code>"sum"</code>.</li>
+</ul>
+<p>Requirements:</p>
+<ul>
+<li><code>fit()</code> must be called first.</li>
+<li><code>individual</code> must also appear in <code>fes</code>.</li>
+<li>At most 3 standard FE dimensions are supported (Stata extractfes limit).</li>
+</ul>
+<p>Options (defaults match the C++ <code>GroupIndividualFeOptions</code>):</p>
+<ul>
+<li><code>tol_main</code> (1e-9): convergence threshold for the outer loop.</li>
+<li><code>tol_start</code> (1e-3), <code>tol_final</code> (1e-9): starting/final tolerances for the inner solver.</li>
+<li><code>max_iter_main</code> (10000): max outer iterations.</li>
+<li><code>max_iter_solver</code> (1000): max inner iterations.</li>
+<li><code>verbose</code> (0): 0 = silent; higher values emit progress.</li>
+<li><code>accel</code> (2): acceleration mode (0 none, 1 linear, 2 geometric).</li>
+<li><code>start_accel</code> (5), <code>every_accel</code> (5): acceleration schedule.</li>
+<li><code>factor</code> (1.0): tighten solver tolerance if MSE &lt; factor * tol.</li>
+<li><code>a1p1</code> (0.75): linear acceleration parameter.</li>
+<li><code>a2p1</code> (1e-8), <code>a2p2</code> (5): geometric acceleration parameters.</li>
+</ul>
+<p>Return dict:</p>
+<ul>
+<li><code>individual_ids</code>, <code>individual_effects</code></li>
+<li><code>fe_level_ids</code>, <code>fe_level_effects</code></li>
+<li><code>iterations</code>, <code>converged</code>, <code>mse</code></li>
+</ul>
+<h2 id="minimal-usage-example">Minimal usage example</h2>
+<div class="sourceCode" id="cb1"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> py_hdfe_v11 <span class="im">as</span> hdfe</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> hdfe.HdfeRegressor(se_type<span class="op">=</span><span class="st">&quot;robust&quot;</span>, tol<span class="op">=</span><span class="fl">1e-8</span>, max_iter<span class="op">=</span><span class="dv">5000</span>, num_threads<span class="op">=</span><span class="dv">8</span>)</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>reg.fit(y, X, fes<span class="op">=</span>[firm_id, year_id], weights<span class="op">=</span>weights)</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(reg.summary())</span></code></pre></div>
+<p>Grouped example:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> hdfe.HdfeRegressor(se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>, tol<span class="op">=</span><span class="fl">1e-8</span>, max_iter<span class="op">=</span><span class="dv">5000</span>)</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>reg.fit(y, X, fes<span class="op">=</span>[inventor_id], group<span class="op">=</span>patent_id, individual<span class="op">=</span>inventor_id, aggregation<span class="op">=</span><span class="st">&quot;sum&quot;</span>)</span></code></pre></div>
+</body>
+</html>

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.20.0.20260723 LANGUAGES CXX)
+project(xhdfe VERSION 2.21.0.20260725 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -92,10 +92,23 @@ if(XHDFE_ENABLE_METAL)
     enable_language(OBJCXX)
 endif()
 
-# Eigen3: pin provenance to the copy tracked inside this repository.  Never
-# allow find_package() to resolve an unrelated sibling checkout or host install.
-set(XHDFE_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/r/xhdfe/src/eigen"
-    CACHE PATH "In-repository Eigen 3.4.0 source directory")
+# Eigen3: pin provenance to a copy shipped inside this source tree.  The full
+# checkout keeps the R-package mirror as the primary copy; Python sdists carry
+# the canonical third_party tree instead of duplicating that large directory.
+# Never allow find_package() to resolve an unrelated sibling checkout or host
+# install.
+set(_XHDFE_EIGEN_R_MIRROR "${CMAKE_CURRENT_SOURCE_DIR}/r/xhdfe/src/eigen")
+set(_XHDFE_EIGEN_SDIST
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/eigen-3.4.0")
+if(EXISTS "${_XHDFE_EIGEN_R_MIRROR}/Eigen/Dense")
+    set(_XHDFE_EIGEN_DEFAULT "${_XHDFE_EIGEN_R_MIRROR}")
+elseif(EXISTS "${_XHDFE_EIGEN_SDIST}/Eigen/Dense")
+    set(_XHDFE_EIGEN_DEFAULT "${_XHDFE_EIGEN_SDIST}")
+else()
+    set(_XHDFE_EIGEN_DEFAULT "${_XHDFE_EIGEN_R_MIRROR}")
+endif()
+set(XHDFE_EIGEN_DIR "${_XHDFE_EIGEN_DEFAULT}"
+    CACHE PATH "Source-tree Eigen 3.4.0 directory")
 if(NOT EXISTS "${XHDFE_EIGEN_DIR}/Eigen/Dense")
     message(FATAL_ERROR
         "Vendored Eigen is missing at ${XHDFE_EIGEN_DIR}; refusing an "

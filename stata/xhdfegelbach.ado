@@ -1,4 +1,4 @@
-*! version 1.4.0  23jul2026
+*! version 1.5.0  25jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -6,12 +6,24 @@
 program define xhdfegelbach, rclass sortpreserve
     version 14.0
     syntax varname(numeric) [if] [in] [aweight fweight /], x1(varlist numeric) ///
-        [ x2groups(string) fes(varlist numeric) vce(string) cluster(varname numeric) ///
+        [ x2groups(string) fes(varlist numeric) COMMONFES(varlist numeric) ///
+          vce(string) cluster(varname numeric) ///
           gamma0 cov0 ABSorbedtargets(varlist numeric) tol(real 1e-8) ///
           threads(integer 0) GPU VERBose FOCAL(varlist numeric) ///
-          SHARES(string) SHARETOL(real 1e-12) Level(cilevel) ]
+          SHARES(string) SHARETOL(real 1e-12) SHARETMIN(real 3.0) ///
+          FEVARMIN(real 0.35) Level(cilevel) ///
+          CONNected(string) CONNectivityfes(varlist numeric min=2 max=2) ///
+          SAMPLEAudit GENerate(name) ]
 
     local y `varlist'
+    if ("`generate'" != "") {
+        capture confirm new variable `generate'
+        if (_rc) {
+            di as err "generate() must name a new variable"
+            exit 110
+        }
+    }
+    local sample_requested = ("`sampleaudit'" != "" | "`generate'" != "")
     if ("`x2groups'" == "" & "`fes'" == "") {
         di as err "specify x2groups() and/or fes()"
         exit 198
@@ -44,6 +56,44 @@ program define xhdfegelbach, rclass sortpreserve
     }
     if (`sharetol' < 0 | missing(`sharetol')) {
         di as err "sharetol() must be finite and nonnegative"
+        exit 198
+    }
+    if (`sharetmin' < 0 | missing(`sharetmin')) {
+        di as err "sharetmin() must be finite and nonnegative"
+        exit 198
+    }
+    if (`fevarmin' < 0 | missing(`fevarmin')) {
+        di as err "fevarmin() must be finite and nonnegative"
+        exit 198
+    }
+    local connected = lower(trim("`connected'"))
+    if ("`connected'" == "") local connected "diagnose"
+    if (!inlist("`connected'", "diagnose", "require")) {
+        di as err "connected() must be diagnose or require"
+        exit 198
+    }
+    if ("`connectivityfes'" != "") {
+        unab connectivityfes : `connectivityfes'
+        local connectivity_count : word count `connectivityfes'
+        if (`connectivity_count' != 2) {
+            di as err "connectivityfes() requires exactly two FE variables"
+            exit 198
+        }
+        local duplicate_connectivity : list dups connectivityfes
+        if ("`duplicate_connectivity'" != "") {
+            di as err "connectivityfes() entries must be distinct"
+            exit 198
+        }
+        local invalid_connectivity : list connectivityfes - fes
+        if ("`invalid_connectivity'" != "") {
+            di as err "connectivityfes() must select variables from fes(): `invalid_connectivity'"
+            exit 198
+        }
+    }
+    local nfe_connectivity : word count `fes'
+    if ("`connected'" == "require" & ///
+        (`nfe_connectivity' != 2 | "`commonfes'" != "")) {
+        di as err "connected(require) requires exactly two FE dimensions, both added in fes(), and no commonfes(); this split is not yet certified with common FEs or a multiway added-FE design"
         exit 198
     }
     local focal_requested = ("`focal'" != "")
@@ -89,6 +139,16 @@ program define xhdfegelbach, rclass sortpreserve
     foreach f of local fes {
         local gnames "`gnames' `f'"
     }
+    local duplicate_commonfes : list dups commonfes
+    if ("`duplicate_commonfes'" != "") {
+        di as err "commonfes() entries must be distinct: `duplicate_commonfes'"
+        exit 198
+    }
+    local fe_overlap : list commonfes & fes
+    if ("`fe_overlap'" != "") {
+        di as err "an FE variable may not appear in both commonfes() and fes(): `fe_overlap'"
+        exit 198
+    }
     local duplicate_vars : list dups x2vars
     if ("`duplicate_vars'" != "") {
         di as err "x2 variables may not appear in more than one block: `duplicate_vars'"
@@ -108,9 +168,10 @@ program define xhdfegelbach, rclass sortpreserve
         di as err "absorbedtargets() requires fes()"
         exit 198
     }
-    local duplicate_names : list dups gnames
+    local all_block_names "`gnames' `commonfes'"
+    local duplicate_names : list dups all_block_names
     if ("`duplicate_names'" != "") {
-        di as err "x2 and FE block names must be unique: `duplicate_names'"
+        di as err "x2, common-FE and added-FE names must be unique: `duplicate_names'"
         exit 198
     }
     local gsizes_csv : subinstr local gsizes " " ",", all
@@ -118,7 +179,7 @@ program define xhdfegelbach, rclass sortpreserve
     local gsizes_csv : subinstr local gsizes_csv " " "", all
 
     marksample touse
-    markout `touse' `x1' `x2vars' `fes' `cluster'
+    markout `touse' `x1' `x2vars' `commonfes' `fes' `cluster'
     local has_weight 0
     tempvar wvar
     if ("`weight'" != "") {
@@ -128,14 +189,37 @@ program define xhdfegelbach, rclass sortpreserve
     }
     quietly count if `touse'
     if (r(N) == 0) error 2000
+    local samplepass
+    if ("`generate'" != "") {
+        tempvar sample_kept
+        quietly gen byte `sample_kept' = .
+        quietly replace `sample_kept' = 0 if `touse'
+        local samplepass "`sample_kept'"
+    }
 
     // FE and cluster ids enter the shared plugin as int32. Compact raw codes
     // outside that range (for example NIF/NISS) or non-integer categorical
     // codes to 1..N labels. Gelbach's decomposition depends only on category
     // membership, so this is an exact relabelling with unchanged estimates.
+    local id_recoded 0
+    local commonfes_use
+    foreach src of local commonfes {
+        quietly summarize `src' if `touse', meanonly
+        local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
+        if (!`need') {
+            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            local need = (r(N) > 0)
+        }
+        if (`need') {
+            tempvar idc
+            quietly egen long `idc' = group(`src') if `touse'
+            local commonfes_use "`commonfes_use' `idc'"
+            local id_recoded 1
+        }
+        else local commonfes_use "`commonfes_use' `src'"
+    }
     local fes_use
     local cluster_use "`cluster'"
-    local id_recoded 0
     foreach src of local fes {
         quietly summarize `src' if `touse', meanonly
         local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
@@ -171,6 +255,7 @@ program define xhdfegelbach, rclass sortpreserve
 
     local p : word count `x1'
     local q : word count `x2vars'
+    local ncommonfe : word count `commonfes'
     local nfe : word count `fes'
     local k1 = `p' + 1
     local G : word count `gnames'
@@ -187,6 +272,17 @@ program define xhdfegelbach, rclass sortpreserve
     }
     local focal_indices = trim("`focal_indices'")
     local nabs : word count `absorbedtargets'
+    local connectivity_pair_csv
+    if ("`connectivityfes'" != "") {
+        local connectivity_fe1 : word 1 of `connectivityfes'
+        local connectivity_fe2 : word 2 of `connectivityfes'
+        local connectivity_fe1_pos : list posof "`connectivity_fe1'" in fes
+        local connectivity_fe2_pos : list posof "`connectivity_fe2'" in fes
+        local connectivity_fe1_index = `connectivity_fe1_pos' - 1
+        local connectivity_fe2_index = `connectivity_fe2_pos' - 1
+        local connectivity_pair_csv ///
+            "`connectivity_fe1_index',`connectivity_fe2_index'"
+    }
     local absorbed_indices
     foreach target of local absorbedtargets {
         local pos : list posof "`target'" in x1
@@ -199,6 +295,8 @@ program define xhdfegelbach, rclass sortpreserve
 
     tempname D SE TOT BBASE BFULL ABS COV TOTCOV FEAGG
     tempname FERATIO NEARMASK BASECOV COVDB COVTB GAMMA
+    tempname BETA2 BETA2COV AUXLOAD LOADDIAG LOADZ LOADP LOADEVAL
+    tempname BETA2WALD GRADNORM REGVALID REGSTATUS
     matrix `D' = J(`k1', `G', .)
     matrix `SE' = J(`k1', `G', .)
     matrix `TOT' = J(`k1', 2, .)
@@ -212,19 +310,44 @@ program define xhdfegelbach, rclass sortpreserve
     matrix `BASECOV' = J(`k1', `k1', .)
     matrix `COVDB' = J(`G' * `k1', `k1', .)
     matrix `COVTB' = J(`k1', `k1', .)
-    if (`nx2g' > 0) matrix `GAMMA' = J(`gamma_rows', `nx2g', .)
+    if (`nx2g' > 0) {
+        matrix `GAMMA' = J(`gamma_rows', `nx2g', .)
+        matrix `BETA2' = J(1, `q', .)
+        matrix `BETA2COV' = J(`q', `q', .)
+        matrix `AUXLOAD' = J(`k1', `q', .)
+        matrix `LOADDIAG' = J(`nx2g', 3, .)
+        matrix `LOADZ' = J(`k1', `nx2g', .)
+        matrix `LOADP' = J(`k1', `nx2g', .)
+        matrix `LOADEVAL' = J(`k1', `nx2g', .)
+        matrix `BETA2WALD' = J(`nx2g', 3, .)
+        matrix `GRADNORM' = J(`k1', `nx2g', .)
+        matrix `REGVALID' = J(`k1', `nx2g', .)
+        matrix `REGSTATUS' = J(`k1', `nx2g', .)
+    }
 
-    local cfg "cfg=task=gelbach;p=`p';q=`q';nfe=`nfe';has_cluster=`=("`cluster'"!="")';"
+    local cfg "cfg=task=gelbach;p=`p';q=`q';ncommonfe=`ncommonfe';nfe=`nfe';has_cluster=`=("`cluster'"!="")';"
     local cfg "`cfg'has_weight=`has_weight';weight_type=`weight';"
     local cfg "`cfg'group_sizes=`gsizes_csv';vce=`vce';"
     local cfg "`cfg'gamma0=`=("`gamma0'"!="")';cov0=`=("`cov0'"!="")';"
     local cfg "`cfg'absorbed_x1=`absorbed_indices_csv';tol=`tol';num_threads=`threads';"
+    if ("`connectivity_pair_csv'" != "") ///
+        local cfg "`cfg'connectivity_fe_pair=`connectivity_pair_csv';"
+    local cfg "`cfg'require_connected=`=("`connected'"=="require")';"
     local cfg "`cfg'use_gpu=`=("`gpu'"!="")';verbose=`=("`verbose'"!="")';"
+    local cfg "`cfg'capture_sample_provenance=`sample_requested';"
+    local cfg "`cfg'has_sample_output=`=("`generate'"!="")';"
     local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';bbasemat=`BBASE';bfullmat=`BFULL';"
     local cfg "`cfg'absmat=`ABS';covmat=`COV';totcovmat=`TOTCOV';"
     local cfg "`cfg'feratiomat=`FERATIO';nearmaskmat=`NEARMASK';"
     local cfg "`cfg'basecovmat=`BASECOV';covdbmat=`COVDB';covtbmat=`COVTB';"
-    if (`nx2g' > 0) local cfg "`cfg'gammamat=`GAMMA';"
+    if (`nx2g' > 0) {
+        local cfg "`cfg'gammamat=`GAMMA';beta2mat=`BETA2';"
+        local cfg "`cfg'beta2covmat=`BETA2COV';auxloadmat=`AUXLOAD';"
+        local cfg "`cfg'loaddiagmat=`LOADDIAG';loadzmat=`LOADZ';loadpmat=`LOADP';"
+        local cfg "`cfg'loadevalmat=`LOADEVAL';beta2waldmat=`BETA2WALD';"
+        local cfg "`cfg'gradnormmat=`GRADNORM';regvalidmat=`REGVALID';"
+        local cfg "`cfg'regstatusmat=`REGSTATUS';"
+    }
 
     quietly findfile xhdfe.ado
     local plugin_path "`r(fn)'"
@@ -259,9 +382,26 @@ program define xhdfegelbach, rclass sortpreserve
 
     local wpass ""
     if (`has_weight') local wpass "`wvar'"
-    capture noisily plugin call `plugin_prog' `y' `x1' `x2vars' `fes_use' `cluster_use' `wpass' ///
+    capture noisily plugin call `plugin_prog' `y' `x1' `x2vars' ///
+        `commonfes_use' `fes_use' `cluster_use' `wpass' `samplepass' ///
         if `touse', "`cfg'"
     if (_rc) exit _rc
+    if ("`generate'" != "") {
+        rename `sample_kept' `generate'
+    }
+
+    local connectivity_fe_indices
+    local connectivity_fes_used
+    if (scalar(__xgel_connectivity_fe1) >= 0) {
+        local connectivity_fe1_pos = scalar(__xgel_connectivity_fe1) + 1
+        local connectivity_fe2_pos = scalar(__xgel_connectivity_fe2) + 1
+        local connectivity_fe1_name : word `connectivity_fe1_pos' of `fes'
+        local connectivity_fe2_name : word `connectivity_fe2_pos' of `fes'
+        local connectivity_fe_indices ///
+            "`=scalar(__xgel_connectivity_fe1)' `=scalar(__xgel_connectivity_fe2)'"
+        local connectivity_fes_used ///
+            "`connectivity_fe1_name' `connectivity_fe2_name'"
+    }
 
     matrix rownames `D' = `x1' _cons
     matrix colnames `D' = `gnames'
@@ -274,6 +414,21 @@ program define xhdfegelbach, rclass sortpreserve
     matrix colnames `ABS' = `x1'
     matrix colnames `FERATIO' = `x1'
     matrix colnames `NEARMASK' = `x1'
+    local fe_variance_status ""
+    local fe_variance_failed 0
+    forvalues c = 1/`p' {
+        if (`nfe' > 0 & ///
+            (missing(`FERATIO'[1, `c']) | `FERATIO'[1, `c'] <= `fevarmin')) {
+            local fe_variance_status ///
+                "`fe_variance_status' conditional_only_between_fe_dominant"
+            local fe_variance_failed 1
+        }
+        else {
+            local fe_variance_status ///
+                "`fe_variance_status' valid_first_order"
+        }
+    }
+    local fe_variance_status = trim("`fe_variance_status'")
 
     // The backend classification is authoritative.  Never infer an imposed
     // zero merely from the user's request: a shared-core classification bug
@@ -320,6 +475,19 @@ program define xhdfegelbach, rclass sortpreserve
         }
         matrix rownames `GAMMA' = `gamma_rownames'
         matrix colnames `GAMMA' = `gamma_colnames'
+        matrix colnames `BETA2' = `x2vars'
+        matrix rownames `BETA2COV' = `x2vars'
+        matrix colnames `BETA2COV' = `x2vars'
+        matrix rownames `AUXLOAD' = `x1' _cons
+        matrix colnames `AUXLOAD' = `x2vars'
+        matrix rownames `LOADDIAG' = `gamma_colnames'
+        matrix colnames `LOADDIAG' = ss_ratio rank condition_number
+        foreach M in LOADZ LOADP LOADEVAL GRADNORM REGVALID REGSTATUS {
+            matrix rownames ``M'' = `x1' _cons
+            matrix colnames ``M'' = `gamma_colnames'
+        }
+        matrix rownames `BETA2WALD' = `gamma_colnames'
+        matrix colnames `BETA2WALD' = statistic df pvalue
     }
 
     if (`nfe' > 0) {
@@ -343,13 +511,21 @@ program define xhdfegelbach, rclass sortpreserve
         matrix rownames `FEAGG' = `x1' _cons
         matrix colnames `FEAGG' = delta se
     }
+    if (`fe_variance_failed') {
+        local fe_note "WARNING: conditional FE-block and mixed-total normal intervals are diagnostic only because x1_fe_collinear_ratio is at or below fevarmin(). Use xhdfegelbachbootstrap, method(pairs), for the calibrated alternative."
+        if ("`xgel_notes'" == "") local xgel_notes "`fe_note'"
+        else local xgel_notes "`xgel_notes' `fe_note'"
+    }
 
     // Optional empirical-reporting layer. It is pure post-processing of the
     // certified delta/covariance objects and never changes a fit or a matrix
     // returned by the core. Shares remain signed and are not renormalized.
-    tempname SHARE SHARESE SHARELO SHAREHI SHAREDEF SHARERESID
+    tempname SHARE SHARESE SHARELO SHAREHI SHAREDEF SHARERESID ///
+        SHARET SHAREVALID
     local share_se_type ""
     local share_undefined 0
+    local share_weak 0
+    local share_interval_status ""
     if ("`shares'" != "") {
         matrix `SHARE' = J(`k1', `G', .)
         matrix `SHARESE' = J(`k1', `G', .)
@@ -357,6 +533,8 @@ program define xhdfegelbach, rclass sortpreserve
         matrix `SHAREHI' = J(`k1', `G', .)
         matrix `SHAREDEF' = J(`k1', 1, 0)
         matrix `SHARERESID' = J(1, `p', .)
+        matrix `SHARET' = J(`k1', 1, .)
+        matrix `SHAREVALID' = J(`k1', 1, 0)
         local alpha = (100 - `level') / 200
         local zcrit = invnormal(1 - `alpha')
         if ("`shares'" == "base") ///
@@ -371,6 +549,20 @@ program define xhdfegelbach, rclass sortpreserve
                 local denom = `BBASE'[1, `r']
             else if ("`shares'" == "movement") local denom = `TOT'[`r', 1]
             if (!missing(`denom') & abs(`denom') > `sharetol') {
+                local denom_se .
+                if (inlist("`shares'", "base", "base_fixed") & `r' <= `p') ///
+                    local denom_se = sqrt(max(0, `BASECOV'[`r', `r']))
+                else if ("`shares'" == "movement") ///
+                    local denom_se = sqrt(max(0, `TOTCOV'[`r', `r']))
+                if (!missing(`denom_se')) {
+                    if (`denom_se' > 0) ///
+                        matrix `SHARET'[`r', 1] = abs(`denom') / `denom_se'
+                    else matrix `SHARET'[`r', 1] = c(maxdouble)
+                }
+                if (!missing(`SHARET'[`r', 1]) & ///
+                    `SHARET'[`r', 1] >= `sharetmin') {
+                    matrix `SHAREVALID'[`r', 1] = 1
+                }
                 matrix `SHAREDEF'[`r', 1] = 1
                 if (inlist("`shares'", "base", "base_fixed") & `r' <= `p') {
                     matrix `SHARERESID'[1, `r'] = `BFULL'[1, `r'] / `denom'
@@ -426,7 +618,40 @@ program define xhdfegelbach, rclass sortpreserve
         }
         matrix rownames `SHAREDEF' = `x1' _cons
         matrix colnames `SHAREDEF' = defined
+        matrix rownames `SHARET' = `x1' _cons
+        matrix colnames `SHARET' = denominator_t
+        matrix rownames `SHAREVALID' = `x1' _cons
+        matrix colnames `SHAREVALID' = valid_first_order
         matrix colnames `SHARERESID' = `x1'
+        forvalues r = 1/`k1' {
+            if (`SHAREVALID'[`r', 1] == 1) {
+                local share_interval_status ///
+                    "`share_interval_status' valid_first_order"
+            }
+            else {
+                local share_interval_status ///
+                    "`share_interval_status' weak_denominator_delta_method_unreliable"
+            }
+        }
+        local share_interval_status = trim("`share_interval_status'")
+        // Match tidy() in the Python/R frontends: the aggregate warning and
+        // returned scalar SE label apply to rows selected for reporting, not
+        // to an unreported intercept or non-focal X1 row.
+        local share_check_names "`x1' _cons"
+        if (`ncommonfe' > 0) local share_check_names "`x1'"
+        if (`focal_requested') local share_check_names "`focal'"
+        local share_coefnames "`x1' _cons"
+        foreach share_coef of local share_check_names {
+            local share_r : list posof "`share_coef'" in share_coefnames
+            if (`SHAREDEF'[`share_r', 1] == 1 & ///
+                `SHAREVALID'[`share_r', 1] != 1) {
+                local share_weak 1
+            }
+        }
+        if (`share_weak') {
+            local share_se_type ///
+                "`share_se_type'_weak_denominator_diagnostic_only"
+        }
     }
 
     // Human-facing display.  Keep the numerical API entirely in r(); this
@@ -434,6 +659,7 @@ program define xhdfegelbach, rclass sortpreserve
     // coefficient and therefore has no estimator or precision side effects.
     local coefnames "`x1' _cons"
     local display_coefs "`coefnames'"
+    if (`ncommonfe' > 0) local display_coefs "`x1'"
     if (`focal_requested') local display_coefs "`focal'"
     local cov_word = cond(`nx2g' == 1, "block", "blocks")
     local fe_word = cond(`nfe' == 1, "fixed effect", "fixed effects")
@@ -466,7 +692,11 @@ program define xhdfegelbach, rclass sortpreserve
     di as txt "{hline 78}"
     di as txt "Outcome: " as res "`y'" as txt "    Observations: " ///
         as res %12.0fc scalar(__xgel_n_obs_eff)
-    di as txt "Base model: " as res "`y' on `x1' (with intercept)"
+    if (`ncommonfe' > 0) {
+        di as txt "Common fixed effects (base and full): " as res "`commonfes'"
+        di as txt "Base model: " as res "`y' on `x1', absorbing commonfes()"
+    }
+    else di as txt "Base model: " as res "`y' on `x1' (with intercept)"
     di as txt "Full model adds: " as res `nx2g' as txt " covariate `cov_word', " ///
         as res `nfe' as txt " absorbed `fe_word'"
     if (`nabs' > 0) {
@@ -475,9 +705,31 @@ program define xhdfegelbach, rclass sortpreserve
             as res "`absorbed_backend_names'"
     }
     di as txt "Inference: " as res "`vce_display'"
+    if (`nx2g' > 0) {
+        if (scalar(__xgel_regular_all_valid) == 1) {
+            di as txt "Product regularity: " as res ///
+                "conservative gate passed for all observed-X2 contribution cells"
+        }
+        else {
+            di as txt "Product regularity: " as err ///
+                "NOT ESTABLISHED for at least one observed-X2 contribution cell"
+            di as err "  Flagged normal-theory SEs/CIs/p-values are diagnostic only; inspect r(regular_inference_valid)."
+        }
+    }
+    if (`fe_variance_failed') {
+        di as err "FE variance status: conditional_only_between_fe_dominant; conditional FE-block and mixed-total intervals are diagnostic only."
+    }
     di as txt "Computation: " as res "`backend_display'" as txt ", " ///
         as res %5.0f scalar(__xgel_threads_used) as txt " thread(s)"
+    if (`sample_requested') {
+        di as txt "Retained-sample audit: " as res "`xgel_sample_hash'" ///
+            as txt " (" as res "`xgel_sample_hash_algorithm'" as txt ")"
+    }
     di as txt "Movement = base coefficient - full coefficient; block contributions sum to it."
+    if (`ncommonfe' > 0) {
+        di as txt "Intercept row: " as res "not reported" ///
+            as txt " (depends on common-FE normalization); slope identity and inference are available."
+    }
     di as txt "Interpretation: specification accounting, not causal mediation."
     if (`focal_requested') {
         di as txt "Reported focal coefficient(s): " as res "`focal'" ///
@@ -488,7 +740,10 @@ program define xhdfegelbach, rclass sortpreserve
             "total movement", "base coefficient")
         di as txt "Shares: signed fraction of " as res "`share_label'" ///
             as txt "; displayed as percent; never truncated or renormalized."
-        if ("`shares'" == "base") {
+        if (`share_weak') {
+            di as err "Share interval status: weak denominator; delta-method intervals are diagnostic only. Use xhdfegelbachbootstrap, method(pairs)."
+        }
+        else if ("`shares'" == "base") {
             di as txt "Share inference: full delta method using Var(b_base) and Cov(delta,b_base)."
         }
         else if ("`shares'" == "base_fixed") {
@@ -521,6 +776,18 @@ program define xhdfegelbach, rclass sortpreserve
             di as txt "Intercept movement: " as res %14.7g `TOT'[`r', 1] ///
                 as txt "    Std. err.: " as res %14.7g `TOT'[`r', 2]
         }
+        if (`r' <= `p') {
+            local row_fe_variance_status : word `r' of `fe_variance_status'
+            if ("`row_fe_variance_status'" == ///
+                "conditional_only_between_fe_dominant") {
+                di as err "  FE interval qualifier: diagnostic_only_between_fe_dominant"
+            }
+        }
+        if ("`shares'" != "") {
+            if (`SHAREDEF'[`r', 1] == 1 & `SHAREVALID'[`r', 1] != 1) {
+                di as err "  Share qualifier: weak_denominator_delta_method_unreliable"
+            }
+        }
 
         if ("`shares'" == "") {
             di as txt "{hline 64}"
@@ -535,9 +802,14 @@ program define xhdfegelbach, rclass sortpreserve
         }
         if (`nx2g' > 0) {
             di as txt "Covariate blocks"
+            local row_reg_warning 0
             forvalues g = 1/`nx2g' {
                 local gname : word `g' of `gnames'
                 local rowlabel "  `gname'"
+                if (`REGVALID'[`r', `g'] != 1) {
+                    local rowlabel "  `gname' *"
+                    local row_reg_warning 1
+                }
                 if ("`shares'" == "") {
                     di as txt %-36s "`rowlabel'" as res ///
                         %14.7g `D'[`r', `g'] %14.7g `SE'[`r', `g']
@@ -547,6 +819,9 @@ program define xhdfegelbach, rclass sortpreserve
                         %14.7g `D'[`r', `g'] %14.7g `SE'[`r', `g'] ///
                         %14.3f (100 * `SHARE'[`r', `g'])
                 }
+            }
+            if (`row_reg_warning') {
+                di as err "  * first-order product regularity not established; normal inference is diagnostic only"
             }
         }
         if (`nfe' > 0) {
@@ -602,6 +877,11 @@ program define xhdfegelbach, rclass sortpreserve
         if ("`xgel_notes'" == "") local xgel_notes "`share_note'"
         else local xgel_notes "`xgel_notes' `share_note'"
     }
+    if (`share_weak') {
+        local share_note "WARNING: at least one defined share denominator has |t| below sharetmin(); first-order delta-method intervals are diagnostic only. Use xhdfegelbachbootstrap, method(pairs), for the calibrated alternative."
+        if ("`xgel_notes'" == "") local xgel_notes "`share_note'"
+        else local xgel_notes "`xgel_notes' `share_note'"
+    }
 
     di as txt _n "Result status"
     if (scalar(__xgel_converged) == 1) {
@@ -615,6 +895,27 @@ program define xhdfegelbach, rclass sortpreserve
     if (`nfe' > 0) {
         di as txt "  FE standard errors are conditional on the recovered FE estimates."
     }
+    if (`nfe' == 1) {
+        di as txt "  FE X1-row split: " as res "`xgel_fe_split_status'"
+    }
+    else if (`nfe' >= 2) {
+        di as txt "  FE mobility components (`connectivity_fes_used'): " ///
+            as res %9.0fc scalar(__xgel_n_mobility_components)
+        di as txt "  Largest component: " ///
+            as res %12.0fc scalar(__xgel_largest_mob_n) as txt " rows (" ///
+            as res %6.2f (100 * scalar(__xgel_largest_mob_share)) ///
+            as txt "%); largest weight share " ///
+            as res %6.2f (100 * scalar(__xgel_largest_mob_wshare)) as txt "%"
+        di as txt "  Selected FE pair: " ///
+            as res "`xgel_connectivity_pair_status'" ///
+            as txt "; connected mode " as res "`xgel_connected_mode'"
+        if (scalar(__xgel_fe_split_identified) == 1) {
+            di as txt "  FE X1-row split: " as res "`xgel_fe_split_status'"
+        }
+        else {
+            di as txt "  FE X1-row split: " as err "`xgel_fe_split_status'"
+        }
+    }
     if (scalar(__xgel_converged) != 1) {
         di as err "warning: computation did not pass all convergence checks; do not interpret these results"
         if ("`xgel_notes'" != "") di as err "details: `xgel_notes'"
@@ -626,10 +927,30 @@ program define xhdfegelbach, rclass sortpreserve
 
     local absorbed_inf_valid = scalar(__xgel_abs_inf_valid)
     return scalar identity_gap = scalar(__xgel_identity_gap)
+    return scalar n_common_fes = scalar(__xgel_n_common_fes)
+    return scalar common_fes_applied = scalar(__xgel_common_fes_applied)
+    return scalar intercept_inference_available = ///
+        scalar(__xgel_intercept_inf)
     return scalar n_obs_input = scalar(__xgel_n_obs_input)
     return scalar n_obs = scalar(__xgel_n_obs)
     return scalar n_obs_effective = scalar(__xgel_n_obs_eff)
     return scalar n_singletons_dropped = scalar(__xgel_n_singletons_dropped)
+    return scalar n_mobility_components = ///
+        scalar(__xgel_n_mobility_components)
+    return scalar largest_mobility_component_n_obs = ///
+        scalar(__xgel_largest_mob_n)
+    return scalar largest_mobility_component_share = ///
+        scalar(__xgel_largest_mob_share)
+    return scalar largest_mobility_weight_share = ///
+        scalar(__xgel_largest_mob_wshare)
+    return scalar fe_split_identified = ///
+        scalar(__xgel_fe_split_identified)
+    return scalar connectivity_fe1_index = ///
+        scalar(__xgel_connectivity_fe1)
+    return scalar connectivity_fe2_index = ///
+        scalar(__xgel_connectivity_fe2)
+    return scalar connectivity_pair_explicit = ///
+        scalar(__xgel_connectivity_explicit)
     return scalar df_full = scalar(__xgel_df_full)
     return scalar df_base = scalar(__xgel_df_base)
     return scalar n_clusters = scalar(__xgel_n_clusters)
@@ -640,11 +961,18 @@ program define xhdfegelbach, rclass sortpreserve
         scalar(__xgel_fewG_threshold)
     return scalar absorbed_target_inference_valid = scalar(__xgel_abs_inf_valid)
     return scalar absorbing_fe_index = scalar(__xgel_abs_fe_index)
+    return scalar regular_inference_all_valid = ///
+        scalar(__xgel_regular_all_valid)
+    return scalar regularity_test_alpha = ///
+        scalar(__xgel_regularity_alpha)
     return scalar converged = scalar(__xgel_converged)
     return scalar tol = `tol'
     return scalar focal_selection_explicit = `focal_requested'
     return scalar conf_level = `level' / 100
     return scalar share_tol = `sharetol'
+    return scalar share_t_min = `sharetmin'
+    return scalar fe_variance_ratio_min = `fevarmin'
+    return scalar sample_info_requested = `sample_requested'
     foreach name in threads_used gpu_used gpu_status_code gpu_attempted ///
         gpu_absorption_converged gpu_absorption_iterations {
         return scalar `name' = scalar(__xgel_`name')
@@ -652,13 +980,28 @@ program define xhdfegelbach, rclass sortpreserve
     }
     return scalar gpu_requested = scalar(__xgel_gpu_requested)
     capture scalar drop __xgel_identity_gap __xgel_n_obs_input __xgel_n_obs ///
+        __xgel_n_common_fes __xgel_common_fes_applied __xgel_intercept_inf ///
         __xgel_n_obs_eff ///
-        __xgel_n_singletons_dropped __xgel_df_full __xgel_df_base ///
+        __xgel_n_singletons_dropped __xgel_n_mobility_components ///
+        __xgel_largest_mob_n __xgel_largest_mob_share ///
+        __xgel_largest_mob_wshare __xgel_fe_split_identified ///
+        __xgel_connectivity_fe1 __xgel_connectivity_fe2 ///
+        __xgel_connectivity_explicit ///
+        __xgel_df_full __xgel_df_base ///
         __xgel_n_clusters __xgel_feclass_tol __xgel_near_fe_warn_upper ///
         __xgel_fewG_threshold __xgel_gpu_requested ///
-        __xgel_abs_inf_valid __xgel_abs_fe_index __xgel_converged
+        __xgel_abs_inf_valid __xgel_abs_fe_index ///
+        __xgel_regular_all_valid __xgel_regularity_alpha __xgel_converged
     return local vce "`vce'"
     return local groups "`gnames'"
+    return local common_fes "`commonfes'"
+    if (`sample_requested') {
+        return local sample_hash "`xgel_sample_hash'"
+        return local sample_hash_algorithm "`xgel_sample_hash_algorithm'"
+        return local sample_index_scope "marked_input_rows_zero_based"
+    }
+    if ("`generate'" != "") return local sample_variable "`generate'"
+    return local intercept_status "`xgel_intercept_status'"
     return local x1_names "`x1'"
     return local focal_indices "`focal_indices'"
     return local focal_names "`focal'"
@@ -668,6 +1011,8 @@ program define xhdfegelbach, rclass sortpreserve
         local estimand "absorbed_target_allocation"
         local identity_status "exact_ols_constrained"
     }
+    if (`ncommonfe' > 0) ///
+        local identity_status "exact_ols_conditional_common_fes"
     local b_full_status
     local focal_status
     local x_pos 0
@@ -696,6 +1041,10 @@ program define xhdfegelbach, rclass sortpreserve
         else local total_se_type "mixed_full_observed_conditional_fe"
     }
     if (`nabs' > 0) local total_se_type "target_exact_base_vce_mixed_components"
+    if (`fe_variance_failed' & `nfe' > 0) {
+        local total_se_type ///
+            "`total_se_type'_conditional_only_diagnostic"
+    }
     local inference_status "not_applicable"
     if (`nabs' > 0) {
         if (`absorbed_inf_valid' == 1) ///
@@ -712,13 +1061,40 @@ program define xhdfegelbach, rclass sortpreserve
     return local total_se_type "`total_se_type'"
     return local inference_status "`inference_status'"
     return local causal_interpretation "no"
-    return local fe_se_type "conditional_gamma0"
+    local fe_se_type "conditional_gamma0"
+    if (`fe_variance_failed' & `nfe' > 0) {
+        local fe_se_type ///
+            "`fe_se_type'_conditional_only_diagnostic"
+    }
+    return local fe_se_type "`fe_se_type'"
+    return local fe_variance_status "`fe_variance_status'"
+    return local fe_variance_status_order "x1() column order"
+    return local fe_split_status "`xgel_fe_split_status'"
+    return local connected_mode "`xgel_connected_mode'"
+    return local connectivity_fes "`connectivity_fes_used'"
+    return local connectivity_fe_indices "`connectivity_fe_indices'"
+    return local connectivity_pair_status ///
+        "`xgel_connectivity_pair_status'"
+    return local mobility_component_scope "`xgel_mobility_component_scope'"
     return local gpu_backend "`gpu_backend'"
     return local gpu_status "`gpu_status'"
+    if (`nx2g' > 0) {
+        return local regular_inference_status ///
+            "`xgel_regular_inference_status'"
+        return local regular_inference_status_order ///
+            "group-major; x1() rows then _cons within each observed block"
+        return local regular_inference_codebook ///
+            "-2=not_applicable_common_fe_intercept -1=not_certified 0=nonregular_not_ruled_out 1=regular_beta_nonzero 2=regular_loading_nonzero"
+    }
     if ("`shares'" != "") {
         return local share_denominator "`shares'"
         return local share_se_type "`share_se_type'"
+        return local share_interval_status "`share_interval_status'"
+        return local share_interval_status_order ///
+            "x1() rows then _cons"
         return local share_units "fraction"
+        return matrix share_denominator_t = `SHARET'
+        return matrix share_interval_status_code = `SHAREVALID'
         return matrix residual_share = `SHARERESID'
         return matrix share_defined = `SHAREDEF'
         return matrix share_ci_high = `SHAREHI'
@@ -733,7 +1109,20 @@ program define xhdfegelbach, rclass sortpreserve
     return matrix cov_delta_bbase = `COVDB'
     return matrix base_cov = `BASECOV'
     return matrix cov = `COV'
-    if (`nx2g' > 0) return matrix gamma = `GAMMA'
+    if (`nx2g' > 0) {
+        return matrix regular_inference_status_code = `REGSTATUS'
+        return matrix regular_inference_valid = `REGVALID'
+        return matrix contribution_gradient_norm = `GRADNORM'
+        return matrix beta2_wald = `BETA2WALD'
+        return matrix auxiliary_loading_test_evaluated = `LOADEVAL'
+        return matrix auxiliary_loading_pvalue = `LOADP'
+        return matrix auxiliary_loading_max_abs_z = `LOADZ'
+        return matrix auxiliary_loading_diagnostics = `LOADDIAG'
+        return matrix auxiliary_loadings = `AUXLOAD'
+        return matrix beta2_cov = `BETA2COV'
+        return matrix beta2 = `BETA2'
+        return matrix gamma = `GAMMA'
+    }
     return matrix b_full = `BFULL'
     return matrix b_base = `BBASE'
     return matrix absorbed_mask = `ABS'

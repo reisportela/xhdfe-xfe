@@ -4,72 +4,102 @@
 \alias{xhdfe_gelbach_tidy}
 \title{Tidy Gelbach contributions, confidence intervals and signed shares}
 \usage{
-xhdfe_gelbach_tidy(x, focal = NULL, include_intercept = FALSE,
-  include_total = TRUE, include_full = TRUE, conf_level = 0.95,
-  share = NULL, share_tol = 1e-12)
+xhdfe_gelbach_tidy(
+  x,
+  focal = NULL,
+  include_intercept = FALSE,
+  include_total = TRUE,
+  include_full = TRUE,
+  conf_level = 0.95,
+  share = NULL,
+  share_tol = 1e-12,
+  share_t_min = 3
+)
 }
 \arguments{
 \item{x}{An \code{xhdfe_gelbach} result.}
-\item{focal}{Optional X1 names, one-based indices, or a logical mask. The
+
+\item{focal}{Optional X1 names, one-based indices or logical mask. The
 default uses the reporting selector stored in \code{x}.}
-\item{include_intercept}{Include the implicit intercept row.}
+
+\item{include_intercept}{Include the implicit intercept row. With common FEs,
+its estimates and inferential fields are missing by contract.}
+
 \item{include_total}{Include a total-movement row.}
+
 \item{include_full}{Include the full-model residual coefficient row.}
-\item{conf_level}{Normal-approximation confidence level in (0,1).}
-\item{share}{Optional \code{"movement"}, \code{"base"}, or
-\code{"base_fixed"} denominator.}
+
+\item{conf_level}{Normal-approximation confidence level.}
+
+\item{share}{Optional \code{"base"}, \code{"base_fixed"}, or
+\code{"movement"} denominator.}
+
 \item{share_tol}{Absolute threshold below which a share is undefined.}
+
+\item{share_t_min}{Minimum absolute denominator t-statistic for valid
+first-order delta-method share inference. Point shares and SEs are retained
+below this diagnostic threshold.}
 }
 \value{
-A data frame with one row per selected coefficient and component. Core columns
-are \code{coefficient}, \code{component}, \code{component_kind},
-\code{estimate}, \code{std_error}, \code{conf_low}, \code{conf_high},
-\code{conf_level}, and \code{se_type}.
-
-When \code{share} is requested, the result also contains \code{share},
-\code{share_std_error}, \code{share_conf_low}, \code{share_conf_high},
-\code{share_defined}, \code{share_denominator}, \code{share_se_type},
-\code{share_units}, and \code{share_tol}.
+A data frame with one row per selected coefficient and component.
+  Core columns are \code{coefficient}, \code{component},
+  \code{component_kind}, \code{estimate}, \code{std_error},
+  \code{conf_low}, \code{conf_high}, \code{conf_level}, and
+  \code{se_type}, plus \code{regular_inference_valid},
+  \code{regular_inference_status}, and
+  \code{confidence_interval_status}. When \code{share} is requested, the
+  result also contains
+  \code{share}, \code{share_std_error}, \code{share_conf_low},
+  \code{share_conf_high}, \code{share_defined},
+  \code{share_denominator}, \code{share_se_type}, \code{share_units}, and
+  \code{share_tol}, \code{share_t_min}, \code{share_denominator_t}, and
+  \code{share_interval_status}. Every row also carries
+  \code{fe_variance_status} and \code{fe_variance_ratio_min}.
 }
 \description{
-Pure post-processing of the stored Gelbach point estimates and covariance; no
-model is re-estimated. \code{share = "movement"} uses the joint covariance and
-the delta method. \code{share = "base"} also uses denominator uncertainty and
-\eqn{Cov(\delta,b_{base})}. \code{share = "base_fixed"} explicitly labels
-fixed-denominator scaling.
-Signed shares are never truncated or renormalized.
+This is reporting-only post-processing of an \code{xhdfe_gelbach} result.
+No model is re-estimated. With \code{share = "movement"}, ratio uncertainty
+uses the full joint covariance and the delta method. With
+\code{share = "base"}, the delta method also uses denominator uncertainty
+and \code{Cov(delta, b_base)}. The explicit
+\code{share = "base_fixed"} reproduces fixed-denominator scaling and labels
+that convention in the output.
 }
 \section{Share contract}{
-\code{share = "movement"} divides every component by total coefficient
-movement. Ratio uncertainty uses the full joint component covariance and the
-delta method; the appended total share is one with SE zero.
 
-\code{share = "base"} divides by \code{b_base} and reports full delta-method
-inference. For component \eqn{g},
-\deqn{Var(\delta_g/b)=Var(\delta_g)/b^2+
-\delta_g^2 Var(b)/b^4-2\delta_g Cov(\delta_g,b)/b^3.}
-The total row uses the analogous \code{Cov(total, b_base)} expression and is
-labelled \code{joint_base_covariance_delta_method}.
-
+\code{share = "movement"} divides by total coefficient movement and uses
+the full joint component covariance with the delta method; the total share
+is one with SE zero. For \code{share = "base"}, the component formula is
+\code{Var(delta_g / b) = Var(delta_g) / b^2 +
+delta_g^2 Var(b) / b^4 - 2 delta_g Cov(delta_g, b) / b^3}; the total row
+uses the analogous \code{Cov(total, b_base)} expression.
 \code{share = "base_fixed"} is an explicit descriptive convention that
-scales component SEs while holding the reported base coefficient fixed. It is
-labelled \code{fixed_base_denominator_scaling}, not full ratio inference.
+scales component SEs while holding the reported base coefficient fixed.
+Shares are fractions, remain signed, and are never truncated or
+renormalized. Denominators with absolute value at or below
+\code{share_tol} are marked undefined and returned as missing. Base-based
+shares are also undefined for the implicit intercept because \code{b_base}
+contains X1 coefficients only.
+Defined shares are additionally diagnosed with
+\code{|denominator| / se(denominator)} using \code{$base_cov} for base
+shares and \code{$total_cov} for movement shares. Below
+\code{share_t_min} the point share and numerical SE are retained, while
+\code{share_interval_status} becomes
+\code{"weak_denominator_delta_method_unreliable"} and
+\code{share_se_type} gains
+\code{"_weak_denominator_diagnostic_only"}. One warning routes users to
+\code{xhdfe_gelbach_bootstrap(method = "pairs")}; \code{share_tol} keeps
+its separate absolute-denominator meaning.
+}
 
-Shares are fractions, remain signed, and may be negative or exceed one. They
-are never truncated or renormalized. A denominator whose absolute value is at
-or below \code{share_tol} is marked undefined, emits one visible warning for
-the call, and its shares and confidence intervals are missing.
-Base-based shares are also undefined for the implicit intercept because
-\code{b_base} contains X1 coefficients only.
-}
 \section{Added rows}{
-\code{include_total = TRUE} appends a \code{total_movement} row.
-\code{include_full = TRUE} appends a \code{full_model_residual} row for X1
-coefficients. Its SE and interval are missing because that covariance is not
-exposed by the public result contract. Both are reporting identities; no model
-is re-estimated.
+
+\code{include_total} appends \code{total_movement}. \code{include_full}
+appends \code{full_model_residual}; its SE and interval are missing because
+that covariance is not exposed by the public contract. These rows are
+reporting identities and do not re-estimate either model.
 }
-\seealso{\code{\link{xhdfe_gelbach}}, \code{\link{xhdfe_gelbach_contrast}}}
+
 \examples{
 \dontrun{
 rows <- xhdfe_gelbach_tidy(

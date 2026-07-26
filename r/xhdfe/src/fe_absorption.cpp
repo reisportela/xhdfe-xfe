@@ -10883,9 +10883,9 @@ bool build_mlsmr_domain_from_component(const MlsmrBuildComponent& comp,
         const double ridge = ridge_scale * std::max(1.0, mean_diag);
 
         if (factor_dim > 0 && n_keep <= dense_schur_threshold) {
-            Eigen::MatrixXd minor = Eigen::MatrixXd::Zero(factor_dim, factor_dim);
+            Eigen::MatrixXd schur_minor = Eigen::MatrixXd::Zero(factor_dim, factor_dim);
             for (int i = 0; i < factor_dim; ++i) {
-                minor(i, i) = schur_diag[i] + ridge;
+                schur_minor(i, i) = schur_diag[i] + ridge;
             }
             for (int k = 0; k < n_elim; ++k) {
                 const double inv_d = inv_diag_elim[static_cast<std::size_t>(k)];
@@ -10903,7 +10903,7 @@ bool build_mlsmr_domain_from_component(const MlsmrBuildComponent& comp,
                             if (b >= factor_dim) {
                                 continue;
                             }
-                            minor(a, b) -=
+                            schur_minor(a, b) -=
                                 aw * inv_d * block_elim_data[static_cast<std::size_t>(ib)];
                         }
                     }
@@ -10917,13 +10917,13 @@ bool build_mlsmr_domain_from_component(const MlsmrBuildComponent& comp,
                             if (b.first >= factor_dim) {
                                 continue;
                             }
-                            minor(a.first, b.first) -= a.second * inv_d * b.second;
+                            schur_minor(a.first, b.first) -= a.second * inv_d * b.second;
                         }
                     }
                 }
             }
             auto factor = std::make_shared<Eigen::LDLT<Eigen::MatrixXd>>();
-            factor->compute(minor);
+            factor->compute(schur_minor);
             if (factor->info() != Eigen::Success) {
                 return false;
             }

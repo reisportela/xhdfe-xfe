@@ -1,287 +1,698 @@
-name: release-binaries
+name: Release plugins
 
-# Builds the prebuilt Stata plugin bundles for Linux, Windows and macOS
-# (Apple Silicon) on real GitHub-hosted runners and attaches them to the
-# draft release. A version-tag push runs the complete release transaction:
-# validate tag, create the draft, build and verify every mandatory platform,
-# publish the net-install site, and publish the release only after all gates
-# succeed. Manual dispatch remains available for an exact, already-pushed tag.
-#
-# CPU only, by design: CUDA/Metal binaries are not distributed — GPU is an
-# opt-in optimization built from source. The plugins are COMPILED on each
-# platform's runner (real native artifacts), but Stata itself cannot run on
-# GitHub runners, so Stata runtime certification is performed on the release
-# workstation and reported in the release notes.
-
+# A version tag (v*) builds a draft release. After the exact CI CUDA artifacts
+# pass runtime validation on the maintainer H100, a matching publish-v* marker
+# publishes that existing draft and its net-install snapshot. A plain
+# workflow_dispatch is intentionally non-releasing.
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*'           # build a draft release
+      - 'publish-v*'   # publish only after exact CI CUDA assets pass H100 validation
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag to build and attach to a draft release"
-        required: true
+        description: 'Tag/name for the draft release (manual runs only; release job is skipped unless a tag ref triggers it)'
+        required: false
+        default: ''
 
+# Required so the built-in GITHUB_TOKEN can create the release. No PAT/secret needed.
 permissions:
   contents: write
 
+# Avoid overlapping runs for the same ref clobbering each other's artifacts.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # CUDA fatbin SM targets. SM 70 dropped: the build scripts hard-reject arch < 75
+  # (build-plugin.sh line ~289). H100 (sm_90) requires CUDA >= 12.0.
+  XHDFE_CUDA_ARCHS: '75,80,86,89,90'
 
 jobs:
-  validate-tag:
+  # ---------------------------------------------------------------------------
+  # Linux runner: builds linux-cpu, linux-cuda-fatbin, and Windows x86_64
+  # OpenMP plugins (mingw cross) for xhdfe and xfe. CI proves COMPILE + LINK only:
+  # GitHub-hosted runners have NO GPU and NO Stata license.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    name: Build Linux (CPU + CUDA fatbin) and Windows/OpenMP
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-          fetch-depth: 0
-      - name: Verify exact tag and version
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$(git rev-parse "${TAG}^{commit}")"
-          expected="${TAG#v}"
-          actual="$(python -c 'exec(open("xhdfe/_version.py").read()); print(__version__)')"
-          test "$actual" = "$expected"
-          grep -Fqx "v ${expected%.*}" stata/xhdfe.pkg
-          grep -Fq "project(xhdfe VERSION $expected " CMakeLists.txt
-          echo "release tag verified: $TAG -> $(git rev-parse HEAD)"
-      - name: Create draft release before any asset upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "release already exists: $TAG"
-          else
-            notes="RELEASE_NOTES_${TAG#v}.md"
-            test -f "$notes"
-            gh release create "$TAG" \
-              --draft \
-              --verify-tag \
-              --title "$TAG" \
-              --notes-file "$notes" \
-              --repo "${{ github.repository }}"
-          fi
+      - name: Checkout
+        uses: actions/checkout@v4
 
-  # ---- Linux x86-64 (native, OpenMP) -------------------------------------
-  linux:
-    needs: validate-tag
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-      - name: Build Linux plugins (manylinux2014, CPU, OpenMP)
-        run: |
-          docker run --rm \
-            -v "$PWD":/io \
-            -w /io \
-            -e XHDFE_STATIC_GNU_LIBS=ON \
-            quay.io/pypa/manylinux2014_x86_64 \
-            /bin/bash -lc '
-              set -euo pipefail
-              yum install -y zip curl tar gzip libstdc++-static
-              g++ --version
-              bash stata/tools/build-plugin.sh --linux --openmp
-              bash stata/tools/build-xfe-plugin.sh --linux --openmp
-            '
-      - name: Check Linux binary compatibility
+      - name: Install toolchains (g++, mingw POSIX, binutils, curl, tar)
         run: |
           set -euo pipefail
-          ldd stata/xhdfe.plugin || true
-          ldd stata/xfe.plugin || true
-          if readelf -Ws stata/xhdfe.plugin stata/xfe.plugin | grep -E 'GLIBC_(2\.(1[89]|[2-9][0-9])|[3-9])'; then
-            echo "Linux plugin requires glibc newer than manylinux2014 (2.17)." >&2
-            exit 1
-          fi
-          if readelf -Ws stata/xhdfe.plugin stata/xfe.plugin | grep -E 'GLIBCXX_'; then
-            echo "Linux plugin still has a dynamic libstdc++/GLIBCXX dependency." >&2
-            exit 1
-          fi
-      - name: Save Linux plugin artifacts
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential g++ binutils curl ca-certificates tar gzip zip \
+            g++-mingw-w64-x86-64 \
+            python3-dev python3-pip python3-venv python3-numpy \
+            python3-setuptools python3-wheel r-base-core
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ \
+            /usr/bin/x86_64-w64-mingw32-g++-posix
+          x86_64-w64-mingw32-g++ --version
+
+      - name: Cache build dependencies (Eigen, stplugin.h/.c)
+        uses: actions/cache@v4
+        with:
+          path: stata/tools/_deps
+          key: xhdfe-deps-${{ runner.os }}-eigen340-v1
+
+      - name: Install CUDA toolkit (nvcc + cuobjdump — no driver/GPU)
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: '12.6.3'                       # >=12.0 needed for sm_90; action default is 13.x, so pin explicitly
+          method: 'network'
+          # cuobjdump is required by the fatbin verification step below; nvcc alone
+          # does not install it.
+          sub-packages: '["nvcc", "cuobjdump"]'
+          linux-local-args: '["--toolkit"]'
+
+      - name: Verify nvcc / cuobjdump
         run: |
-          mkdir -p artifacts
+          set -euo pipefail
+          nvcc --version
+          echo "CUDA_PATH=${CUDA_PATH:-unset}"
+          command -v cuobjdump && cuobjdump --version | head -2 || echo "WARN: cuobjdump not on PATH"
+
+      - name: Prepare artifacts dir
+        run: mkdir -p artifacts
+
+      # ---- Linux CPU (portable, OpenMP, no -march=native) ----
+      - name: Build linux-cpu (xhdfe + xfe)
+        run: |
+          set -euo pipefail
+          bash stata/tools/build-plugin.sh --linux --openmp
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cpu
+          bash stata/tools/build-xfe-plugin.sh --linux --openmp
           cp stata/xfe.plugin artifacts/xfe.plugin.linux-cpu
-      - name: Upload Linux plugin artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: plugins-linux
-          path: artifacts/*
 
-  # ---- Windows x86-64 (MinGW cross-compile on Linux) ---------------------
-  windows:
-    needs: validate-tag
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-      - name: Install MinGW toolchain
+      - name: Verify linux-cpu plugins (ELF + libgomp)
         run: |
-          # Drop GitHub's third-party apt repos (packages.microsoft.com is
-          # intermittently degraded and breaks apt-get update); the packages we
-          # need come from the Ubuntu archive.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
-                     /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
-          sudo apt-get update || true
-          sudo apt-get install -y g++-mingw-w64-x86-64 zip
-      - name: Build Windows plugins (CPU, MinGW)
+          set -euo pipefail
+          for f in artifacts/xhdfe.plugin.linux-cpu artifacts/xfe.plugin.linux-cpu; do
+            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
+            ls -la "$f"; file "$f"
+            file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
+            echo "-- ldd (libgomp expected) --"
+            ldd "$f" || true
+            ldd "$f" | grep -q libgomp || { echo "ERROR: libgomp not linked in $f (OpenMP missing)" >&2; exit 1; }
+          done
+
+      # ---- Linux CUDA fatbin (sm_75/80/86/89/90 + compute_90 PTX) ----
+      # Compile/link verified only — no GPU on CI. Maintainer validates on H100.
+      - name: Build linux-cuda fatbin (xhdfe + xfe)
+        env:
+          XHDFE_ENABLE_CUDA: 'ON'
+          # XHDFE_CUDA_ARCHS inherited from workflow env; overrides single-arch default.
         run: |
-          bash stata/tools/build-plugin.sh --windows --no-openmp
-          bash stata/tools/build-xfe-plugin.sh --windows --no-openmp
-      - name: Save Windows plugin artifacts
+          set -euo pipefail
+          bash stata/tools/build-plugin.sh --linux --openmp
+          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cuda
+          bash stata/tools/build-xfe-plugin.sh --linux --openmp
+          cp stata/xfe.plugin artifacts/xfe.plugin.linux-cuda
+
+      - name: Verify linux-cuda fatbin plugins (compile-verified only; no GPU)
         run: |
-          mkdir -p artifacts
+          set -euo pipefail
+          CUOBJDUMP=""
+          if command -v cuobjdump >/dev/null 2>&1; then
+            CUOBJDUMP="$(command -v cuobjdump)"
+          elif [ -x "${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump" ]; then
+            CUOBJDUMP="${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump"
+          fi
+          for f in artifacts/xhdfe.plugin.linux-cuda artifacts/xfe.plugin.linux-cuda; do
+            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
+            ls -la "$f"; file "$f"
+            file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
+            echo "-- ldd (libgomp expected; CUDA runtime is STATICALLY linked, so libcudart will NOT appear here) --"
+            ldd "$f" || true
+            ldd "$f" | grep -q libgomp || { echo "ERROR: libgomp not linked in $f (OpenMP missing)" >&2; exit 1; }
+            # Do NOT assert libcudart via ldd: the plugin links libcudart_static (nvcc default),
+            # so it is intentionally absent from ldd. Embedded CUDA code is proven by cuobjdump below.
+            if [ -n "$CUOBJDUMP" ]; then
+              echo "-- embedded SASS arches ($CUOBJDUMP --list-elf) --"
+              "$CUOBJDUMP" --list-elf "$f" || true
+              echo "-- embedded PTX ($CUOBJDUMP --list-ptx) --"
+              "$CUOBJDUMP" --list-ptx "$f" || true
+              for arch in sm_75 sm_80 sm_86 sm_89 sm_90; do
+                "$CUOBJDUMP" --list-elf "$f" | grep -q "$arch" \
+                  || { echo "ERROR: $arch missing from fatbin in $f" >&2; exit 1; }
+              done
+              # cuobjdump --list-ptx labels the forward-compat PTX as "sm_90.ptx"
+              # (named by the SM target, though it is compute_90 virtual PTX).
+              "$CUOBJDUMP" --list-ptx "$f" | grep -qE 'sm_90|compute_90' \
+                || { echo "ERROR: sm_90/compute_90 PTX missing from fatbin in $f" >&2; exit 1; }
+              echo "OK: fatbin contains sm_75/80/86/89/90 SASS + compute_90 PTX"
+            else
+              # Do not silently pass if the fatbin cannot be inspected at all.
+              echo "ERROR: cuobjdump unavailable; cannot verify fatbin arches for $f" >&2
+              exit 1
+            fi
+          done
+
+      # ---- Windows x86_64 CPU/OpenMP (mingw POSIX cross-compile) ----
+      # OpenMP is mandatory for production plugins. The two runtime DLLs are
+      # shipped beside the plugins so Windows' DLL loader resolves them from the
+      # package directory without a machine-wide installation.
+      - name: Build windows-cpu OpenMP (xhdfe + xfe, mingw cross)
+        run: |
+          set -euo pipefail
+          bash stata/tools/build-plugin.sh --windows --openmp
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
+          bash stata/tools/build-xfe-plugin.sh --windows --openmp
           cp stata/xfe.plugin artifacts/xfe.plugin.windows
-      - name: Upload Windows plugin artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: plugins-windows
-          path: artifacts/*
-      - name: Package bundle
-        run: bash .github/scripts/make_stata_bundle.sh windows-x86_64-cpu
-      - name: Attach to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" xhdfe-stata-windows-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
+          LIBGOMP="$(x86_64-w64-mingw32-g++ -print-file-name=libgomp-1.dll)"
+          LIBWINPTHREAD="$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)"
+          test -f "$LIBGOMP"
+          test -f "$LIBWINPTHREAD"
+          cp "$LIBGOMP" artifacts/libgomp-1.dll
+          cp "$LIBWINPTHREAD" artifacts/libwinpthread-1.dll
 
-  # ---- macOS universal (x86-64 + Apple Silicon arm64) --------------------
-  macos:
-    needs: validate-tag
-    runs-on: macos-14           # Apple Silicon
-    steps:
-      - uses: actions/checkout@v7
+      - name: Verify windows-cpu plugins (PE32+ + OpenMP runtime)
+        run: |
+          set -euo pipefail
+          for f in artifacts/xhdfe.plugin.windows artifacts/xfe.plugin.windows; do
+            test -f "$f"
+            file "$f" | grep -Eq 'PE32\+|PE32 '
+            file "$f" | grep -q 'ELF' && {
+              echo "ERROR: $f is ELF, not a Windows PE plugin." >&2
+              exit 1
+            }
+            x86_64-w64-mingw32-objdump -p "$f" |
+              grep -qi 'DLL Name: libgomp-1.dll' || {
+                echo "ERROR: OpenMP runtime dependency missing in $f." >&2
+                exit 1
+              }
+          done
+          for f in artifacts/libgomp-1.dll artifacts/libwinpthread-1.dll; do
+            test -f "$f"
+            file "$f" | grep -Eq 'PE32\+|PE32 '
+          done
+
+      - name: Build and smoke-test Python wheel/sdist and R source package
+        env:
+          XHDFE_ENABLE_CUDA: 'OFF'
+          XHDFE_ENABLE_MARCH_NATIVE: 'OFF'
+        run: |
+          set -euo pipefail
+          python3 -m venv --system-site-packages /tmp/xhdfe-wheel-build
+          /tmp/xhdfe-wheel-build/bin/python -m pip wheel . \
+            --no-build-isolation --no-deps --wheel-dir artifacts
+          /tmp/xhdfe-wheel-build/bin/python setup.py sdist --dist-dir artifacts
+          python3 -m venv --system-site-packages /tmp/xhdfe-wheel-smoke
+          WHEELS=(artifacts/xhdfe-*.whl)
+          test "${#WHEELS[@]}" -eq 1
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install \
+            --no-deps "${WHEELS[0]}"
+          (
+            cd /tmp
+            /tmp/xhdfe-wheel-smoke/bin/python -c \
+              'import numpy as np; import xhdfe; from xhdfe import gelbach; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == "2.21.0.20260725"; print("PYTHON_WHEEL_SMOKE_PASS")'
+          )
+          R CMD build --no-build-vignettes --no-manual r/xhdfe
+          R_TARBALL="xhdfe_2.21.0.20260725.tar.gz"
+          test -f "$R_TARBALL"
+          mv "$R_TARBALL" artifacts/
+          ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
+            artifacts/xhdfe_*.tar.gz
+
+      - name: Upload Linux/Windows plugin artifacts
+        uses: actions/upload-artifact@v4
         with:
-          ref: ${{ env.TAG }}
-      - name: Install zip
-        run: brew install zip || true
-      - name: Build macOS universal plugins (CPU, serial)
-        # Apple clang does not accept plain -fopenmp; ship a serial macOS
-        # binary for now. OpenMP on macOS (libomp) is a follow-up.
+          name: plugins-linux            # MUST be unique per job (v4 artifacts are immutable)
+          path: |
+            artifacts/xhdfe.plugin.linux-cpu
+            artifacts/xfe.plugin.linux-cpu
+            artifacts/xhdfe.plugin.linux-cuda
+            artifacts/xfe.plugin.linux-cuda
+            artifacts/xhdfe.plugin.windows
+            artifacts/xfe.plugin.windows
+            artifacts/libgomp-1.dll
+            artifacts/libwinpthread-1.dll
+            artifacts/xhdfe-*.whl
+            artifacts/xhdfe-*.tar.gz
+            artifacts/xhdfe_*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # macOS Apple Silicon runner: builds a universal (x86_64 + arm64) Mach-O
+  # bundle for both xhdfe and xfe. No OpenMP (Apple clang rejects bare -fopenmp;
+  # the script forces OpenMP OFF on Darwin). The xfe script is run under Homebrew
+  # bash 5.x to dodge a `set -u` empty `metal_flags[@]` bug present only in
+  # build-xfe-plugin.sh (breaks under macOS stock bash 3.2).
+  # ---------------------------------------------------------------------------
+  build-macos:
+    name: Build macOS universal (CPU, no OpenMP)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14                    # arm64 / Apple Silicon
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache build dependencies (Eigen, stplugin.h/.c)
+        uses: actions/cache@v4
+        with:
+          path: stata/tools/_deps
+          key: xhdfe-deps-${{ runner.os }}-eigen340-v1
+
+      - name: Install bash 5.x (for the xfe build script's empty-array safety)
         run: |
-          bash stata/tools/build-plugin.sh --no-openmp
-          bash stata/tools/build-xfe-plugin.sh --no-openmp
-      - name: Save macOS plugin artifacts
+          set -euo pipefail
+          brew install bash
+          BREW_BASH="$(brew --prefix)/bin/bash"
+          "$BREW_BASH" --version | head -1
+          echo "BREW_BASH=$BREW_BASH" >> "$GITHUB_ENV"
+
+      - name: Prepare artifacts dir
+        run: mkdir -p artifacts
+
+      # macOS: do NOT pass --openmp (Apple clang rejects bare -fopenmp; the script
+      # forces OpenMP off on Darwin anyway). Pass --linux: on Darwin the script maps
+      # it to the Unix path but the Darwin-specific -bundle/lipo/APPLEMAC branches
+      # still fire because they key on `uname -s == Darwin`. Always builds a
+      # universal x86_64+arm64 bundle.
+      - name: Build macos universal (xhdfe + xfe)
         run: |
-          mkdir -p artifacts
+          set -euo pipefail
+          bash stata/tools/build-plugin.sh --linux
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.macos
+          # Run xfe under Homebrew bash 5.x if available, else fall back to /bin/bash.
+          BREW_BASH="${BREW_BASH:-$(brew --prefix)/bin/bash}"
+          if [ -x "$BREW_BASH" ]; then
+            echo "Using Homebrew bash: $BREW_BASH"
+            "$BREW_BASH" stata/tools/build-xfe-plugin.sh --linux
+          else
+            echo "WARN: Homebrew bash not found; falling back to system bash (3.2 metal_flags bug risk)"
+            bash stata/tools/build-xfe-plugin.sh --linux
+          fi
           cp stata/xfe.plugin artifacts/xfe.plugin.macos
-      - name: Upload macOS plugin artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: plugins-macos
-          path: artifacts/*
-      - name: Package bundle
-        run: bash .github/scripts/make_stata_bundle.sh macos-universal-cpu
-      - name: Attach to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" xhdfe-stata-macos-universal-cpu.zip --clobber --repo "${{ github.repository }}"
 
-  # ---- Online Stata net-install site ------------------------------------
-  publish-netinstall:
-    runs-on: ubuntu-latest
-    needs: [linux, windows, macos]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ env.TAG }}
-      - name: Install zip
+      - name: Ad-hoc codesign (cosmetic; not notarized)
         run: |
-          # Drop GitHub's third-party apt repos (packages.microsoft.com is
-          # intermittently degraded and breaks apt-get update); zip comes from
-          # the Ubuntu archive.
-          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
-                     /etc/apt/sources.list.d/azure-cli.list 2>/dev/null || true
-          sudo apt-get update || true
-          sudo apt-get install -y zip
-      - name: Download plugin artifacts
-        uses: actions/download-artifact@v8
+          set -euo pipefail
+          codesign -s - --force artifacts/xhdfe.plugin.macos || true
+          codesign -s - --force artifacts/xfe.plugin.macos || true
+
+      - name: "Verify macos universal plugins (Mach-O fat: x86_64 + arm64)"
+        run: |
+          set -euo pipefail
+          for f in artifacts/xhdfe.plugin.macos artifacts/xfe.plugin.macos; do
+            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
+            ls -la "$f"; file "$f"
+            file "$f" | grep -q 'Mach-O' \
+              || { echo "ERROR: not a Mach-O object: $f" >&2; exit 1; }
+            echo "-- lipo -archs --"
+            lipo -archs "$f" || true
+            # arm64 is the required target ("Mac ARM"); x86_64 is a bonus universal slice.
+            lipo -archs "$f" | grep -q 'arm64'  || { echo "ERROR: missing arm64 slice in $f"  >&2; exit 1; }
+            lipo -archs "$f" | grep -q 'x86_64' && echo "OK: universal (also has x86_64)" || echo "NOTE: arm64-only (no x86_64 slice) -- acceptable for Mac ARM"
+            echo "-- otool -L --"
+            otool -L "$f" || true
+          done
+
+      - name: Upload macOS plugin artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-macos            # unique per job (v4 immutability)
+          path: |
+            artifacts/xhdfe.plugin.macos
+            artifacts/xfe.plugin.macos
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Release staging: assemble per-platform Stata bundles, attach the raw CUDA
+  # fatbins and an offline source/runtime ZIP, and create a DRAFT release.
+  # Publication and gh-pages promotion are a separate H100-certified marker job.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Build and stage DRAFT GitHub Release
+    needs: [build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zip + python (for bundle assembly / offline packaging)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zip unzip python3
+
+      - name: Download all plugin artifacts
+        uses: actions/download-artifact@v4
         with:
           path: dl
           pattern: plugins-*
-          merge-multiple: true
-      - name: Package and attach Linux bundle
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp dl/xhdfe.plugin.linux-cpu stata/xhdfe.plugin
-          cp dl/xfe.plugin.linux-cpu stata/xfe.plugin
-          bash .github/scripts/make_stata_bundle.sh linux-x86_64-cpu
-          gh release upload "$TAG" xhdfe-stata-linux-x86_64-cpu.zip --clobber --repo "${{ github.repository }}"
-      - name: Stage Stata net-install site
+          merge-multiple: true           # flatten plugins-linux + plugins-macos into dl/
+
+      - name: List downloaded plugins (fail-fast on any missing REQUIRED variant)
         run: |
           set -euo pipefail
+          echo "== downloaded artifacts =="
           ls -la dl
-          bash tools/stage_stata_netinstall_site.sh netinstall_site/stata \
+          # Required set: Linux CPU + Linux CUDA + Windows/OpenMP + macOS.
+          for f in \
+            dl/xhdfe.plugin.linux-cpu dl/xfe.plugin.linux-cpu \
+            dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda \
+            dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
+            dl/libgomp-1.dll dl/libwinpthread-1.dll \
+            dl/xhdfe.plugin.macos dl/xfe.plugin.macos ; do
+            test -f "$f" || { echo "MISSING required plugin: $f" >&2; exit 1; }
+          done
+          PY_WHEELS=(dl/xhdfe-*.whl)
+          PY_SDISTS=(dl/xhdfe-*.tar.gz)
+          R_TARBALLS=(dl/xhdfe_*.tar.gz)
+          test "${#PY_WHEELS[@]}" -eq 1
+          test "${#PY_SDISTS[@]}" -eq 1
+          test "${#R_TARBALLS[@]}" -eq 1
+
+      - name: Assemble per-platform Stata bundles + release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+
+          # Shared, platform-independent Stata package files.
+          SHARED=(
+            stata/xhdfe.ado stata/xhdfe.sthlp stata/xhdfe.pkg
+            stata/xhdfe_p.ado stata/xhdfe_estat.ado
+            stata/xhdfeakm.ado stata/xhdfeakm.sthlp
+            stata/xhdfeconnected.ado stata/xhdfeconnected.sthlp
+            stata/xhdfegelbach.ado stata/xhdfegelbach.sthlp
+            stata/xhdfegelbachbootstrap.ado stata/xhdfegelbachbootstrap.sthlp
+            stata/xhdfegelbachetable.ado stata/xhdfegelbachetable.sthlp
+            stata/xhdfegelbachcoefplot.ado stata/xhdfegelbachcoefplot.sthlp
+            stata/xhdfegpu.ado stata/xhdfegpu.sthlp
+            stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg
+            stata/stata.toc
+          )
+          for s in "${SHARED[@]}"; do
+            test -f "$s" || { echo "MISSING shared Stata file: $s" >&2; exit 1; }
+          done
+
+          # bundle <zipname> <xhdfe-plugin-src> <xfe-plugin-src>
+          # Stages the platform plugins under canonical names + the shared files,
+          # then zips. The canonical names (xhdfe.plugin / xfe.plugin) are what
+          # Stata loads at runtime.
+          bundle() {
+            local zipname="$1" xhdfe_src="$2" xfe_src="$3"
+            shift 3
+            test -f "$xhdfe_src" || { echo "MISSING plugin src: $xhdfe_src" >&2; exit 1; }
+            test -f "$xfe_src"   || { echo "MISSING plugin src: $xfe_src"   >&2; exit 1; }
+            local stage; stage="$(mktemp -d)"
+            cp "$xhdfe_src" "$stage/xhdfe.plugin"
+            cp "$xfe_src"   "$stage/xfe.plugin"
+            local s
+            for s in "${SHARED[@]}"; do cp "$s" "$stage/"; done
+            for s in "$@"; do
+              test -f "$s" || { echo "MISSING runtime dependency: $s" >&2; exit 1; }
+              cp "$s" "$stage/"
+            done
+            ( cd "$stage" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/$zipname" . )
+            rm -rf "$stage"
+            echo "built release_assets/$zipname"
+            unzip -l "release_assets/$zipname"
+          }
+
+          bundle xhdfe_xfe-stata-linux-cpu.zip       dl/xhdfe.plugin.linux-cpu  dl/xfe.plugin.linux-cpu
+          bundle xhdfe_xfe-stata-linux-cuda.zip      dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda
+          bundle xhdfe_xfe-stata-macos-universal.zip dl/xhdfe.plugin.macos      dl/xfe.plugin.macos
+          bundle xhdfe_xfe-stata-windows-cpu.zip \
+            dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
+            dl/libgomp-1.dll dl/libwinpthread-1.dll
+
+          # Also attach the raw CUDA fatbin plugins separately (for direct H100 validation).
+          cp dl/xhdfe.plugin.linux-cuda release_assets/xhdfe-linux-cuda.plugin
+          cp dl/xfe.plugin.linux-cuda   release_assets/xfe-linux-cuda.plugin
+          cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz dl/xhdfe_*.tar.gz release_assets/
+
+          # ---- Autonomous offline source + multi-platform runtime bundle ----
+          # Build from the exact tagged tree; never select a historical dist/*.zip.
+          # The archive contains every tracked source/build input (including vendored
+          # Eigen, pybind11, Rcpp, and stplugin inputs) plus the exact CI Linux,
+          # Windows, and macOS plugins. CI itself proves compile/link only. Publication remains
+          # blocked until those exact CUDA bytes are downloaded from this run and
+          # exercised on the maintainer H100; only then is a publish-v* marker pushed.
+          OFFLINE_NAME="xhdfe_xfe-offline-source-and-platform-binaries.zip"
+          OFFLINE_STAGE="$(mktemp -d)"
+          git archive --format=tar HEAD | tar -xf - -C "$OFFLINE_STAGE"
+          mkdir -p "$OFFLINE_STAGE/prebuilt/linux_x86_64"
+          cp dl/xhdfe.plugin.linux-cpu \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xhdfe_cpu.plugin"
+          cp dl/xfe.plugin.linux-cpu \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfe_cpu.plugin"
+          cp dl/xhdfe.plugin.linux-cuda \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xhdfe_cuda_fatbin.plugin"
+          cp dl/xfe.plugin.linux-cuda \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfe_cuda_fatbin.plugin"
+          mkdir -p "$OFFLINE_STAGE/prebuilt/windows_x86_64"
+          cp dl/xhdfe.plugin.windows \
+            "$OFFLINE_STAGE/prebuilt/windows_x86_64/xhdfe.plugin"
+          cp dl/xfe.plugin.windows \
+            "$OFFLINE_STAGE/prebuilt/windows_x86_64/xfe.plugin"
+          cp dl/libgomp-1.dll dl/libwinpthread-1.dll \
+            "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
+          mkdir -p "$OFFLINE_STAGE/prebuilt/macos_universal"
+          cp dl/xhdfe.plugin.macos \
+            "$OFFLINE_STAGE/prebuilt/macos_universal/xhdfe.plugin"
+          cp dl/xfe.plugin.macos \
+            "$OFFLINE_STAGE/prebuilt/macos_universal/xfe.plugin"
+          mkdir -p "$OFFLINE_STAGE/packages/python" "$OFFLINE_STAGE/packages/R"
+          cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz \
+            "$OFFLINE_STAGE/packages/python/"
+          cp dl/xhdfe_*.tar.gz "$OFFLINE_STAGE/packages/R/"
+          cp dl/xhdfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xhdfe.plugin"
+          cp dl/xfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xfe.plugin"
+          cat > "$OFFLINE_STAGE/OFFLINE_ARTIFACT_SCOPE.md" <<'EOF'
+          # Offline artifact scope
+
+          This archive is generated from the exact tagged Git tree and contains
+          the installable Stata package, C++/CUDA/Python/R/Stata sources, build
+          scripts, package metadata, validation programs, and vendored third-party
+          inputs required by the documented offline build paths. It also contains
+          the release Python wheel/source distribution and R source package.
+
+          `stata/xhdfe.plugin` and `stata/xfe.plugin` are portable Linux CPU/OpenMP
+          defaults. `prebuilt/` also contains the exact Linux CUDA fatbins,
+          Windows x86_64 OpenMP plugins and runtime DLLs, and macOS universal
+          plugins from the release workflow.
+
+          GitHub-hosted CI has no Stata licence or GPU and therefore certifies only
+          compilation, linking, binary format, OpenMP linkage, and embedded CUDA
+          architectures. The release remains a draft until the exact CUDA plugins
+          from this workflow have been executed successfully on the maintainer H100.
+          The `publish-v*` marker records completion of that external runtime gate.
+          EOF
+          (
+            cd "$OFFLINE_STAGE"
+            find . -type f ! -name MANIFEST.sha256 -print0 |
+              sort -z |
+              xargs -0 sha256sum > MANIFEST.sha256
+            sha256sum -c MANIFEST.sha256
+            zip -q -r -X "$GITHUB_WORKSPACE/release_assets/$OFFLINE_NAME" .
+          )
+          rm -rf "$OFFLINE_STAGE"
+          echo "built release_assets/$OFFLINE_NAME"
+
+          # ---- Online Stata net-install site ----
+          # This is the unpacked site published to the gh-pages branch.  The
+          # generated .pkg files use Stata platform-specific g lines, so one URL
+          # can serve Linux, macOS, and Windows when the corresponding plugin
+          # artifacts are present.
+          bash tools/stage_stata_netinstall_site.sh "$GITHUB_WORKSPACE/netinstall_site/stata" \
             --linux-xhdfe dl/xhdfe.plugin.linux-cpu \
             --linux-xfe   dl/xfe.plugin.linux-cpu \
             --macos-xhdfe dl/xhdfe.plugin.macos \
             --macos-xfe   dl/xfe.plugin.macos \
             --windows-xhdfe dl/xhdfe.plugin.windows \
-            --windows-xfe   dl/xfe.plugin.windows
-          bash tools/validate_stata_package_site.sh netinstall_site/stata
-      - name: Build offline source distribution zip (for xhdfegpu)
+            --windows-xfe   dl/xfe.plugin.windows \
+            --windows-libgomp dl/libgomp-1.dll \
+            --windows-libwinpthread dl/libwinpthread-1.dll
+          ( cd "$GITHUB_WORKSPACE/netinstall_site" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/xhdfe_xfe-stata-netinstall-site.zip" . )
+          echo "built release_assets/xhdfe_xfe-stata-netinstall-site.zip"
+
+          (
+            cd release_assets
+            find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -printf '%P\0' |
+              sort -z |
+              xargs -0 sha256sum > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+
+          echo "== final release assets =="
+          ls -la release_assets
+
+      - name: Write release notes body
+        run: |
+          set -euo pipefail
+          cat > release_body.md <<EOF
+          # xhdfe / xfe — ${{ github.ref_name }} (DRAFT)
+
+          Stata plugins built automatically on GitHub-hosted runners.
+
+          > **CI proves COMPILE + LINK only.** GitHub runners have **no GPU** and
+          > **no Stata license**, so there is **no Stata-functional validation and no
+          > GPU execution in CI**. The Linux CUDA fatbin is **COMPILE-VERIFIED ONLY**
+          > and **must be GPU-validated on real hardware** (e.g. an NVIDIA H100,
+          > \`sm_90\`) before this draft is published. This release is a **DRAFT** until
+          > a maintainer completes that validation.
+
+          ## Online Stata install
+
+          After the exact CUDA artifacts pass the external H100 gate, the
+          \`publish-v*\` workflow publishes this snapshot to \`gh-pages\` and
+          Stata can install the OS-appropriate plugin from one URL:
+
+          \`\`\`stata
+          net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+          net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+          \`\`\`
+
+          The online \`.pkg\` files use Stata's platform-specific \`g\` lines:
+          Linux installs the portable CPU/OpenMP plugin, macOS installs the
+          universal CPU plugin, and Windows installs the Windows plugin when that
+          build artifact exists.
+
+          ## Assets
+
+          ### Per-platform Stata bundles (plugin renamed to canonical \`xhdfe.plugin\` / \`xfe.plugin\` + shared ado/sthlp/pkg/stata.toc)
+          - \`xhdfe_xfe-stata-linux-cpu.zip\` — **Linux x86_64, CPU/OpenMP** (portable ELF, links libgomp; no \`-march=native\`).
+          - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; links libcudart + libgomp). GPU path **compile-verified only — validate on real GPU**.
+          - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows 11 x86_64, CPU/OpenMP** (PE32+ plugins plus the required \`libgomp-1.dll\` and \`libwinpthread-1.dll\` runtime files).
+          - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfe.plugin\` before Stata loads them.
+
+          ### Raw CUDA fatbin plugins (for direct H100 validation)
+          - \`xhdfe-linux-cuda.plugin\`, \`xfe-linux-cuda.plugin\` — the same Linux CUDA binaries as in the CUDA bundle, attached standalone.
+
+          ### Python and R packages
+          - \`xhdfe-2.21.0.20260725-*.whl\` — Linux x86_64 CPU wheel, installed
+            and exercised from an isolated environment in CI; use the source
+            distribution on systems with an incompatible glibc/Python ABI.
+          - \`xhdfe-2.21.0.20260725.tar.gz\` — Python source distribution.
+          - \`xhdfe_2.21.0.20260725.tar.gz\` — R source package.
+
+          ### Offline source bundle
+          - \`xhdfe_xfe-offline-source-and-platform-binaries.zip\` — exact tagged
+            sources, vendored offline build inputs, and the exact Linux CPU/CUDA,
+            Windows 11 x86_64 OpenMP, and macOS universal plugins from this workflow.
+
+          ### Online net-install site snapshot
+          - \`xhdfe_xfe-stata-netinstall-site.zip\` — the exact \`stata/\` tree published to \`gh-pages\` for online \`net install\`.
+
+          ### Integrity
+          - \`SHA256SUMS.txt\` — SHA-256 digest for every separately downloadable release asset.
+
+          ## Build matrix
+          | Platform | Backend | Runner | Notes |
+          |---|---|---|---|
+          | Linux x86_64 | CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
+          | Linux x86_64 | CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; **GPU-validate** |
+          | Windows 11 x86_64 | CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
+          | macOS x86_64+arm64 | CPU | macos-14 | universal bundle, no OpenMP |
+          EOF
+          echo "---- release body ----"
+          cat release_body.md
+
+      - name: Create DRAFT release with assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true                              # nothing public until a maintainer reviews + publishes
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: release_body.md
+          fail_on_unmatched_files: true
+          files: |
+            release_assets/*.zip
+            release_assets/*.plugin
+            release_assets/*.whl
+            release_assets/*.tar.gz
+            release_assets/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # built-in token; no extra secrets
+
+      - name: Keep release draft pending exact H100 validation
+        run: |
+          set -euo pipefail
+          echo "Draft assets are ready for external runtime certification."
+          echo "Download plugins-linux from this workflow run and exercise the exact"
+          echo "CUDA fatbins on the H100. Publish only by pushing"
+          echo "publish-${{ github.ref_name }} at this same commit after that gate passes."
+
+  # ---------------------------------------------------------------------------
+  # Publication marker: this job never rebuilds or substitutes artifacts. It
+  # publishes the pre-existing draft and the net-install snapshot only after a
+  # maintainer has validated the exact CUDA bytes from the version-tag run on
+  # real hardware and pushes publish-v<version> at the same commit.
+  # ---------------------------------------------------------------------------
+  publish-certified:
+    name: Publish H100-certified draft and net-install site
+    if: startsWith(github.ref, 'refs/tags/publish-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve and verify target release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Self-contained sources (C++/Stata/Python/R, CPU+GPU, all deps
-          # vendored) that xhdfegpu downloads to build a CUDA plugin, and that
-          # anyone can use to rebuild offline. Published into the net-install
-          # site so it lands at <gh-pages>/stata/xhdfe-src.zip.
-          bash tools/make_source_dist_zip.sh netinstall_site/stata/xhdfe-src.zip
-          bash tools/validate_source_dist_zip.sh netinstall_site/stata/xhdfe-src.zip
-          gh release upload "$TAG" netinstall_site/stata/xhdfe-src.zip --clobber --repo "${{ github.repository }}"
-      - name: Build autonomous offline bundle (installables + sources)
+          TARGET="${GITHUB_REF_NAME#publish-}"
+          test -n "$TARGET"
+          TARGET_SHA="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/tags/$TARGET^{}" | cut -f1)"
+          if [ -z "$TARGET_SHA" ]; then
+            TARGET_SHA="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
+              "refs/tags/$TARGET" | cut -f1)"
+          fi
+          test "$TARGET_SHA" = "$GITHUB_SHA" || {
+              echo "ERROR: publish marker and version tag do not resolve to the same commit." >&2
+              exit 1
+            }
+          test "$(gh release view "$TARGET" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft)" = "true" || {
+              echo "ERROR: target release is absent or is no longer a draft." >&2
+              exit 1
+            }
+          echo "TARGET_RELEASE=$TARGET" >> "$GITHUB_ENV"
+
+      - name: Download exact net-install snapshot from draft
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          root="xhdfe-offline-${TAG#v}"
-          rm -rf _offline xhdfe-offline-bundle.zip
-          mkdir -p "_offline/$root/installable" "_offline/$root/sources"
-          cp -a netinstall_site/. "_offline/$root/installable/"
-          unzip -q netinstall_site/stata/xhdfe-src.zip -d "_offline/$root/sources"
-          cp "RELEASE_NOTES_${TAG#v}.md" "_offline/$root/README.md"
-          rcpp="_offline/$root/sources/xhdfe-src/third_party/Rcpp_1.1.2.tar.gz"
-          test -f "$rcpp"
-          echo "2746cf2fb188e5f0a84dbf5c8f68915b54564ed33e5754572f174e7b32e7f4f3  $rcpp" \
-            | sha256sum --check -
-          ( cd _offline && zip -q -r -X ../xhdfe-offline-bundle.zip "$root" )
-          unzip -t xhdfe-offline-bundle.zip
-          unzip -Z1 xhdfe-offline-bundle.zip > _offline_bundle_listing.txt
-          grep -Fxq "$root/sources/xhdfe-src/third_party/Rcpp_1.1.2.tar.gz" \
-            _offline_bundle_listing.txt
-          grep -Fxq "$root/sources/xhdfe-src/third_party/RCPP_SOURCE_PROVENANCE.md" \
-            _offline_bundle_listing.txt
-          gh release upload "$TAG" xhdfe-offline-bundle.zip --clobber --repo "${{ github.repository }}"
-      - name: Attach net-install site snapshot to release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ( cd netinstall_site && zip -q -r -X ../xhdfe-stata-netinstall-site.zip . )
-          unzip -t xhdfe-stata-netinstall-site.zip
-          unzip -Z1 xhdfe-stata-netinstall-site.zip | grep -Fxq 'stata/xhdfe-src.zip'
-          gh release upload "$TAG" xhdfe-stata-netinstall-site.zip --clobber --repo "${{ github.repository }}"
-      - name: Publish Stata net-install site to gh-pages
+          mkdir -p netinstall_site
+          gh release download "$TARGET_RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern xhdfe_xfe-stata-netinstall-site.zip
+          unzip -q xhdfe_xfe-stata-netinstall-site.zip -d netinstall_site
+          test -f netinstall_site/stata/xhdfe.pkg
+          test -f netinstall_site/stata/xhdfegelbachbootstrap.ado
+
+      - name: Publish certified Stata net-install site to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
           publish_dir: ./netinstall_site
-          commit_message: Publish Stata net-install site for ${{ env.TAG }}
-      - name: Publish release after all build, archive, and site gates
+          commit_message: Publish H100-certified Stata site for ${{ env.TARGET_RELEASE }}
+
+      - name: Publish certified release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release edit "$TAG" \
+          gh release edit "$TARGET_RELEASE" \
             --draft=false \
             --latest \
-            --repo "${{ github.repository }}"
+            --repo "$GITHUB_REPOSITORY"

@@ -1,4 +1,4 @@
-v 2.20.0
+v 2.21.0
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d Installs xhdfe and its companion commands (xfe, xhdfeakm, xhdfeconnected,
@@ -15,6 +15,12 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegelbachbootstrap.ado
+f xhdfegelbachbootstrap.sthlp
+f xhdfegelbachetable.ado
+f xhdfegelbachetable.sthlp
+f xhdfegelbachcoefplot.ado
+f xhdfegelbachcoefplot.sthlp
 f xhdfegpu.ado
 f xhdfegpu.sthlp
 f xfe.ado

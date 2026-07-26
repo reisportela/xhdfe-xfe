@@ -3254,12 +3254,21 @@ int count_bipartite_components(const Eigen::VectorXi& base_raw,
                                const Eigen::VectorXi& other_raw,
                                const FeLookup& base,
                                const FeLookup& other,
-                               Eigen::VectorXi* edge_components) {
+                               Eigen::VectorXi* edge_components,
+                               FeComponentStats* component_stats = nullptr,
+                               const Eigen::VectorXd* weights = nullptr) {
     if (base.num_groups <= 0 || other.num_groups <= 0) {
         return 0;
     }
     if (base_raw.size() != other_raw.size()) {
         throw std::runtime_error("Bipartite FE vectors must have the same length");
+    }
+    if (weights != nullptr && weights->size() != base_raw.size()) {
+        throw std::runtime_error(
+            "Bipartite component weights must match the FE vectors");
+    }
+    if (component_stats != nullptr) {
+        *component_stats = FeComponentStats{};
     }
     const int total_nodes = base.num_groups + other.num_groups;
     UnionFind uf(total_nodes);
@@ -3269,7 +3278,7 @@ int count_bipartite_components(const Eigen::VectorXi& base_raw,
         uf.unite(a, base.num_groups + b);
     }
 
-    if (!edge_components) {
+    if (edge_components == nullptr && component_stats == nullptr) {
         int components = 0;
         for (int node = 0; node < total_nodes; ++node) {
             if (uf.find(node) == node) {
@@ -3279,7 +3288,8 @@ int count_bipartite_components(const Eigen::VectorXi& base_raw,
         return components;
     }
 
-    std::vector<int> root_to_component(static_cast<std::size_t>(total_nodes), -1);
+    std::vector<int> root_to_component(
+        static_cast<std::size_t>(total_nodes), -1);
     int components = 0;
     for (int node = 0; node < total_nodes; ++node) {
         const int root = uf.find(node);
@@ -3288,12 +3298,62 @@ int count_bipartite_components(const Eigen::VectorXi& base_raw,
         }
     }
 
-    edge_components->resize(base_raw.size());
+    std::vector<long long> counts;
+    std::vector<long double> weight_sums;
+    long double total_weight = 0.0L;
+    if (component_stats != nullptr) {
+        counts.assign(static_cast<std::size_t>(components), 0);
+        if (weights != nullptr) {
+            weight_sums.assign(
+                static_cast<std::size_t>(components), 0.0L);
+        }
+    }
+    if (edge_components != nullptr) {
+        edge_components->resize(base_raw.size());
+    }
     for (int i = 0; i < base_raw.size(); ++i) {
-        const int a = base.index(base_raw(i));
-        const int root = uf.find(a);
-        const int comp = root_to_component[static_cast<std::size_t>(root)];
-        (*edge_components)(i) = comp + 1;  // 1-based, like Stata's groupvar()
+        const int root = uf.find(base.index(base_raw(i)));
+        const int component =
+            root_to_component[static_cast<std::size_t>(root)];
+        if (edge_components != nullptr) {
+            (*edge_components)(i) =
+                component + 1;  // 1-based, like Stata's groupvar()
+        }
+        if (component_stats != nullptr) {
+            const std::size_t index = static_cast<std::size_t>(component);
+            counts[index] += 1;
+            if (weights != nullptr) {
+                const double weight = (*weights)(i);
+                if (!(weight > 0.0) || !(weight < 1e300)) {
+                    throw std::runtime_error(
+                        "Bipartite component weights must be finite and "
+                        "positive");
+                }
+                weight_sums[index] += static_cast<long double>(weight);
+                total_weight += static_cast<long double>(weight);
+            }
+        }
+    }
+    if (component_stats != nullptr) {
+        component_stats->num_components = components;
+        long double largest_weight = 0.0L;
+        for (std::size_t c = 0; c < counts.size(); ++c) {
+            component_stats->largest_component_n_obs =
+                std::max(
+                    component_stats->largest_component_n_obs, counts[c]);
+            if (weights != nullptr) {
+                largest_weight = std::max(
+                    largest_weight, weight_sums[c]);
+            }
+        }
+        component_stats->largest_component_obs_share =
+            static_cast<double>(
+                component_stats->largest_component_n_obs) /
+            static_cast<double>(base_raw.size());
+        component_stats->largest_component_weight_share =
+            weights == nullptr
+                ? component_stats->largest_component_obs_share
+                : static_cast<double>(largest_weight / total_weight);
     }
     return components;
 }
@@ -3358,8 +3418,13 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                                  const std::vector<int>& fe_levels,
                                  DofAdjustmentMethod method,
                                  Eigen::VectorXi* groupvar,
-                                 int threads) {
+                                 int threads,
+                                 FeComponentStats* first_pair_stats = nullptr,
+                                 const Eigen::VectorXd* weights = nullptr) {
     FeDofInfo info;
+    if (first_pair_stats != nullptr) {
+        *first_pair_stats = FeComponentStats{};
+    }
     if (fes.empty()) {
         return info;
     }
@@ -3434,6 +3499,11 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
             }
 
             if (!effective_fes.empty() && static_cast<int>(effective_fes.size()) < dims) {
+                if (first_pair_stats != nullptr && dims >= 2) {
+                    count_bipartite_components(
+                        fes[0], fes[1], lookups[0], lookups[1], nullptr,
+                        first_pair_stats, weights);
+                }
                 FeDofInfo effective =
                     compute_fe_dof_reghdfe(effective_fes, effective_levels, method, nullptr, threads);
                 for (int d = 0; d < dims; ++d) {
@@ -3466,6 +3536,11 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
     }
 
     if (method == DofAdjustmentMethod::None) {
+        if (first_pair_stats != nullptr && dims >= 2) {
+            count_bipartite_components(
+                fes[0], fes[1], lookups[0], lookups[1], nullptr,
+                first_pair_stats, weights);
+        }
         for (int d = 0; d < dims; ++d) {
             info.redundant[static_cast<std::size_t>(d)] = 0;
             info.num_coefs[static_cast<std::size_t>(d)] = std::max(0, info.levels[static_cast<std::size_t>(d)]);
@@ -3477,7 +3552,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
             Eigen::VectorXi tmp;
             Eigen::VectorXi* out_ptr = groupvar ? &tmp : nullptr;
             const int mobility_groups =
-                count_bipartite_components(fes[0], fes[1], lookups[0], lookups[1], out_ptr);
+                count_bipartite_components(
+                    fes[0], fes[1], lookups[0], lookups[1], out_ptr,
+                    first_pair_stats, weights);
             info.redundant[1] = mobility_groups;
             info.num_coefs[1] = std::max(0, info.levels[1] - mobility_groups);
             if (groupvar) {
@@ -3499,7 +3576,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
         if (dims >= 2 && groupvar) {
             Eigen::VectorXi tmp;
             const int groups =
-                count_bipartite_components(fes[0], fes[1], lookups[0], lookups[1], &tmp);
+                count_bipartite_components(
+                    fes[0], fes[1], lookups[0], lookups[1], &tmp,
+                    first_pair_stats, weights);
             pair_groups[0][1] = groups;
             *groupvar = std::move(tmp);
         }
@@ -3535,7 +3614,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                     fes[static_cast<std::size_t>(b)],
                     lookups[static_cast<std::size_t>(a)],
                     lookups[static_cast<std::size_t>(b)],
-                    nullptr);
+                    nullptr,
+                    (a == 0 && b == 1) ? first_pair_stats : nullptr,
+                    (a == 0 && b == 1) ? weights : nullptr);
                 pair_groups[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] = groups;
             }
         } else {
@@ -3545,7 +3626,11 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                     fes[static_cast<std::size_t>(pair.b)],
                     lookups[static_cast<std::size_t>(pair.a)],
                     lookups[static_cast<std::size_t>(pair.b)],
-                    nullptr);
+                    nullptr,
+                    (pair.a == 0 && pair.b == 1)
+                        ? first_pair_stats
+                        : nullptr,
+                    (pair.a == 0 && pair.b == 1) ? weights : nullptr);
                 pair_groups[static_cast<std::size_t>(pair.a)][static_cast<std::size_t>(pair.b)] = groups;
             }
         }
@@ -6220,6 +6305,89 @@ void recompute_inference(Eigen::VectorXd& coefficients,
 
 }  // namespace
 
+FeComponentStats compute_first_pair_component_stats(
+    const Eigen::VectorXi& first_fe,
+    const Eigen::VectorXi& second_fe,
+    const Eigen::VectorXd* weights) {
+    if (first_fe.size() != second_fe.size()) {
+        throw std::runtime_error(
+            "First-pair FE vectors must have the same length");
+    }
+    if (weights != nullptr && weights->size() != first_fe.size()) {
+        throw std::runtime_error(
+            "First-pair component weights must match the FE vectors");
+    }
+
+    FeComponentStats stats;
+    const Eigen::Index n = first_fe.size();
+    if (n == 0) {
+        return stats;
+    }
+
+    const FeIndexerLite first = build_indexer_lite(first_fe);
+    const FeIndexerLite second = build_indexer_lite(second_fe);
+    const int total_nodes = first.num_groups + second.num_groups;
+    if (first.num_groups <= 0 || second.num_groups <= 0 ||
+        total_nodes <= 0) {
+        return stats;
+    }
+
+    UnionFind uf(total_nodes);
+    for (Eigen::Index i = 0; i < n; ++i) {
+        uf.unite(
+            first.group_ids[static_cast<std::size_t>(i)],
+            first.num_groups +
+                second.group_ids[static_cast<std::size_t>(i)]);
+    }
+
+    std::vector<long long> counts(static_cast<std::size_t>(total_nodes), 0);
+    std::vector<long double> weight_sums;
+    if (weights != nullptr) {
+        weight_sums.assign(static_cast<std::size_t>(total_nodes), 0.0L);
+    }
+    long double total_weight = 0.0L;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        const int root = uf.find(
+            first.group_ids[static_cast<std::size_t>(i)]);
+        const std::size_t index = static_cast<std::size_t>(root);
+        counts[index] += 1;
+        if (weights != nullptr) {
+            const double weight = (*weights)[i];
+            if (!(weight > 0.0) || !(weight < 1e300)) {
+                throw std::runtime_error(
+                    "First-pair component weights must be finite and "
+                    "positive");
+            }
+            weight_sums[index] += static_cast<long double>(weight);
+            total_weight += static_cast<long double>(weight);
+        }
+    }
+
+    long double largest_weight = 0.0L;
+    for (std::size_t c = 0; c < counts.size(); ++c) {
+        if (counts[c] <= 0) {
+            continue;
+        }
+        ++stats.num_components;
+        stats.largest_component_n_obs =
+            std::max(stats.largest_component_n_obs, counts[c]);
+        if (weights != nullptr) {
+            largest_weight = std::max(largest_weight, weight_sums[c]);
+        }
+    }
+    stats.largest_component_obs_share =
+        static_cast<double>(stats.largest_component_n_obs) /
+        static_cast<double>(n);
+    if (weights == nullptr) {
+        stats.largest_component_weight_share =
+            stats.largest_component_obs_share;
+    } else if (total_weight > 0.0L) {
+        stats.largest_component_weight_share =
+            static_cast<double>(largest_weight / total_weight);
+    }
+    return stats;
+}
+
 HdfeRegressorV11::HdfeRegressorV11(HdfeOptions options, ThreadingOptions threading)
     : options_(options), threading_(threading) {
     if (!options_.symmetric_sweep) {
@@ -6381,6 +6549,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     gpu_attempted_ = false;
     gpu_absorption_converged_ = false;
     gpu_absorption_iterations_ = 0;
+    first_pair_component_stats_ = FeComponentStats{};
     if (clusters) {
         for (const auto& c : *clusters) {
             if (c.size() != y.size()) {
@@ -7916,6 +8085,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             post_phase_t0 = std::chrono::steady_clock::now();
             Eigen::VectorXi groupvar;
             Eigen::VectorXi* groupvar_ptr = options_.save_groupvar ? &groupvar : nullptr;
+            FeComponentStats* first_pair_stats_ptr =
+                options_.capture_first_pair_component_stats
+                    ? &first_pair_component_stats_
+                    : nullptr;
             const std::size_t dof_dims = fes_use.size();
             std::vector<uint8_t> nested_flags(dof_dims, 0);
             std::vector<uint8_t> slope_only_flags(dof_dims, 0);
@@ -7952,6 +8125,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             FeDofInfo dof;
             const bool can_skip_full_dof =
                 any_nested && groupvar_ptr == nullptr &&
+                first_pair_stats_ptr == nullptr &&
                 absorption.fe_levels.size() == dof_dims &&
                 options_.dof_method != DofAdjustmentMethod::None;
             if (can_skip_full_dof) {
@@ -7987,7 +8161,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             } else {
                 dof = compute_fe_dof_reghdfe(fes_use, absorption.fe_levels,
                                              options_.dof_method, groupvar_ptr,
-                                             tuned.num_threads);
+                                             tuned.num_threads,
+                                             first_pair_stats_ptr, w_ptr);
 
                 // If some fixed effects are nested within the clustering variable, reghdfe does not
                 // use them to compute mobility-group redundancies for the remaining dimensions.
@@ -8775,9 +8950,15 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         if (!fes_use.empty()) {
             Eigen::VectorXi groupvar;
             Eigen::VectorXi* groupvar_ptr = options_.save_groupvar ? &groupvar : nullptr;
+            FeComponentStats* first_pair_stats_ptr =
+                options_.capture_first_pair_component_stats
+                    ? &first_pair_component_stats_
+                    : nullptr;
             FeDofInfo dof =
-                compute_fe_dof_reghdfe(fes_use, absorption.fe_levels, options_.dof_method, groupvar_ptr,
-                                       tuned.num_threads);
+                compute_fe_dof_reghdfe(
+                    fes_use, absorption.fe_levels, options_.dof_method,
+                    groupvar_ptr, tuned.num_threads, first_pair_stats_ptr,
+                    w_ptr);
             std::vector<uint8_t> nested_flags(dof.levels.size(), 0);
             std::vector<uint8_t> slope_only_flags(dof.levels.size(), 0);
             for (const auto& slope : slope_terms) {
@@ -9109,6 +9290,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     gpu_attempted_ = false;
     gpu_absorption_converged_ = false;
     gpu_absorption_iterations_ = 0;
+    first_pair_component_stats_ = FeComponentStats{};
     if (!individual_ids) {
         GroupCollapsedData collapsed =
             collapse_group_long_format(y, X, fes, group_ids, nullptr, -1, aggregation, weights, clusters);
@@ -9674,9 +9856,14 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
         Eigen::VectorXi groupvar;
         Eigen::VectorXi* groupvar_ptr = options_.save_groupvar ? &groupvar : nullptr;
+        FeComponentStats* first_pair_stats_ptr =
+            options_.capture_first_pair_component_stats
+                ? &first_pair_component_stats_
+                : nullptr;
         FeDofInfo dof =
-            compute_fe_dof_reghdfe(standard_fes_work, standard_levels, options_.dof_method, groupvar_ptr,
-                                   tuned.num_threads);
+            compute_fe_dof_reghdfe(
+                standard_fes_work, standard_levels, options_.dof_method,
+                groupvar_ptr, tuned.num_threads, first_pair_stats_ptr, w_ptr);
         std::vector<uint8_t> nested_flags(dof.levels.size(), 0);
         if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
             !c_ptr->empty()) {

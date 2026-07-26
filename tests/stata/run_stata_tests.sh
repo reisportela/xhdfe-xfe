@@ -55,6 +55,13 @@ gelbach_markers=(
   "All fixed effects (subtotal)"
   "Total movement"
   "Result status"
+  "FE mobility components (connected_worker connected_firm)"
+  "Selected FE pair: connected; connected mode require"
+  "connected(require) failed"
+  "connected(require) requires exactly two FE dimensions"
+  "FE X1-row split: normalization_dependent"
+  "per-FE-dimension X1-row contributions are normalization-dependent"
+  "per-FE-dimension X1-row contributions are not connectivity-certified"
   "0 (imposed)"
   "Summation check (max absolute residual)"
   "Interpretation: specification accounting, not causal mediation."
@@ -64,7 +71,7 @@ gelbach_markers=(
   "Share inference: full delta method using Var(b_base) and Cov(delta,b_base)."
   "near-FE-collinear focal"
   "few clusters (G < 30)"
-  "requested share denominator is within sharetol()"
+  "shares and confidence intervals are undefined and returned missing"
   "observed x2 group 1 is severely ill-conditioned"
   "absorbed-target inference is not certified for this VCE"
 )
@@ -83,4 +90,16 @@ if grep -Fq "Contributions (delta):" "${LOG_FILE}"; then
   exit 1
 fi
 
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/xhdfegelbach_bootstrap_smoke.do"
+)
+BOOTSTRAP_LOG="${OUT_DIR}/xhdfegelbach_bootstrap_smoke.log"
+if ! grep -Fq "XHDFEGELBACH_BOOTSTRAP_SMOKE_PASS" "${BOOTSTRAP_LOG}"; then
+  echo "Stata Gelbach bootstrap/reporting certification failed. Last log lines:" >&2
+  tail -n 100 "${BOOTSTRAP_LOG}" >&2
+  exit 1
+fi
+
 echo "Stata certification log: ${LOG_FILE}"
+echo "Stata Gelbach bootstrap log: ${BOOTSTRAP_LOG}"

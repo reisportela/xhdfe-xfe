@@ -225,11 +225,23 @@ struct GelbachOptions {
     bool gamma0 = false;
     bool cov0 = false;
     bool use_gpu = false;                 //!< Request CUDA for the full-model absorption phase; CPU remains the default/reference.
+    bool capture_sample_provenance = false; //!< Compute a stable retained-sample identifier. Opt-in so the default path pays no O(n) provenance cost.
+    bool return_sample_index = false;      //!< Return zero-based retained input-row positions. Implies sample provenance.
     // Zero-based X1 columns that the caller explicitly permits the full
     // model to absorb. Every declared column must be classified by the HDFE
     // fit as collinear with the absorbed FEs (omitted_reason == 1); all other
     // X1/X2 columns remain subject to the standard fail-hard rank guard.
     std::vector<int> absorbed_x1;
+    // Optional zero-based pair of added FE dimensions for the retained-sample
+    // mobility diagnostic. Indices exclude the common-FE prefix used by the
+    // extended overload. Empty preserves the historical first-two-added
+    // default. This is diagnostic only with common FEs or 3+ added FEs; it is
+    // not a global rank certificate.
+    std::vector<int> connectivity_fe_pair;
+    // Fail closed unless the per-FE-dimension X1-row split is certified.
+    // At present that certificate exists only with no common FEs and exactly
+    // two added FE dimensions forming one retained-sample mobility component.
+    bool require_connected_fe_split = false;
     double tol = 1e-8;
     int num_threads = 0;
     int verbose = 0;                     //!< 0 = silent; 1 = phase progress. Output only.
@@ -244,6 +256,23 @@ struct GelbachResult {
     Eigen::VectorXd x1_fe_collinear_ratio; //!< Per-X1 ||M_D x||^2 / ||x||^2 from the full-fit classifier.
     Eigen::VectorXi x1_near_collinear_mask; //!< 1 where the ratio is in the documented warning band above the omission boundary.
     Eigen::MatrixXd gamma;        //!< Full-model X2 coefficients, padded by block: rows=max block width, cols=observed blocks.
+    Eigen::VectorXd beta2;        //!< Full-model X2 coefficients in original column order.
+    Eigen::MatrixXd beta2_cov;    //!< Requested-VCE covariance of beta2 in original column order.
+    Eigen::MatrixXd auxiliary_loadings; //!< True auxiliary loadings Gamma: rows=[x1..., _cons], cols=X2 in original order.
+    Eigen::VectorXd auxiliary_loading_ss_ratio; //!< Per observed block, weighted fitted/raw sum-of-squares ratio for Gamma.
+    Eigen::VectorXi auxiliary_loading_rank; //!< Numerical rank of each observed block's Gamma matrix.
+    Eigen::VectorXd auxiliary_loading_condition_number; //!< Nonzero-singular-value condition number of each block's Gamma.
+    Eigen::MatrixXd auxiliary_loading_max_abs_z; //!< Rows=[x1..., _cons], cols=observed blocks; largest marginal |z| for each Gamma row.
+    Eigen::MatrixXd auxiliary_loading_pvalue; //!< Rows=[x1..., _cons], cols=observed blocks; Bonferroni-adjusted rowwise Gamma=0 p-value.
+    Eigen::MatrixXi auxiliary_loading_test_evaluated; //!< 1 when the rowwise Gamma test was needed and evaluated; 0 otherwise.
+    Eigen::VectorXd beta2_wald_stat; //!< Requested-VCE joint Wald statistic for beta2_g=0.
+    Eigen::VectorXi beta2_wald_df; //!< Numerical covariance rank used by each beta2 Wald test.
+    Eigen::VectorXd beta2_wald_pvalue; //!< Chi-square reference p-value for each beta2 Wald test.
+    Eigen::MatrixXd contribution_gradient_norm; //!< Rows=[x1..., _cons], cols=observed blocks; norm of the product gradient.
+    Eigen::MatrixXi regular_inference_valid; //!< Rows=[x1..., _cons], cols=observed blocks; 1 only when beta2_g!=0 or the corresponding Gamma row!=0 is statistically established.
+    std::vector<std::string> regular_inference_status; //!< Column-major status for each observed contribution: regular_beta_nonzero, regular_loading_nonzero, nonregular_not_ruled_out, not_certified, or not_applicable_common_fe_intercept.
+    bool regular_inference_all_valid = true; //!< True iff every observed-X2 contribution passes the conservative regularity gate.
+    double regularity_test_alpha = 0.05; //!< Family-wise threshold used by the diagnostic gate.
     Eigen::MatrixXd delta;    //!< (p+1) x G contributions over [x1..., _cons]; group order = x2 groups then FE dims.
     Eigen::MatrixXd cov;      //!< (G*(p+1)) x (G*(p+1)) covariance of vec(delta).
     Eigen::MatrixXd base_cov; //!< Requested-VCE covariance of [b_base, base intercept].
@@ -251,11 +280,31 @@ struct GelbachResult {
     Eigen::MatrixXd cov_total_bbase; //!< Cov(sum_g delta_g, [b_base, base intercept]).
     Eigen::VectorXd total;    //!< Summed contribution (= b_base - b_full over [x1, _cons]).
     Eigen::MatrixXd total_cov;
+    int n_common_fes = 0;      //!< FE dimensions absorbed in both base and full specifications.
+    bool common_fes_applied = false; //!< True when the conditional common-FE estimand is active.
+    bool intercept_inference_available = true; //!< False with common FEs because the intercept allocation is normalization-dependent.
+    std::string intercept_status = "estimated_no_common_fes"; //!< estimated_no_common_fes or not_certified_common_fes.
     double identity_gap = 0.0;
     long long n_obs_input = 0;
     long long n_obs = 0;       //!< Retained row count (historical public field).
     long long n_obs_effective = 0; //!< Retained rows normally; sum of retained fweights under frequency weighting.
     long long n_singletons_dropped = 0;
+    Eigen::VectorXi sample_index; //!< Optional zero-based retained positions into the caller's input arrays; empty unless requested.
+    std::string sample_hash; //!< Optional non-cryptographic identifier of n_obs_input plus sample_index.
+    std::string sample_hash_algorithm; //!< fnv1a64-le-v1 when provenance was requested; empty otherwise.
+    std::string sample_index_scope; //!< input_rows_zero_based when provenance was requested; empty otherwise.
+    int n_mobility_components = 0; //!< Exact selected-pair added-FE components in the retained sample; 0 unless at least two added FEs.
+    long long largest_mobility_component_n_obs = 0; //!< Physical rows in the row-largest selected-pair component.
+    double largest_mobility_component_share = 0.0; //!< Retained-row share of the row-largest selected-pair component.
+    double largest_mobility_component_weight_share = 0.0; //!< Retained-weight share of the weight-largest selected-pair component.
+    bool fe_split_identified = false; //!< Whether per-FE-dimension X1-row contributions are certified normalization-invariant.
+    std::string fe_split_status = "not_applicable"; //!< not_applicable, single_fe_dimension, identified_two_way, normalization_dependent, not_certified_multiway, or not_certified_with_common_fes.
+    int connectivity_fe_index1 = -1; //!< First zero-based added-FE index used by the pair diagnostic; -1 when not applicable.
+    int connectivity_fe_index2 = -1; //!< Second zero-based added-FE index used by the pair diagnostic; -1 when not applicable.
+    bool connectivity_pair_explicit = false; //!< True when the caller selected the diagnostic pair.
+    std::string connectivity_pair_status = "not_applicable"; //!< not_applicable, connected, or disconnected.
+    std::string connected_mode = "diagnose"; //!< diagnose (default) or require.
+    std::string mobility_component_scope = "not_applicable"; //!< first_two_fe_dimensions/selected_fe_pair without common FEs; first_two_added_fe_dimensions/selected_added_fe_pair with common FEs.
     double df_full = 0.0;
     double df_base = 0.0;
     int n_clusters = 0;          //!< Independent retained-sample clusters for cluster VCE; 0 otherwise.
@@ -263,7 +312,7 @@ struct GelbachResult {
     double near_fe_collinear_ss_ratio_warn_upper = 1e-4; //!< Inclusive upper edge of the diagnostic-only warning band.
     int few_cluster_warning_threshold = 30; //!< Warn when one-way cluster count is below this value.
     bool absorbed_target_inference_valid = true; //!< True unless absorbed-target inference is requested away from an absorbing FE cluster.
-    int absorbing_fe_index = -1; //!< Zero-based FE dimension matching the cluster and absorbing every target; -1 if unavailable/not applicable.
+    int absorbing_fe_index = -1; //!< Zero-based added-FE dimension matching the cluster and absorbing every target; -1 if unavailable/not applicable.
     bool converged = true;
     int threads_used = 1;
     bool gpu_requested = false;
@@ -278,12 +327,29 @@ struct GelbachResult {
 };
 
 // X2 holds the observed covariate groups side by side; x2_group_sizes gives
-// the column count of each observed group (in order). Each entry of fes is
-// one absorbed FE dimension forming its own decomposable block, ordered
-// after the observed groups. cluster may be null unless vce == Cluster.
+// the column count of each observed group (in order). In the extended
+// overload, the first n_common_fes entries of fes are absorbed in both base
+// and full and are not reported as contributions; the remaining entries are
+// added only to the full model and form decomposable blocks after the observed
+// groups. With common FEs, slope rows receive the full point/inference
+// contract while the intercept row is deliberately not certified because its
+// allocation depends on FE normalization. cluster may be null unless
+// vce == Cluster.
 // weights (optional): Stata-style aweights (freq_weights = false; normalized
 // to sum to N internally) or fweights (freq_weights = true), matching b1x2's
 // weighted estimators exactly.
+GelbachResult decompose(const Eigen::VectorXd& y,
+                        const Eigen::MatrixXd& X1,
+                        const Eigen::MatrixXd& X2,
+                        const std::vector<int>& x2_group_sizes,
+                        const std::vector<Eigen::VectorXi>& fes,
+                        int n_common_fes,
+                        const Eigen::VectorXi* cluster,
+                        const GelbachOptions& options,
+                        const Eigen::VectorXd* weights = nullptr,
+                        bool freq_weights = false);
+
+// Backward-compatible lane: every FE is added only to the full model.
 GelbachResult decompose(const Eigen::VectorXd& y,
                         const Eigen::MatrixXd& X1,
                         const Eigen::MatrixXd& X2,

@@ -138,6 +138,192 @@ quietly xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///
 assert r(n_clusters) == 50
 assert strpos("`r(notes)'", "few clusters") == 0
 
+* FEs common to base and full condition the decomposition; fes() remains the
+* added/decomposable surface.  The slope identity is benchmarked against dense
+* LSDV while the normalization-dependent intercept row must be missing.
+gen long common_fe = mod(floor((_n - 1) / 2), 30) + 1
+quietly regress y x1 i.common_fe, vce(robust)
+scalar common_bbase_oracle = _b[x1]
+quietly regress y x1 x2 i.common_fe i.fe, vce(robust)
+scalar common_bfull_oracle = _b[x1]
+xhdfegelbach y, x1(x1) x2groups("observables = x2") ///
+    commonfes(common_fe) fes(fe) vce(robust)
+matrix gel_common_base = r(b_base)
+matrix gel_common_full = r(b_full)
+matrix gel_common_delta = r(delta)
+matrix gel_common_total = r(total)
+matrix gel_common_cov = r(cov)
+matrix gel_common_basecov = r(base_cov)
+assert abs(gel_common_base[1, 1] - common_bbase_oracle) < 1e-10
+assert abs(gel_common_full[1, 1] - common_bfull_oracle) < 1e-10
+assert abs(gel_common_total[1, 1] - ///
+    (common_bbase_oracle - common_bfull_oracle)) < 1e-10
+assert abs(gel_common_total[1, 1] - ///
+    gel_common_delta[1, 1] - gel_common_delta[1, 2]) < 1e-10
+assert missing(gel_common_total[2, 1]) & missing(gel_common_total[2, 2])
+assert missing(gel_common_cov[2, 2]) & missing(gel_common_basecov[2, 2])
+assert r(identity_gap) < 1e-10
+assert r(n_common_fes) == 1
+assert r(common_fes_applied) == 1
+assert r(intercept_inference_available) == 0
+assert "`r(common_fes)'" == "common_fe"
+assert "`r(intercept_status)'" == "not_certified_common_fes"
+assert "`r(identity_status)'" == "exact_ols_conditional_common_fes"
+matrix gel_common_status = r(regular_inference_status_code)
+assert gel_common_status[2, 1] == -2
+assert strpos("`r(notes)'", "common FEs were conditioned out") > 0
+capture noisily xhdfegelbach y, x1(x1) commonfes(common_fe)
+assert _rc == 198
+capture noisily xhdfegelbach y, x1(x1) x2groups("observables = x2") ///
+    commonfes(fe) fes(fe)
+assert _rc == 198
+
+* Exactly two FE dimensions are certified only on one retained mobility
+* component. Use an explicit worker-firm ring rather than assuming that the
+* broader companion fixture is connected (it deliberately is not).
+preserve
+clear
+set obs 64
+gen long connected_worker = floor((_n - 1) / 4) + 1
+gen byte connected_period = mod(_n - 1, 4)
+gen long connected_firm = ///
+    mod(connected_worker - 1 + (connected_period >= 2), 8) + 1
+gen long connected_occupation = ///
+    mod(connected_worker + connected_period, 5) + 1
+gen double connected_x1 = rnormal()
+gen double connected_x2 = 0.25 * connected_x1 + rnormal()
+gen double connected_y = 0.7 * connected_x1 + 0.4 * connected_x2 + ///
+    0.1 * connected_worker - 0.07 * connected_firm + rnormal()
+xhdfegelbach connected_y, x1(connected_x1) ///
+    x2groups("observables = connected_x2") ///
+    fes(connected_worker connected_firm)
+assert r(n_mobility_components) == 1
+assert r(largest_mobility_component_n_obs) == r(n_obs)
+assert r(largest_mobility_component_share) == 1
+assert r(largest_mobility_weight_share) == 1
+assert r(fe_split_identified) == 1
+assert "`r(fe_split_status)'" == "identified_two_way"
+assert r(connectivity_fe1_index) == 0
+assert r(connectivity_fe2_index) == 1
+assert r(connectivity_pair_explicit) == 0
+assert "`r(connectivity_fes)'" == "connected_worker connected_firm"
+assert "`r(connectivity_fe_indices)'" == "0 1"
+assert "`r(connectivity_pair_status)'" == "connected"
+assert "`r(connected_mode)'" == "diagnose"
+assert "`r(mobility_component_scope)'" == "first_two_fe_dimensions"
+xhdfegelbach connected_y, x1(connected_x1) ///
+    x2groups("observables = connected_x2") ///
+    fes(connected_worker connected_firm) connected(require) ///
+    connectivityfes(connected_firm connected_worker)
+assert r(fe_split_identified) == 1
+assert r(connectivity_fe1_index) == 1
+assert r(connectivity_fe2_index) == 0
+assert r(connectivity_pair_explicit) == 1
+assert "`r(connectivity_fes)'" == "connected_firm connected_worker"
+assert "`r(connectivity_fe_indices)'" == "1 0"
+assert "`r(connectivity_pair_status)'" == "connected"
+assert "`r(connected_mode)'" == "require"
+assert "`r(mobility_component_scope)'" == "selected_fe_pair"
+
+* Three or more dimensions remain explicitly uncertified even when their
+* first pair is connected.
+xhdfegelbach connected_y, x1(connected_x1) ///
+    x2groups("observables = connected_x2") ///
+    fes(connected_worker connected_firm connected_occupation)
+assert r(n_mobility_components) == 1
+assert r(fe_split_identified) == 0
+assert "`r(fe_split_status)'" == "not_certified_multiway"
+assert "`r(connectivity_pair_status)'" == "connected"
+assert strpos("`r(notes)'", "not connectivity-certified") > 0
+capture noisily xhdfegelbach connected_y, x1(connected_x1) ///
+    x2groups("observables = connected_x2") ///
+    fes(connected_worker connected_firm connected_occupation) ///
+    connected(require)
+assert _rc != 0
+restore
+
+* The disconnected fixture includes a huge-weight raw singleton. Exact
+* component shares must be computed after recursive singleton removal.
+preserve
+clear
+set obs 65
+gen byte component = cond(_n <= 32, 0, cond(_n <= 64, 1, 2))
+gen int within_component = mod(_n - 1, 32)
+gen int period = mod(within_component, 4)
+gen long worker2 = component * 8 + floor(within_component / 4) + 1
+gen long firm2 = component * 4 + ///
+    mod(floor(within_component / 4) + (period >= 2), 4) + 1
+replace worker2 = 17 in 65
+replace firm2 = 9 in 65
+gen double target2 = component + 0.2 * rnormal()
+gen double observed2 = 0.3 * target2 + rnormal()
+gen double outcome2 = 0.8 * target2 + 0.5 * observed2 + ///
+    0.1 * worker2 - 0.07 * firm2 + rnormal()
+gen double weight2 = cond(component == 0, 1, 3)
+replace weight2 = 100 in 65
+gen byte bridge2 = mod(period, 2)
+xhdfegelbach outcome2 [aweight=weight2], x1(target2) ///
+    x2groups("observed = observed2") fes(worker2 firm2)
+local disconnected_status "`r(fe_split_status)'"
+local disconnected_scope "`r(mobility_component_scope)'"
+local disconnected_notes "`r(notes)'"
+scalar disconnected_n_input = r(n_obs_input)
+scalar disconnected_n = r(n_obs)
+scalar disconnected_singletons = r(n_singletons_dropped)
+scalar disconnected_components = r(n_mobility_components)
+scalar disconnected_largest_n = r(largest_mobility_component_n_obs)
+scalar disconnected_largest_share = r(largest_mobility_component_share)
+scalar disconnected_largest_wshare = r(largest_mobility_weight_share)
+scalar disconnected_identified = r(fe_split_identified)
+matrix disconnected_delta = r(delta)
+matrix disconnected_fe_total = r(fe_total)
+assert disconnected_n_input == 65
+assert disconnected_n == 64
+assert disconnected_singletons == 1
+assert disconnected_components == 2
+assert disconnected_largest_n == 32
+assert disconnected_largest_share == 0.5
+assert disconnected_largest_wshare == 0.75
+assert disconnected_identified == 0
+assert "`disconnected_status'" == "normalization_dependent"
+assert "`disconnected_scope'" == "first_two_fe_dimensions"
+assert "`r(connectivity_pair_status)'" == "disconnected"
+assert "`r(connected_mode)'" == "diagnose"
+assert strpos("`disconnected_notes'", "normalization-dependent") > 0
+forvalues rr = 1/2 {
+    assert disconnected_fe_total[`rr', 1] == ///
+        disconnected_delta[`rr', 2] + disconnected_delta[`rr', 3]
+}
+
+capture noisily xhdfegelbach outcome2 [aweight=weight2], x1(target2) ///
+    x2groups("observed = observed2") fes(worker2 firm2) connected(require)
+assert _rc != 0
+
+* With 3+ FE, selecting another pair changes only the pair diagnostic. The
+* global FE split remains explicitly uncertified and the numerics are inert.
+tempname C3DEFAULT C3SELECTED C3GAP
+xhdfegelbach outcome2 [aweight=weight2], x1(target2) ///
+    x2groups("observed = observed2") fes(worker2 firm2 bridge2)
+assert r(n_mobility_components) == 2
+assert "`r(connectivity_pair_status)'" == "disconnected"
+assert "`r(fe_split_status)'" == "not_certified_multiway"
+matrix `C3DEFAULT' = r(cov)
+xhdfegelbach outcome2 [aweight=weight2], x1(target2) ///
+    x2groups("observed = observed2") fes(worker2 firm2 bridge2) ///
+    connectivityfes(worker2 bridge2)
+assert r(n_mobility_components) == 1
+assert r(connectivity_fe1_index) == 0
+assert r(connectivity_fe2_index) == 2
+assert r(connectivity_pair_explicit) == 1
+assert "`r(connectivity_fes)'" == "worker2 bridge2"
+assert "`r(connectivity_pair_status)'" == "connected"
+assert "`r(fe_split_status)'" == "not_certified_multiway"
+assert "`r(mobility_component_scope)'" == "selected_fe_pair"
+matrix `C3SELECTED' = r(cov)
+mata: st_numscalar("`C3GAP'", max(abs(st_matrix("`C3DEFAULT'") :- st_matrix("`C3SELECTED'"))))
+assert scalar(`C3GAP') == 0
+restore
+
 * The empirical reporting layer is opt-in and numerically inert. A common
 * control remains in x1() while focal() selects only the paper-facing row.
 gen double common_control = 0.15 * x1 + rnormal()
@@ -249,7 +435,8 @@ assert "`gel_abs_targets'" == "0"
 assert "`gel_abs_target_names'" == "female"
 assert "`gel_abs_bstatus'" == "imposed_zero estimated"
 assert "`gel_abs_fstatus'" == "absorbed identified"
-assert "`gel_abs_total_se_type'" == "target_exact_base_vce_mixed_components"
+assert "`gel_abs_total_se_type'" == ///
+    "target_exact_base_vce_mixed_components_conditional_only_diagnostic"
 assert "`gel_abs_inference_status'" == "clustered_at_absorbing_fe"
 assert `gel_abs_inference_valid' == 1
 assert `gel_abs_fe_index' == 0
@@ -342,6 +529,69 @@ assert `gel_nofe_gpu_used' == 0
 assert `gel_nofe_gpu_code' == 6
 assert "`gel_nofe_gpu_status'" == "not_applicable"
 
+* Gelbach footnote-14 boundary: when both beta2_g and the corresponding
+* auxiliary-loading row are zero, normal first-order inference is not regular.
+* The command must keep the numerical diagnostic but flag it explicitly.
+preserve
+clear
+set obs 256
+gen long reg_i = _n - 1
+gen double reg_x1 = cond(mod(floor(reg_i / 1), 2) == 0, 1, -1)
+gen double reg_x2 = cond(mod(floor(reg_i / 2), 2) == 0, 1, -1)
+gen double reg_e = cond(mod(floor(reg_i / 4), 2) == 0, 1, -1)
+gen double reg_y0 = 1.2 * reg_x1 + 0.7 * reg_e
+
+xhdfegelbach reg_y0, x1(reg_x1) x2groups("orthogonal = reg_x2")
+matrix reg_b2 = r(beta2)
+matrix reg_b2cov = r(beta2_cov)
+matrix reg_aux = r(auxiliary_loadings)
+matrix reg_ld = r(auxiliary_loading_diagnostics)
+matrix reg_lp = r(auxiliary_loading_pvalue)
+matrix reg_bw = r(beta2_wald)
+matrix reg_grad = r(contribution_gradient_norm)
+matrix reg_valid = r(regular_inference_valid)
+matrix reg_status = r(regular_inference_status_code)
+local reg_status_words "`r(regular_inference_status)'"
+local reg_status1 : word 1 of `reg_status_words'
+local reg_status2 : word 2 of `reg_status_words'
+assert r(converged) == 1
+assert r(regular_inference_all_valid) == 0
+assert r(regularity_test_alpha) == .05
+assert abs(reg_b2[1, 1]) < 2e-14
+assert abs(reg_aux[1, 1]) < 2e-14
+assert abs(reg_aux[2, 1]) < 2e-14
+assert abs(reg_grad[1, 1]) < 2e-14
+assert abs(reg_grad[2, 1]) < 2e-14
+assert reg_bw[1, 3] > r(regularity_test_alpha)
+assert reg_lp[1, 1] > r(regularity_test_alpha)
+assert reg_lp[2, 1] > r(regularity_test_alpha)
+assert reg_valid[1, 1] == 0 & reg_valid[2, 1] == 0
+assert reg_status[1, 1] == 0 & reg_status[2, 1] == 0
+assert "`reg_status1'" == "nonregular_not_ruled_out"
+assert "`reg_status2'" == "nonregular_not_ruled_out"
+assert strpos("`r(notes)'", ///
+    "regular first-order delta-method inference is not established") > 0
+
+gen double reg_loaded = .8 * reg_x1 + reg_x2
+xhdfegelbach reg_y0, x1(reg_x1) ///
+    x2groups("loading_signal = reg_loaded")
+matrix reg_loaded_valid = r(regular_inference_valid)
+matrix reg_loaded_status = r(regular_inference_status_code)
+assert reg_loaded_valid[1, 1] == 1
+assert reg_loaded_valid[2, 1] == 0
+assert reg_loaded_status[1, 1] == 2
+assert reg_loaded_status[2, 1] == 0
+
+gen double reg_ybeta = reg_y0 + .5 * reg_x2
+xhdfegelbach reg_ybeta, x1(reg_x1) ///
+    x2groups("beta_signal = reg_x2")
+matrix reg_beta_valid = r(regular_inference_valid)
+matrix reg_beta_status = r(regular_inference_status_code)
+assert r(regular_inference_all_valid) == 1
+assert reg_beta_valid[1, 1] == 1 & reg_beta_valid[2, 1] == 1
+assert reg_beta_status[1, 1] == 1 & reg_beta_status[2, 1] == 1
+restore
+
 xhdfeconnected worker firm, generate(keep_default_after)
 assert keep_default_before == keep_default_after
 assert r(threads_used) == companion_default_threads
@@ -408,6 +658,56 @@ replace worker = 4000000000 + 1009 * worker + 0.25
 replace firm = -4000000000 + 1013 * firm + 0.25
 xhdfeconnected worker firm, generate(keep_large)
 assert keep_compact == keep_large
+
+* Gelbach retained-sample provenance is opt-in.  generate() maps the backend's
+* zero-based positions back to the current Stata observations: missing outside
+* the marked input, 0 for recursive singletons, and 1 for retained rows.
+preserve
+clear
+set obs 27
+gen long prov_i = _n
+gen long prov_fe = cond(_n <= 24, ceil(_n / 4), 7)
+gen double prov_x = (prov_i - 13) / 7
+gen double prov_z = sin(1.3 * prov_i) + .2 * cos(.7 * prov_i)
+gen double prov_y = .8 * prov_x + .4 * prov_z + ///
+    mod(prov_fe, 3) / 5 + cos(.43 * prov_i)
+
+quietly xhdfegelbach prov_y if prov_i <= 25, x1(prov_x) ///
+    x2groups("observed = prov_z") fes(prov_fe)
+matrix prov_plain_delta = r(delta)
+matrix prov_plain_cov = r(cov)
+assert r(sample_info_requested) == 0
+assert "`r(sample_hash)'" == ""
+
+quietly xhdfegelbach prov_y if prov_i <= 25, x1(prov_x) ///
+    x2groups("observed = prov_z") fes(prov_fe) generate(prov_keep)
+matrix prov_audit_delta = r(delta)
+matrix prov_audit_cov = r(cov)
+assert r(sample_info_requested) == 1
+assert r(n_obs_input) == 25
+assert r(n_obs) == 24
+assert r(n_singletons_dropped) == 1
+assert "`r(sample_hash)'" == "2d4dcd55f696e111"
+assert "`r(sample_hash_algorithm)'" == "fnv1a64-le-v1"
+assert "`r(sample_index_scope)'" == "marked_input_rows_zero_based"
+assert "`r(sample_variable)'" == "prov_keep"
+assert prov_keep == 1 if inrange(prov_i, 1, 24)
+assert prov_keep == 0 if prov_i == 25
+assert missing(prov_keep) if prov_i > 25
+xcert_assert_matrix_close prov_plain_delta prov_audit_delta, ///
+    tol(0) name("Gelbach sample audit delta invariance")
+xcert_assert_matrix_close prov_plain_cov prov_audit_cov, ///
+    tol(0) name("Gelbach sample audit covariance invariance")
+
+quietly xhdfegelbach prov_y if prov_i <= 25, x1(prov_x) ///
+    x2groups("observed = prov_z") fes(prov_fe) sampleaudit
+assert r(sample_info_requested) == 1
+assert "`r(sample_hash)'" == "2d4dcd55f696e111"
+assert "`r(sample_variable)'" == ""
+capture noisily xhdfegelbach prov_y if prov_i <= 25, x1(prov_x) ///
+    x2groups("observed = prov_z") fes(prov_fe) generate(prov_keep)
+assert _rc == 110
+restore
 
 * A loaded dispatcher from another checkout must never be reused silently.
 local bound "$XHDFE_PLUGIN_PATH_INTERNAL"

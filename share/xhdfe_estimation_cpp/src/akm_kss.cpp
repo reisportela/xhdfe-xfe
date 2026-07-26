@@ -4480,6 +4480,49 @@ namespace gelbach {
 
 namespace {
 
+inline void gelbach_sample_hash_byte(std::uint64_t& hash,
+                                     unsigned char value) {
+    hash ^= static_cast<std::uint64_t>(value);
+    hash *= 1099511628211ULL;
+}
+
+inline void gelbach_sample_hash_u64(std::uint64_t& hash,
+                                    std::uint64_t value) {
+    for (unsigned int shift = 0; shift < 64; shift += 8) {
+        gelbach_sample_hash_byte(
+            hash, static_cast<unsigned char>((value >> shift) & 0xffULL));
+    }
+}
+
+std::string gelbach_retained_sample_hash(Eigen::Index n_input,
+                                         const Eigen::VectorXi& keep) {
+    // Canonical byte stream:
+    //   ASCII domain tag, uint64-le n_input, uint64-le n_keep,
+    //   then each zero-based retained input position as uint64-le.
+    // This is an audit/provenance identifier, not a cryptographic digest.
+    static constexpr char kDomain[] = "xhdfe-gelbach-sample-v1";
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (std::size_t i = 0; i + 1 < sizeof(kDomain); ++i) {
+        gelbach_sample_hash_byte(
+            hash, static_cast<unsigned char>(kDomain[i]));
+    }
+    gelbach_sample_hash_u64(hash, static_cast<std::uint64_t>(n_input));
+    gelbach_sample_hash_u64(
+        hash, static_cast<std::uint64_t>(keep.size()));
+    for (Eigen::Index i = 0; i < keep.size(); ++i) {
+        gelbach_sample_hash_u64(
+            hash, static_cast<std::uint64_t>(keep[i]));
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int pos = 15; pos >= 0; --pos) {
+        out[static_cast<std::size_t>(pos)] =
+            kHex[static_cast<unsigned int>(hash & 0x0fULL)];
+        hash >>= 4;
+    }
+    return out;
+}
+
 void gelbach_set_env_value(const char* key, const char* value) {
 #ifdef _WIN32
     if (_putenv_s(key, value) != 0) {
@@ -4700,6 +4743,111 @@ Eigen::MatrixXd cluster_meat(const Eigen::MatrixXd& Z, const Eigen::VectorXi* co
 constexpr double kGelbachFeCollinearSsRatioTol = 1e-9;
 constexpr double kGelbachNearFeCollinearWarnUpper = 1e-4;
 constexpr int kGelbachFewClusterWarningThreshold = 30;
+constexpr double kGelbachRegularityTestAlpha = 0.05;
+
+inline bool gelbach_guarded_finite(double value) {
+    return value > -1e300 && value < 1e300;
+}
+
+// Regularized upper incomplete gamma Q(a, x), used only for the reference
+// chi-square probability attached to the diagnostic Wald statistic.  This is
+// the standard convergent series (x < a + 1) / continued-fraction
+// (x >= a + 1) split.  Keeping it in the shared core gives Python, R and Stata
+// identical regularity classifications without adding a runtime dependency.
+double gelbach_regularized_gamma_q(double a, double x) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    if (!(a > 0.0) || !(x >= 0.0) ||
+        !gelbach_guarded_finite(a) || !gelbach_guarded_finite(x)) {
+        return nan;
+    }
+    if (x == 0.0) return 1.0;
+
+    constexpr int kMaxIterations = 256;
+    constexpr double kEpsilon = 3e-14;
+    constexpr double kFloor = 1e-100;
+    const double log_scale = -x + a * std::log(x) - std::lgamma(a);
+
+    if (x < a + 1.0) {
+        double ap = a;
+        double term = 1.0 / a;
+        double sum = term;
+        for (int i = 1; i <= kMaxIterations; ++i) {
+            ap += 1.0;
+            term *= x / ap;
+            sum += term;
+            if (std::abs(term) <= std::abs(sum) * kEpsilon) break;
+        }
+        const double p = sum * std::exp(log_scale);
+        return std::max(0.0, std::min(1.0, 1.0 - p));
+    }
+
+    double b = x + 1.0 - a;
+    if (std::abs(b) < kFloor) b = b < 0.0 ? -kFloor : kFloor;
+    double c = 1.0 / kFloor;
+    double d = 1.0 / b;
+    double h = d;
+    for (int i = 1; i <= kMaxIterations; ++i) {
+        const double an = -static_cast<double>(i) *
+                          (static_cast<double>(i) - a);
+        b += 2.0;
+        d = an * d + b;
+        if (std::abs(d) < kFloor) d = d < 0.0 ? -kFloor : kFloor;
+        c = b + an / c;
+        if (std::abs(c) < kFloor) c = c < 0.0 ? -kFloor : kFloor;
+        d = 1.0 / d;
+        const double ratio = d * c;
+        h *= ratio;
+        if (std::abs(ratio - 1.0) <= kEpsilon) break;
+    }
+    const double q = std::exp(log_scale) * h;
+    return std::max(0.0, std::min(1.0, q));
+}
+
+struct GelbachWaldDiagnostic {
+    double statistic = std::numeric_limits<double>::quiet_NaN();
+    int df = 0;
+    double pvalue = std::numeric_limits<double>::quiet_NaN();
+    bool evaluated = false;
+};
+
+GelbachWaldDiagnostic gelbach_wald_zero(const Eigen::VectorXd& coefficients,
+                                        const Eigen::MatrixXd& covariance) {
+    GelbachWaldDiagnostic out;
+    if (coefficients.size() == 0 ||
+        covariance.rows() != coefficients.size() ||
+        covariance.cols() != coefficients.size()) {
+        return out;
+    }
+    const Eigen::MatrixXd sym = 0.5 * (covariance + covariance.transpose());
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(sym);
+    if (eig.info() != Eigen::Success) return out;
+    const Eigen::VectorXd values = eig.eigenvalues();
+    const double largest = values.size() > 0 ? values.maxCoeff() : 0.0;
+    if (!(largest > 0.0) || !gelbach_guarded_finite(largest)) return out;
+    const double threshold =
+        std::max(1, static_cast<int>(coefficients.size())) *
+        100.0 * std::numeric_limits<double>::epsilon() * largest;
+    const Eigen::VectorXd projected =
+        eig.eigenvectors().transpose() * coefficients;
+    double statistic = 0.0;
+    int rank = 0;
+    for (Eigen::Index i = 0; i < values.size(); ++i) {
+        if (values[i] > threshold) {
+            statistic += projected[i] * projected[i] / values[i];
+            ++rank;
+        }
+    }
+    if (rank <= 0 || !(statistic >= 0.0) ||
+        !gelbach_guarded_finite(statistic)) {
+        return out;
+    }
+    out.statistic = statistic;
+    out.df = rank;
+    out.pvalue = gelbach_regularized_gamma_q(
+        0.5 * static_cast<double>(rank), 0.5 * statistic);
+    out.evaluated = gelbach_guarded_finite(out.pvalue);
+    return out;
+}
 
 bool gelbach_same_partition(const Eigen::VectorXi& a,
                             const Eigen::VectorXi& b) {
@@ -4759,6 +4907,8 @@ int gelbach_absorbing_cluster_fe(
     const Eigen::MatrixXd& X1,
     const std::vector<int>& targets,
     const std::vector<Eigen::VectorXi>& fes,
+    int first_fe,
+    int n_fes,
     const Eigen::VectorXi* cluster_codes,
     int n_clusters,
     const Eigen::VectorXd& weights) {
@@ -4767,9 +4917,14 @@ int gelbach_absorbing_cluster_fe(
             X1, targets, *cluster_codes, n_clusters, weights)) {
         return -1;
     }
-    for (std::size_t d = 0; d < fes.size(); ++d) {
-        if (gelbach_same_partition(fes[d], *cluster_codes)) {
-            return static_cast<int>(d);
+    for (int d = 0; d < n_fes; ++d) {
+        const int union_index = first_fe + d;
+        if (union_index >= 0 &&
+            union_index < static_cast<int>(fes.size()) &&
+            gelbach_same_partition(
+                fes[static_cast<std::size_t>(union_index)],
+                *cluster_codes)) {
+            return d;
         }
     }
     return -1;
@@ -4982,6 +5137,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         const Eigen::MatrixXd& X2_in,
                         const std::vector<int>& x2_group_sizes,
                         const std::vector<Eigen::VectorXi>& fes_in,
+                        int n_common_fes,
                         const Eigen::VectorXi* cluster,
                         const GelbachOptions& options,
                         const Eigen::VectorXd* weights,
@@ -5016,14 +5172,58 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     for (const auto& f : fes_in) {
         if (f.size() != n0) throw std::runtime_error("gelbach: fe length mismatch");
     }
+    const int nfe_all = static_cast<int>(fes_in.size());
+    if (n_common_fes < 0 || n_common_fes > nfe_all) {
+        throw std::runtime_error(
+            "gelbach: n_common_fes is outside the FE dimension range");
+    }
+    const int nfe = nfe_all - n_common_fes;
+    const bool common_fe_mode = n_common_fes > 0;
     if (options.vce == GelbachVce::Cluster && cluster == nullptr) {
         throw std::runtime_error("gelbach: cluster vce requires cluster ids");
     }
-    if (x2_group_sizes.empty() && fes_in.empty()) {
-        throw std::runtime_error("gelbach: provide at least one x2 group or FE dimension");
+    if (x2_group_sizes.empty() && nfe == 0) {
+        throw std::runtime_error(
+            "gelbach: provide at least one x2 group or added FE dimension");
     }
     if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
         throw std::runtime_error("gelbach: tol must be finite and strictly positive");
+    }
+
+    int connectivity_fe_index1 = -1;
+    int connectivity_fe_index2 = -1;
+    const bool connectivity_pair_explicit =
+        !options.connectivity_fe_pair.empty();
+    if (connectivity_pair_explicit) {
+        if (options.connectivity_fe_pair.size() != 2) {
+            throw std::runtime_error(
+                "gelbach: connectivity_fe_pair must contain exactly two FE "
+                "indices");
+        }
+        connectivity_fe_index1 = options.connectivity_fe_pair[0];
+        connectivity_fe_index2 = options.connectivity_fe_pair[1];
+        if (connectivity_fe_index1 < 0 ||
+            connectivity_fe_index1 >= nfe ||
+            connectivity_fe_index2 < 0 ||
+            connectivity_fe_index2 >= nfe) {
+            throw std::runtime_error(
+                "gelbach: connectivity_fe_pair index is outside the FE "
+                "dimension range");
+        }
+        if (connectivity_fe_index1 == connectivity_fe_index2) {
+            throw std::runtime_error(
+                "gelbach: connectivity_fe_pair indices must be distinct");
+        }
+    } else if (nfe >= 2) {
+        connectivity_fe_index1 = 0;
+        connectivity_fe_index2 = 1;
+    }
+    if (options.require_connected_fe_split &&
+        (nfe != 2 || common_fe_mode)) {
+        throw std::runtime_error(
+            "gelbach: connected(require) currently requires exactly two added "
+            "FE dimensions and no common FEs; the split with common FEs is "
+            "not yet connectivity-certified");
     }
 
     std::vector<unsigned char> declared_absorbed(static_cast<std::size_t>(p), 0);
@@ -5039,9 +5239,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         declared_absorbed[static_cast<std::size_t>(c)] = 1;
     }
     const bool absorbed_target_mode = !options.absorbed_x1.empty();
-    if (absorbed_target_mode && fes_in.empty()) {
+    if (absorbed_target_mode && nfe == 0) {
         throw std::runtime_error(
-            "gelbach: absorbed targets require at least one absorbed FE dimension");
+            "gelbach: absorbed targets require at least one added FE dimension");
     }
 
     GelbachResult res;
@@ -5056,13 +5256,26 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     res.few_cluster_warning_threshold =
         kGelbachFewClusterWarningThreshold;
     res.gpu_requested = options.use_gpu;
+    res.n_common_fes = n_common_fes;
+    res.common_fes_applied = common_fe_mode;
+    res.intercept_inference_available = !common_fe_mode;
+    res.intercept_status =
+        common_fe_mode ? "not_certified_common_fes"
+                       : "estimated_no_common_fes";
+    res.connected_mode =
+        options.require_connected_fe_split ? "require" : "diagnose";
+    res.connectivity_pair_explicit = connectivity_pair_explicit;
+    res.connectivity_fe_index1 = connectivity_fe_index1;
+    res.connectivity_fe_index2 = connectivity_fe_index2;
     const int recovery_threads = gelbach_recovery_team(options.num_threads, n0);
-    const int G = static_cast<int>(x2_group_sizes.size() + fes_in.size());
+    const int G = static_cast<int>(x2_group_sizes.size()) + nfe;
     const int k1 = p + 1;
+    const int ka = common_fe_mode ? p : k1;
     progress.say("starting decomposition: %lld observations, %d x1 column(s), "
-                 "%d x2 column(s), %d fixed-effect dimension(s)",
+                 "%d x2 column(s), %d common FE dimension(s), %d added FE "
+                 "dimension(s)",
                  static_cast<long long>(n0), p, q,
-                 static_cast<int>(fes_in.size()));
+                 n_common_fes, nfe);
 
     // ---- full model ------------------------------------------------------
     Eigen::MatrixXd X_full(n0, p + q);
@@ -5090,6 +5303,11 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     ho.num_threads = options.num_threads;
     ho.weights_are_frequencies = freq_weights;
     ho.capture_fe_collinear_ss_ratio = true;
+    const bool diagnostic_uses_first_pair =
+        !common_fe_mode && nfe >= 2 &&
+        ((connectivity_fe_index1 == 0 && connectivity_fe_index2 == 1) ||
+         (connectivity_fe_index1 == 1 && connectivity_fe_index2 == 0));
+    ho.capture_first_pair_component_stats = diagnostic_uses_first_pair;
     v11::HdfeRegressorV11 reg(ho);
     progress.say("fitting the full specification...");
     bool gelbach_cuda_available = false;
@@ -5396,6 +5614,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         }
     }
     const Eigen::VectorXd b2 = coefs.segment(p, q);
+    res.beta2 = b2;
+    res.beta2_cov = Eigen::MatrixXd::Constant(
+        q, q, std::numeric_limits<double>::quiet_NaN());
     const int n_observed_groups = static_cast<int>(x2_group_sizes.size());
     int max_group_width = 0;
     for (const int width : x2_group_sizes) {
@@ -5424,6 +5645,14 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
 
     // restrict to the kept sample (singleton dropping)
     const Eigen::VectorXi& keep = regu.results().sample_index;
+    if (options.capture_sample_provenance || options.return_sample_index) {
+        res.sample_hash = gelbach_retained_sample_hash(n0, keep);
+        res.sample_hash_algorithm = "fnv1a64-le-v1";
+        res.sample_index_scope = "input_rows_zero_based";
+    }
+    if (options.return_sample_index) {
+        res.sample_index = keep;
+    }
     const Eigen::Index n = keep.size();
     Eigen::VectorXd y(n);
     Eigen::MatrixXd X1(n, p);
@@ -5448,6 +5677,93 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (weights != nullptr) {
         w_raw.resize(n);
         for (Eigen::Index i2 = 0; i2 < n; ++i2) w_raw[i2] = (*weights)[keep[i2]];
+    }
+    if (nfe == 1) {
+        res.fe_split_status = "single_fe_dimension";
+    } else if (nfe >= 2) {
+        v11::FeComponentStats mobility;
+        if (diagnostic_uses_first_pair) {
+            mobility = regu.first_pair_component_stats();
+        }
+        if (mobility.num_components <= 0) {
+            mobility = v11::compute_first_pair_component_stats(
+                fes[static_cast<std::size_t>(
+                    n_common_fes + connectivity_fe_index1)],
+                fes[static_cast<std::size_t>(
+                    n_common_fes + connectivity_fe_index2)],
+                weights != nullptr ? &w_raw : nullptr);
+        }
+        if (mobility.num_components <= 0) {
+            throw std::runtime_error(
+                "gelbach: first-pair FE mobility graph is empty on the "
+                "retained sample");
+        }
+        res.n_mobility_components = mobility.num_components;
+        res.largest_mobility_component_n_obs =
+            mobility.largest_component_n_obs;
+        res.largest_mobility_component_share =
+            mobility.largest_component_obs_share;
+        res.largest_mobility_component_weight_share =
+            mobility.largest_component_weight_share;
+        if (common_fe_mode) {
+            res.mobility_component_scope = connectivity_pair_explicit
+                ? "selected_added_fe_pair"
+                : "first_two_added_fe_dimensions";
+        } else {
+            res.mobility_component_scope = connectivity_pair_explicit
+                ? "selected_fe_pair"
+                : "first_two_fe_dimensions";
+        }
+        res.connectivity_pair_status =
+            mobility.num_components == 1 ? "connected" : "disconnected";
+
+        if (common_fe_mode) {
+            res.fe_split_status = "not_certified_with_common_fes";
+            res.notes +=
+                "WARNING: per-added-FE-dimension X1-row contributions are "
+                "not connectivity-certified in the presence of common FEs; "
+                "the selected added-FE-pair diagnostic is informative but is "
+                "not a rank certificate for the union FE design. Use the "
+                "normalization-invariant fe_total subtotal unless "
+                "identification is established externally. ";
+        } else if (nfe == 2) {
+            if (mobility.num_components == 1) {
+                res.fe_split_identified = true;
+                res.fe_split_status = "identified_two_way";
+            } else {
+                res.fe_split_status = "normalization_dependent";
+                res.notes +=
+                    "WARNING: per-FE-dimension X1-row contributions are "
+                    "normalization-dependent: the selected FE pair forms " +
+                    std::to_string(mobility.num_components) +
+                    " mobility components in the retained sample. Use the "
+                    "normalization-invariant fe_total subtotal or restrict "
+                    "and refit on a connected component. ";
+            }
+        } else {
+            res.fe_split_status = "not_certified_multiway";
+            res.notes +=
+                "WARNING: per-FE-dimension X1-row contributions are not "
+                "connectivity-certified for three or more FE dimensions; "
+                "a selected-pair diagnostic is not a multiway rank "
+                "certificate. Use the "
+                "normalization-invariant fe_total subtotal unless "
+                "identification is established externally. ";
+            if (mobility.num_components > 1) {
+                res.notes +=
+                    "The selected FE pair is itself disconnected (" +
+                    std::to_string(mobility.num_components) +
+                    " retained-sample components). ";
+            }
+        }
+        if (options.require_connected_fe_split &&
+            !res.fe_split_identified) {
+            throw std::runtime_error(
+                "gelbach: connected(require) failed: the selected FE pair "
+                "has " + std::to_string(mobility.num_components) +
+                " mobility components in the retained sample; rerun in "
+                "diagnose mode to inspect the normalization-safe fe_total");
+        }
     }
     {
         int first = 0;
@@ -5612,27 +5928,40 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         res.absorbing_fe_index =
             options.vce == GelbachVce::Cluster
                 ? gelbach_absorbing_cluster_fe(
-                      X1, options.absorbed_x1, fes, ccodes_ptr, n_clusters, wq)
+                      X1, options.absorbed_x1, fes, n_common_fes, nfe,
+                      ccodes_ptr, n_clusters, wq)
                 : -1;
         res.absorbed_target_inference_valid = res.absorbing_fe_index >= 0;
     }
 
-    // ---- base model (X1 + constant, no FEs) ------------------------------
+    std::vector<Eigen::VectorXi> common_fes;
+    common_fes.reserve(static_cast<std::size_t>(n_common_fes));
+    for (int d = 0; d < n_common_fes; ++d) {
+        common_fes.push_back(fes[static_cast<std::size_t>(d)]);
+    }
+
+    // ---- base model (X1 + common FEs) -----------------------------------
     HdfeOptions hb;
     hb.se_type = StandardErrorType::Homoskedastic;
+    hb.drop_singletons = false;
     hb.tol = options.tol;
     hb.num_threads = recovery_threads;
     hb.weights_are_frequencies = freq_weights;
     v11::HdfeRegressorV11 breg(hb);
     progress.say("fitting the base specification...");
-    breg.fit(y, X1, {}, weights != nullptr ? &w_raw : nullptr);
+    breg.fit(y, X1, common_fes, weights != nullptr ? &w_raw : nullptr);
+    if (!breg.results().converged) {
+        throw std::runtime_error(
+            "gelbach: common-FE base-model absorption did not converge");
+    }
     for (int c = 0; c < p; ++c) {
         const auto& omitted = breg.results().omitted_reason;
         if (c < static_cast<int>(omitted.size()) &&
             omitted[static_cast<std::size_t>(c)] != 0) {
             throw std::runtime_error(
-                "gelbach: the base specification is rank deficient; every x1 "
-                "column must be uniquely identified");
+                "gelbach: the base specification is rank deficient after "
+                "absorbing common FEs; every x1 column must be uniquely "
+                "identified in the base estimand");
         }
     }
     gprof_.mark("gel_base_reg");
@@ -5640,29 +5969,112 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     const Eigen::VectorXd bco = breg.results().coefficients;
     res.b_base = bco.head(p);
 
-    // ---- aux regressions of each H_g on [x1, 1] ---------------------------
-    Eigen::MatrixXd X1t(n, k1);
-    X1t.leftCols(p) = X1;
-    X1t.col(p).setOnes();
+    // ---- component outcomes and common-FE within representation ----------
+    std::vector<Eigen::VectorXd> H(G), vres(G), dvec(G);
+    std::vector<Eigen::MatrixXd> gam(G);  // ka x q_g; empty for FE blocks
+    std::vector<std::pair<int, int>> span(G, {-1, -1});
+    Eigen::MatrixXd X1t(n, ka);
+    Eigen::MatrixXd X2_aux(n, q);
+    if (!common_fe_mode) {
+        X1t.leftCols(p) = X1;
+        X1t.col(p).setOnes();
+        X2_aux = X2;
+        int cursor = 0;
+        int gi = 0;
+        for (int gsz : x2_group_sizes) {
+            H[gi] = X2.middleCols(cursor, gsz) * b2.segment(cursor, gsz);
+            span[gi] = {cursor, cursor + gsz};
+            cursor += gsz;
+            ++gi;
+        }
+        for (int d = 0; d < nfe; ++d, ++gi) {
+            const std::size_t union_d =
+                static_cast<std::size_t>(n_common_fes + d);
+            H[gi] = gel_fast_fit
+                ? fe_effects_sep[union_d]
+                : regu.results().fe_effects[union_d];
+        }
+    } else {
+        // Frisch-Waugh-Lovell representation for the conditional estimand:
+        // residualize X1, X2, and every added-FE fitted component against the
+        // common FE space on exactly the full model's retained sample.
+        const int batch_cols = p + q + nfe;
+        Eigen::MatrixXd batch(n, batch_cols);
+        batch.leftCols(p) = X1;
+        if (q > 0) batch.middleCols(p, q) = X2;
+        for (int d = 0; d < nfe; ++d) {
+            const std::size_t union_d =
+                static_cast<std::size_t>(n_common_fes + d);
+            batch.col(p + q + d) = gel_fast_fit
+                ? fe_effects_sep[union_d]
+                : regu.results().fe_effects[union_d];
+        }
+        HdfeOptions hc;
+        hc.se_type = StandardErrorType::Homoskedastic;
+        hc.fit_intercept = false;
+        hc.drop_singletons = false;
+        hc.tol = options.tol;
+        hc.num_threads = recovery_threads;
+        hc.weights_are_frequencies = freq_weights;
+        v11::HdfeRegressorV11 creg(hc);
+        const detail::AbsorptionResult cab = creg.partial_out(
+            batch.col(0), batch.rightCols(batch_cols - 1), common_fes,
+            weights != nullptr ? &w_raw : nullptr);
+        if (!cab.converged) {
+            throw std::runtime_error(
+                "gelbach: common-FE auxiliary absorption did not converge");
+        }
+        Eigen::MatrixXd within(n, batch_cols);
+        within.col(0) = cab.y_tilde;
+        within.rightCols(batch_cols - 1) = cab.X_tilde;
+        X1t = within.leftCols(p);
+        if (q > 0) X2_aux = within.middleCols(p, q);
+        int cursor = 0;
+        int gi = 0;
+        for (int gsz : x2_group_sizes) {
+            H[gi] =
+                X2_aux.middleCols(cursor, gsz) * b2.segment(cursor, gsz);
+            span[gi] = {cursor, cursor + gsz};
+            cursor += gsz;
+            ++gi;
+        }
+        for (int d = 0; d < nfe; ++d, ++gi) {
+            H[gi] = within.col(p + q + d);
+        }
+        res.notes +=
+            "common FEs were conditioned out of the base, full, and "
+            "auxiliary equations; intercept contributions are not reported "
+            "because they depend on common-FE normalization. ";
+    }
+
+    // ---- aux regressions of each H_g on common-within X1 -----------------
     const Eigen::MatrixXd X1tw = wq.asDiagonal() * X1t;
+    const Eigen::MatrixXd X1_cross = X1t.transpose() * X1tw;
     const Eigen::MatrixXd P =
-        (X1t.transpose() * X1tw).ldlt().solve(Eigen::MatrixXd::Identity(k1, k1));
+        X1_cross.ldlt().solve(Eigen::MatrixXd::Identity(ka, ka));
 
     // The denominator covariance and its cross-covariance with every
     // component are part of the public share=base contract.  Use the base
     // regression's own Stata/regress finite-sample correction; this is
     // intentionally distinct from q_big on the stacked Gelbach equations.
-    const double df_base = n_eff - static_cast<double>(k1);
+    const double df_base = common_fe_mode
+        ? breg.results().df_resid
+        : n_eff - static_cast<double>(k1);
     res.df_base = df_base;
-    if (!(df_base > 0.0) || bco.size() != k1) {
+    if (!(df_base > 0.0) ||
+        (!common_fe_mode && bco.size() != k1) ||
+        (common_fe_mode && bco.size() < p)) {
         throw std::runtime_error(
             "gelbach: insufficient base-model residual degrees of freedom");
     }
-    const Eigen::VectorXd u_base = y - X1t * bco;
+    const Eigen::VectorXd u_base = common_fe_mode
+        ? breg.results().residuals
+        : y - X1t * bco;
+    Eigen::MatrixXd base_cov_aux;
     if (options.vce == GelbachVce::Unadjusted) {
         const double sigma2_base =
             (wq.array() * u_base.array().square()).sum() / df_base;
-        res.base_cov = sigma2_base * P;
+        base_cov_aux = sigma2_base * P;
     } else {
         const Eigen::VectorXd base_score = sf.cwiseProduct(u_base);
         const Eigen::MatrixXd Zbase =
@@ -5674,31 +6086,122 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             const double gc = static_cast<double>(n_clusters);
             correction = (n_eff - 1.0) / df_base * gc / (gc - 1.0);
         }
-        res.base_cov = correction * (P * Mbase * P);
+        base_cov_aux = correction * (P * Mbase * P);
+    }
+    if (common_fe_mode) {
+        res.base_cov = Eigen::MatrixXd::Constant(
+            k1, k1, std::numeric_limits<double>::quiet_NaN());
+        res.base_cov.topLeftCorner(p, p) = base_cov_aux;
+    } else {
+        res.base_cov = base_cov_aux;
     }
 
-    std::vector<Eigen::VectorXd> H(G), vres(G), dvec(G);
-    std::vector<Eigen::MatrixXd> gam(G);   // k1 x q_g; empty for FE blocks
-    std::vector<std::pair<int, int>> span(G, {-1, -1});
     {
         int cursor = 0;
         int gi = 0;
         for (int gsz : x2_group_sizes) {
-            H[gi] = X2.middleCols(cursor, gsz) * b2.segment(cursor, gsz);
-            gam[gi] = P * (X1tw.transpose() * X2.middleCols(cursor, gsz));
+            gam[gi] =
+                P * (X1tw.transpose() * X2_aux.middleCols(cursor, gsz));
             span[gi] = {cursor, cursor + gsz};
             cursor += gsz;
             ++gi;
         }
-        for (std::size_t d = 0; d < fes.size(); ++d, ++gi) {
-            H[gi] = gel_fast_fit ? fe_effects_sep[d] : regu.results().fe_effects[d];
+    }
+    const double diagnostic_nan =
+        std::numeric_limits<double>::quiet_NaN();
+    res.auxiliary_loadings = Eigen::MatrixXd::Constant(k1, q, diagnostic_nan);
+    res.auxiliary_loading_ss_ratio =
+        Eigen::VectorXd::Constant(n_observed_groups, diagnostic_nan);
+    res.auxiliary_loading_rank =
+        Eigen::VectorXi::Zero(n_observed_groups);
+    res.auxiliary_loading_condition_number =
+        Eigen::VectorXd::Constant(n_observed_groups, diagnostic_nan);
+    res.auxiliary_loading_max_abs_z =
+        Eigen::MatrixXd::Constant(k1, n_observed_groups, diagnostic_nan);
+    res.auxiliary_loading_pvalue =
+        Eigen::MatrixXd::Constant(k1, n_observed_groups, diagnostic_nan);
+    res.auxiliary_loading_test_evaluated =
+        Eigen::MatrixXi::Zero(k1, n_observed_groups);
+    res.beta2_wald_stat =
+        Eigen::VectorXd::Constant(n_observed_groups, diagnostic_nan);
+    res.beta2_wald_df = Eigen::VectorXi::Zero(n_observed_groups);
+    res.beta2_wald_pvalue =
+        Eigen::VectorXd::Constant(n_observed_groups, diagnostic_nan);
+    res.contribution_gradient_norm =
+        Eigen::MatrixXd::Constant(k1, n_observed_groups, diagnostic_nan);
+    res.regular_inference_valid =
+        Eigen::MatrixXi::Zero(k1, n_observed_groups);
+    res.regular_inference_status.assign(
+        static_cast<std::size_t>(k1 * n_observed_groups), "not_certified");
+    if (common_fe_mode) {
+        for (int g = 0; g < n_observed_groups; ++g) {
+            res.regular_inference_status[
+                static_cast<std::size_t>(g * k1 + p)] =
+                "not_applicable_common_fe_intercept";
+        }
+    }
+    res.regular_inference_all_valid = true;
+    res.regularity_test_alpha = kGelbachRegularityTestAlpha;
+    const double regularity_component_alpha =
+        res.regularity_test_alpha / 2.0;
+
+    // X2 is column-major.  Accumulate the weighted sums of squares one
+    // contiguous column at a time, once, instead of rescanning short dynamic
+    // row segments for every block.  These values feed diagnostics only.
+    Eigen::VectorXd x2_weighted_ss = Eigen::VectorXd::Zero(q);
+    for (int j = 0; j < q; ++j) {
+        x2_weighted_ss[j] =
+            (wq.array() * X2_aux.col(j).array().square()).sum();
+    }
+    for (int g = 0; g < n_observed_groups; ++g) {
+        const int first = span[g].first;
+        const int width = span[g].second - span[g].first;
+        res.auxiliary_loadings.topRows(ka).middleCols(first, width) = gam[g];
+
+        const double raw_ss =
+            x2_weighted_ss.segment(first, width).sum();
+        const double fitted_ss =
+            (gam[g].transpose() * X1_cross * gam[g]).trace();
+        if (raw_ss > 0.0 && gelbach_guarded_finite(raw_ss) &&
+            gelbach_guarded_finite(fitted_ss)) {
+            res.auxiliary_loading_ss_ratio[g] =
+                std::max(0.0, fitted_ss) / raw_ss;
+        }
+
+        const Eigen::JacobiSVD<Eigen::MatrixXd> svd(gam[g]);
+        const Eigen::VectorXd singular = svd.singularValues();
+        if (singular.size() > 0) {
+            const double largest = singular[0];
+            const double threshold =
+                std::max(gam[g].rows(), gam[g].cols()) *
+                100.0 * std::numeric_limits<double>::epsilon() * largest;
+            double smallest_nonzero = diagnostic_nan;
+            int rank = 0;
+            for (Eigen::Index j = 0; j < singular.size(); ++j) {
+                if (singular[j] > threshold) {
+                    smallest_nonzero = singular[j];
+                    ++rank;
+                }
+            }
+            res.auxiliary_loading_rank[g] = rank;
+            if (rank > 0 && smallest_nonzero > 0.0) {
+                res.auxiliary_loading_condition_number[g] =
+                    largest / smallest_nonzero;
+            }
+        }
+
+        const double beta_norm_sq =
+            b2.segment(first, width).squaredNorm();
+        for (int r = 0; r < ka; ++r) {
+            res.contribution_gradient_norm(r, g) =
+                std::sqrt(beta_norm_sq + gam[g].row(r).squaredNorm());
         }
     }
     for (int g = 0; g < G; ++g) {
         dvec[g] = P * (X1tw.transpose() * H[g]);
         vres[g] = H[g] - X1t * dvec[g];
     }
-    bool any_fe_block = !fes.empty();
+    bool any_fe_block = nfe > 0;
     if (any_fe_block) {
         res.notes += "absorbed FE blocks use the aux-regression (gamma0) variance. ";
     }
@@ -5720,8 +6223,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
 
     // ---- covariance --------------------------------------------------------
-    Eigen::MatrixXd fullcov = Eigen::MatrixXd::Zero(G * k1, G * k1);
-    res.cov_delta_bbase = Eigen::MatrixXd::Zero(G * k1, k1);
+    Eigen::MatrixXd fullcov_aux = Eigen::MatrixXd::Zero(G * ka, G * ka);
+    Eigen::MatrixXd cov_delta_bbase_aux =
+        Eigen::MatrixXd::Zero(G * ka, ka);
     if (options.vce == GelbachVce::Unadjusted) {
         Eigen::MatrixXd R(n, G + 1);
         R.col(0) = e;
@@ -5734,6 +6238,10 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             (wq.array() * e.array().square()).sum() / df_full;
         const double vscale =
             regu.results().sigma2 > 0.0 ? s2u_w / regu.results().sigma2 : 1.0;
+        if (q > 0) {
+            res.beta2_cov =
+                vscale * V_hom.block(p, p, q, q);
+        }
         Eigen::VectorXd u_base_centered = u_base;
         u_base_centered.array() -=
             (wq.dot(u_base) / wq.sum());
@@ -5742,7 +6250,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 (wq.array() * vres[g].array() *
                  u_base_centered.array()).sum() /
                 df_full;
-            res.cov_delta_bbase.block(g * k1, 0, k1, k1) =
+            cov_delta_bbase_aux.block(g * ka, 0, ka, ka) =
                 cov_v_base * P;
             for (int h = 0; h < G; ++h) {
                 Eigen::MatrixXd block = Omega(g + 1, h + 1) * P;
@@ -5753,7 +6261,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                                          span[h].second - span[h].first) *
                              gam[h].transpose();
                 }
-                fullcov.block(g * k1, h * k1, k1, k1) = block;
+                fullcov_aux.block(g * ka, h * ka, ka, ka) = block;
             }
         }
     } else {
@@ -5868,15 +6376,15 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         if (ccodes_ptr != nullptr) {
             // Sum score rows directly by cluster. This preserves each
             // cluster's original row-addition order while avoiding the
-            // n x (Kx + G*k1) stacked-score matrix (multi-GB at AKM scale).
+            // n x (Kx + G*ka) stacked-score matrix (multi-GB at AKM scale).
             M = gelbach_cluster_meat_streamed(
                 W, X1t, se_score, sf, vres, u_base, *ccodes_ptr,
                 n_clusters, recovery_threads, &score_base_cross, nullptr);
         } else {
-            Eigen::MatrixXd Z(n, Kx + G * k1);
+            Eigen::MatrixXd Z(n, Kx + G * ka);
             Z.leftCols(Kx) = W.array().colwise() * se_score.array();
             for (int g = 0; g < G; ++g) {
-                Z.middleCols(Kx + g * k1, k1) =
+                Z.middleCols(Kx + g * ka, ka) =
                     X1t.array().colwise() * sf.cwiseProduct(vres[g]).array();
             }
             M = cluster_meat(Z, nullptr, 0);
@@ -5887,10 +6395,11 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         }
         gprof_.mark("gel_meat");
         progress.say("covariance system assembled");
-        Eigen::MatrixXd bread = Eigen::MatrixXd::Zero(Kx + G * k1, Kx + G * k1);
+        Eigen::MatrixXd bread =
+            Eigen::MatrixXd::Zero(Kx + G * ka, Kx + G * ka);
         bread.topLeftCorner(Kx, Kx) = Sw;
         for (int g = 0; g < G; ++g) {
-            bread.block(Kx + g * k1, Kx + g * k1, k1, k1) = P;
+            bread.block(Kx + g * ka, Kx + g * ka, ka, ka) = P;
         }
         const Eigen::MatrixXd C = q_big * (bread * M * bread);
         // Cross-blocks with the base equation belong to the same stacked
@@ -5905,18 +6414,23 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         // identified X1 columns, followed by X2. In the standard mode this
         // remains exactly the historical offset p.
         const int x2_score_offset = p_score;
+        if (q > 0) {
+            res.beta2_cov =
+                vu.block(x2_score_offset, x2_score_offset, q, q);
+        }
         for (int g = 0; g < G; ++g) {
             Eigen::MatrixXd cross =
-                Cbase.block(Kx + g * k1, 0, k1, k1);
+                Cbase.block(Kx + g * ka, 0, ka, ka);
             if (!options.gamma0 && gam[g].size() > 0) {
                 const int s0 = span[g].first;
                 const int sq = span[g].second - span[g].first;
                 cross += gam[g] *
-                         Cbase.block(x2_score_offset + s0, 0, sq, k1);
+                         Cbase.block(x2_score_offset + s0, 0, sq, ka);
             }
-            res.cov_delta_bbase.block(g * k1, 0, k1, k1) = cross;
+            cov_delta_bbase_aux.block(g * ka, 0, ka, ka) = cross;
             for (int h = 0; h < G; ++h) {
-                Eigen::MatrixXd block = C.block(Kx + g * k1, Kx + h * k1, k1, k1);
+                Eigen::MatrixXd block =
+                    C.block(Kx + g * ka, Kx + h * ka, ka, ka);
                 if (!options.gamma0 && gam[g].size() > 0 && gam[h].size() > 0) {
                     const int s0 = span[g].first, sq = span[g].second - span[g].first;
                     const int t0 = span[h].first, tq = span[h].second - span[h].first;
@@ -5927,50 +6441,226 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                     if (!options.cov0) {
                         const Eigen::MatrixXd cr =
                             gam[g] * C.block(x2_score_offset + s0,
-                                             Kx + h * k1, sq, k1);
+                                             Kx + h * ka, sq, ka);
                         const Eigen::MatrixXd crT =
                             (gam[h] * C.block(x2_score_offset + t0,
-                                              Kx + g * k1, tq, k1)).transpose();
+                                              Kx + g * ka, tq, ka)).transpose();
                         block += cr + crT;
                     }
                 }
-                fullcov.block(g * k1, h * k1, k1, k1) = block;
+                fullcov_aux.block(g * ka, h * ka, ka, ka) = block;
             }
         }
     }
 
+    // ---- product-regularity diagnostic (Gelbach 2016, footnote 14) -------
+    // For contribution row r in observed block g,
+    //     delta_rg = Gamma_rg * beta2_g,
+    // so its gradient is [beta2_g, Gamma_rg].  The ordinary first-order
+    // delta method is nonregular when both parts are zero.  Samples almost
+    // never return exact floating-point zeros, therefore the public gate is
+    // deliberately conservative: regularity is marked valid only if the
+    // requested-VCE joint Wald test rejects beta2_g=0, or (otherwise) a
+    // Bonferroni rowwise test rejects Gamma_rg=0.  Failure to reject is not a
+    // claim that the population gradient is zero; it is a loud "not ruled
+    // out" qualification of the normal-theory inference.
+    int nonregular_cells = 0;
+    std::vector<int> nonregular_groups;
+    for (int g = 0; g < n_observed_groups; ++g) {
+        const int first = span[g].first;
+        const int width = span[g].second - span[g].first;
+        const GelbachWaldDiagnostic beta_test = gelbach_wald_zero(
+            b2.segment(first, width),
+            res.beta2_cov.block(first, first, width, width));
+        if (beta_test.evaluated) {
+            res.beta2_wald_stat[g] = beta_test.statistic;
+            res.beta2_wald_df[g] = beta_test.df;
+            res.beta2_wald_pvalue[g] = beta_test.pvalue;
+        }
+        const bool beta_regular =
+            beta_test.evaluated &&
+            beta_test.pvalue < regularity_component_alpha;
+        if (beta_regular) {
+            for (int r = 0; r < ka; ++r) {
+                res.regular_inference_valid(r, g) = 1;
+                res.regular_inference_status[
+                    static_cast<std::size_t>(g * k1 + r)] =
+                    "regular_beta_nonzero";
+            }
+            continue;
+        }
+
+        std::vector<double> row_min_p(static_cast<std::size_t>(ka), 1.0);
+        std::vector<double> row_max_z(static_cast<std::size_t>(ka), 0.0);
+        std::vector<int> row_valid_tests(static_cast<std::size_t>(ka), 0);
+        const Eigen::MatrixXd loading_residual =
+            X2_aux.middleCols(first, width) - X1t * gam[g];
+        for (int j = 0; j < width; ++j) {
+            Eigen::MatrixXd loading_cov;
+            if (options.vce == GelbachVce::Unadjusted) {
+                const double sigma2 =
+                    (wq.array() *
+                     loading_residual.col(j).array().square()).sum() /
+                    df_base;
+                loading_cov = sigma2 * P;
+            } else {
+                const Eigen::VectorXd loading_score =
+                    sf.cwiseProduct(loading_residual.col(j));
+                const Eigen::MatrixXd Zloading =
+                    X1t.array().colwise() * loading_score.array();
+                const Eigen::MatrixXd Mloading =
+                    cluster_meat(Zloading, ccodes_ptr, n_clusters);
+                double correction = n_eff / df_base;
+                if (ccodes_ptr != nullptr) {
+                    const double gc = static_cast<double>(n_clusters);
+                    correction =
+                        (n_eff - 1.0) / df_base * gc / (gc - 1.0);
+                }
+                loading_cov = correction * (P * Mloading * P);
+            }
+            for (int r = 0; r < ka; ++r) {
+                const double variance = loading_cov(r, r);
+                const double loading = gam[g](r, j);
+                double abs_z = diagnostic_nan;
+                double pvalue = diagnostic_nan;
+                if (variance > 0.0 &&
+                    gelbach_guarded_finite(variance)) {
+                    abs_z = std::abs(loading) / std::sqrt(variance);
+                    pvalue = std::erfc(abs_z / std::sqrt(2.0));
+                } else if (variance == 0.0 && loading != 0.0 &&
+                           gelbach_guarded_finite(loading)) {
+                    // A deterministic, nonzero auxiliary loading establishes
+                    // a nonzero gradient even though a z ratio is undefined.
+                    abs_z = 1e300;
+                    pvalue = 0.0;
+                }
+                if (gelbach_guarded_finite(pvalue) && pvalue >= 0.0) {
+                    row_min_p[static_cast<std::size_t>(r)] =
+                        std::min(row_min_p[static_cast<std::size_t>(r)],
+                                 pvalue);
+                    row_max_z[static_cast<std::size_t>(r)] =
+                        std::max(row_max_z[static_cast<std::size_t>(r)],
+                                 abs_z);
+                    ++row_valid_tests[static_cast<std::size_t>(r)];
+                }
+            }
+        }
+
+        bool group_has_nonregular_cell = false;
+        for (int r = 0; r < ka; ++r) {
+            const std::size_t rr = static_cast<std::size_t>(r);
+            const std::size_t status_index =
+                static_cast<std::size_t>(g * k1 + r);
+            if (row_valid_tests[rr] > 0) {
+                const double adjusted_p = std::min(
+                    1.0, static_cast<double>(width) * row_min_p[rr]);
+                res.auxiliary_loading_max_abs_z(r, g) = row_max_z[rr];
+                res.auxiliary_loading_pvalue(r, g) = adjusted_p;
+                res.auxiliary_loading_test_evaluated(r, g) = 1;
+                if (adjusted_p < regularity_component_alpha) {
+                    res.regular_inference_valid(r, g) = 1;
+                    res.regular_inference_status[status_index] =
+                        "regular_loading_nonzero";
+                    continue;
+                }
+                res.regular_inference_status[status_index] =
+                    "nonregular_not_ruled_out";
+            } else {
+                res.regular_inference_status[status_index] =
+                    "not_certified";
+            }
+            res.regular_inference_valid(r, g) = 0;
+            res.regular_inference_all_valid = false;
+            group_has_nonregular_cell = true;
+            ++nonregular_cells;
+        }
+        if (group_has_nonregular_cell) {
+            nonregular_groups.push_back(g + 1);
+        }
+    }
+    if (nonregular_cells > 0) {
+        res.notes +=
+            "WARNING: regular first-order delta-method inference is not "
+            "established for " + std::to_string(nonregular_cells) +
+            " observed-X2 contribution cell(s) in block(s) ";
+        for (std::size_t i = 0; i < nonregular_groups.size(); ++i) {
+            if (i > 0) res.notes += ",";
+            res.notes += std::to_string(nonregular_groups[i]);
+        }
+        res.notes +=
+            ": the conservative requested-VCE beta/loading tests, each using "
+            "half the family-wise level, did not establish a nonzero product "
+            "gradient at family-wise alpha=" +
+            std::to_string(res.regularity_test_alpha) +
+            ". Failure to reject is not proof of nonregularity; normal-theory "
+            "SEs, confidence intervals, and p-values for flagged cells are "
+            "diagnostic only. Use a product-aware bootstrap or weak-inference "
+            "procedure before substantive inference. Inspect "
+            "regular_inference_valid and regular_inference_status. ";
+    }
+
     // ---- totals and identity ----------------------------------------------
-    res.delta.resize(k1, G);
-    for (int g = 0; g < G; ++g) res.delta.col(g) = dvec[g];
-    res.cov = fullcov;
-    res.total = Eigen::VectorXd::Zero(k1);
-    for (int g = 0; g < G; ++g) res.total += dvec[g];
-    res.total_cov = Eigen::MatrixXd::Zero(k1, k1);
-    res.cov_total_bbase = Eigen::MatrixXd::Zero(k1, k1);
+    Eigen::VectorXd total_aux = Eigen::VectorXd::Zero(ka);
+    Eigen::MatrixXd total_cov_aux = Eigen::MatrixXd::Zero(ka, ka);
+    Eigen::MatrixXd cov_total_bbase_aux =
+        Eigen::MatrixXd::Zero(ka, ka);
     for (int g = 0; g < G; ++g) {
-        res.cov_total_bbase +=
-            res.cov_delta_bbase.block(g * k1, 0, k1, k1);
+        total_aux += dvec[g];
+        cov_total_bbase_aux +=
+            cov_delta_bbase_aux.block(g * ka, 0, ka, ka);
         for (int h = 0; h < G; ++h) {
-            res.total_cov += fullcov.block(g * k1, h * k1, k1, k1);
+            total_cov_aux +=
+                fullcov_aux.block(g * ka, h * ka, ka, ka);
         }
     }
     if (absorbed_target_mode) {
         for (const int r : options.absorbed_x1) {
             for (const int c : options.absorbed_x1) {
-                res.total_cov(r, c) = res.base_cov(r, c);
+                total_cov_aux(r, c) = base_cov_aux(r, c);
             }
             // total_r and b_base_r are literally the same estimator. Keep the
             // conditional FE component cross-blocks as estimated, but make
             // the authoritative total cross-covariance obey that identity.
-            res.cov_total_bbase.row(r) = res.base_cov.row(r);
+            cov_total_bbase_aux.row(r) = base_cov_aux.row(r);
         }
     }
-    Eigen::VectorXd b_base_c(k1), b_full_c(k1);
-    b_base_c.head(p) = res.b_base;
-    b_base_c[p] = bco.size() == p + 1 ? bco[p] : 0.0;
-    b_full_c.head(p) = res.b_full;
-    b_full_c[p] = has_cons ? coefs[p + q] : 0.0;
-    res.identity_gap = (b_base_c - b_full_c - res.total).cwiseAbs().maxCoeff();
+
+    const double public_nan = std::numeric_limits<double>::quiet_NaN();
+    res.delta = Eigen::MatrixXd::Constant(k1, G, public_nan);
+    res.cov = Eigen::MatrixXd::Constant(G * k1, G * k1, public_nan);
+    res.cov_delta_bbase =
+        Eigen::MatrixXd::Constant(G * k1, k1, public_nan);
+    res.total = Eigen::VectorXd::Constant(k1, public_nan);
+    res.total_cov = Eigen::MatrixXd::Constant(k1, k1, public_nan);
+    res.cov_total_bbase =
+        Eigen::MatrixXd::Constant(k1, k1, public_nan);
+    res.delta.topRows(ka) = Eigen::MatrixXd::Zero(ka, G);
+    for (int g = 0; g < G; ++g) {
+        res.delta.col(g).head(ka) = dvec[g];
+        res.cov_delta_bbase.block(g * k1, 0, ka, ka) =
+            cov_delta_bbase_aux.block(g * ka, 0, ka, ka);
+        for (int h = 0; h < G; ++h) {
+            res.cov.block(g * k1, h * k1, ka, ka) =
+                fullcov_aux.block(g * ka, h * ka, ka, ka);
+        }
+    }
+    res.total.head(ka) = total_aux;
+    res.total_cov.topLeftCorner(ka, ka) = total_cov_aux;
+    res.cov_total_bbase.topLeftCorner(ka, ka) =
+        cov_total_bbase_aux;
+
+    if (common_fe_mode) {
+        res.identity_gap =
+            (res.b_base - res.b_full - total_aux).cwiseAbs().maxCoeff();
+    } else {
+        Eigen::VectorXd b_base_c(k1), b_full_c(k1);
+        b_base_c.head(p) = res.b_base;
+        b_base_c[p] = bco.size() == p + 1 ? bco[p] : 0.0;
+        b_full_c.head(p) = res.b_full;
+        b_full_c[p] = has_cons ? coefs[p + q] : 0.0;
+        res.identity_gap =
+            (b_base_c - b_full_c - res.total).cwiseAbs().maxCoeff();
+    }
     const bool gap_finite =
         res.identity_gap > -1e300 && res.identity_gap < 1e300;
     const double base_scale =
@@ -5984,6 +6674,20 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                  res.converged ? "yes" : "NO", res.identity_gap,
                  res.gpu_used ? ", gpu_used=1" : "");
     return res;
+}
+
+GelbachResult decompose(const Eigen::VectorXd& y,
+                        const Eigen::MatrixXd& X1,
+                        const Eigen::MatrixXd& X2,
+                        const std::vector<int>& x2_group_sizes,
+                        const std::vector<Eigen::VectorXi>& fes,
+                        const Eigen::VectorXi* cluster,
+                        const GelbachOptions& options,
+                        const Eigen::VectorXd* weights,
+                        bool freq_weights) {
+    return decompose(
+        y, X1, X2, x2_group_sizes, fes, 0, cluster, options, weights,
+        freq_weights);
 }
 
 }  // namespace gelbach

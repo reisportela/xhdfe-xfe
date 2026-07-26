@@ -48,6 +48,26 @@ struct GroupIndividualFeEstimates {
     double mse = 0.0;
 };
 
+/**
+ * \brief Exact connected-component summary for the first pair of FE dimensions.
+ *
+ * These are the mobility groups used by the Component-style FE normalization
+ * and by reghdfe-compatible groupvar()/first-pair DoF accounting. Observation
+ * counts always refer to physical rows. The weight share uses the supplied
+ * positive weights and is therefore scale invariant.
+ */
+struct FeComponentStats {
+    int num_components = 0;
+    long long largest_component_n_obs = 0;
+    double largest_component_obs_share = 0.0;
+    double largest_component_weight_share = 0.0;
+};
+
+FeComponentStats compute_first_pair_component_stats(
+    const Eigen::VectorXi& first_fe,
+    const Eigen::VectorXi& second_fe,
+    const Eigen::VectorXd* weights = nullptr);
+
 class HdfeRegressorV11 {
 public:
     explicit HdfeRegressorV11(HdfeOptions options = HdfeOptions{},
@@ -99,6 +119,9 @@ public:
     bool gpu_attempted() const noexcept { return gpu_attempted_; }
     bool gpu_absorption_converged() const noexcept { return gpu_absorption_converged_; }
     int gpu_absorption_iterations() const noexcept { return gpu_absorption_iterations_; }
+    const FeComponentStats& first_pair_component_stats() const noexcept {
+        return first_pair_component_stats_;
+    }
 
 private:
     int resolve_threads(int n_rows, int num_fes) const;
@@ -119,6 +142,7 @@ private:
     bool gpu_attempted_ = false;
     bool gpu_absorption_converged_ = false;
     int gpu_absorption_iterations_ = 0;
+    FeComponentStats first_pair_component_stats_;
 };
 
 }  // namespace v11

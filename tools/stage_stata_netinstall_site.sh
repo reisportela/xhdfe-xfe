@@ -13,6 +13,9 @@ Plugin options:
   --macos-xfe PATH         macOS universal/ARM xfe.plugin source
   --windows-xhdfe PATH     Windows x86_64 xhdfe.plugin source
   --windows-xfe PATH       Windows x86_64 xfe.plugin source
+  --windows-libgomp PATH   Windows OpenMP libgomp-1.dll source
+  --windows-libwinpthread PATH
+                           Windows POSIX-thread runtime DLL source
 
 The output directory is a Stata net-install site.  The generated .pkg files use
 Stata platform-specific g lines, so each OS downloads the matching plugin and
@@ -34,6 +37,8 @@ macos_xhdfe=""
 macos_xfe=""
 windows_xhdfe=""
 windows_xfe=""
+windows_libgomp=""
+windows_libwinpthread=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +48,8 @@ while [[ $# -gt 0 ]]; do
     --macos-xfe) macos_xfe="${2:?}"; shift 2 ;;
     --windows-xhdfe) windows_xhdfe="${2:?}"; shift 2 ;;
     --windows-xfe) windows_xfe="${2:?}"; shift 2 ;;
+    --windows-libgomp) windows_libgomp="${2:?}"; shift 2 ;;
+    --windows-libwinpthread) windows_libwinpthread="${2:?}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -82,6 +89,12 @@ shared=(
   stata/xhdfeconnected.sthlp
   stata/xhdfegelbach.ado
   stata/xhdfegelbach.sthlp
+  stata/xhdfegelbachbootstrap.ado
+  stata/xhdfegelbachbootstrap.sthlp
+  stata/xhdfegelbachetable.ado
+  stata/xhdfegelbachetable.sthlp
+  stata/xhdfegelbachcoefplot.ado
+  stata/xhdfegelbachcoefplot.sthlp
   stata/xhdfegpu.ado
   stata/xhdfegpu.sthlp
   stata/xfe.ado
@@ -101,6 +114,18 @@ copy_optional_pair "$macos_xhdfe" "$macos_xfe" \
   xhdfe.macos-universal.plugin xfe.macos-universal.plugin && has_macos=1
 copy_optional_pair "$windows_xhdfe" "$windows_xfe" \
   xhdfe.win64.plugin xfe.win64.plugin && has_windows=1
+
+if [[ "$has_windows" -eq 1 ]]; then
+  [[ -n "$windows_libgomp" && -n "$windows_libwinpthread" ]] || {
+    echo "Windows OpenMP plugins require both runtime DLLs." >&2
+    exit 1
+  }
+  copy_required "$windows_libgomp" "$outdir/libgomp-1.dll"
+  copy_required "$windows_libwinpthread" "$outdir/libwinpthread-1.dll"
+elif [[ -n "$windows_libgomp" || -n "$windows_libwinpthread" ]]; then
+  echo "Windows runtime DLLs were supplied without a Windows plugin pair." >&2
+  exit 1
+fi
 
 cat > "$outdir/stata.toc" <<'EOF'
 v 3
@@ -134,6 +159,12 @@ f xhdfeconnected.ado
 f xhdfeconnected.sthlp
 f xhdfegelbach.ado
 f xhdfegelbach.sthlp
+f xhdfegelbachbootstrap.ado
+f xhdfegelbachbootstrap.sthlp
+f xhdfegelbachetable.ado
+f xhdfegelbachetable.sthlp
+f xhdfegelbachcoefplot.ado
+f xhdfegelbachcoefplot.sthlp
 f xhdfegpu.ado
 f xhdfegpu.sthlp
 f xfe.ado
@@ -153,6 +184,12 @@ EOF
   emit_plugin_g_lines "$pkg" "$plugin_prefix" "$cmd.plugin"
   if [[ "$cmd" == "xhdfe" ]]; then
     emit_plugin_g_lines "$pkg" "xfe" "xfe.plugin"
+  fi
+  if [[ "$has_windows" -eq 1 ]]; then
+    cat >> "$pkg" <<EOF
+g WIN64 libgomp-1.dll libgomp-1.dll
+g WIN64 libwinpthread-1.dll libwinpthread-1.dll
+EOF
   fi
 
   cat >> "$pkg" <<EOF
@@ -215,6 +252,8 @@ The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
 file is installed under the canonical runtime name xhdfe.plugin or xfe.plugin.
+Windows packages also install the colocated libgomp-1.dll and
+libwinpthread-1.dll required by the production OpenMP plugins.
 EOF
 
 echo "Staged Stata net-install site in $outdir"

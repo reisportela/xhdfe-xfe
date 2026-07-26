@@ -8,16 +8,20 @@ are not validated by the command.
 Decomposes the change in the base-specification coefficients when covariate
 groups (and/or absorbed fixed-effect blocks) are added:
 
-    base:  y = X1*b_base + e_base            (always includes a constant)
-    full:  y = X1*b_full + sum_g X2_g*G_g [+ absorbed FEs] + e
+    base:  y = X1*b_base + common FEs C + e_base
+    full:  y = X1*b_full + sum_g X2_g*G_g + C + added FEs A + e
 
-    b_base - b_full = sum_g delta_g,   delta_g = (X1~'X1~)^{-1} X1~'H_g
+    b_base - b_full = sum_g delta_g,
+    delta_g = (X1_C'X1_C)^{-1} X1_C'H_g,C
 
 with H_g = X2_g @ G_g for observed groups and H_d = the observation-level
-fixed-effect contribution for absorbed dimensions (recovered by the xhdfe
-core). X1~ = [X1, 1]; the implicit constant makes each block's x1-row split
-invariant to the fixed-effect normalization (only the constant row shifts),
-exactly as in Gelbach's b1x2.
+fixed-effect contribution for added absorbed dimensions (recovered by the
+xhdfe core). The C subscript denotes partialling out ``common_fes``. Those
+dimensions condition base, full and every auxiliary projection; they are not
+contribution blocks. Without common FEs, X1_C = [X1, 1] and the historical
+b1x2-compatible intercept contract is unchanged. With common FEs, the slope
+identity and inference remain available, while the intercept allocation is
+normalization-dependent and its public point/covariance entries are missing.
 
 The default is the standard Gelbach estimand and remains fail-closed when an
 X1 column is not identified in the full model. ``absorbed_targets=`` activates
@@ -59,6 +63,20 @@ formula, including robust cross terms via the within representation.
 Accordingly, ``total_se_type`` is labelled ``mixed_*_conditional_fe`` when a
 total combines fully modelled observed blocks with conditional FE blocks.
 
+For every observed-block contribution row, the backend also evaluates the
+product gradient ``[beta2_g, Gamma_rg]``. Ordinary first-order delta-method
+inference is marked valid only when the requested-VCE joint Wald test rejects
+``beta2_g = 0`` or, if it does not, a Bonferroni rowwise test rejects
+``Gamma_rg = 0``. Each component test uses half of
+``regularity_test_alpha=0.05`` so that the exposed value is the family-wise
+level for their union. Failure to reject is not proof that the population
+gradient is zero: it is reported conservatively as
+``nonregular_not_ruled_out``. Numerical SEs are preserved for diagnosis, while
+``notes``, runtime warnings, tidy rows and contrasts label the corresponding
+normal confidence intervals as diagnostic only. ``auxiliary_loadings`` are the
+true projection loadings; the legacy ``gamma`` field remains the padded
+full-model X2 coefficients for backward compatibility.
+
 Per the brief, NO KSS-style correction is applied: the contributions are
 linear functionals of the fixed effects and largely escape the quadratic
 limited-mobility bias. Stata-style aweights and fweights are supported
@@ -88,11 +106,17 @@ diagnostic-only band immediately above that boundary through 1e-4 emits a
 ``RuntimeWarning`` and sets ``x1_near_collinear_mask`` without changing any
 estimate, covariance, or rank decision.
 
-Note on interpretation: with two or more mobility components, the split of
-the combined FE contribution into per-FE-dimension deltas depends on a
-normalization convention (the component mean-shift documented above); the
-total across FE dimensions and b_base - b_full are convention-invariant.
-Within a single connected mobility component the x1-row split is identified.
+Note on interpretation: component diagnostics are computed on the retained
+sample for the pair selected by ``connectivity_fes`` among the added
+dimensions in ``fes`` (the first two added FEs by default). With no common FEs
+and exactly two added FE dimensions, one component certifies the x1-row split;
+two or more components make the per-dimension split normalization-dependent.
+``connected='require'`` turns that certificate into a fail-closed gate. With
+common FEs, the selected pair remains informative but cannot certify the
+larger common-plus-added FE normalization, so the result reports
+``fe_split_status='not_certified_with_common_fes'``. With three or more added
+FE dimensions, it reports ``not_certified_multiway``. In every case the total
+across added FE dimensions and b_base - b_full are normalization-invariant.
 """
 
 from __future__ import annotations
@@ -102,7 +126,15 @@ from statistics import NormalDist
 import numpy as np
 
 
-__all__ = ["decompose", "tidy", "contrast"]
+__all__ = [
+    "decompose",
+    "bootstrap",
+    "tidy",
+    "contrast",
+    "etable",
+    "waterfall_data",
+    "coefplot",
+]
 
 
 def _core():
@@ -171,10 +203,61 @@ def _focal_indices(focal, p, labels):
     return indices
 
 
+def _connectivity_fe_indices(connectivity_fes, fe_names):
+    """Normalize an FE-pair selector to zero-based indices."""
+    if connectivity_fes is None:
+        return []
+    if isinstance(connectivity_fes, (str, int, np.integer)):
+        values = [connectivity_fes]
+    else:
+        try:
+            values = list(connectivity_fes)
+        except TypeError as exc:
+            raise ValueError(
+                "connectivity_fes must contain exactly two FE names or "
+                "zero-based indices"
+            ) from exc
+    if len(values) != 2:
+        raise ValueError(
+            "connectivity_fes must contain exactly two FE names or "
+            "zero-based indices"
+        )
+    if all(isinstance(value, str) for value in values):
+        unknown = [value for value in values if value not in fe_names]
+        if unknown:
+            raise ValueError(
+                f"connectivity_fes contains unknown FE name(s): {unknown}"
+            )
+        indices = [fe_names.index(value) for value in values]
+    elif any(isinstance(value, str) for value in values):
+        raise ValueError(
+            "connectivity_fes must use either FE names or zero-based "
+            "indices, not a mixture"
+        )
+    else:
+        indices = []
+        for value in values:
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                    value, (int, np.integer)):
+                raise ValueError(
+                    "connectivity_fes indices must be integers"
+                )
+            indices.append(int(value))
+        if any(value < 0 or value >= len(fe_names) for value in indices):
+            raise ValueError(
+                "connectivity_fes index is outside the FE dimension range"
+            )
+    if indices[0] == indices[1]:
+        raise ValueError("connectivity_fes entries must be distinct")
+    return indices
+
+
 def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
               gamma0=False, cov0=False, tol=1e-8, num_threads=0,
               weights=None, fweights=False, absorbed_targets=None,
-              x1_names=None, focal=None, gpu=False):
+              x1_names=None, focal=None, gpu=False, connected="diagnose",
+              connectivity_fes=None, common_fes=None, sample_info=False,
+              fe_variance_ratio_min=0.35):
     """Gelbach decomposition of the coefficient movement b_base - b_full.
 
     The result is an accounting identity for the declared base and full
@@ -186,7 +269,14 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     y : (n,) outcome.
     x1 : (n, p) base covariates (no constant column; one is implicit).
     x2_groups : dict name -> (n,) or (n, q_g) observed covariate group(s).
-    fes : dict name -> (n,) integer ids of absorbed fixed-effect dimensions.
+    fes : dict name -> (n,) integer ids of fixed-effect dimensions added only
+        to the full model and reported as decomposable contribution blocks.
+    common_fes : optional dict name -> (n,) integer ids of fixed-effect
+        dimensions absorbed in both the base and full specifications. They
+        condition the decomposition and are not themselves reported as
+        contribution blocks. Slope rows retain the full point/inference
+        contract; the ``_cons`` row is returned missing because its allocation
+        depends on common-FE normalization.
     vce : 'unadjusted' (b1x2 default), 'robust', or 'cluster' (requires
         `cluster` ids). Matches b1x2's estimators exactly (see module doc).
     cluster : optional length-n one-way cluster ids. Required exactly when
@@ -220,6 +310,28 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         columns remain in both the base and full specifications. It is useful
         when X1 contains one focal regressor plus common controls. The
         decomposition and returned full-precision matrices are unchanged.
+    connected : ``'diagnose'`` (default) or ``'require'``. Require mode fails
+        closed unless there are no common FEs and exactly two added FE
+        dimensions form one mobility component in the retained sample.
+        Common-FE and three-or-more-added-FE splits are not yet
+        connectivity-certified and therefore cannot pass require mode.
+    connectivity_fes : optional pair of FE names or zero-based indices.
+        Selects the retained-sample pair diagnostic among the added dimensions
+        in ``fes``. Common FEs cannot be selected. The default is the first two
+        added FE dimensions. With common FEs or three or more added FEs the
+        selected pair remains a diagnostic, never a global identification
+        certificate.
+    sample_info : bool, default False.
+        Opt in to retained-sample provenance. The result then contains the
+        zero-based positions into the supplied arrays (``sample_index``), a
+        length-n Boolean ``sample_mask``, and a stable non-cryptographic
+        ``sample_hash`` together with its declared algorithm and scope.
+        Leaving this false avoids the extra O(n) hash and output allocation.
+    fe_variance_ratio_min : nonnegative float, default 0.35.
+        Diagnostic threshold for the residual-to-total X1 squared-norm ratio.
+        With added FEs, ratios at or below this value mark conditional FE-block
+        and mixed-total normal intervals as diagnostic only; no estimate or
+        covariance is changed.
 
     Returns
     -------
@@ -228,10 +340,21 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     full-model observed-block 'gamma', sample sizes and notes. The total
     covariance is available both as ``total['cov']`` and the cross-language
     top-level alias ``total_cov``. ``base_cov``, ``cov_delta_bbase`` and
-    ``cov_total_bbase`` support joint base-share inference. ``fe_total`` is the
-    normalization-safe aggregate FE object. Always inspect ``converged``,
-    ``notes``, ``total_se_type``, the GPU diagnostics when ``gpu=True`` and,
-    in absorbed-target mode, ``absorbed_target_inference_valid``.
+    ``cov_total_bbase`` support joint base-share inference. ``beta2``,
+    ``beta2_cov``, ``auxiliary_loadings`` and the per-block ``regularity``
+    dictionary expose the product-gradient diagnostic.
+    ``regular_inference_valid`` and ``regular_inference_status`` are keyed by
+    observed block and contain one entry per [x1..., _cons] row. ``fe_total``
+    is the normalization-safe aggregate of added FEs. Common-FE metadata and
+    the intercept boundary are exposed through ``common_fe_names``,
+    ``n_common_fes``, ``common_fes_applied``,
+    ``intercept_inference_available`` and ``intercept_status``. Always inspect
+    ``converged``, ``notes``, ``regular_inference_valid``,
+    ``fe_split_status``, ``total_se_type``, the GPU diagnostics
+    when ``gpu=True`` and, in absorbed-target mode,
+    ``absorbed_target_inference_valid``. With ``sample_info=True``, the
+    zero-based ``sample_index``, Boolean ``sample_mask``, and declared
+    non-cryptographic ``sample_hash`` make the retained sample auditable.
 
     See Also
     --------
@@ -255,8 +378,24 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         raise ValueError("y and x1 must contain only finite values")
     if not np.isfinite(tol) or tol <= 0:
         raise ValueError("tol must be finite and strictly positive")
+    if (
+        isinstance(num_threads, (bool, np.bool_))
+        or not isinstance(num_threads, (int, np.integer))
+    ):
+        raise TypeError("num_threads must be a nonnegative integer")
+    if num_threads < 0:
+        raise ValueError("num_threads must be a nonnegative integer")
     if not isinstance(gpu, (bool, np.bool_)):
         raise TypeError("gpu must be True or False")
+    if not isinstance(sample_info, (bool, np.bool_)):
+        raise TypeError("sample_info must be True or False")
+    if (
+        not np.isfinite(fe_variance_ratio_min)
+        or fe_variance_ratio_min < 0
+    ):
+        raise ValueError(
+            "fe_variance_ratio_min must be finite and nonnegative"
+        )
     if vce not in ("unadjusted", "robust", "cluster"):
         raise ValueError("vce must be 'unadjusted', 'robust' or 'cluster'")
     if vce == "cluster":
@@ -280,13 +419,32 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         ccodes = None
     x2_groups = dict(x2_groups or {})
     fes = dict(fes or {})
+    common_fes = dict(common_fes or {})
     if not x2_groups and not fes:
-        raise ValueError("provide at least one x2 group or fixed-effect dimension")
-    all_names = list(x2_groups) + list(fes)
+        raise ValueError(
+            "provide at least one x2 group or added fixed-effect dimension"
+        )
+    all_names = list(x2_groups) + list(common_fes) + list(fes)
     if any(not isinstance(name, str) or not name.strip() for name in all_names):
         raise ValueError("every x2/FE block must have a non-empty string name")
     if len(set(all_names)) != len(all_names):
-        raise ValueError("x2 and FE block names must be unique")
+        raise ValueError("x2, common-FE and added-FE names must be unique")
+    if not isinstance(connected, str):
+        raise TypeError("connected must be 'diagnose' or 'require'")
+    connected_mode = connected.strip().lower()
+    if connected_mode not in ("diagnose", "require"):
+        raise ValueError("connected must be 'diagnose' or 'require'")
+    fe_names = list(fes)
+    connectivity_fe_pair = _connectivity_fe_indices(
+        connectivity_fes, fe_names
+    )
+    if connected_mode == "require" and (
+            len(fe_names) != 2 or common_fes):
+        raise ValueError(
+            "connected='require' requires exactly two FE dimensions, both "
+            "added, and no common FEs; this split is not yet certified with "
+            "common FEs or a multiway added-FE design"
+        )
 
     if absorbed_targets is None:
         absorbed_x1 = []
@@ -349,6 +507,23 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
             raise ValueError(f"x2 group {name!r} must contain only finite values")
         groups.append((name, "x2", arr))
         x2_cols.append(arr)
+    common_fe_lists = []
+    for name, ids in common_fes.items():
+        ids = np.asarray(ids)
+        if ids.ndim != 1 or ids.shape[0] != n:
+            raise ValueError(
+                f"common fe {name!r} must be one-dimensional with length n"
+            )
+        if not np.issubdtype(ids.dtype, np.integer):
+            if (np.issubdtype(ids.dtype, np.floating) and
+                    np.all(np.isfinite(ids)) and
+                    np.all(ids == np.rint(ids))):
+                ids = np.rint(ids).astype(np.int64)
+            else:
+                raise ValueError(
+                    f"common fe {name!r} ids must be finite integers"
+                )
+        common_fe_lists.append(ids)
     fe_lists = []
     for name, ids in fes.items():
         ids = np.asarray(ids)
@@ -383,8 +558,9 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     x2_sizes = [np.asarray(d).shape[1] for _, k, d in groups if k == "x2"]
     X2 = (np.hstack([np.asarray(d, dtype=float) for _, k, d in groups
                      if k == "x2"]) if x2_sizes else None)
+    union_fe_lists = common_fe_lists + fe_lists
     r = core.gelbach_decompose(y, x1, x2=X2, x2_group_sizes=x2_sizes,
-                               fes=fe_lists if fe_lists else None,
+                               fes=union_fe_lists if union_fe_lists else None,
                                cluster=(np.ascontiguousarray(ccodes, dtype=np.int64)
                                         if ccodes is not None else None),
                                vce=vce, gamma0=bool(gamma0), cov0=bool(cov0),
@@ -392,7 +568,13 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                                weights=w,
                                fweights=bool(fweights),
                                absorbed_x1=absorbed_x1,
-                               gpu=bool(gpu))
+                               gpu=bool(gpu),
+                               connectivity_fe_pair=connectivity_fe_pair,
+                               require_connected=(
+                                   connected_mode == "require"
+                               ),
+                               n_common_fes=len(common_fe_lists),
+                               sample_info=bool(sample_info))
 
     p_ = x1.shape[1]
     k1 = p_ + 1
@@ -410,6 +592,64 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         for g, width in enumerate(x2_sizes)
     }
     labels = x1_labels + ["_cons"]
+    beta2 = np.asarray(r["beta2"], dtype=float)
+    beta2_cov = np.asarray(r["beta2_cov"], dtype=float)
+    auxiliary_loadings = np.asarray(r["auxiliary_loadings"], dtype=float)
+    loading_ss_ratio = np.asarray(
+        r["auxiliary_loading_ss_ratio"], dtype=float
+    )
+    loading_rank = np.asarray(r["auxiliary_loading_rank"], dtype=int)
+    loading_condition = np.asarray(
+        r["auxiliary_loading_condition_number"], dtype=float
+    )
+    loading_max_abs_z = np.asarray(
+        r["auxiliary_loading_max_abs_z"], dtype=float
+    )
+    loading_pvalue = np.asarray(
+        r["auxiliary_loading_pvalue"], dtype=float
+    )
+    loading_test_evaluated = np.asarray(
+        r["auxiliary_loading_test_evaluated"], dtype=bool
+    )
+    beta2_wald_stat = np.asarray(r["beta2_wald_stat"], dtype=float)
+    beta2_wald_df = np.asarray(r["beta2_wald_df"], dtype=int)
+    beta2_wald_pvalue = np.asarray(r["beta2_wald_pvalue"], dtype=float)
+    gradient_norm = np.asarray(
+        r["contribution_gradient_norm"], dtype=float
+    )
+    regular_valid_raw = np.asarray(
+        r["regular_inference_valid"], dtype=bool
+    )
+    regular_status_raw = np.asarray(
+        list(r["regular_inference_status"]), dtype=object
+    ).reshape(len(x2_sizes), k1).T
+    regularity = {}
+    x2_cursor = 0
+    for g, width in enumerate(x2_sizes):
+        name = names[g]
+        block_slice = slice(x2_cursor, x2_cursor + width)
+        regularity[name] = {
+            "beta2": beta2[block_slice].copy(),
+            "beta2_cov": beta2_cov[block_slice, block_slice].copy(),
+            "auxiliary_loadings": auxiliary_loadings[:, block_slice].copy(),
+            "auxiliary_loading_ss_ratio": float(loading_ss_ratio[g]),
+            "auxiliary_loading_rank": int(loading_rank[g]),
+            "auxiliary_loading_condition_number": float(
+                loading_condition[g]
+            ),
+            "auxiliary_loading_max_abs_z": loading_max_abs_z[:, g].copy(),
+            "auxiliary_loading_pvalue": loading_pvalue[:, g].copy(),
+            "auxiliary_loading_test_evaluated":
+                loading_test_evaluated[:, g].copy(),
+            "beta2_wald_stat": float(beta2_wald_stat[g]),
+            "beta2_wald_df": int(beta2_wald_df[g]),
+            "beta2_wald_pvalue": float(beta2_wald_pvalue[g]),
+            "contribution_gradient_norm": gradient_norm[:, g].copy(),
+            "regular_inference_valid": regular_valid_raw[:, g].copy(),
+            "regular_inference_status":
+                regular_status_raw[:, g].astype(str).tolist(),
+        }
+        x2_cursor += width
     observed_se_type = (
         "gamma0" if gamma0 else
         ("cov0" if cov0 and vce != "unadjusted" else "full")
@@ -427,6 +667,27 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                     for value in absorbed_mask]
     has_fe_groups = any(kind == "fe" for kind in kinds)
     has_observed_groups = any(kind == "x2" for kind in kinds)
+    x1_fe_collinear_ratio = np.asarray(
+        r["x1_fe_collinear_ratio"], dtype=float
+    )
+    fe_variance_status = [
+        (
+            "conditional_only_between_fe_dominant"
+            if (
+                has_fe_groups
+                and (
+                    not np.isfinite(x1_fe_collinear_ratio[row])
+                    or x1_fe_collinear_ratio[row] <= fe_variance_ratio_min
+                )
+            )
+            else "valid_first_order"
+        )
+        for row in range(p)
+    ]
+    fe_variance_failed = any(
+        status == "conditional_only_between_fe_dominant"
+        for status in fe_variance_status
+    )
     total_cov = np.asarray(r["total_cov"])
     if has_fe_groups:
         total_se_type = (
@@ -439,6 +700,12 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         total_se_type = observed_se_type
     if absorbed_mode:
         total_se_type = "target_exact_base_vce_mixed_components"
+    fe_diagnostic_suffix = "_conditional_only_diagnostic"
+    if fe_variance_failed and has_fe_groups:
+        total_se_type += fe_diagnostic_suffix
+        for name, kind in zip(names, kinds):
+            if kind == "fe":
+                se_type[name] += fe_diagnostic_suffix
     inference_status = "not_applicable"
     if absorbed_mode:
         inference_status = (
@@ -446,6 +713,45 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
             if bool(r["absorbed_target_inference_valid"])
             else "warning_unsupported_vce_or_cluster"
         )
+    connectivity_indices = [
+        int(r["connectivity_fe_index1"]),
+        int(r["connectivity_fe_index2"]),
+    ]
+    connectivity_indices = [
+        value for value in connectivity_indices if value >= 0
+    ]
+    connectivity_names = [
+        fe_names[value] for value in connectivity_indices
+    ]
+    sample_index = None
+    sample_mask = None
+    sample_hash = None
+    sample_hash_algorithm = None
+    sample_index_scope = None
+    if sample_info:
+        sample_index = np.asarray(r["sample_index"], dtype=np.int64)
+        if sample_index.ndim != 1 or sample_index.size != int(r["n_obs"]):
+            raise RuntimeError(
+                "Gelbach backend returned an invalid retained-sample index"
+            )
+        if (sample_index.size and
+                (sample_index[0] < 0 or sample_index[-1] >= n or
+                 np.any(np.diff(sample_index) <= 0))):
+            raise RuntimeError(
+                "Gelbach backend returned unordered, duplicate, or "
+                "out-of-range retained-sample positions"
+            )
+        sample_mask = np.zeros(n, dtype=bool)
+        sample_mask[sample_index] = True
+        sample_hash = str(r["sample_hash"])
+        sample_hash_algorithm = str(r["sample_hash_algorithm"])
+        sample_index_scope = str(r["sample_index_scope"])
+        if (not sample_hash or
+                sample_hash_algorithm != "fnv1a64-le-v1" or
+                sample_index_scope != "input_rows_zero_based"):
+            raise RuntimeError(
+                "Gelbach backend returned incomplete sample provenance"
+            )
     out = {
         "names": names,
         "group_kinds": dict(zip(names, kinds)),
@@ -453,10 +759,33 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "x1_names": x1_labels,
         "focal_indices": focal_x1,
         "focal_names": [x1_labels[c] for c in focal_x1],
+        "common_fe_names": list(common_fes),
+        "n_common_fes": int(r["n_common_fes"]),
+        "common_fes_applied": bool(r["common_fes_applied"]),
+        "intercept_inference_available": bool(
+            r["intercept_inference_available"]
+        ),
+        "intercept_status": str(r["intercept_status"]),
         "b_base": np.asarray(r["b_base"]),
         "b_full": np.asarray(r["b_full"]),
         "b_full_status": b_full_status,
         "gamma": gamma,
+        "beta2": beta2,
+        "beta2_cov": beta2_cov,
+        "auxiliary_loadings": auxiliary_loadings,
+        "regularity": regularity,
+        "regular_inference_valid": {
+            name: regularity[name]["regular_inference_valid"]
+            for name in names[:len(x2_sizes)]
+        },
+        "regular_inference_status": {
+            name: regularity[name]["regular_inference_status"]
+            for name in names[:len(x2_sizes)]
+        },
+        "regular_inference_all_valid": bool(
+            r["regular_inference_all_valid"]
+        ),
+        "regularity_test_alpha": float(r["regularity_test_alpha"]),
         "focal_status": focal_status,
         "absorbed_mask": absorbed_mask.astype(bool).tolist(),
         "absorbed_targets": np.flatnonzero(absorbed_mask).astype(int).tolist(),
@@ -482,12 +811,48 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "n_obs": int(r["n_obs"]),
         "n_obs_effective": int(r["n_obs_effective"]),
         "n_singletons_dropped": int(r["n_singletons_dropped"]),
+        "sample_info_requested": bool(sample_info),
+        "sample_index": sample_index,
+        "sample_mask": sample_mask,
+        "sample_hash": sample_hash,
+        "sample_hash_algorithm": sample_hash_algorithm,
+        "sample_index_scope": sample_index_scope,
+        "n_mobility_components": int(r["n_mobility_components"]),
+        "largest_mobility_component_n_obs": int(
+            r["largest_mobility_component_n_obs"]
+        ),
+        "largest_mobility_component_share": float(
+            r["largest_mobility_component_share"]
+        ),
+        "largest_mobility_component_weight_share": float(
+            r["largest_mobility_component_weight_share"]
+        ),
+        "fe_split_identified": bool(r["fe_split_identified"]),
+        "fe_split_status": str(r["fe_split_status"]),
+        "connectivity_fe_index1": int(
+            r["connectivity_fe_index1"]
+        ),
+        "connectivity_fe_index2": int(
+            r["connectivity_fe_index2"]
+        ),
+        "connectivity_fe_indices": connectivity_indices,
+        "connectivity_fe_names": connectivity_names,
+        "connectivity_pair_explicit": bool(
+            r["connectivity_pair_explicit"]
+        ),
+        "connectivity_pair_status": str(
+            r["connectivity_pair_status"]
+        ),
+        "connected_mode": str(r["connected_mode"]),
+        "mobility_component_scope": str(
+            r["mobility_component_scope"]
+        ),
         "df_full": float(r["df_full"]),
         "df_base": float(r["df_base"]),
         "n_clusters": int(r["n_clusters"]),
-        "x1_fe_collinear_ratio": np.asarray(
-            r["x1_fe_collinear_ratio"], dtype=float
-        ),
+        "x1_fe_collinear_ratio": x1_fe_collinear_ratio,
+        "fe_variance_status": fe_variance_status,
+        "fe_variance_ratio_min": float(fe_variance_ratio_min),
         "x1_near_collinear_mask": np.asarray(
             r["x1_near_collinear_mask"], dtype=bool
         ).tolist(),
@@ -526,13 +891,34 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         ),
         "estimand": ("absorbed_target_allocation" if absorbed_mode else
                      "coefficient_movement"),
-        "identity_status": ("exact_ols_constrained" if absorbed_mode else
-                            "exact_ols"),
+        "identity_status": (
+            "exact_ols_conditional_common_fes"
+            if common_fes else
+            ("exact_ols_constrained" if absorbed_mode else "exact_ols")
+        ),
         "total_se_type": total_se_type,
         "causal_interpretation": False,
         "notes": r["notes"],
         "converged": bool(r["converged"]),
     }
+    for name in names:
+        if out["group_kinds"][name] == "x2":
+            out["delta"][name].update({
+                "regular_inference_valid":
+                    regularity[name]["regular_inference_valid"],
+                "regular_inference_status":
+                    regularity[name]["regular_inference_status"],
+                "contribution_gradient_norm":
+                    regularity[name]["contribution_gradient_norm"],
+            })
+        else:
+            out["delta"][name].update({
+                "regular_inference_valid": None,
+                "regular_inference_status":
+                    ["not_applicable_conditional_fe"] * k1,
+                "contribution_gradient_norm":
+                    np.full(k1, np.nan, dtype=float),
+            })
     fe_groups = [g for g, kind in enumerate(kinds) if kind == "fe"]
     if fe_groups:
         fe_coef = delta[:, fe_groups].sum(axis=1)
@@ -546,10 +932,25 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
             "coef": fe_coef,
             "cov": fe_cov,
             "se": np.sqrt(np.diag(fe_cov)),
-            "se_type": "conditional_gamma0",
+            "se_type": se_type[names[fe_groups[0]]],
+            "fe_variance_status": fe_variance_status,
         }
     else:
         out["fe_total"] = None
+    if fe_variance_failed:
+        failed_names = [
+            x1_labels[row]
+            for row, status in enumerate(fe_variance_status)
+            if status == "conditional_only_between_fe_dominant"
+        ]
+        fe_note = (
+            "WARNING: conditional FE-block and mixed-total normal intervals "
+            "are diagnostic only because x1_fe_collinear_ratio is at or below "
+            f"fe_variance_ratio_min={fe_variance_ratio_min:g} for "
+            f"{','.join(failed_names)}. Use xhdfe.gelbach.bootstrap with the "
+            "pairs method for the calibrated alternative."
+        )
+        out["notes"] = f"{out['notes'].strip()} {fe_note}".strip()
     if not r["converged"]:
         out["notes"] += " (not converged)"
         import warnings
@@ -593,11 +994,13 @@ def _row_group_covariance(result, row):
     return np.asarray(result["cov"])[np.ix_(positions, positions)]
 
 
-def _share_rows(result, denominator, share_tol):
+def _share_rows(result, denominator, share_tol, share_t_min):
     if denominator not in ("base", "base_fixed", "movement"):
         raise ValueError("share must be None, 'base', 'base_fixed' or 'movement'")
     if not np.isfinite(share_tol) or share_tol < 0:
         raise ValueError("share_tol must be finite and nonnegative")
+    if not np.isfinite(share_t_min) or share_t_min < 0:
+        raise ValueError("share_t_min must be finite and nonnegative")
 
     names = list(result["names"])
     k1 = len(result["labels"])
@@ -607,16 +1010,30 @@ def _share_rows(result, denominator, share_tol):
     share = np.full((k1, G), np.nan)
     se = np.full((k1, G), np.nan)
     defined = np.zeros(k1, dtype=bool)
+    denominator_t = np.full(k1, np.nan)
+    interval_status = np.full(
+        k1,
+        "weak_denominator_delta_method_unreliable",
+        dtype=object,
+    )
 
     for row in range(k1):
         if denominator in ("base", "base_fixed"):
             if row >= p:
                 continue
             denom = float(result["b_base"][row])
+            denom_var = float(np.asarray(result["base_cov"])[row, row])
         else:
             denom = float(result["total"]["coef"][row])
+            denom_var = float(np.asarray(result["total_cov"])[row, row])
         if not np.isfinite(denom) or abs(denom) <= share_tol:
             continue
+        denom_se = np.sqrt(max(0.0, denom_var))
+        denominator_t[row] = (
+            abs(denom) / denom_se if denom_se > 0.0 else np.inf
+        )
+        if denominator_t[row] >= share_t_min:
+            interval_status[row] = "valid_first_order"
         defined[row] = True
         d = coef[row, :]
         share[row, :] = d / denom
@@ -653,6 +1070,8 @@ def _share_rows(result, denominator, share_tol):
         "coef": share,
         "se": se,
         "defined": defined,
+        "denominator_t": denominator_t,
+        "interval_status": interval_status.astype(str).tolist(),
         "denominator": denominator,
         "se_type": ("joint_base_covariance_delta_method" if denominator == "base"
                     else ("fixed_base_denominator_scaling"
@@ -660,11 +1079,13 @@ def _share_rows(result, denominator, share_tol):
                           "joint_covariance_delta_method")),
         "units": "fraction",
         "tol": float(share_tol),
+        "t_min": float(share_t_min),
     }
 
 
 def tidy(result, *, focal=None, include_intercept=False, include_total=True,
-         include_full=True, conf_level=0.95, share=None, share_tol=1e-12):
+         include_full=True, conf_level=0.95, share=None, share_tol=1e-12,
+         share_t_min=3.0):
     """Return publication-ready Gelbach rows without changing the estimator.
 
     The result is a list of dictionaries, so it can be passed directly to
@@ -688,6 +1109,9 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
     conf_level : normal-approximation confidence level in (0, 1).
     share : None, ``'movement'``, ``'base'``, or ``'base_fixed'``.
     share_tol : nonnegative absolute threshold below which ratios are missing.
+    share_t_min : nonnegative minimum absolute denominator t-statistic for
+        first-order delta-method share inference. Point shares and SEs are
+        retained below this diagnostic threshold.
 
     Returns
     -------
@@ -699,7 +1123,10 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
         raise ValueError("conf_level must lie strictly between zero and one")
     rows = _result_focal_indices(result, focal, include_intercept)
     zcrit = NormalDist().inv_cdf(0.5 + conf_level / 2.0)
-    share_stats = None if share is None else _share_rows(result, share, share_tol)
+    share_stats = (
+        None if share is None
+        else _share_rows(result, share, share_tol, share_t_min)
+    )
     if share_stats is not None:
         undefined = [
             result["labels"][row]
@@ -716,44 +1143,143 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                 RuntimeWarning,
                 stacklevel=2,
             )
+        weak = [
+            result["labels"][row]
+            for row in rows
+            if (
+                share_stats["defined"][row]
+                and share_stats["interval_status"][row]
+                == "weak_denominator_delta_method_unreliable"
+            )
+        ]
+        if weak:
+            import warnings
+
+            warnings.warn(
+                "xhdfe.gelbach.tidy: the requested share denominator has "
+                f"|t| < share_t_min for {', '.join(weak)}; first-order "
+                "delta-method share intervals are diagnostic only. Use "
+                "xhdfe.gelbach.bootstrap with the pairs method for the "
+                "calibrated alternative.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     output = []
     p = len(result["b_base"])
 
     for row in rows:
         label = result["labels"][row]
+        fe_variance_status = (
+            result["fe_variance_status"][row]
+            if row < p else "valid_first_order"
+        )
+        fe_variance_failed = (
+            fe_variance_status
+            == "conditional_only_between_fe_dominant"
+        )
         for g, name in enumerate(result["names"]):
             estimate = float(result["delta"][name]["coef"][row])
             std_error = float(result["delta"][name]["se"][row])
+            component_kind = result["group_kinds"][name]
+            if component_kind == "x2":
+                regular_valid = bool(
+                    result["delta"][name]["regular_inference_valid"][row]
+                )
+                regular_status = str(
+                    result["delta"][name]["regular_inference_status"][row]
+                )
+                interval_status = (
+                    "valid_first_order"
+                    if regular_valid
+                    else "diagnostic_only_nonregular_not_ruled_out"
+                )
+                row_se_type = result["delta"][name]["se_type"]
+                if not regular_valid:
+                    row_se_type += "_nonregular_diagnostic_only"
+            else:
+                regular_valid = None
+                regular_status = "not_applicable_conditional_fe"
+                interval_status = (
+                    "diagnostic_only_between_fe_dominant"
+                    if fe_variance_failed
+                    else "conditional_fe_not_covered"
+                )
+                row_se_type = result["delta"][name]["se_type"]
+                diagnostic_suffix = "_conditional_only_diagnostic"
+                if (
+                    fe_variance_failed
+                    and not row_se_type.endswith(diagnostic_suffix)
+                ):
+                    row_se_type += "_conditional_only_diagnostic"
+                elif (
+                    not fe_variance_failed
+                    and row_se_type.endswith(diagnostic_suffix)
+                ):
+                    row_se_type = row_se_type[:-len(diagnostic_suffix)]
             item = {
                 "coefficient": label,
                 "component": name,
-                "component_kind": result["group_kinds"][name],
+                "component_kind": component_kind,
                 "estimate": estimate,
                 "std_error": std_error,
                 "conf_low": estimate - zcrit * std_error,
                 "conf_high": estimate + zcrit * std_error,
                 "conf_level": float(conf_level),
-                "se_type": result["delta"][name]["se_type"],
+                "se_type": row_se_type,
+                "regular_inference_valid": regular_valid,
+                "regular_inference_status": regular_status,
+                "confidence_interval_status": interval_status,
+                "fe_variance_status": fe_variance_status,
+                "fe_variance_ratio_min":
+                    result["fe_variance_ratio_min"],
             }
             if share_stats is not None:
                 s = float(share_stats["coef"][row, g])
                 sse = float(share_stats["se"][row, g])
+                share_interval_status = share_stats["interval_status"][row]
+                share_se_type = share_stats["se_type"]
+                if (
+                    share_stats["defined"][row]
+                    and share_interval_status
+                    == "weak_denominator_delta_method_unreliable"
+                ):
+                    share_se_type += "_weak_denominator_diagnostic_only"
                 item.update({
                     "share": s,
                     "share_std_error": sse,
                     "share_conf_low": s - zcrit * sse,
                     "share_conf_high": s + zcrit * sse,
                     "share_defined": bool(share_stats["defined"][row]),
+                    "share_denominator_t":
+                        float(share_stats["denominator_t"][row]),
+                    "share_interval_status": share_interval_status,
                     "share_denominator": share_stats["denominator"],
-                    "share_se_type": share_stats["se_type"],
+                    "share_se_type": share_se_type,
                     "share_units": share_stats["units"],
                     "share_tol": share_stats["tol"],
+                    "share_t_min": share_stats["t_min"],
                 })
             output.append(item)
 
         if include_total:
             estimate = float(result["total"]["coef"][row])
             std_error = float(result["total"]["se"][row])
+            total_has_fe = any(
+                kind == "fe" for kind in result["group_kinds"].values()
+            )
+            total_se_type = result["total"]["se_type"]
+            total_interval_status = "linear_total_not_product_gate"
+            if total_has_fe and fe_variance_failed:
+                diagnostic_suffix = "_conditional_only_diagnostic"
+                if not total_se_type.endswith(diagnostic_suffix):
+                    total_se_type += diagnostic_suffix
+                total_interval_status = (
+                    "diagnostic_only_between_fe_dominant"
+                )
+            elif total_has_fe:
+                diagnostic_suffix = "_conditional_only_diagnostic"
+                if total_se_type.endswith(diagnostic_suffix):
+                    total_se_type = total_se_type[:-len(diagnostic_suffix)]
             item = {
                 "coefficient": label,
                 "component": "total_movement",
@@ -763,9 +1289,24 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                 "conf_low": estimate - zcrit * std_error,
                 "conf_high": estimate + zcrit * std_error,
                 "conf_level": float(conf_level),
-                "se_type": result["total"]["se_type"],
+                "se_type": total_se_type,
+                "regular_inference_valid": None,
+                "regular_inference_status":
+                    "not_applicable_linear_total",
+                "confidence_interval_status": total_interval_status,
+                "fe_variance_status": fe_variance_status,
+                "fe_variance_ratio_min":
+                    result["fe_variance_ratio_min"],
             }
             if share_stats is not None:
+                share_interval_status = share_stats["interval_status"][row]
+                share_se_type = share_stats["se_type"]
+                if (
+                    share_stats["defined"][row]
+                    and share_interval_status
+                    == "weak_denominator_delta_method_unreliable"
+                ):
+                    share_se_type += "_weak_denominator_diagnostic_only"
                 if share == "movement" and share_stats["defined"][row]:
                     sval, sse = 1.0, 0.0
                 elif share in ("base", "base_fixed") and row < p and share_stats["defined"][row]:
@@ -802,10 +1343,14 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                     "share_conf_low": sval - zcrit * sse,
                     "share_conf_high": sval + zcrit * sse,
                     "share_defined": bool(share_stats["defined"][row]),
+                    "share_denominator_t":
+                        float(share_stats["denominator_t"][row]),
+                    "share_interval_status": share_interval_status,
                     "share_denominator": share_stats["denominator"],
-                    "share_se_type": share_stats["se_type"],
+                    "share_se_type": share_se_type,
                     "share_units": share_stats["units"],
                     "share_tol": share_stats["tol"],
+                    "share_t_min": share_stats["t_min"],
                 })
             output.append(item)
 
@@ -820,6 +1365,13 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                 "conf_high": float("nan"),
                 "conf_level": float(conf_level),
                 "se_type": "not_available_in_public_contract",
+                "regular_inference_valid": None,
+                "regular_inference_status":
+                    "not_applicable_full_model_coefficient",
+                "confidence_interval_status": "not_available",
+                "fe_variance_status": fe_variance_status,
+                "fe_variance_ratio_min":
+                    result["fe_variance_ratio_min"],
             }
             if share_stats is not None:
                 if share in ("base", "base_fixed") and share_stats["defined"][row]:
@@ -832,10 +1384,15 @@ def tidy(result, *, focal=None, include_intercept=False, include_total=True,
                     "share_conf_low": float("nan"),
                     "share_conf_high": float("nan"),
                     "share_defined": bool(share_stats["defined"][row]),
+                    "share_denominator_t":
+                        float(share_stats["denominator_t"][row]),
+                    "share_interval_status":
+                        share_stats["interval_status"][row],
                     "share_denominator": share_stats["denominator"],
                     "share_se_type": "not_available_for_full_model_residual",
                     "share_units": share_stats["units"],
                     "share_tol": share_stats["tol"],
+                    "share_t_min": share_stats["t_min"],
                 })
             output.append(item)
     return output
@@ -889,6 +1446,40 @@ def contrast(result, focal, groups, *, conf_level=0.95):
     zcrit = NormalDist().inv_cdf(0.5 + conf_level / 2.0)
     included = [name for name, weight in zip(names, weights) if weight != 0]
     has_fe = any(result["group_kinds"][name] == "fe" for name in included)
+    observed_included = [
+        name for name in included
+        if result["group_kinds"][name] == "x2"
+    ]
+    invalid_regular = [
+        name for name in observed_included
+        if not bool(result["delta"][name]["regular_inference_valid"][row])
+    ]
+    if invalid_regular:
+        import warnings
+
+        warnings.warn(
+            "xhdfe.gelbach.contrast: first-order regular inference is not "
+            "established for included observed block(s) "
+            f"{', '.join(invalid_regular)}; the normal-theory interval is "
+            "diagnostic only.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if invalid_regular:
+        regular_valid = False
+        regular_status = "contains_nonregular_not_ruled_out"
+    elif observed_included:
+        regular_valid = True
+        regular_status = "regular_observed_components"
+    else:
+        regular_valid = None
+        regular_status = "not_applicable_no_observed_x2"
+    se_type = (
+        "joint_covariance_including_conditional_fe" if has_fe else
+        "joint_covariance"
+    )
+    if invalid_regular:
+        se_type += "_nonregular_diagnostic_only"
     return {
         "coefficient": result["labels"][row],
         "weights": dict(zip(names, weights.tolist())),
@@ -897,6 +1488,146 @@ def contrast(result, focal, groups, *, conf_level=0.95):
         "conf_low": estimate - zcrit * std_error,
         "conf_high": estimate + zcrit * std_error,
         "conf_level": float(conf_level),
-        "se_type": ("joint_covariance_including_conditional_fe" if has_fe else
-                    "joint_covariance"),
+        "se_type": se_type,
+        "regular_inference_valid": regular_valid,
+        "regular_inference_status": regular_status,
+        "confidence_interval_status": (
+            "diagnostic_only_nonregular_not_ruled_out"
+            if invalid_regular else
+            "valid_first_order_or_not_applicable"
+        ),
     }
+
+
+def bootstrap(y, x1, x2_groups=None, fes=None, *, method="pairs",
+              bootstrap_cluster=None, reps=999, seed=0, conf_level=0.95,
+              ci_method="percentile", min_valid_reps=None,
+              store_draws=True, require_gpu_used=False, share_tol=1e-12,
+              **decompose_kwargs):
+    """Fit a Gelbach decomposition and fully re-estimate a pairs bootstrap.
+
+    Parameters specific to resampling are keyword-only. All remaining keyword
+    arguments are forwarded to :func:`decompose`, including ``common_fes``,
+    VCE, weights, absorbed targets, connectivity controls and GPU selection.
+
+    ``method='pairs'`` samples observations. ``method='cluster_pairs'``
+    requires ``bootstrap_cluster`` and samples those blocks; the resampling
+    unit is deliberately not inferred from ``vce='cluster'``. Each replication
+    receives an independent deterministic RNG stream derived from ``seed``.
+    Failed fits are retained in an auditable ledger and the procedure fails
+    closed below ``min_valid_reps``.
+
+    Frequency-weight bootstrap is deliberately rejected because resampling
+    compressed records is not equivalent to resampling the expanded empirical
+    distribution. Analytic weights are retained on every sampled pair.
+
+    Returns
+    -------
+    The ordinary :func:`decompose` result with a ``bootstrap`` member
+    containing full draws (unless ``store_draws=False``), percentile or basic
+    intervals, bootstrap standard errors, replication ledger, failure counts
+    and resampling metadata.
+    """
+    from ._gelbach_features import bootstrap as _bootstrap
+
+    return _bootstrap(
+        decompose,
+        y,
+        x1,
+        x2_groups=x2_groups,
+        fes=fes,
+        method=method,
+        bootstrap_cluster=bootstrap_cluster,
+        reps=reps,
+        seed=seed,
+        conf_level=conf_level,
+        ci_method=ci_method,
+        min_valid_reps=min_valid_reps,
+        store_draws=store_draws,
+        require_gpu_used=require_gpu_used,
+        share_tol=share_tol,
+        **decompose_kwargs,
+    )
+
+
+def etable(result, *, panels="all", format="dataframe", type=None,
+           focal=None, keep=None, drop=None, exact_match=False, labels=None,
+           include_other=True, digits=3, caption=None, notes=None, conf_level=0.95,
+           interval="auto", share_tol=1e-12, share_t_min=3.0):
+    """Render Gelbach results as records, DataFrame, Markdown, LaTeX, HTML or GT.
+
+    Bootstrap intervals are selected automatically when ``result`` was
+    produced by :func:`bootstrap`; pass ``interval='normal'`` to request the
+    analytic interval explicitly. ``type=`` is accepted as a PyFixest-style
+    alias for ``format=``.
+    """
+    from ._gelbach_features import etable as _etable
+
+    return _etable(
+        result,
+        tidy,
+        panels=panels,
+        format=format,
+        type=type,
+        focal=focal,
+        keep=keep,
+        drop=drop,
+        exact_match=exact_match,
+        labels=labels,
+        include_other=include_other,
+        digits=digits,
+        caption=caption,
+        notes=notes,
+        conf_level=conf_level,
+        interval=interval,
+        share_tol=share_tol,
+        share_t_min=share_t_min,
+    )
+
+
+def waterfall_data(result, *, focal=None, keep=None, drop=None,
+                   exact_match=False, labels=None, include_other=True,
+                   share_tol=1e-12):
+    """Return a dependency-free specification for a Gelbach waterfall chart."""
+    from ._gelbach_features import waterfall_data as _waterfall_data
+
+    return _waterfall_data(
+        result,
+        focal=focal,
+        keep=keep,
+        drop=drop,
+        exact_match=exact_match,
+        labels=labels,
+        include_other=include_other,
+        share_tol=share_tol,
+    )
+
+
+def coefplot(result, *, focal=None, annotate_shares=True, title=None,
+             figsize=None, keep=None, drop=None, exact_match=False,
+             labels=None, notes=None, include_other=True, share_tol=1e-12,
+             ax=None, save=None, show=False):
+    """Draw an identity-preserving Gelbach waterfall chart.
+
+    Matplotlib is an optional dependency. For dependency-free reporting use
+    :func:`waterfall_data`.
+    """
+    from ._gelbach_features import coefplot as _coefplot
+
+    return _coefplot(
+        result,
+        focal=focal,
+        annotate_shares=annotate_shares,
+        title=title,
+        figsize=figsize,
+        keep=keep,
+        drop=drop,
+        exact_match=exact_match,
+        labels=labels,
+        notes=notes,
+        include_other=include_other,
+        share_tol=share_tol,
+        ax=ax,
+        save=save,
+        show=show,
+    )

@@ -1196,7 +1196,13 @@ def main():
             ra["focal_status"] == ["absorbed", "identified"] and
             ra["absorbed_targets"] == [0] and
             ra["absorbed_mask"] == [True, False] and
-            ra["total_se_type"] == "target_exact_base_vce_mixed_components" and
+            ra["total_se_type"] ==
+            ("target_exact_base_vce_mixed_components"
+             "_conditional_only_diagnostic") and
+            ra["fe_variance_status"] ==
+            ["conditional_only_between_fe_dominant",
+             "conditional_only_between_fe_dominant"] and
+            ra["fe_variance_ratio_min"] == 0.35 and
             ra["inference_status"] == "clustered_at_absorbing_fe" and
             ra["absorbed_target_inference_valid"] and
             ra["absorbing_fe_index"] == 0 and
