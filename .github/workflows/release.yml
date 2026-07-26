@@ -537,22 +537,21 @@ jobs:
         run: |
           set -euo pipefail
           cat > release_body.md <<EOF
-          # xhdfe / xfe — ${{ github.ref_name }} (DRAFT)
+          # xhdfe / xfe — ${{ github.ref_name }}
 
           Stata plugins built automatically on GitHub-hosted runners.
 
-          > **CI proves COMPILE + LINK only.** GitHub runners have **no GPU** and
-          > **no Stata license**, so there is **no Stata-functional validation and no
-          > GPU execution in CI**. The Linux CUDA fatbin is **COMPILE-VERIFIED ONLY**
-          > and **must be GPU-validated on real hardware** (e.g. an NVIDIA H100,
-          > \`sm_90\`) before this draft is published. This release is a **DRAFT** until
-          > a maintainer completes that validation.
+          > **CI itself proves COMPILE + LINK only.** GitHub runners have **no GPU**
+          > and **no Stata license**. The workflow initially stages this release as a
+          > draft and permits publication only after the exact attached CUDA fatbins
+          > pass Stata-functional validation on real hardware (an NVIDIA H100,
+          > \`sm_90\`). A published release therefore records completion of that
+          > external H100 gate.
 
           ## Online Stata install
 
-          After the exact CUDA artifacts pass the external H100 gate, the
-          \`publish-v*\` workflow publishes this snapshot to \`gh-pages\` and
-          Stata can install the OS-appropriate plugin from one URL:
+          The \`publish-v*\` gate publishes the exact H100-certified snapshot to
+          \`gh-pages\`. Stata can install the OS-appropriate plugin from one URL:
 
           \`\`\`stata
           net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
@@ -568,11 +567,11 @@ jobs:
 
           ### Per-platform Stata bundles (plugin renamed to canonical \`xhdfe.plugin\` / \`xfe.plugin\` + shared ado/sthlp/pkg/stata.toc)
           - \`xhdfe_xfe-stata-linux-cpu.zip\` — **Linux x86_64, CPU/OpenMP** (portable ELF, links libgomp; no \`-march=native\`).
-          - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; links libcudart + libgomp). GPU path **compile-verified only — validate on real GPU**.
+          - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; links libcudart + libgomp). CI compile-verifies this path; publication additionally requires the external H100 runtime gate.
           - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows 11 x86_64, CPU/OpenMP** (PE32+ plugins plus the required \`libgomp-1.dll\` and \`libwinpthread-1.dll\` runtime files).
           - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfe.plugin\` before Stata loads them.
 
-          ### Raw CUDA fatbin plugins (for direct H100 validation)
+          ### Raw CUDA fatbin plugins (for direct H100 validation and reproducibility)
           - \`xhdfe-linux-cuda.plugin\`, \`xfe-linux-cuda.plugin\` — the same Linux CUDA binaries as in the CUDA bundle, attached standalone.
 
           ### Python and R packages
@@ -597,7 +596,7 @@ jobs:
           | Platform | Backend | Runner | Notes |
           |---|---|---|---|
           | Linux x86_64 | CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
-          | Linux x86_64 | CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; **GPU-validate** |
+          | Linux x86_64 | CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
           | Windows 11 x86_64 | CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
           | macOS x86_64+arm64 | CPU | macos-14 | universal bundle, no OpenMP |
           EOF
