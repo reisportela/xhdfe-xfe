@@ -9,3 +9,5 @@ The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
 file is installed under the canonical runtime name xhdfe.plugin or xfe.plugin.
+Windows packages also install the colocated libgomp-1.dll and
+libwinpthread-1.dll required by the production OpenMP plugins.
