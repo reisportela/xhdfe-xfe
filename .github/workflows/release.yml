@@ -649,11 +649,18 @@ jobs:
           set -euo pipefail
           TARGET="${GITHUB_REF_NAME#publish-}"
           test -n "$TARGET"
-          TARGET_SHA="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
-            "refs/tags/$TARGET^{}" | cut -f1)"
-          if [ -z "$TARGET_SHA" ]; then
-            TARGET_SHA="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" \
-              "refs/tags/$TARGET" | cut -f1)"
+          TAG_TYPE="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TARGET" \
+            --jq '.object.type')"
+          TAG_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$TARGET" \
+            --jq '.object.sha')"
+          if [ "$TAG_TYPE" = "tag" ]; then
+            TARGET_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/$TAG_SHA" \
+              --jq '.object.sha')"
+          elif [ "$TAG_TYPE" = "commit" ]; then
+            TARGET_SHA="$TAG_SHA"
+          else
+            echo "ERROR: unsupported target tag object type: $TAG_TYPE" >&2
+            exit 1
           fi
           test "$TARGET_SHA" = "$GITHUB_SHA" || {
               echo "ERROR: publish marker and version tag do not resolve to the same commit." >&2
