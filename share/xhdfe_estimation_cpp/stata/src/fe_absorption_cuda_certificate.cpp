@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -197,6 +199,18 @@ struct CertificateAccumulationPlan {
     std::size_t scratch_bytes = 0;
 };
 
+// WP1 telemetry gate. Same channel and env variable as the solver's
+// cpu_profile lines (XHDFE_PROFILE_CPU) so the phase balance sees one stream;
+// self-contained here because those helpers have internal linkage in their
+// own translation units.
+inline bool certificate_profile_enabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_CPU");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
 inline std::size_t certificate_dense_bytes(int groups,
                                            int values_per_group) {
     if (groups <= 0 || values_per_group <= 0) {
@@ -218,6 +232,7 @@ inline CertificateAccumulationPlan choose_certificate_plan(
     int n,
     int groups,
     int values_per_group,
+    int moment_count,
     bool groups_contiguous,
     bool unit_weights,
     bool has_slope) {
@@ -227,11 +242,25 @@ inline CertificateAccumulationPlan choose_certificate_plan(
     plan.logical_chunk_count =
         deterministic_scatter_chunk_count(n, groups, values_per_group);
     plan.groups_contiguous = groups_contiguous;
-    // Both layouts use owner-computes.  Non-contiguous inputs first build a
-    // stable inverse row order, which is an O(n) index rather than dense
-    // accumulation scratch.  The arithmetic scratch itself is zero.
     plan.kind = CertificateAccumulationPlan::Kind::OwnerByGroup;
-    plan.scratch_bytes = 0;
+    // WP1 (plan C7): report the bytes this plan actually allocates instead of
+    // the previous hard-coded 0, which made the scratch-budget check vacuous
+    // and the telemetry false. Per dimension the certificate allocates:
+    //   sums               groups x values_per_group doubles (dominant)
+    //   stable order       obs_index (n ints) + group_ptr and its cursor
+    //                      copy (2 x (groups+1) ints), only when the input
+    //                      groups are not contiguous
+    //   operator_partials  chunk_count x moment_count doubles
+    plan.scratch_bytes = certificate_dense_bytes(groups, values_per_group);
+    if (!groups_contiguous) {
+        plan.scratch_bytes +=
+            (static_cast<std::size_t>(n) +
+             2U * (static_cast<std::size_t>(groups) + 1U)) *
+            sizeof(int);
+    }
+    plan.scratch_bytes +=
+        static_cast<std::size_t>(plan.logical_chunk_count) *
+        static_cast<std::size_t>(moment_count) * sizeof(double);
     return plan;
 }
 
@@ -362,15 +391,45 @@ void certify_cuda_absorption_result(
         const bool groups_contiguous =
             input_has_contiguous_groups(input, n);
         const CertificateAccumulationPlan plan = choose_certificate_plan(
-            n, input.num_groups, values_per_group, groups_contiguous,
-            unit_weights, slope != nullptr);
+            n, input.num_groups, values_per_group, moment_count,
+            groups_contiguous, unit_weights, slope != nullptr);
+        // The budget is the dense accumulation cost plus the bounded index
+        // and partial overheads — the same quantities the plan now reports
+        // truthfully. Until WP3 introduces an independent device-side budget
+        // this check can only catch planner bugs (negative chunk counts,
+        // overflow in the byte accounting), not policy violations; the
+        // previous form compared a hard-coded 0 against the budget and could
+        // not fail at all.
         const std::size_t scratch_budget =
-            certificate_dense_bytes(input.num_groups, values_per_group);
+            certificate_dense_bytes(input.num_groups, values_per_group) +
+            (static_cast<std::size_t>(n) +
+             2U * (static_cast<std::size_t>(input.num_groups) + 1U)) *
+                sizeof(int) +
+            static_cast<std::size_t>(plan.logical_chunk_count) *
+                static_cast<std::size_t>(moment_count) * sizeof(double);
         const bool scratch_budget_ok =
             plan.scratch_bytes <= scratch_budget;
         if (!scratch_budget_ok || plan.logical_chunk_count <= 0) {
             throw std::runtime_error(
                 "CUDA certificate accumulation plan exceeds its scratch budget");
+        }
+        if (certificate_profile_enabled()) {
+            // WP1 telemetry: actual scratch and observation passes for this
+            // dimension. passes = rows x (operator moments + sums reads per
+            // row) + the two stable-order passes when an inverse order must
+            // be built. Emitted on the cpu_profile channel so the WP1 phase
+            // balance can consume it alongside the existing labels.
+            const long long passes =
+                static_cast<long long>(n) *
+                    (static_cast<long long>(moment_count) +
+                     static_cast<long long>(values_per_group)) +
+                (groups_contiguous ? 0LL : 2LL * static_cast<long long>(n));
+            std::fprintf(stderr,
+                         "cpu_profile label=cuda_cert_scratch dim=%zu "
+                         "bytes=%zu passes=%lld chunks=%d contiguous=%d\n",
+                         dim, plan.scratch_bytes, passes,
+                         plan.logical_chunk_count,
+                         plan.groups_contiguous ? 1 : 0);
         }
         const int chunk_count = plan.logical_chunk_count;
         const int* group_ids = input.group_ids;
