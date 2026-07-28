@@ -7,6 +7,10 @@
 
 namespace hdfe {
 
+namespace detail {
+class ParallelWorkObserver;
+}
+
 /** \brief Supported covariance estimators for coefficient inference. */
 enum class StandardErrorType { Homoskedastic, Robust, Cluster };
 
@@ -58,6 +62,8 @@ struct HdfeOptions {
                                                            //!< Explicit values override; standard (slope-free) absorption is
                                                            //!< governed by tolerance_mode alone.
     int num_threads = 0;                                   //!< Threads for absorption (0 = library default / auto).
+    bool num_threads_explicit = false;                     //!< Internal: explicit positive request; bypass auto-only shape heuristics.
+    detail::ParallelWorkObserver* parallel_observer = nullptr; //!< Internal: records workers executing real loop iterations.
     bool drop_singletons = true;                           //!< When true, iteratively drop singleton observations before estimation (reghdfe default).
     bool weights_are_frequencies = false;                  //!< Interpret weights as frequency weights for N/df bookkeeping.
     bool capture_fe_collinear_ss_ratio = false;             //!< Retain the already-computed FE-collinearity ratios for diagnostic consumers.
@@ -136,6 +142,9 @@ struct HdfeResults {
     double fe_recovery_max_delta = 0.0; //!< Maximum change observed in the final FE recovery sweep.
     bool fe_recovery_converged = true; //!< Whether the FE recovery loop converged within the iteration cap.
     bool converged = true;         //!< Flag indicating whether the absorber reached tolerance.
+    double abs_residual = 0.0;     //!< Verified absolute normal-equation residual after absorption.
+    double abs_residual_rel = 0.0; //!< Verified relative normal-equation residual after absorption.
+    bool precision_certified = true; //!< Whether the verified residual meets the declared certificate limit.
     int num_clusters = 0;          //!< Minimum number of clusters across dimensions (if clustered).
     std::vector<int> cluster_counts; //!< Number of clusters for each dimension (if clustered).
     std::vector<int> cluster_combo_counts; //!< Cluster counts for each multiway combination (optional).

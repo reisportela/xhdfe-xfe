@@ -69,13 +69,19 @@ is applied (defaults \code{5}, \code{5}).}
 \item{a1p1, a2p1, a2p2}{acceleration safeguards (defaults \code{0.75},
 \code{1e-8}, \code{5}).}
 
-\item{threads}{absorber thread count (0 = auto).}
+\item{threads}{OpenMP thread request. Must be one nonnegative integer;
+\code{0} selects the automatic policy, while a positive request is
+limited only by runtime-visible processor capacity.}
 }
 \value{
 An object of class \code{xhdfe_group_fes}: a list with
   \code{individual_ids}, \code{individual_effects}, \code{fe_level_ids},
   \code{fe_level_effects}, \code{iterations}, \code{converged} and
-  \code{mse}.
+  \code{mse}, plus the extraction-specific thread diagnostics
+  \code{threads_requested}, \code{threads_effective}, \code{threads_used},
+  \code{parallel_workers_active}, \code{thread_capacity},
+  \code{openmp_enabled}, \code{thread_limit_code}, and
+  \code{thread_limit_reason}.
 }
 \description{
 Recovers individual-level and FE-level effect estimates for the

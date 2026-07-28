@@ -25,7 +25,11 @@ No IV part is accepted.}
 
 \item{data, weights}{as in \code{\link{xhdfe}}.}
 
-\item{tol, maxiter, tolerance_mode, absorption_method, symmetric_sweep, threads, backend}{absorber controls, as in \code{\link{xhdfe}}.}
+\item{tol, maxiter, tolerance_mode, absorption_method, symmetric_sweep, backend}{absorber controls, as in \code{\link{xhdfe}}.}
+
+\item{threads}{OpenMP thread request. Must be one nonnegative integer;
+\code{0} selects the automatic policy, while a positive request is
+limited only by runtime-visible processor capacity.}
 
 \item{drop_singletons}{defaults to \code{FALSE} here (transform-only use
 normally wants all rows kept), unlike \code{xhdfe()}.}
@@ -36,9 +40,12 @@ An object of class \code{xhdfe_demean}: a list with
   \code{rows} (the input rows present in \code{demeaned}, after NA
   filtering and, when \code{drop_singletons = TRUE}, singleton dropping),
   \code{num_singletons}, \code{fe_labels}, \code{fe_num_levels},
-  \code{iterations}, \code{converged}, \code{absorption_method_used},
-  \code{schwarz_used}, \code{mlsmr_used}, \code{gpu_used} and
-  \code{threads_used}.
+  \code{iterations}, \code{converged}, \code{abs_residual},
+  \code{abs_residual_rel}, \code{precision_certified},
+  \code{absorption_method_used}, \code{schwarz_used}, \code{mlsmr_used},
+  \code{gpu_used} and \code{threads_used}.  The relative certificate is
+  the maximum \eqn{\|D'W\widetilde v\|_2 /
+  (\|D'W\|_F\|v\|_2)} across transformed columns.
 }
 \description{
 Applies the xhdfe absorber to a set of variables without running the

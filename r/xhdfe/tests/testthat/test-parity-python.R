@@ -186,6 +186,10 @@ test_that("parity: group-level outcomes", {
   expect_equal(unname(m2$se), ref2$se, tolerance = TOL_STAT)
   expect_identical(m2$nobs, ref2$nobs)
   expect_equal(m2$rss, ref2$rss, tolerance = TOL_STAT)
+  expect_true(m2$converged)
+  expect_true(m2$precision_certified)
+  expect_lte(m2$abs_residual_rel,
+             max(8 * 1e-8, 64 * .Machine$double.eps))
 
   ref3 <- ref_all$specs[["group_fes_decomposition"]]
   dec <- xhdfe_group_fes(g$yg, as.matrix(g[, "xg", drop = FALSE]),

@@ -12,8 +12,11 @@
 #'   the left of the \code{|} (response and regressors alike) is transformed.
 #'   No IV part is accepted.
 #' @param data,weights as in \code{\link{xhdfe}}.
-#' @param tol,maxiter,tolerance_mode,absorption_method,symmetric_sweep,threads,backend
+#' @param tol,maxiter,tolerance_mode,absorption_method,symmetric_sweep,backend
 #'   absorber controls, as in \code{\link{xhdfe}}.
+#' @param threads OpenMP thread request. Must be one nonnegative integer;
+#'   \code{0} selects the automatic policy, while a positive request is
+#'   limited only by runtime-visible processor capacity.
 #' @param drop_singletons defaults to \code{FALSE} here (transform-only use
 #'   normally wants all rows kept), unlike \code{xhdfe()}.
 #' @return An object of class \code{xhdfe_demean}: a list with
@@ -21,9 +24,12 @@
 #'   \code{rows} (the input rows present in \code{demeaned}, after NA
 #'   filtering and, when \code{drop_singletons = TRUE}, singleton dropping),
 #'   \code{num_singletons}, \code{fe_labels}, \code{fe_num_levels},
-#'   \code{iterations}, \code{converged}, \code{absorption_method_used},
-#'   \code{schwarz_used}, \code{mlsmr_used}, \code{gpu_used} and
-#'   \code{threads_used}.
+#'   \code{iterations}, \code{converged}, \code{abs_residual},
+#'   \code{abs_residual_rel}, \code{precision_certified},
+#'   \code{absorption_method_used}, \code{schwarz_used}, \code{mlsmr_used},
+#'   \code{gpu_used} and \code{threads_used}.  The relative certificate is
+#'   the maximum \eqn{\|D'W\widetilde v\|_2 /
+#'   (\|D'W\|_F\|v\|_2)} across transformed columns.
 #' @examples
 #' d <- data.frame(f1 = rep(1:25, 20), f2 = rep(1:20, each = 25))
 #' d$x <- rnorm(500); d$y <- d$x + d$f1 / 10 + d$f2 / 5 + rnorm(500)
@@ -41,6 +47,12 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                          threads = 0,
                          backend = c("default", "cpu", "cuda", "metal")) {
   backend <- match.arg(backend)
+  if (length(threads) != 1L || !is.numeric(threads) ||
+      is.logical(threads) || is.na(threads) ||
+      !is.finite(threads) || threads < 0 ||
+      threads != floor(threads)) {
+    stop("threads must be one nonnegative integer", call. = FALSE)
+  }
   env <- environment(fml)
   if (is.null(env)) env <- parent.frame()
   spec <- split_xhdfe_formula(fml)
@@ -142,6 +154,9 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                  fe_num_levels = res$fe_num_levels,
                  iterations = res$iterations,
                  converged = res$converged,
+                 abs_residual = res$abs_residual,
+                 abs_residual_rel = res$abs_residual_rel,
+                 precision_certified = res$precision_certified,
                  absorption_method_used = res$absorption_method_used,
                  schwarz_used = res$schwarz_used,
                  mlsmr_used = res$mlsmr_used,

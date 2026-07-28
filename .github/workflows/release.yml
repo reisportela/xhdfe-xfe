@@ -84,14 +84,35 @@ jobs:
       - name: Prepare artifacts dir
         run: mkdir -p artifacts
 
-      # ---- Linux CPU (portable, OpenMP, no -march=native) ----
-      - name: Build linux-cpu (xhdfe + xfe)
+      # ---- Linux ELF artifacts: built inside manylinux_2_28 (glibc 2.28 floor) ----
+      # Release 2.21.0's Linux binaries were built directly on the Ubuntu runner
+      # and required GLIBC_2.38/GLIBCXX_3.4.32, which does not load on
+      # RHEL/AlmaLinux/Rocky 9 (glibc 2.34), Ubuntu 22.04, Debian 12 or SLES 15
+      # — the Enterprise Linux platforms the stated audience runs (finding F-01).
+      # Building in the manylinux_2_28 container (AlmaLinux 8 + gcc-toolset,
+      # whose new C++ runtime parts link statically) pins the artifact floor at
+      # GLIBC_2.28/GLIBCXX_3.4.25. The script fail-closed-gates every ELF with
+      # tools/check_binary_floor.sh before it returns.
+      - name: Build linux-cpu + linux-cuda + Python wheel/sdist (manylinux_2_28)
         run: |
           set -euo pipefail
-          bash stata/tools/build-plugin.sh --linux --openmp
-          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cpu
-          bash stata/tools/build-xfe-plugin.sh --linux --openmp
-          cp stata/xfe.plugin artifacts/xfe.plugin.linux-cpu
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e XHDFE_CUDA_ARCHS="$XHDFE_CUDA_ARCHS" \
+            quay.io/pypa/manylinux_2_28_x86_64 \
+            bash ci/build_linux_release_manylinux.sh
+
+      - name: Enforce glibc floor on Linux artifacts (fail-closed, host-side re-check)
+        run: |
+          set -euo pipefail
+          bash tools/check_binary_floor.sh \
+            artifacts/xhdfe.plugin.linux-cpu artifacts/xfe.plugin.linux-cpu \
+            artifacts/xhdfe.plugin.linux-cuda artifacts/xfe.plugin.linux-cuda
+          WHEELS=(artifacts/xhdfe-*.whl)
+          test "${#WHEELS[@]}" -eq 1
+          STAGE="$(mktemp -d)"
+          python3 -m zipfile -e "${WHEELS[0]}" "$STAGE"
+          find "$STAGE" -name '*.so' -print0 | xargs -0 bash tools/check_binary_floor.sh
+          rm -rf "$STAGE"
 
       - name: Verify linux-cpu plugins (ELF + libgomp)
         run: |
@@ -105,19 +126,9 @@ jobs:
             ldd "$f" | grep -q libgomp || { echo "ERROR: libgomp not linked in $f (OpenMP missing)" >&2; exit 1; }
           done
 
-      # ---- Linux CUDA fatbin (sm_75/80/86/89/90 + compute_90 PTX) ----
-      # Compile/link verified only — no GPU on CI. Maintainer validates on H100.
-      - name: Build linux-cuda fatbin (xhdfe + xfe)
-        env:
-          XHDFE_ENABLE_CUDA: 'ON'
-          # XHDFE_CUDA_ARCHS inherited from workflow env; overrides single-arch default.
-        run: |
-          set -euo pipefail
-          bash stata/tools/build-plugin.sh --linux --openmp
-          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cuda
-          bash stata/tools/build-xfe-plugin.sh --linux --openmp
-          cp stata/xfe.plugin artifacts/xfe.plugin.linux-cuda
-
+      # Linux CUDA fatbin plugins are built by the manylinux step above
+      # (sm_75/80/86/89/90 + compute_90 PTX). Compile/link verified only — no
+      # GPU on CI. Maintainer validates on H100.
       - name: Verify linux-cuda fatbin plugins (compile-verified only; no GPU)
         run: |
           set -euo pipefail
@@ -196,16 +207,16 @@ jobs:
             file "$f" | grep -Eq 'PE32\+|PE32 '
           done
 
-      - name: Build and smoke-test Python wheel/sdist and R source package
-        env:
-          XHDFE_ENABLE_CUDA: 'OFF'
-          XHDFE_ENABLE_MARCH_NATIVE: 'OFF'
+      - name: Smoke-test manylinux Python wheel and build R source package
         run: |
           set -euo pipefail
-          python3 -m venv --system-site-packages /tmp/xhdfe-wheel-build
-          /tmp/xhdfe-wheel-build/bin/python -m pip wheel . \
-            --no-build-isolation --no-deps --wheel-dir artifacts
-          /tmp/xhdfe-wheel-build/bin/python setup.py sdist --dist-dir artifacts
+          # Wheel + sdist come from the manylinux container step (glibc-2.28
+          # floor); the smoke below proves the container-built wheel loads and
+          # runs on this newer-glibc host (forward compatibility).
+          # Single source of truth for the expected version: xhdfe/_version.py.
+          python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))' > /tmp/xhdfe-expected-version
+          EXPECTED_VERSION="$(cat /tmp/xhdfe-expected-version)"
+          echo "expected version: $EXPECTED_VERSION"
           python3 -m venv --system-site-packages /tmp/xhdfe-wheel-smoke
           WHEELS=(artifacts/xhdfe-*.whl)
           test "${#WHEELS[@]}" -eq 1
@@ -214,10 +225,10 @@ jobs:
           (
             cd /tmp
             /tmp/xhdfe-wheel-smoke/bin/python -c \
-              'import numpy as np; import xhdfe; from xhdfe import gelbach; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == "2.21.0.20260725"; print("PYTHON_WHEEL_SMOKE_PASS")'
+              'import numpy as np; import xhdfe; from xhdfe import gelbach; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); print("PYTHON_WHEEL_SMOKE_PASS")'
           )
           R CMD build --no-build-vignettes --no-manual r/xhdfe
-          R_TARBALL="xhdfe_2.21.0.20260725.tar.gz"
+          R_TARBALL="xhdfe_${EXPECTED_VERSION}.tar.gz"
           test -f "$R_TARBALL"
           mv "$R_TARBALL" artifacts/
           ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \

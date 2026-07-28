@@ -35,11 +35,11 @@
 #'   \code{1e-8} preserves the historical effective tolerance. This does not
 #'   control FE-collinearity classification, whose separate squared-norm rule
 #'   is \code{||M_D x||^2 / ||x||^2 <= 1e-9} and is returned as metadata.
-#' @param num_threads OpenMP thread request/cap for supported CPU phases
-#'   (0 = library default). Individual phases may choose fewer threads;
-#'   \code{$threads_used} reports the maximum effective absorber/recovery
-#'   team, not a promise that every auxiliary or covariance phase used that
-#'   count. GPU kernels do not use this OpenMP setting.
+#' @param num_threads OpenMP request for supported CPU phases (0 = automatic
+#'   policy). A positive request bypasses workload/environment heuristics and
+#'   is limited only by runtime-visible processor capacity. Returned
+#'   command/phase diagnostics distinguish budgets, observed teams, and
+#'   workers doing useful work. GPU kernels do not use this OpenMP setting.
 #' @param weights Optional finite, strictly positive Stata-style weights:
 #'   analytic by default, frequency when \code{fweights = TRUE}.
 #' @param fweights Treat \code{weights} as positive integer frequency weights.
@@ -181,7 +181,8 @@
 #' \code{$connectivity_fe_indices}, \code{$connectivity_fe_names},
 #' \code{$connectivity_pair_explicit}, \code{$connectivity_pair_status},
 #' \code{$connected_mode}, and \code{$mobility_component_scope},
-#' \code{$threads_used}, and the truthful \code{$gpu_*} fields.
+#' the full \code{$threads_*}/phase useful-worker diagnostics, and the
+#' truthful \code{$gpu_*} fields.
 #' \code{$gamma} has one column per observed block and is padded with
 #' non-finite entries to the widest block. \code{$causal_interpretation} is
 #' always \code{FALSE}. R accepts one-based selector indices but

@@ -187,10 +187,9 @@ void preflight_identification(const Eigen::MatrixXd& weighted_instruments,
         throw std::runtime_error("IV design produced a non-finite cross-product");
     }
 
-    // An absorbed intercept is retained by the legacy IV path as an exactly
-    // zero exogenous column.  It must stay in the LDLT below for zero-diff
-    // compatibility, but it carries no identifying information and must not
-    // make an otherwise valid model fail preflight.
+    // Defensively ignore exactly zero exogenous columns in the instrument-rank
+    // preflight.  The current FE path removes an absorbed constant before
+    // 2SLS, but direct callers and older cached designs may still supply one.
     std::vector<Eigen::Index> checked_columns;
     checked_columns.reserve(static_cast<std::size_t>(k));
     for (Eigen::Index j = 0; j < num_exogenous; ++j) {

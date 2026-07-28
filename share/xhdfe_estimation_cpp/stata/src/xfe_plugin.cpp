@@ -16,7 +16,12 @@
 #include <utility>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "hdfe/hdfe_regressor_v11.hpp"
+#include "fe_absorption_cuda.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
 // with OpenMP, as used by the plugin build); otherwise fall back to std::sort.
@@ -45,6 +50,52 @@ constexpr double kGroupConstantTol = 1e-12;
     throw std::runtime_error(std::string(kPluginPrefix) + msg);
 }
 
+// Dense-ranking happens before HdfeRegressorV11 creates its task-local
+// runtime guard. Honour an explicit request during plugin preprocessing and
+// restore the caller's OpenMP ICV even if a later read/fit throws.
+class ScopedPluginThreadRequest {
+public:
+    explicit ScopedPluginThreadRequest(int requested) {
+#ifdef _OPENMP
+        if (requested <= 0) return;
+        if (requested > 1 && omp_in_parallel()) {
+            throw_with_prefix(
+                "explicit num_threads > 1 cannot be guaranteed inside an "
+                "active OpenMP region");
+        }
+        previous_dynamic_ = omp_get_dynamic();
+        previous_threads_ = omp_get_max_threads();
+        const int capacity = std::max(
+            1, std::min(omp_get_num_procs(), omp_get_thread_limit()));
+        omp_set_dynamic(0);
+        omp_set_num_threads(std::max(1, std::min(requested, capacity)));
+        active_ = true;
+#else
+        (void)requested;
+#endif
+    }
+
+    ~ScopedPluginThreadRequest() {
+#ifdef _OPENMP
+        if (active_) {
+            omp_set_num_threads(previous_threads_);
+            omp_set_dynamic(previous_dynamic_);
+        }
+#endif
+    }
+
+    ScopedPluginThreadRequest(const ScopedPluginThreadRequest&) = delete;
+    ScopedPluginThreadRequest& operator=(const ScopedPluginThreadRequest&) =
+        delete;
+
+private:
+#ifdef _OPENMP
+    bool active_ = false;
+    int previous_dynamic_ = 0;
+    int previous_threads_ = 1;
+#endif
+};
+
 std::string to_lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -58,6 +109,13 @@ std::string normalize_gpu_backend(const std::string& raw) {
         return name;
     }
     throw_with_prefix("invalid gpu_backend: " + raw);
+}
+
+hdfe::detail::GpuBackend parse_gpu_backend_override(
+    const std::string& backend) {
+    if (backend == "cuda") return hdfe::detail::GpuBackend::Cuda;
+    if (backend == "metal") return hdfe::detail::GpuBackend::Metal;
+    return hdfe::detail::GpuBackend::Cpu;
 }
 
 void set_env_value(const std::string& key, const std::string& value) {
@@ -461,6 +519,7 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.tol = parse_double(args.get_required("tol"), "tol");
         opts.max_iter = parse_int(args.get_required("max_iter"), "max_iter");
         opts.num_threads = parse_int(args.get_required("num_threads"), "num_threads");
+        ScopedPluginThreadRequest plugin_thread_request(opts.num_threads);
         opts.drop_singletons = parse_bool(args.get_required("drop_singletons"), "drop_singletons");
         opts.symmetric_sweep = parse_bool(args.get_required("symmetric_sweep"), "symmetric_sweep");
         opts.absorption_method = parse_absorption_method(args.get_required("absorption_method"));
@@ -494,10 +553,10 @@ STDLL stata_call(int argc, char* argv[]) {
             parse_int(args.get_required("target_rows_per_thread"), "target_rows_per_thread");
         threading.symmetric_sweep = opts.symmetric_sweep;
 
-        std::optional<ScopedEnvVar> gpu_env;
+        std::optional<hdfe::detail::ScopedGpuBackendOverride> gpu_backend_scope;
         if (auto val = args.get_optional("gpu_backend")) {
             const std::string backend = normalize_gpu_backend(*val);
-            gpu_env.emplace("XHDFE_GPU_BACKEND", backend);
+            gpu_backend_scope.emplace(parse_gpu_backend_override(backend));
         }
         std::optional<ScopedEnvVar> mobility_profile_env;
         if (auto val = args.get_optional("mobility_profile")) {
@@ -717,6 +776,18 @@ STDLL stata_call(int argc, char* argv[]) {
         const std::optional<std::string> s_iterations = args.get_optional("s_iterations");
         const std::optional<std::string> s_converged = args.get_optional("s_converged");
         const std::optional<std::string> s_threads_used = args.get_optional("s_threads_used");
+        const std::optional<std::string> s_threads_requested =
+            args.get_optional("s_threads_requested");
+        const std::optional<std::string> s_threads_effective =
+            args.get_optional("s_threads_effective");
+        const std::optional<std::string> s_parallel_workers_active =
+            args.get_optional("s_parallel_workers_active");
+        const std::optional<std::string> s_thread_capacity =
+            args.get_optional("s_thread_capacity");
+        const std::optional<std::string> s_openmp_enabled =
+            args.get_optional("s_openmp_enabled");
+        const std::optional<std::string> s_thread_limit_code =
+            args.get_optional("s_thread_limit_code");
         const std::optional<std::string> s_gpu_used = args.get_optional("s_gpu_used");
         const std::optional<std::string> s_gpu_status_code =
             args.get_optional("s_gpu_status_code");
@@ -742,6 +813,17 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_iterations, static_cast<double>(r.num_iterations));
         maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
         maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+        maybe_save_scalar(s_threads_requested,
+                          static_cast<double>(reg.threads_requested()));
+        maybe_save_scalar(s_threads_effective,
+                          static_cast<double>(reg.threads_effective()));
+        maybe_save_scalar(s_parallel_workers_active,
+                          static_cast<double>(reg.parallel_workers_active()));
+        maybe_save_scalar(s_thread_capacity,
+                          static_cast<double>(reg.thread_capacity()));
+        maybe_save_scalar(s_openmp_enabled, reg.openmp_enabled() ? 1.0 : 0.0);
+        maybe_save_scalar(s_thread_limit_code,
+                          static_cast<double>(reg.thread_limit_code()));
         maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
         maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                    s_gpu_absorption_converged,

@@ -25,7 +25,9 @@
 #'   \code{factor * tol} (default \code{1}).
 #' @param a1p1,a2p1,a2p2 acceleration safeguards (defaults \code{0.75},
 #'   \code{1e-8}, \code{5}).
-#' @param threads absorber thread count (0 = auto).
+#' @param threads OpenMP thread request. Must be one nonnegative integer;
+#'   \code{0} selects the automatic policy, while a positive request is
+#'   limited only by runtime-visible processor capacity.
 #' @param weights_type,fit_intercept,drop_singletons,keep_singletons,tol,maxiter,tolerance_mode,convergence,absorption_method,symmetric_sweep
 #'   options for the internal grouped fit that precedes the decomposition;
 #'   pass the SAME values used for the model being decomposed so the
@@ -34,7 +36,11 @@
 #' @return An object of class \code{xhdfe_group_fes}: a list with
 #'   \code{individual_ids}, \code{individual_effects}, \code{fe_level_ids},
 #'   \code{fe_level_effects}, \code{iterations}, \code{converged} and
-#'   \code{mse}.
+#'   \code{mse}, plus the extraction-specific thread diagnostics
+#'   \code{threads_requested}, \code{threads_effective}, \code{threads_used},
+#'   \code{parallel_workers_active}, \code{thread_capacity},
+#'   \code{openmp_enabled}, \code{thread_limit_code}, and
+#'   \code{thread_limit_reason}.
 #' @seealso \code{\link{xhdfe}} (arguments \code{group},
 #'   \code{individual}, \code{aggregation})
 #' @name xhdfe_group_fes
@@ -56,6 +62,12 @@ xhdfe_group_fes <- function(y, X, fes, group, individual,
                             a2p1 = 1e-8, a2p2 = 5,
                             threads = 0) {
   weights_type <- match.arg(weights_type)
+  if (length(threads) != 1L || !is.numeric(threads) ||
+      is.logical(threads) || is.na(threads) ||
+      !is.finite(threads) || threads < 0 ||
+      threads != floor(threads)) {
+    stop("threads must be one nonnegative integer", call. = FALSE)
+  }
   y <- as.numeric(y)
   if (is.data.frame(X)) X <- as.matrix(X)
   if (!is.matrix(X)) X <- matrix(as.numeric(X), ncol = 1L)

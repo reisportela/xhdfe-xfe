@@ -1,4 +1,4 @@
-*! version 1.7.2  25jul2026
+*! version 1.7.2  28jul2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -14,6 +14,10 @@ program define xhdfeakm, rclass sortpreserve
           VERBose ]
 
     local y `varlist'
+    if (`threads' < 0) {
+        di as err "threads() must be nonnegative"
+        exit 198
+    }
     marksample touse
     markout `touse' `worker' `firm'
     // controls() may contain factor / time-series terms (e.g. i.year). Expand
@@ -187,11 +191,36 @@ program define xhdfeakm, rclass sortpreserve
     }
 
     // Collect the plugin scalars into r() and clean the hidden names up.
-    local smap "gpu_used plugin_var_alpha plugin_var_psi plugin_cov agsu_var_alpha agsu_var_psi agsu_cov kss_var_alpha kss_var_psi kss_cov var_y sigma2_ho n_obs n_obs_input n_obs_connected n_workers n_firms n_matches n_movers n_stayers n_rows max_pii mean_pii leverages_exact solver_direct fwl_threads_used threads_used jla_draws seed solver_iterations converged"
+    local smap "gpu_requested gpu_used gpu_status_code fwl_gpu_attempted fwl_gpu_used fwl_gpu_fallback fwl_gpu_status_code fwl_iterations fwl_abs_residual_rel fwl_precision_certified plugin_var_alpha plugin_var_psi plugin_cov agsu_var_alpha agsu_var_psi agsu_cov kss_var_alpha kss_var_psi kss_cov var_y sigma2_ho n_obs n_obs_input n_obs_connected n_workers n_firms n_matches n_movers n_stayers n_rows max_pii mean_pii leverages_exact solver_direct threads_requested threads_effective solver_threads_effective fwl_threads_effective fwl_threads_used solver_threads_used threads_used thread_capacity openmp_enabled thread_limit_code jla_draws seed solver_iterations converged"
     foreach name of local smap {
         return scalar `name' = scalar(__xakm_`name')
         capture scalar drop __xakm_`name'
     }
+    return scalar parallel_workers_active = scalar(__xakm_workers_active)
+    return scalar fwl_parallel_workers_active = scalar(__xakm_fwl_workers_active)
+    return scalar solver_parallel_workers_active = scalar(__xakm_solver_workers_active)
+    capture scalar drop __xakm_workers_active __xakm_fwl_workers_active ///
+        __xakm_solver_workers_active
+    return scalar sample_threads_requested = scalar(__xakm_samp_threads_req)
+    return scalar sample_threads_effective = scalar(__xakm_samp_threads_eff)
+    return scalar sample_threads_used = scalar(__xakm_samp_threads_used)
+    return scalar sample_parallel_workers_active = ///
+        scalar(__xakm_samp_workers_active)
+    return scalar sample_thread_capacity = ///
+        scalar(__xakm_samp_thread_capacity)
+    return scalar sample_openmp_enabled = ///
+        scalar(__xakm_samp_openmp_enabled)
+    return scalar sample_thread_limit_code = ///
+        scalar(__xakm_samp_thread_limit_code)
+    capture scalar drop __xakm_samp_threads_req __xakm_samp_threads_eff ///
+        __xakm_samp_threads_used __xakm_samp_workers_active ///
+        __xakm_samp_thread_capacity __xakm_samp_openmp_enabled ///
+        __xakm_samp_thread_limit_code
+    return local thread_limit_reason "`xakm_thread_limit_reason'"
+    return local sample_thread_limit_reason "`xakm_samp_limit_reason'"
+    return local gpu_backend "`xakm_gpu_backend'"
+    return local gpu_status "`xakm_gpu_status'"
+    return local fwl_gpu_status "`xakm_fwl_gpu_status'"
     if ("`se'" != "") {
         foreach nm in se_var_psi se_cov se_var_alpha theta_var_psi theta_cov theta_var_alpha {
             return scalar `nm' = scalar(__xakm_`nm')

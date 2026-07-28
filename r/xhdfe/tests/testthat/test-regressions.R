@@ -18,6 +18,47 @@ test_that("predict(newdata) includes endogenous contributions for IV fits", {
   in_sample <- predict(m)
   out_sample <- predict(m, newdata = rd)
   expect_equal(unname(out_sample), unname(in_sample), tolerance = 1e-10)
+  expect_true(all(is.finite(coef(m))))
+  expect_true(all(is.finite(diag(vcov(m)))))
+  alpha_expected <- mean(rd$y) -
+    mean(rd$x1) * unname(coef(m)["x1"]) -
+    mean(rd$endo) * unname(coef(m)["endo"])
+  expect_equal(unname(coef(m)["(Intercept)"]), alpha_expected,
+               tolerance = 1e-12)
+  expect_true(all(is.finite(in_sample)))
+  expect_lt(max(abs(in_sample)), 100 * max(1, abs(rd$y)))
+})
+
+test_that("FE-IV normalized intercept cannot alter identified slope inference", {
+  X <- cbind(x1 = rd$x1, endo = rd$endo)
+  Z <- matrix(rd$z, ncol = 1)
+  cases <- list(
+    list(vcov = "robust"),
+    list(cluster = list(rd$f1)),
+    list(cluster = list(rd$f1, rd$f2)),
+    list(cluster = list(rd$f1), weights = rd$w)
+  )
+  for (args in cases) {
+    common <- c(
+      list(y = rd$y, X = X, fes = list(rd$f1, rd$f2),
+           instruments = Z, endogenous = 2),
+      args
+    )
+    with_alpha <- suppressWarnings(do.call(xhdfe_fit, common))
+    no_alpha <- suppressWarnings(do.call(
+      xhdfe_fit, c(common, list(fit_intercept = FALSE))
+    ))
+    expect_equal(
+      unname(with_alpha$coefficients[1:2]),
+      unname(no_alpha$coefficients),
+      tolerance = 1e-12
+    )
+    expect_equal(
+      unname(with_alpha$vcov[1:2, 1:2]),
+      unname(no_alpha$vcov),
+      tolerance = 1e-12
+    )
+  }
 })
 
 test_that("predict(newdata) fails closed on missing model columns", {
@@ -69,6 +110,31 @@ test_that("demean resolves weights given as a column name", {
                "one entry per observation")
 })
 
+test_that("demean and group-FE front-ends reject malformed thread requests", {
+  small <- data.frame(y = 1:6, x = 2:7, fe = rep(1:2, each = 3))
+  invalid <- list(-1, 1.5, c(1, 2), NA_real_, Inf, TRUE, "2")
+
+  for (value in invalid) {
+    expect_error(
+      xhdfe_demean(y ~ x | fe, small, threads = value),
+      "threads must be one nonnegative integer",
+      fixed = TRUE
+    )
+    expect_error(
+      xhdfe_group_fes(
+        small$y,
+        cbind(x = small$x),
+        fes = list(small$fe),
+        group = seq_len(nrow(small)),
+        individual = small$fe,
+        threads = value
+      ),
+      "threads must be one nonnegative integer",
+      fixed = TRUE
+    )
+  }
+})
+
 test_that("weighted fits use the effective N in ll and r2_a", {
   m_fw <- xhdfe(y ~ x1 | f1, rd, weights = ~round(w * 2),
                 weights_type = "frequency")
@@ -90,6 +156,16 @@ test_that("group FE decomposition honours forwarded fit options", {
                           tolerance_mode = "xhdfe-fast")
   expect_s3_class(dec1, "xhdfe_group_fes")
   expect_true(dec1$converged)
+  expect_identical(dec1$threads_requested, 0L)
+  expect_gte(dec1$threads_effective, 1L)
+  expect_gte(dec1$threads_used, 1L)
+  expect_lte(dec1$threads_used, dec1$threads_effective)
+  expect_gte(dec1$parallel_workers_active, 1L)
+  expect_lte(dec1$parallel_workers_active, dec1$threads_used)
+  expect_gte(dec1$thread_capacity, dec1$threads_effective)
+  expect_type(dec1$openmp_enabled, "logical")
+  expect_type(dec1$thread_limit_code, "integer")
+  expect_type(dec1$thread_limit_reason, "character")
   # the fit options genuinely reach the core option parser
   expect_error(xhdfe_group_fes(gd$cit, cbind(fund = gd$fund),
                                fes = list(gd$inv), group = gd$pat,

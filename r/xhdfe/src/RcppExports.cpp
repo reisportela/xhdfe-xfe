@@ -10,6 +10,18 @@ Rcpp::Rostream<true>&  Rcpp::Rcout = Rcpp::Rcpp_cout_get();
 Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
+// xhdfe_cpp_run_with_backend
+SEXP xhdfe_cpp_run_with_backend(std::string backend, Rcpp::Function fun);
+RcppExport SEXP _xhdfe_xhdfe_cpp_run_with_backend(SEXP backendSEXP, SEXP funSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::string >::type backend(backendSEXP);
+    Rcpp::traits::input_parameter< Rcpp::Function >::type fun(funSEXP);
+    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_run_with_backend(backend, fun));
+    return rcpp_result_gen;
+END_RCPP
+}
 // xhdfe_cpp_fit
 Rcpp::List xhdfe_cpp_fit(Rcpp::NumericVector y, Rcpp::NumericMatrix X, Rcpp::List fes, SEXP weights, Rcpp::List clusters, SEXP instruments, Rcpp::IntegerVector endogenous_idx, Rcpp::List slopes, SEXP group, SEXP individual, std::string aggregation, Rcpp::List opts);
 RcppExport SEXP _xhdfe_xhdfe_cpp_fit(SEXP ySEXP, SEXP XSEXP, SEXP fesSEXP, SEXP weightsSEXP, SEXP clustersSEXP, SEXP instrumentsSEXP, SEXP endogenous_idxSEXP, SEXP slopesSEXP, SEXP groupSEXP, SEXP individualSEXP, SEXP aggregationSEXP, SEXP optsSEXP) {
@@ -89,6 +101,22 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// xhdfe_cpp_akm_leave_out_set_opts
+Rcpp::List xhdfe_cpp_akm_leave_out_set_opts(Rcpp::IntegerVector worker, Rcpp::IntegerVector firm, SEXP fweights, int num_threads, bool gpu, int verbose);
+RcppExport SEXP _xhdfe_xhdfe_cpp_akm_leave_out_set_opts(SEXP workerSEXP, SEXP firmSEXP, SEXP fweightsSEXP, SEXP num_threadsSEXP, SEXP gpuSEXP, SEXP verboseSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type worker(workerSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerVector >::type firm(firmSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type fweights(fweightsSEXP);
+    Rcpp::traits::input_parameter< int >::type num_threads(num_threadsSEXP);
+    Rcpp::traits::input_parameter< bool >::type gpu(gpuSEXP);
+    Rcpp::traits::input_parameter< int >::type verbose(verboseSEXP);
+    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_akm_leave_out_set_opts(worker, firm, fweights, num_threads, gpu, verbose));
+    return rcpp_result_gen;
+END_RCPP
+}
 // xhdfe_cpp_akm_kss
 Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y, Rcpp::IntegerVector worker, Rcpp::IntegerVector firm, SEXP X, Rcpp::List opts, SEXP fweights);
 RcppExport SEXP _xhdfe_xhdfe_cpp_akm_kss(SEXP ySEXP, SEXP workerSEXP, SEXP firmSEXP, SEXP XSEXP, SEXP optsSEXP, SEXP fweightsSEXP) {
@@ -136,11 +164,13 @@ END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
+    {"_xhdfe_xhdfe_cpp_run_with_backend", (DL_FUNC) &_xhdfe_xhdfe_cpp_run_with_backend, 2},
     {"_xhdfe_xhdfe_cpp_fit", (DL_FUNC) &_xhdfe_xhdfe_cpp_fit, 12},
     {"_xhdfe_xhdfe_cpp_partial_out", (DL_FUNC) &_xhdfe_xhdfe_cpp_partial_out, 6},
     {"_xhdfe_xhdfe_cpp_extract_group_fes", (DL_FUNC) &_xhdfe_xhdfe_cpp_extract_group_fes, 9},
     {"_xhdfe_xhdfe_cpp_build_info", (DL_FUNC) &_xhdfe_xhdfe_cpp_build_info, 0},
     {"_xhdfe_xhdfe_cpp_akm_leave_out_set", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_leave_out_set, 2},
+    {"_xhdfe_xhdfe_cpp_akm_leave_out_set_opts", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_leave_out_set_opts, 6},
     {"_xhdfe_xhdfe_cpp_akm_kss", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_kss, 6},
     {"_xhdfe_xhdfe_cpp_gelbach", (DL_FUNC) &_xhdfe_xhdfe_cpp_gelbach, 19},
     {NULL, NULL, 0}

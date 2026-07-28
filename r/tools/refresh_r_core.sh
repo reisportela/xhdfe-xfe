@@ -11,6 +11,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DST="$ROOT/r/xhdfe/src"
 
 cp "$ROOT"/src/fe_absorption.cpp \
+   "$ROOT"/src/fe_absorption_cuda_certificate.cpp \
    "$ROOT"/src/hdfe_regressor_v11.cpp \
    "$ROOT"/src/iv.cpp \
    "$ROOT"/src/ols.cpp \
@@ -31,7 +32,8 @@ cp "$ROOT"/third_party/eigen-3.4.0/COPYING.* "$DST/eigen/"
 
 echo "R core mirror refreshed. Verifying alignment..."
 fail=0
-for f in fe_absorption.cpp hdfe_regressor_v11.cpp iv.cpp ols.cpp \
+for f in fe_absorption.cpp fe_absorption_cuda_certificate.cpp \
+         hdfe_regressor_v11.cpp iv.cpp ols.cpp \
          schwarz_demean.cpp fe_absorption_cuda.cu fe_absorption_cuda.hpp \
          fe_absorption_metal.hpp; do
   cmp -s "$ROOT/src/$f" "$DST/$f" || { echo "MISMATCH: $f"; fail=1; }

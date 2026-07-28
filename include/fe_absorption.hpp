@@ -34,6 +34,9 @@ struct AbsorptionResult {
     std::vector<int> sweep_order_used;
     int iterations = 0;
     bool converged = true;
+    double abs_residual = 0.0;      // verified ||D' W v_tilde||_2, max over RHS columns
+    double abs_residual_rel = 0.0;  // max ||D' W v_tilde||_2 / (||D' W||_F ||v||_2)
+    bool precision_certified = true;
     bool schwarz_used = false;  // true when the Schwarz/approx-Cholesky PCG path ran (forced or auto-gated)
     bool mlsmr_used = false;    // true when the MLSMR absorber ran via the auto-gate promotion
     bool gpu_used = false;
@@ -55,6 +58,33 @@ struct FeRecoveryResult {
     double max_delta = 0.0;
     bool converged = true;
 };
+
+// Compute an explicit normal-equation residual for the returned within
+// transform. The diagnostic is independent of the solver's internal stopping
+// proxy and uses fixed logical chunks, so its value is invariant to the OpenMP
+// team size within one artefact/backend.
+void certify_absorption_result(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    const std::vector<HeterogeneousSlopeTerm>& slopes,
+    AbsorptionResult& result,
+    const GroupIndividualStructure* group_individual = nullptr);
+
+// Authoritative convergence gate for group()/individual() absorption.
+// The norm-change proxy is only a candidate trigger: this routine certifies
+// the explicit backward error (and the strict maximum-mean condition when
+// requested), then makes converged and precision_certified agree.
+bool certify_group_individual_candidate(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& standard_fes,
+    const GroupIndividualStructure& group_individual,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result);
 
 AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                       const Eigen::MatrixXd& X,

@@ -20,6 +20,8 @@
 
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/akm_kss_am_tabulation.hpp"
+#include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/parallel_work_observer.hpp"
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
@@ -32,7 +34,6 @@
 #include <limits>
 #include <numeric>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <chrono>
@@ -59,6 +60,98 @@
 #endif
 
 namespace hdfe {
+
+namespace {
+
+struct SpecializedThreadResolution {
+    int requested = 0;
+    int effective = 1;
+    int capacity = 1;
+    bool openmp_enabled = false;
+    int limit_code = 0;
+    std::string limit_reason = "none";
+};
+
+SpecializedThreadResolution resolve_specialized_threads(int requested) {
+    if (requested < 0) {
+        throw std::invalid_argument("num_threads must be nonnegative");
+    }
+    SpecializedThreadResolution resolution;
+    resolution.requested = requested;
+#ifdef _OPENMP
+    resolution.openmp_enabled = true;
+    if (requested > 1 && omp_in_parallel()) {
+        throw std::runtime_error(
+            "num_threads > 1 cannot be guaranteed from inside an active "
+            "OpenMP region; invoke the xhdfe command from the host thread");
+    }
+    resolution.capacity =
+        std::max(1, std::min(omp_get_num_procs(), omp_get_thread_limit()));
+    if (requested == 0 && omp_in_parallel()) {
+        resolution.effective = 1;
+        resolution.limit_code = 5;
+        resolution.limit_reason = "active_openmp_region";
+        return resolution;
+    }
+    const int desired =
+        requested > 0 ? requested : std::max(1, omp_get_max_threads());
+    resolution.effective = std::min(desired, resolution.capacity);
+    if (resolution.effective < desired) {
+        resolution.limit_code = 1;
+        resolution.limit_reason = "runtime_capacity";
+    }
+#else
+    resolution.openmp_enabled = false;
+    resolution.capacity = 1;
+    resolution.effective = 1;
+    resolution.limit_code = 4;
+    resolution.limit_reason = "openmp_unavailable";
+    if (requested > 1) {
+        throw std::runtime_error(
+            "num_threads > 1 requires an xhdfe build with OpenMP support");
+    }
+#endif
+    return resolution;
+}
+
+class ObservedParallelRegion {
+public:
+    ObservedParallelRegion(detail::ParallelWorkObserver* observer,
+                           bool has_work,
+                           int expected_team)
+        : observer_(has_work ? observer : nullptr) {
+        if (observer_ != nullptr) {
+            observer_->begin_region(std::max(1, expected_team));
+        }
+    }
+
+    ~ObservedParallelRegion() noexcept(false) {
+        if (observer_ != nullptr) {
+            observer_->end_region();
+        }
+    }
+
+    void observe_work() const noexcept {
+        if (observer_ != nullptr) {
+            observer_->observe_work();
+        }
+    }
+
+private:
+    detail::ParallelWorkObserver* observer_ = nullptr;
+};
+
+void merge_parallel_observation(
+    const detail::ParallelWorkObserver& observer,
+    int& max_team,
+    int& max_active_workers) noexcept {
+    max_team = std::max(max_team, observer.max_team_size());
+    max_active_workers =
+        std::max(max_active_workers, observer.active_workers());
+}
+
+}  // namespace
+
 namespace akm {
 namespace {
 
@@ -360,11 +453,19 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                                    bool prune,
                                    const std::vector<long long>* fw = nullptr,
                                    bool gpu_sort_requested = false,
-                                   AkmProgress* progress = nullptr) {
+                                   AkmProgress* progress = nullptr,
+                                   detail::ParallelWorkObserver* parallel_observer = nullptr,
+                                   int explicit_threads = 0) {
     if (worker_ids.size() != firm_ids.size()) {
         throw std::runtime_error("worker and firm id vectors must have the same length");
     }
     const Eigen::Index n = worker_ids.size();
+    int sample_threads = 1;
+#ifdef _OPENMP
+    sample_threads =
+        explicit_threads > 0 ? explicit_threads
+                             : std::max(1, omp_get_max_threads());
+#endif
     SampleBuild out;
     out.set.n_obs_input = static_cast<long long>(n);
     if (n == 0) {
@@ -411,10 +512,21 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
     std::iota(order.begin(), order.end(), 0);
     {
         std::vector<std::uint64_t> key(static_cast<std::size_t>(n));
+        // In automatic mode retain the profitability gate. An explicit
+        // request is authoritative: the independent key construction is real,
+        // deterministic useful work that can employ the requested team even
+        // when the subsequent CPU sort chooses its own internal schedule.
+        const bool parallel_key_build =
+            (gpu_sort_enabled && n >= 200000) ||
+            (explicit_threads > 1 && n >= explicit_threads);
+        ObservedParallelRegion observed_key_build(
+            parallel_observer, parallel_key_build && n > 0,
+            sample_threads);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(gpu_sort_enabled && n >= 200000)
+#pragma omp parallel for schedule(static) if(parallel_key_build) num_threads(sample_threads)
 #endif
         for (Eigen::Index i = 0; i < n; ++i) {
+            observed_key_build.observe_work();
             key[static_cast<std::size_t>(i)] =
                 static_cast<std::uint64_t>(w0[static_cast<std::size_t>(i)]) *
                     static_cast<std::uint64_t>(F0) +
@@ -595,12 +707,17 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             // atomics keep the counts exact.
             std::fill(worker_deg.begin(), worker_deg.end(), 0);
             const std::int64_t m_all = static_cast<std::int64_t>(n_matches_all);
-#pragma omp parallel for schedule(static)
-            for (std::int64_t m = 0; m < m_all; ++m) {
-                const std::size_t ms = static_cast<std::size_t>(m);
-                if (active[ms]) {
+            {
+                ObservedParallelRegion observed_degree(
+                    parallel_observer, m_all > 0, sample_threads);
+#pragma omp parallel for schedule(static) num_threads(sample_threads)
+                for (std::int64_t m = 0; m < m_all; ++m) {
+                    observed_degree.observe_work();
+                    const std::size_t ms = static_cast<std::size_t>(m);
+                    if (active[ms]) {
 #pragma omp atomic
-                    ++worker_deg[static_cast<std::size_t>(match_w[ms])];
+                        ++worker_deg[static_cast<std::size_t>(match_w[ms])];
+                    }
                 }
             }
             std::fill(mover_idx.begin(), mover_idx.end(), -1);
@@ -665,11 +782,17 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
             if (!any_bad) {
                 break;
             }
-#pragma omp parallel for schedule(static)
-            for (std::int64_t m = 0; m < m_all; ++m) {
-                const std::size_t ms = static_cast<std::size_t>(m);
-                if (active[ms] && bad_worker[static_cast<std::size_t>(match_w[ms])]) {
-                    active[ms] = 0;
+            {
+                ObservedParallelRegion observed_drop(
+                    parallel_observer, m_all > 0, sample_threads);
+#pragma omp parallel for schedule(static) num_threads(sample_threads)
+                for (std::int64_t m = 0; m < m_all; ++m) {
+                    observed_drop.observe_work();
+                    const std::size_t ms = static_cast<std::size_t>(m);
+                    if (active[ms] &&
+                        bad_worker[static_cast<std::size_t>(match_w[ms])]) {
+                        active[ms] = 0;
+                    }
                 }
             }
             largest_cc();
@@ -739,10 +862,16 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
         std::vector<std::int64_t> ord(n_kept);
         std::iota(ord.begin(), ord.end(), 0);
         std::vector<std::uint64_t> key(n_kept);
+        const bool parallel_final_key_build =
+            gpu_sort_enabled && n_kept >= 200000;
+        ObservedParallelRegion observed_final_key_build(
+            parallel_observer, parallel_final_key_build && n_kept > 0,
+            sample_threads);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(gpu_sort_enabled && n_kept >= 200000)
+#pragma omp parallel for schedule(static) if(gpu_sort_enabled && n_kept >= 200000) num_threads(sample_threads)
 #endif
         for (std::size_t k = 0; k < n_kept; ++k) {
+            observed_final_key_build.observe_work();
             key[k] = static_cast<std::uint64_t>(out.row_w[k]) *
                          static_cast<std::uint64_t>(std::max(out.n_firms, 1)) +
                      static_cast<std::uint64_t>(out.row_f[k]);
@@ -845,6 +974,11 @@ struct TwoWaySolver {
     double cg_tol = 1e-10;
     int cg_max_iter = 1000;
     bool parallel_products = true;  // outer loops may disable to nest safely
+    bool explicit_threads = false;  // explicit requests bypass size heuristics
+    // One-shot observer for a material B/B' graph product.  Observing only
+    // the first eligible product proves real solver work without adding a
+    // branch or bitmap reset to every subsequent PCG iteration.
+    mutable detail::ParallelWorkObserver* material_observer = nullptr;
 #ifdef HDFE_USE_CUDA
     hdfe::akm::AkmCudaContext* cuda_ctx = nullptr;
 #endif
@@ -862,13 +996,15 @@ struct TwoWaySolver {
     void build(int n_workers, int n_firms,
                const std::vector<int>& mw, const std::vector<int>& mf,
                const std::vector<long long>& mc,
-               const AkmOptions& opt, int default_team_cap,
+               const AkmOptions& opt, int command_effective_threads,
+               bool explicit_thread_request, int default_team_cap,
                std::string& notes) {
         N = n_workers;
         J = n_firms;
         Jr = std::max(J - 1, 0);
         m_w = &mw;
         m_f = &mf;
+        explicit_threads = explicit_thread_request;
         const std::size_t M = mw.size();
         m_c.resize(M);
         Dw = Eigen::VectorXd::Zero(N);
@@ -914,33 +1050,42 @@ struct TwoWaySolver {
         // per-region barriers than computing — measured 4-34x slowdowns vs
         // 8-16 threads on every panel below ~10M person-year rows (both CPU
         // and the host side of GPU runs), while at 47.5M the full team is
-        // right. Cap the team by the actual edge work; the fixed 4096/64
-        // element blocks keep the large disjoint-write regions partition
-        // stable. Thread-count comparisons are required to retain the same
-        // convergence and FP64 numerical tolerance; some solver reductions
-        // may differ at the last-ulp level on sufficiently large graphs.
+        // right. Cap the team by the actual edge work. Batched disjoint-write
+        // regions derive their block rows from the runtime capacity (not the
+        // request) and retain 4096-row blocks on large graphs. Thread-count
+        // comparisons are required to retain the same convergence and FP64
+        // numerical tolerance; some solver reductions may differ at the
+        // last-ulp level on sufficiently large graphs.
         // XHDFE_AKM_TEAM=0 restores the uncapped legacy team; =k forces
         // min(k, omp_get_max_threads()).
 #ifdef _OPENMP
         {
             const int amb = omp_get_max_threads();
-            team = static_cast<int>(std::min<long long>(
-                amb,
-                std::max<long long>(1, static_cast<long long>(M) / 65536)));
-            // controls() historically inherited the FWL absorber's tuned
-            // team (typically 16 on large panels). Preserve that performant
-            // default deliberately after making the process-wide state
-            // restoration explicit. The environment override below remains
-            // authoritative and can force any team up to the caller's budget.
-            if (default_team_cap > 0) {
-                team = std::min(team, default_team_cap);
-            }
-            if (const char* e = std::getenv("XHDFE_AKM_TEAM")) {
-                const int v = std::atoi(e);
-                if (v == 0) {
-                    team = amb;
-                } else if (v > 0) {
-                    team = std::min(v, amb);
+            if (explicit_thread_request) {
+                // An explicit request is authoritative up to the
+                // runtime-visible capacity resolved by the command. Problem
+                // size and environment heuristics are automatic-mode policy
+                // only; they must not silently weaken the user's request.
+                team = std::max(1, command_effective_threads);
+            } else {
+                team = static_cast<int>(std::min<long long>(
+                    amb,
+                    std::max<long long>(
+                        1, static_cast<long long>(M) / 65536)));
+                // controls() historically inherited the FWL absorber's tuned
+                // team (typically 16 on large panels). Preserve that
+                // performant automatic default after making process-wide
+                // state restoration explicit.
+                if (default_team_cap > 0) {
+                    team = std::min(team, default_team_cap);
+                }
+                if (const char* e = std::getenv("XHDFE_AKM_TEAM")) {
+                    const int v = std::atoi(e);
+                    if (v == 0) {
+                        team = amb;
+                    } else if (v > 0) {
+                        team = std::min(v, amb);
+                    }
                 }
             }
         }
@@ -1026,10 +1171,45 @@ struct TwoWaySolver {
         }
     }
 
+    detail::ParallelWorkObserver* claim_material_observer(
+        bool parallel_work) const noexcept {
+        if (!parallel_work || material_observer == nullptr) {
+            return nullptr;
+        }
+        detail::ParallelWorkObserver* claimed = material_observer;
+        material_observer = nullptr;
+        return claimed;
+    }
+
+    bool use_row_parallelism(bool requested,
+                             std::int64_t work_units) const noexcept {
+        return requested && team > 1 &&
+               (explicit_threads || work_units >= 16384);
+    }
+
     // t = B x (worker space), x over firms.
     void mult_B(const double* x, double* t, bool parallel) const {
         const std::vector<int>& mf = *m_f;
-        parallel = parallel && N >= 16384;
+        parallel = use_row_parallelism(parallel, N);
+        if (detail::ParallelWorkObserver* observer =
+                claim_material_observer(parallel && team > 1 && N > 0)) {
+            ObservedParallelRegion observed_material_product(
+                observer, true, team);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#endif
+            for (std::int64_t w = 0; w < N; ++w) {
+                observed_material_product.observe_work();
+                double acc = 0.0;
+                for (std::int64_t a = w_ptr[static_cast<std::size_t>(w)];
+                     a < w_ptr[static_cast<std::size_t>(w) + 1]; ++a) {
+                    acc += m_c[static_cast<std::size_t>(a)] *
+                           x[mf[static_cast<std::size_t>(a)]];
+                }
+                t[w] = acc;
+            }
+            return;
+        }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
@@ -1046,7 +1226,27 @@ struct TwoWaySolver {
     // y = B' s (firm space), s over workers.
     void mult_Bt(const double* s, double* y, bool parallel) const {
         const std::vector<int>& mw = *m_w;
-        parallel = parallel && J >= 16384;
+        parallel = use_row_parallelism(parallel, J);
+        if (detail::ParallelWorkObserver* observer =
+                claim_material_observer(parallel && team > 1 && J > 0)) {
+            ObservedParallelRegion observed_material_product(
+                observer, true, team);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#endif
+            for (std::int64_t f = 0; f < J; ++f) {
+                observed_material_product.observe_work();
+                double acc = 0.0;
+                for (std::int64_t a = f_ptr[static_cast<std::size_t>(f)];
+                     a < f_ptr[static_cast<std::size_t>(f) + 1]; ++a) {
+                    const std::size_t m = static_cast<std::size_t>(
+                        f_matches[static_cast<std::size_t>(a)]);
+                    acc += m_c[m] * s[mw[m]];
+                }
+                y[f] = acc;
+            }
+            return;
+        }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
@@ -1168,22 +1368,51 @@ struct TwoWaySolver {
     // and dot products / axpy updates stay per-column Eigen kernels.
     static constexpr int kMrhsTile = 8;
 
+    static std::int64_t batched_block_rows(
+        std::int64_t work_units) noexcept {
+        if (work_units <= 0) {
+            return 1;
+        }
+        const std::int64_t chunk_target = std::max<std::int64_t>(
+            1, detail::deterministic_chunk_target());
+        // floor(work / target), rather than ceil, guarantees that the
+        // resulting ceil(work / block_rows) has at least `target` blocks
+        // whenever work >= target.
+        const std::int64_t rows_for_target =
+            std::max<std::int64_t>(1, work_units / chunk_target);
+        return std::max<std::int64_t>(
+            1, std::min<std::int64_t>(4096, rows_for_target));
+    }
+
+    static std::int64_t batched_block_count(
+        std::int64_t work_units,
+        std::int64_t block_rows) noexcept {
+        return work_units > 0
+                   ? (work_units + block_rows - 1) / block_rows
+                   : 0;
+    }
+
     // T = B X (worker space); X row-major J x kMrhsTile, T row-major
     // N x kMrhsTile. The tile width is a compile-time constant and the outer
-    // loop runs over fixed-size 4096-row blocks, so both the generated code
-    // and the work partition are identical for every call and every thread
-    // count: a column's arithmetic never depends on how many real columns
-    // share the tile (padding lanes carry zeros) nor on the OpenMP split.
+    // loop uses request-independent blocks derived from the runtime capacity,
+    // capped at the historical 4096 rows. This supplies at least one work
+    // unit per available worker on intermediate graphs while preserving the
+    // large-graph plan. A column's arithmetic never depends on how many real
+    // columns share the tile (padding lanes carry zeros), the block boundary,
+    // or the OpenMP split.
     void mult_B_multi(const double* X, double* T, bool parallel) const {
         const std::vector<int>& mf = *m_f;
-        parallel = parallel && N >= 16384;
-        const std::int64_t nblk = (N + 4095) / 4096;
+        parallel = use_row_parallelism(parallel, N);
+        const std::int64_t block_rows = batched_block_rows(N);
+        const std::int64_t nblk = batched_block_count(N, block_rows);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t blk = 0; blk < nblk; ++blk) {
-            const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
-            for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+            const std::int64_t w_begin = blk * block_rows;
+            const std::int64_t w_end =
+                std::min<std::int64_t>(w_begin + block_rows, N);
+            for (std::int64_t w = w_begin; w < w_end; ++w) {
                 double acc[kMrhsTile];
                 for (int k = 0; k < kMrhsTile; ++k) {
                     acc[k] = 0.0;
@@ -1208,17 +1437,21 @@ struct TwoWaySolver {
     }
 
     // Y = B' S (firm space); S row-major N x kMrhsTile, Y row-major
-    // J x kMrhsTile (fixed tile width + fixed 4096 blocks; see mult_B_multi).
+    // J x kMrhsTile (fixed tile width + capacity-derived blocks; see
+    // mult_B_multi).
     void mult_Bt_multi(const double* S, double* Y, bool parallel) const {
         const std::vector<int>& mw = *m_w;
-        parallel = parallel && J >= 16384;
-        const std::int64_t nblk = (J + 4095) / 4096;
+        parallel = use_row_parallelism(parallel, J);
+        const std::int64_t block_rows = batched_block_rows(J);
+        const std::int64_t nblk = batched_block_count(J, block_rows);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) if (parallel && team > 1) num_threads(team)
 #endif
         for (std::int64_t blk = 0; blk < nblk; ++blk) {
-            const std::int64_t f_end = std::min<std::int64_t>((blk + 1) * 4096, J);
-            for (std::int64_t f = blk * 4096; f < f_end; ++f) {
+            const std::int64_t f_begin = blk * block_rows;
+            const std::int64_t f_end =
+                std::min<std::int64_t>(f_begin + block_rows, J);
+            for (std::int64_t f = f_begin; f < f_end; ++f) {
                 double acc[kMrhsTile];
                 for (int k = 0; k < kMrhsTile; ++k) {
                     acc[k] = 0.0;
@@ -1251,7 +1484,10 @@ struct TwoWaySolver {
     // (perf audit 09jul2026, P3): they are pure element copies or per-lane
     // Eigen expressions evaluated exactly as in the sequential code, so any
     // work partition yields identical bits; they were a measurable serial
-    // host cost per solve batch at 47.5M rows.
+    // host cost per solve batch at 47.5M rows. Every hot region keeps the
+    // same `team` cardinality. Alternating between `team` and the 1--8 lane
+    // count made OpenMP runtimes destroy/recreate worker pools on every CG
+    // step, causing pathological TID churn and transient oversubscription.
     void apply_S_multi(const std::vector<const Eigen::VectorXd*>& p,
                        std::vector<Eigen::VectorXd*>& Ap,
                        std::vector<double>& packP, std::vector<double>& packT,
@@ -1266,13 +1502,17 @@ struct TwoWaySolver {
                 for (int k = 0; k < nb; ++k) {
                     srcp[k] = p[static_cast<std::size_t>(c0 + k)]->data();
                 }
-                const std::int64_t nblkj = (J + 4095) / 4096;
+                const std::int64_t block_rows = batched_block_rows(J);
+                const std::int64_t nblkj =
+                    batched_block_count(J, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, J)) num_threads(team)
 #endif
                 for (std::int64_t blk = 0; blk < nblkj; ++blk) {
-                    const std::int64_t j_end = std::min<std::int64_t>((blk + 1) * 4096, J);
-                    for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                    const std::int64_t j_begin = blk * block_rows;
+                    const std::int64_t j_end =
+                        std::min<std::int64_t>(j_begin + block_rows, J);
+                    for (std::int64_t j = j_begin; j < j_end; ++j) {
                         double* dst = packP.data() +
                                       static_cast<std::size_t>(j) * kMrhsTile;
                         for (int k = 0; k < nb; ++k) {
@@ -1284,13 +1524,17 @@ struct TwoWaySolver {
             mult_B_multi(packP.data(), packT.data(), parallel);
             {
                 double* T = packT.data();
-                const std::int64_t nblkw = (N + 4095) / 4096;
+                const std::int64_t block_rows = batched_block_rows(N);
+                const std::int64_t nblkw =
+                    batched_block_count(N, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, N)) num_threads(team)
 #endif
                 for (std::int64_t blk = 0; blk < nblkw; ++blk) {
-                    const std::int64_t w_end = std::min<std::int64_t>((blk + 1) * 4096, N);
-                    for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                    const std::int64_t w_begin = blk * block_rows;
+                    const std::int64_t w_end =
+                        std::min<std::int64_t>(w_begin + block_rows, N);
+                    for (std::int64_t w = w_begin; w < w_end; ++w) {
                         const double dw = Dw[w];
                         double* tw = T + static_cast<std::size_t>(w) * kMrhsTile;
                         for (int k = 0; k < kMrhsTile; ++k) {
@@ -1307,7 +1551,7 @@ struct TwoWaySolver {
             // small-J lanes costs more than the work (measured +35% on a
             // 330k-row panel at J=8k under load).
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && nb > 1 && J >= 16384) num_threads(std::min(team, nb))
+#pragma omp parallel for schedule(static) if (nb > 1 && use_row_parallelism(parallel, J)) num_threads(team)
 #endif
             for (int k = 0; k < nb; ++k) {
                 Eigen::VectorXd& apc = *Ap[static_cast<std::size_t>(c0 + k)];
@@ -1319,13 +1563,17 @@ struct TwoWaySolver {
                 apc[Jr] = 0.0;
             }
             if (c0 + kMrhsTile < nc) {
-                const std::int64_t nblkj = (J + 4095) / 4096;
+                const std::int64_t block_rows = batched_block_rows(J);
+                const std::int64_t nblkj =
+                    batched_block_count(J, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, J)) num_threads(team)
 #endif
                 for (std::int64_t blk = 0; blk < nblkj; ++blk) {
-                    const std::int64_t j_end = std::min<std::int64_t>((blk + 1) * 4096, J);
-                    for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                    const std::int64_t j_begin = blk * block_rows;
+                    const std::int64_t j_end =
+                        std::min<std::int64_t>(j_begin + block_rows, J);
+                    for (std::int64_t j = j_begin; j < j_end; ++j) {
                         double* dst = packP.data() +
                                       static_cast<std::size_t>(j) * kMrhsTile;
                         for (int k = 0; k < nb; ++k) {
@@ -1419,15 +1667,14 @@ struct TwoWaySolver {
             // order is irrelevant and each solve is deterministic, so the
             // parallel loop is bit-identical to the sequential one (perf
             // audit 09jul2026 — the direct multi-RHS branch was serial).
-            // Team capped by the work-aware `team` (see the P1 cap above)
-            // and the lane count: on small direct panels the sparse
-            // backsolves are microseconds each and a full-team fork/barrier
-            // per call dominated the SE/CI phases (measured 5-10x at 15k
-            // rows, t1 == pre-batching); thread count cannot change bits.
+            // Enter this region only when there are at least two useful
+            // lanes, but retain the stable solver-team cardinality used by
+            // the neighbouring regions. This prevents repeated pool
+            // teardown/recreation without changing per-lane arithmetic.
 #ifdef _OPENMP
             const int bs_team = std::min(nc, team);
 #pragma omp parallel for schedule(static) \
-    if (parallel && nc > 1 && bs_team > 1) num_threads(bs_team)
+    if (parallel && nc > 1 && bs_team > 1) num_threads(team)
 #endif
             for (int c = 0; c < nc; ++c) {
                 Eigen::VectorXd z = ldlt.solve(rhs[static_cast<std::size_t>(c)].head(Jr).eval());
@@ -1552,14 +1799,17 @@ struct TwoWaySolver {
                             tw[static_cast<std::size_t>(c0 + k)];
                         srcp[k] = src != nullptr ? src->data() : nullptr;
                     }
-                    const std::int64_t nblkw = (N + 4095) / 4096;
+                    const std::int64_t block_rows = batched_block_rows(N);
+                    const std::int64_t nblkw =
+                        batched_block_count(N, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, N)) num_threads(team)
 #endif
                     for (std::int64_t blk = 0; blk < nblkw; ++blk) {
+                        const std::int64_t w_begin = blk * block_rows;
                         const std::int64_t w_end =
-                            std::min<std::int64_t>((blk + 1) * 4096, N);
-                        for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                            std::min<std::int64_t>(w_begin + block_rows, N);
+                        for (std::int64_t w = w_begin; w < w_end; ++w) {
                             double* dst = packS.data() +
                                           static_cast<std::size_t>(w) * kMrhsTile;
                             for (int k = 0; k < nb; ++k) {
@@ -1572,7 +1822,7 @@ struct TwoWaySolver {
                 }
                 mult_Bt_multi(packS.data(), packY.data(), parallel);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && nb > 1 && J >= 16384) num_threads(std::min(team, nb))
+#pragma omp parallel for schedule(static) if (nb > 1 && use_row_parallelism(parallel, J)) num_threads(team)
 #endif
                 for (int k = 0; k < nb; ++k) {
                     Eigen::VectorXd& r = rhs[static_cast<std::size_t>(c0 + k)];
@@ -1588,14 +1838,17 @@ struct TwoWaySolver {
                     }
                 }
                 if (c0 + kMrhsTile < nc) {
-                    const std::int64_t nblkw = (N + 4095) / 4096;
+                    const std::int64_t block_rows = batched_block_rows(N);
+                    const std::int64_t nblkw =
+                        batched_block_count(N, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && N >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, N)) num_threads(team)
 #endif
                     for (std::int64_t blk = 0; blk < nblkw; ++blk) {
+                        const std::int64_t w_begin = blk * block_rows;
                         const std::int64_t w_end =
-                            std::min<std::int64_t>((blk + 1) * 4096, N);
-                        for (std::int64_t w = blk * 4096; w < w_end; ++w) {
+                            std::min<std::int64_t>(w_begin + block_rows, N);
+                        for (std::int64_t w = w_begin; w < w_end; ++w) {
                             double* dst = packS.data() +
                                           static_cast<std::size_t>(w) * kMrhsTile;
                             for (int k = 0; k < nb; ++k) {
@@ -1617,14 +1870,17 @@ struct TwoWaySolver {
                     for (int k = 0; k < nb; ++k) {
                         srcp[k] = zf[static_cast<std::size_t>(c0 + k)].data();
                     }
-                    const std::int64_t nblkj = (J + 4095) / 4096;
+                    const std::int64_t block_rows = batched_block_rows(J);
+                    const std::int64_t nblkj =
+                        batched_block_count(J, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, J)) num_threads(team)
 #endif
                     for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                        const std::int64_t j_begin = blk * block_rows;
                         const std::int64_t j_end =
-                            std::min<std::int64_t>((blk + 1) * 4096, J);
-                        for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                            std::min<std::int64_t>(j_begin + block_rows, J);
+                        for (std::int64_t j = j_begin; j < j_end; ++j) {
                             double* dst = packZ.data() +
                                           static_cast<std::size_t>(j) * kMrhsTile;
                             for (int k = 0; k < nb; ++k) {
@@ -1635,7 +1891,7 @@ struct TwoWaySolver {
                 }
                 mult_B_multi(packZ.data(), packT.data(), parallel);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && nb > 1 && N >= 16384) num_threads(std::min(team, nb))
+#pragma omp parallel for schedule(static) if (nb > 1 && use_row_parallelism(parallel, N)) num_threads(team)
 #endif
                 for (int k = 0; k < nb; ++k) {
                     Eigen::VectorXd& w = zw[static_cast<std::size_t>(c0 + k)];
@@ -1651,14 +1907,17 @@ struct TwoWaySolver {
                     }
                 }
                 if (c0 + kMrhsTile < nc) {
-                    const std::int64_t nblkj = (J + 4095) / 4096;
+                    const std::int64_t block_rows = batched_block_rows(J);
+                    const std::int64_t nblkj =
+                        batched_block_count(J, block_rows);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (parallel && J >= 16384 && team > 1) num_threads(team)
+#pragma omp parallel for schedule(static) if (use_row_parallelism(parallel, J)) num_threads(team)
 #endif
                     for (std::int64_t blk = 0; blk < nblkj; ++blk) {
+                        const std::int64_t j_begin = blk * block_rows;
                         const std::int64_t j_end =
-                            std::min<std::int64_t>((blk + 1) * 4096, J);
-                        for (std::int64_t j = blk * 4096; j < j_end; ++j) {
+                            std::min<std::int64_t>(j_begin + block_rows, J);
+                        for (std::int64_t j = j_begin; j < j_end; ++j) {
                             double* dst = packZ.data() +
                                           static_cast<std::size_t>(j) * kMrhsTile;
                             for (int k = 0; k < nb; ++k) {
@@ -1746,7 +2005,8 @@ inline double normal_from_stream(std::uint64_t& state) {
 // group_equally (Altman-Bland percentile groups), replicated from the
 // LeaveOutTwoWay helper: quantile cut points p_i at k_i*(N+1)/100 with
 // linear interpolation, then sequential strict-below binning.
-std::vector<int> group_equally(const std::vector<double>& x, int n_groups) {
+std::vector<int> group_equally(const std::vector<double>& x, int n_groups,
+                               bool explicit_thread_request = false) {
     const std::size_t N = x.size();
     std::vector<double> s(x);
     std::sort(s.begin(), s.end());
@@ -1772,7 +2032,7 @@ std::vector<int> group_equally(const std::vector<double>& x, int n_groups) {
     // (perf audit 09jul2026), parallel over rows (independent lookups), and
     // it removes the fast-math-hazardous infinity sentinel of the old loop.
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (N >= 16384)
+#pragma omp parallel for schedule(static) if (explicit_thread_request || N >= 16384)
 #endif
     for (std::int64_t k = 0; k < static_cast<std::int64_t>(N); ++k) {
         const std::size_t idx = static_cast<std::size_t>(
@@ -1866,25 +2126,22 @@ void am_confidence_interval(double NT, double lambda_1_raw, double gamma_sq,
 namespace {
 
 #ifdef _OPENMP
-// Keep all process-wide thread settings exception-safe. HdfeRegressorV11
-// tunes OpenMP and Eigen for each fit; AKM is both its caller (FWL controls)
-// and a separate solver with its own work-aware team policy.
+// Keep the calling task's OpenMP ICVs exception-safe. Do not use Eigen's
+// process-global thread setter here: it is not safe under concurrent fits.
 struct ScopedThreadState {
     int previous_omp = 1;
-    int previous_eigen = 1;
     int previous_dynamic = 0;
-    explicit ScopedThreadState(int requested)
+    detail::ScopedDeterministicParallelCapacity deterministic_capacity;
+    ScopedThreadState(int requested, int runtime_capacity = 0)
         : previous_omp(omp_get_max_threads()),
-          previous_eigen(Eigen::nbThreads()),
-          previous_dynamic(omp_get_dynamic()) {
+          previous_dynamic(omp_get_dynamic()),
+          deterministic_capacity(runtime_capacity) {
         if (requested > 0) {
             omp_set_dynamic(0);
             omp_set_num_threads(requested);
-            Eigen::setNbThreads(requested);
         }
     }
     ~ScopedThreadState() {
-        Eigen::setNbThreads(previous_eigen);
         omp_set_num_threads(previous_omp);
         omp_set_dynamic(previous_dynamic);
     }
@@ -1896,14 +2153,35 @@ std::vector<long long> validate_fweights(const Eigen::VectorXd& fwv,
     if (fwv.size() != n) {
         throw std::runtime_error("fweights must have the same length as y");
     }
+    // `double(INT64_MAX)` rounds to 2^63, whose conversion to int64_t is
+    // outside the representable range.  The largest exactly representable
+    // double below that boundary is therefore the safe per-row ceiling.
+    // Inspect the exponent bits instead of relying on std::isfinite: some
+    // package builds intentionally use aggressive FP flags.
+    constexpr double kMaxSafeInt64AsDouble =
+        9223372036854774784.0;
     std::vector<long long> out(static_cast<std::size_t>(n));
+    std::int64_t total = 0;
     for (Eigen::Index i = 0; i < n; ++i) {
         const double v = fwv[i];
-        const long long w = static_cast<long long>(v);
-        if (!(v >= 1.0) || static_cast<double>(w) != v) {
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &v, sizeof(bits));
+        const bool finite =
+            (bits & UINT64_C(0x7ff0000000000000)) !=
+            UINT64_C(0x7ff0000000000000);
+        if (!finite || !(v > 0.0) ||
+            v > kMaxSafeInt64AsDouble ||
+            std::floor(v) != v) {
             throw std::runtime_error(
-                "fweights must be positive integers (frequency weights)");
+                "fweights must be positive integers representable as int64");
         }
+        const std::int64_t w = static_cast<std::int64_t>(v);
+        if (w <= 0 ||
+            w > std::numeric_limits<std::int64_t>::max() - total) {
+            throw std::runtime_error(
+                "total fweight exceeds the supported int64 range");
+        }
+        total += w;
         out[static_cast<std::size_t>(i)] = w;
     }
     return out;
@@ -1915,9 +2193,14 @@ LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
                                           const Eigen::VectorXi& firm_ids,
                                           const Eigen::VectorXd* fweights,
                                           const LeaveOutSetOptions& options) {
+    const SpecializedThreadResolution thread_resolution =
+        resolve_specialized_threads(options.num_threads);
 #ifdef _OPENMP
-    ScopedThreadState thread_state(options.num_threads);
+    ScopedThreadState thread_state(
+        thread_resolution.effective, thread_resolution.capacity);
 #endif
+    detail::ParallelWorkObserver parallel_observer;
+    parallel_observer.reset();
     AkmProgress progress;
     progress.init(options);
     progress.say("building the leave-out connected set (%lld input rows)...",
@@ -1927,16 +2210,29 @@ LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
         const std::vector<long long> fw =
             validate_fweights(*fweights, worker_ids.size());
         out = build_leave_out_sample(worker_ids, firm_ids, true, &fw,
-                                     options.use_gpu, &progress)
+                                     options.use_gpu, &progress,
+                                     &parallel_observer,
+                                     options.num_threads > 0
+                                         ? thread_resolution.effective
+                                         : 0)
                   .set;
     } else {
         out = build_leave_out_sample(worker_ids, firm_ids, true, nullptr,
-                                     options.use_gpu, &progress)
+                                     options.use_gpu, &progress,
+                                     &parallel_observer,
+                                     options.num_threads > 0
+                                         ? thread_resolution.effective
+                                         : 0)
                   .set;
     }
-#ifdef _OPENMP
-    out.threads_used = omp_get_max_threads();
-#endif
+    out.threads_requested = thread_resolution.requested;
+    out.threads_effective = thread_resolution.effective;
+    out.threads_used = parallel_observer.max_team_size();
+    out.parallel_workers_active = parallel_observer.active_workers();
+    out.thread_capacity = thread_resolution.capacity;
+    out.openmp_enabled = thread_resolution.openmp_enabled;
+    out.thread_limit_code = thread_resolution.limit_code;
+    out.thread_limit_reason = thread_resolution.limit_reason;
     return out;
 }
 
@@ -1957,9 +2253,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         throw std::runtime_error("jla_draws must be >= 1");
     }
 
+    const SpecializedThreadResolution thread_resolution =
+        resolve_specialized_threads(options.num_threads);
 #ifdef _OPENMP
-    ScopedThreadState thread_state(options.num_threads);
+    ScopedThreadState thread_state(
+        thread_resolution.effective, thread_resolution.capacity);
 #endif
+    detail::ParallelWorkObserver sample_observer;
+    detail::ParallelWorkObserver solver_observer;
+    sample_observer.reset();
+    solver_observer.reset();
 
     std::vector<long long> fw_rows;
     const bool has_fw = fweights != nullptr;
@@ -1986,14 +2289,44 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     AkmPhaseProfiler prof_;
     AkmProgress vprog;
     vprog.init(options);
+    res.threads_requested = thread_resolution.requested;
+    res.threads_effective = thread_resolution.effective;
+    res.thread_capacity = thread_resolution.capacity;
+    res.openmp_enabled = thread_resolution.openmp_enabled;
+    res.thread_limit_code = thread_resolution.limit_code;
+    res.thread_limit_reason = thread_resolution.limit_reason;
     res.seed_used = options.seed;
+    int fwl_active_workers = 0;
     long long cg_iters = 0;
     vprog.say("building the leave-out connected set (%lld input rows)...",
               static_cast<long long>(y.size()));
+    vprog.say("thread contract: requested=%d, effective=%d, capacity=%d",
+              res.threads_requested, res.threads_effective,
+              res.thread_capacity);
     SampleBuild sb = build_leave_out_sample(worker_ids, firm_ids, options.prune,
                                             has_fw ? &fw_rows : nullptr,
-                                            false, &vprog);
+                                            false, &vprog,
+                                            &sample_observer,
+                                            options.num_threads > 0
+                                                ? thread_resolution.effective
+                                                : 0);
     res.sample = std::move(sb.set);
+    res.sample.threads_requested = thread_resolution.requested;
+    res.sample.threads_effective = thread_resolution.effective;
+    res.sample.threads_used = sample_observer.max_team_size();
+    res.sample.parallel_workers_active = sample_observer.active_workers();
+    res.sample.thread_capacity = thread_resolution.capacity;
+    res.sample.openmp_enabled = thread_resolution.openmp_enabled;
+    res.sample.thread_limit_code = thread_resolution.limit_code;
+    res.sample.thread_limit_reason = thread_resolution.limit_reason;
+    res.threads_used = res.sample.threads_used;
+    res.parallel_workers_active = res.sample.parallel_workers_active;
+#ifdef _OPENMP
+    // Parallel sorting implementations may alter the calling task's OpenMP
+    // ICV. Reassert the command budget before FWL and solver phase policies.
+    omp_set_dynamic(0);
+    omp_set_num_threads(thread_resolution.effective);
+#endif
     prof_.mark("leave_out_sample");
     vprog.say("leave-out sample: %lld obs kept of %lld, %d workers (%d movers), "
               "%d firms, %lld matches (%d prune rounds)",
@@ -2067,25 +2400,75 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         ho.tol = options.fwl_tol;
         ho.max_iter = options.fwl_max_iter;
         ho.num_threads = options.num_threads;
+        // Controls() is a correctness boundary for every downstream AKM/KSS
+        // quantity.  Force the robust matrix-free CPU reference solver and
+        // require the independent residual certificate: on ill-conditioned
+        // worker-firm graphs the MAP update-norm trigger can stagnate while
+        // leaving economically material FE moments.  MLSMR solves the same
+        // within-projection problem without relaxing fwl_tol, and explicit
+        // thread requests are propagated unchanged to its operators.
+        ho.absorption_method = AbsorptionMethod::Mlsmr;
+        ho.tolerance_mode = ToleranceMode::StrictResidual;
         vprog.say("partialling out %d control(s) (FWL absorber)...",
                   static_cast<int>(Xk.cols()));
-        v11::HdfeRegressorV11 reg(ho);
+        auto fit_fwl = [&](v11::HdfeRegressorV11& target) {
+            // AKM control residualization is a correctness boundary.  The
+            // generic CUDA absorber can pass its update-norm trigger while
+            // failing forward-parity on ill-conditioned worker-firm graphs.
+            // Keep this nested FWL phase on the canonical CPU backend until a
+            // separate forward-accuracy gate exists; the two-way AKM solver
+            // remains independently eligible for CUDA below.
+            detail::ScopedGpuBackendOverride cpu_fwl(
+                detail::GpuBackend::Cpu);
 #ifdef _OPENMP
-        {
             // The nested fit may cap its own work to fewer threads. Restore
             // the caller's OpenMP/Eigen/dynamic state before building the KSS
             // solver, including on exceptions.
             ScopedThreadState restore_after_fwl(0);
-            reg.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
-            res.fwl_threads_used = reg.threads_used();
-        }
+            target.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
 #else
-        reg.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
-        res.fwl_threads_used = reg.threads_used();
+            target.fit(ystar, Xk, fes, has_fw ? &kw : nullptr);
 #endif
-        if (!reg.results().converged) {
-            res.converged = false;
-            res.notes += "control partialling (FWL) absorber did not converge. ";
+        };
+        auto observe_fwl_threads = [&](const v11::HdfeRegressorV11& target) {
+            res.fwl_threads_effective =
+                std::max(res.fwl_threads_effective,
+                         target.threads_effective());
+            res.fwl_threads_used =
+                std::max(res.fwl_threads_used, target.threads_used());
+            fwl_active_workers =
+                std::max(fwl_active_workers,
+                         target.parallel_workers_active());
+            res.fwl_parallel_workers_active = fwl_active_workers;
+        };
+
+        v11::HdfeRegressorV11 reg(ho);
+        fit_fwl(reg);
+        observe_fwl_threads(reg);
+        if (reg.gpu_attempted() || reg.gpu_used()) {
+            throw std::runtime_error(
+                "internal AKM error: CPU-reference FWL unexpectedly entered "
+                "the GPU backend");
+        }
+        res.fwl_gpu_attempted = false;
+        res.fwl_gpu_used = false;
+        res.fwl_gpu_fallback = false;
+        res.fwl_gpu_status_code = 8;
+        res.fwl_gpu_status = "cpu_reference";
+        res.fwl_iterations = reg.results().num_iterations;
+        res.fwl_abs_residual_rel = reg.results().abs_residual_rel;
+        res.fwl_precision_certified =
+            reg.results().precision_certified;
+        if (!reg.results().converged ||
+            !reg.results().precision_certified) {
+            throw std::runtime_error(
+                "AKM control partialling (FWL) failed the independent "
+                "precision certificate; no decomposition was produced");
+        }
+        if (options.use_gpu) {
+            res.notes +=
+                "control partialling (FWL) used the certified CPU reference "
+                "path; two-way solver GPU use is reported separately. ";
         }
         {
             std::string omitted;
@@ -2132,25 +2515,36 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 
     TwoWaySolver solver;
     solver.build(N, J, sb.m_w, sb.m_f, sb.m_cnt, options,
-                 res.fwl_threads_used, res.notes);
+                 thread_resolution.effective, options.num_threads > 0,
+                 res.fwl_threads_effective, res.notes);
+    solver.material_observer = &solver_observer;
     if (match_level && !use_exact) solver.ensure_sqrt_c();
     res.solver_direct = solver.direct;
+    res.gpu_requested = options.use_gpu;
     res.gpu_used = solver.use_cuda;
-    res.threads_used = solver.team;
+    res.gpu_status_code =
+        !options.use_gpu ? 0 : (solver.use_cuda ? 1 : (J > 1 ? 2 : 6));
+    res.gpu_backend = solver.use_cuda ? "cuda" : "cpu";
+    res.gpu_status =
+        !options.use_gpu
+            ? "not_requested"
+            : (solver.use_cuda ? "used"
+                               : (J > 1 ? "unavailable"
+                                        : "not_applicable"));
+    res.solver_threads_effective = solver.team;
 #ifdef _OPENMP
-    // Use one explicit phase budget for OpenMP and Eigen, then let the outer
-    // guard restore the caller's state on every exit path.
+    // Use one explicit OpenMP phase budget, then let the outer guard restore
+    // the calling task's ICVs on every exit path.
     omp_set_dynamic(0);
-    omp_set_num_threads(res.threads_used);
-    Eigen::setNbThreads(res.threads_used);
+    omp_set_num_threads(solver.team);
 #endif
     res.n_rows = static_cast<long long>(R);
     prof_.mark("solver_build");
     vprog.say("two-way solver ready: %s%s (%d firms, %lld matches, %d OpenMP thread%s)",
               solver.direct ? "direct sparse Cholesky" : "Jacobi-PCG",
               solver.use_cuda ? " on GPU (CUDA)" : "", J,
-              static_cast<long long>(M), res.threads_used,
-              res.threads_used == 1 ? "" : "s");
+              static_cast<long long>(M), solver.team,
+              solver.team == 1 ? "" : "s");
 
     // Point estimates: person-year OLS normal equations.
     Eigen::VectorXd alpha(N);
@@ -2226,44 +2620,52 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         Eigen::VectorXd base_cov(static_cast<Eigen::Index>(M));
         long long iter_sum = 0;
         bool failed_local = false;
+        {
+            ObservedParallelRegion observed_exact_leverages(
+                &solver_observer, M > 0, solver.team);
 #ifdef _OPENMP
 #pragma omp parallel reduction(+ : iter_sum) reduction(|| : failed_local)
 #endif
-        {
-            Eigen::VectorXd tw = Eigen::VectorXd::Zero(N);
-            Eigen::VectorXd tf = Eigen::VectorXd::Zero(J);
-            Eigen::VectorXd zw(N), zf(J), scr_w(N), scr_f(J);
+            {
+                Eigen::VectorXd tw = Eigen::VectorXd::Zero(N);
+                Eigen::VectorXd tf = Eigen::VectorXd::Zero(J);
+                Eigen::VectorXd zw(N), zf(J), scr_w(N), scr_f(J);
 #ifdef _OPENMP
 #pragma omp for schedule(dynamic, 16)
 #endif
-            for (std::int64_t m = 0; m < static_cast<std::int64_t>(M); ++m) {
-                const int w = sb.m_w[static_cast<std::size_t>(m)];
-                const int f = sb.m_f[static_cast<std::size_t>(m)];
-                tw[w] = 1.0;
-                tf[f] = 1.0;
-                if (!solver.solve_K(tw, tf, zw, zf, scr_w, scr_f, iter_sum, false)) {
-                    failed_local = true;
+                for (std::int64_t m = 0;
+                     m < static_cast<std::int64_t>(M); ++m) {
+                    observed_exact_leverages.observe_work();
+                    const int w = sb.m_w[static_cast<std::size_t>(m)];
+                    const int f = sb.m_f[static_cast<std::size_t>(m)];
+                    tw[w] = 1.0;
+                    tf[f] = 1.0;
+                    if (!solver.solve_K(tw, tf, zw, zf, scr_w, scr_f,
+                                        iter_sum, false)) {
+                        failed_local = true;
+                    }
+                    tw[w] = 0.0;
+                    tf[f] = 0.0;
+                    base_p[m] = zw[w] + zf[f];
+                    double s1 = 0.0, s2 = 0.0;
+                    for (int ff = 0; ff < J; ++ff) {
+                        s1 += solver.Df[ff] * zf[ff] * zf[ff];
+                        s2 += solver.Df[ff] * zf[ff];
+                    }
+                    double s3 = 0.0, s4 = 0.0;
+                    for (int ww = 0; ww < N; ++ww) {
+                        s3 += solver.Dw[ww] * zw[ww] * zw[ww];
+                        s4 += solver.Dw[ww] * zw[ww];
+                    }
+                    double cross = 0.0;
+                    for (std::size_t mm = 0; mm < M; ++mm) {
+                        cross += solver.m_c[mm] * zw[sb.m_w[mm]] *
+                                 zf[sb.m_f[mm]];
+                    }
+                    base_fe[m] = s1 - s2 * s2 / n_py;
+                    base_pe[m] = s3 - s4 * s4 / n_py;
+                    base_cov[m] = cross - s4 * s2 / n_py;
                 }
-                tw[w] = 0.0;
-                tf[f] = 0.0;
-                base_p[m] = zw[w] + zf[f];
-                double s1 = 0.0, s2 = 0.0;
-                for (int ff = 0; ff < J; ++ff) {
-                    s1 += solver.Df[ff] * zf[ff] * zf[ff];
-                    s2 += solver.Df[ff] * zf[ff];
-                }
-                double s3 = 0.0, s4 = 0.0;
-                for (int ww = 0; ww < N; ++ww) {
-                    s3 += solver.Dw[ww] * zw[ww] * zw[ww];
-                    s4 += solver.Dw[ww] * zw[ww];
-                }
-                double cross = 0.0;
-                for (std::size_t mm = 0; mm < M; ++mm) {
-                    cross += solver.m_c[mm] * zw[sb.m_w[mm]] * zf[sb.m_f[mm]];
-                }
-                base_fe[m] = s1 - s2 * s2 / n_py;
-                base_pe[m] = s3 - s4 * s4 / n_py;
-                base_cov[m] = cross - s4 * s2 / n_py;
             }
         }
         cg_iters += iter_sum;
@@ -2313,7 +2715,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         const double pd = static_cast<double>(p);
         const double scale = 1.0 / std::sqrt(pd);
         const std::int64_t n_blocks = static_cast<std::int64_t>((R + 63) / 64);
-        const bool par_rows = R >= 16384;
+        // Automatic mode retains the profitability gate.  A positive caller
+        // request is a scheduling contract: use the resolved team whenever
+        // there are independent rows, even when that is slower at small R.
+        const bool par_rows = solver.explicit_threads || R >= 16384;
         (void)par_rows;
 
         // Draw-block batching: the p draws are processed in blocks of DB and
@@ -2394,9 +2799,11 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             // the ORIGINAL sequential loops run unchanged; above it the CSR
             // loops produce the identical bits (same per-slot sequences).
             const bool par_scatter =
-                csr_scatter && par_rows && solver.team > 1 && R >= 2097152;
+                csr_scatter && par_rows && solver.team > 1 &&
+                (solver.explicit_threads || R >= 2097152);
             const bool par_scatter_m =
-                csr_scatter && par_rows && solver.team > 1 && M >= 2097152;
+                csr_scatter && par_rows && solver.team > 1 &&
+                (solver.explicit_threads || M >= 2097152);
             Eigen::VectorXd draw_val;
             if (par_scatter || par_scatter_m) {
                 draw_val.resize(static_cast<Eigen::Index>(M));
@@ -2445,12 +2852,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 #endif
                     for (std::int64_t blk = 0; blk < n_blocks; ++blk) {
                         const std::uint64_t bits =
-                            stream_seed(options.seed, static_cast<std::uint64_t>(3 * d),
-                                        static_cast<std::uint64_t>(blk));
-                        const std::size_t base = static_cast<std::size_t>(blk) * 64;
+                            stream_seed(
+                                options.seed,
+                                static_cast<std::uint64_t>(3 * d),
+                                static_cast<std::uint64_t>(blk));
+                        const std::size_t base =
+                            static_cast<std::size_t>(blk) * 64;
                         const std::size_t hi = std::min(base + 64, R);
                         for (std::size_t r = base; r < hi; ++r) {
-                            rvec[r] = ((bits >> (r - base)) & 1ULL) ? 1 : -1;
+                            rvec[r] =
+                                ((bits >> (r - base)) & 1ULL) ? 1 : -1;
                         }
                     }
                     Eigen::VectorXd& tw_b = tw1[static_cast<std::size_t>(b)];
@@ -2689,12 +3100,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
 #endif
             for (std::int64_t b = 0; b < n_blocks; ++b) {
                 const std::uint64_t bits =
-                    stream_seed(options.seed, static_cast<std::uint64_t>(3 * d),
-                                static_cast<std::uint64_t>(b));
-                const std::size_t base = static_cast<std::size_t>(b) * 64;
+                    stream_seed(
+                        options.seed,
+                        static_cast<std::uint64_t>(3 * d),
+                        static_cast<std::uint64_t>(b));
+                const std::size_t base =
+                    static_cast<std::size_t>(b) * 64;
                 const std::size_t hi = std::min(base + 64, R);
                 for (std::size_t r = base; r < hi; ++r) {
-                    rvec[r] = ((bits >> (r - base)) & 1ULL) ? 1 : -1;
+                    rvec[r] =
+                        ((bits >> (r - base)) & 1ULL) ? 1 : -1;
                 }
             }
             tw.setZero();
@@ -3072,7 +3487,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         for (std::size_t k = 0; k < n_py_sz; ++k) {
             p_obs[k] = snap(bp[static_cast<std::size_t>(sb.row_match[k])]);
         }
-        const std::vector<int> gP = group_equally(p_obs, options.se_sigma_grid);
+        const std::vector<int> gP =
+            group_equally(p_obs, options.se_sigma_grid,
+                          solver.explicit_threads);
         // llr_fit mode 0: MATLAB 'lowess' surface fit of sigma_i on
         // (Pii, Bii), normalized predictors, span hBest = NT^(-1/3)
         // (k = ceil(hBest*NT) nearest neighbours), tricube weights, local
@@ -3184,7 +3601,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             for (std::size_t k = 0; k < n_py_sz; ++k) {
                 b_obs[k] = snap(bases[static_cast<std::size_t>(sb.row_match[k])]);
             }
-            const std::vector<int> gB = group_equally(b_obs, options.se_sigma_grid);
+            const std::vector<int> gB =
+                group_equally(b_obs, options.se_sigma_grid,
+                              solver.explicit_threads);
             std::unordered_map<long long, std::pair<double, long long>> cells;
             for (std::size_t k = 0; k < n_py_sz; ++k) {
                 const long long key =
@@ -4468,6 +4887,14 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.notes += "non-finite corrected components. ";
     }
 
+    res.solver_threads_used = solver_observer.max_team_size();
+    res.solver_parallel_workers_active = solver_observer.active_workers();
+    res.threads_used = std::max(
+        {res.sample.threads_used, res.fwl_threads_used,
+         res.solver_threads_used});
+    res.parallel_workers_active = std::max(
+        {res.sample.parallel_workers_active, fwl_active_workers,
+         res.solver_parallel_workers_active});
     vprog.say("done: converged=%s, %lld solver iterations%s",
               res.converged ? "yes" : "NO", res.solver_iterations,
               res.gpu_used ? ", gpu_used=1" : "");
@@ -4522,64 +4949,6 @@ std::string gelbach_retained_sample_hash(Eigen::Index n_input,
     }
     return out;
 }
-
-void gelbach_set_env_value(const char* key, const char* value) {
-#ifdef _WIN32
-    if (_putenv_s(key, value) != 0) {
-        throw std::runtime_error(
-            std::string("gelbach: failed to set environment variable ") + key);
-    }
-#else
-    if (setenv(key, value, 1) != 0) {
-        throw std::runtime_error(
-            std::string("gelbach: failed to set environment variable ") + key);
-    }
-#endif
-}
-
-void gelbach_unset_env_value(const char* key) {
-#ifdef _WIN32
-    (void)_putenv_s(key, "");
-#else
-    (void)unsetenv(key);
-#endif
-}
-
-// The public gpu option is deliberately scoped to the full-model absorption
-// fit. The environment is the existing backend-selection contract used by
-// the absorber; restoring it here prevents state leakage to the base fit or
-// to later commands in the same Python/R/Stata process.
-struct GelbachScopedGpuRequest {
-    std::optional<std::string> previous;
-    bool active = false;
-    bool cuda_available = false;
-
-    explicit GelbachScopedGpuRequest(bool requested) {
-        if (!requested) return;
-        cuda_available = hdfe::detail::cuda_backend_available();
-        if (const char* raw = std::getenv("XHDFE_GPU_BACKEND")) {
-            previous = std::string(raw);
-        }
-        // A public Gelbach GPU request has truthful fallback semantics when
-        // CUDA was not compiled or no device is visible.  Force CPU for this
-        // scoped fit so a pre-existing process-wide CUDA request cannot turn
-        // the unavailable case into an exception before metadata exists.
-        gelbach_set_env_value("XHDFE_GPU_BACKEND",
-                              cuda_available ? "cuda" : "cpu");
-        active = true;
-    }
-    ~GelbachScopedGpuRequest() noexcept {
-        if (!active) return;
-        if (previous.has_value()) {
-            try {
-                gelbach_set_env_value("XHDFE_GPU_BACKEND", previous->c_str());
-            } catch (...) {
-            }
-        } else {
-            gelbach_unset_env_value("XHDFE_GPU_BACKEND");
-        }
-    }
-};
 
 const char* gelbach_gpu_status_name(int code) {
     switch (code) {
@@ -4636,32 +5005,36 @@ struct GelbachProgress {
 #ifdef _OPENMP
 struct GelbachScopedThreadState {
     int previous_omp = 1;
-    int previous_eigen = 1;
     int previous_dynamic = 0;
-    explicit GelbachScopedThreadState(int requested)
+    detail::ScopedDeterministicParallelCapacity deterministic_capacity;
+    GelbachScopedThreadState(int requested, int runtime_capacity = 0)
         : previous_omp(omp_get_max_threads()),
-          previous_eigen(Eigen::nbThreads()),
-          previous_dynamic(omp_get_dynamic()) {
+          previous_dynamic(omp_get_dynamic()),
+          deterministic_capacity(runtime_capacity) {
         if (requested > 0) {
             omp_set_dynamic(0);
             omp_set_num_threads(requested);
-            Eigen::setNbThreads(requested);
         }
     }
     ~GelbachScopedThreadState() {
-        Eigen::setNbThreads(previous_eigen);
         omp_set_num_threads(previous_omp);
         omp_set_dynamic(previous_dynamic);
     }
 };
 #endif
 
-int gelbach_recovery_team(int requested, Eigen::Index n) {
+int gelbach_recovery_team(int effective_threads,
+                          bool explicit_thread_request,
+                          Eigen::Index n) {
     // The exact MLSMR warm recovery repeatedly scatters over n rows.  The
     // work-aware cap follows the same principle as the post-2.15 AKM solver:
     // avoid barrier/TLS overhead on small and medium panels, while leaving
-    // large panels and caller-requested smaller teams untouched.
-    int team = requested > 0 ? requested : 1;  // preserve historical auto=1
+    // large panels untouched. Explicit requests bypass every such heuristic
+    // and are limited only by the runtime capacity resolved by the command.
+    if (explicit_thread_request) {
+        return std::max(1, effective_threads);
+    }
+    int team = 1;  // preserve historical automatic default
     if (n < 2000000) {
         team = std::min(team, 4);
     } else if (n < 12000000) {
@@ -4672,9 +5045,9 @@ int gelbach_recovery_team(int requested, Eigen::Index n) {
     if (const char* e = std::getenv("XHDFE_GELBACH_TEAM")) {
         const int v = std::atoi(e);
         if (v == 0) {
-            team = requested > 0 ? requested : 1;
+            team = 1;
         } else if (v > 0) {
-            team = requested > 0 ? std::min(v, requested) : v;
+            team = std::min(v, std::max(1, effective_threads));
         }
     }
     return std::max(1, team);
@@ -4747,6 +5120,34 @@ constexpr double kGelbachRegularityTestAlpha = 0.05;
 
 inline bool gelbach_guarded_finite(double value) {
     return value > -1e300 && value < 1e300;
+}
+
+std::int64_t checked_frequency_weight_sum(
+    const Eigen::Ref<const Eigen::VectorXd>& weights,
+    const char* context) {
+    constexpr double kMaxSafeInt64AsDouble =
+        9223372036854774784.0;
+    std::int64_t total = 0;
+    for (Eigen::Index i = 0; i < weights.size(); ++i) {
+        const double raw = weights[i];
+        if (!gelbach_guarded_finite(raw) || !(raw > 0.0) ||
+            raw > kMaxSafeInt64AsDouble ||
+            std::floor(raw) != raw) {
+            throw std::runtime_error(
+                std::string(context) +
+                ": fweights must be positive integers representable as "
+                "int64");
+        }
+        const std::int64_t value = static_cast<std::int64_t>(raw);
+        if (value <= 0 ||
+            value > std::numeric_limits<std::int64_t>::max() - total) {
+            throw std::runtime_error(
+                std::string(context) +
+                ": total fweight exceeds the supported int64 range");
+        }
+        total += value;
+    }
+    return total;
 }
 
 // Regularized upper incomplete gamma Q(a, x), used only for the reference
@@ -4940,8 +5341,10 @@ Eigen::MatrixXd gelbach_cluster_meat_streamed(
     const Eigen::VectorXi& codes,
     int n_clusters,
     int threads,
+    bool explicit_thread_request,
     Eigen::MatrixXd* score_base_cross,
-    Eigen::MatrixXd* base_meat) {
+    Eigen::MatrixXd* base_meat,
+    detail::ParallelWorkObserver* parallel_observer) {
     const Eigen::Index n = W.rows();
     const int Kx = static_cast<int>(W.cols());
     const int k1 = static_cast<int>(X1t.cols());
@@ -4965,10 +5368,16 @@ Eigen::MatrixXd gelbach_cluster_meat_streamed(
 
     Eigen::MatrixXd sums = Eigen::MatrixXd::Zero(n_clusters, L);
     Eigen::MatrixXd base_sums = Eigen::MatrixXd::Zero(n_clusters, k1);
+    const bool parallel_cluster_scores =
+        threads > 1 && n_clusters > 0 &&
+        (explicit_thread_request || n >= 200000);
+    ObservedParallelRegion observed_cluster_scores(
+        parallel_observer, parallel_cluster_scores, threads);
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) if(n >= 200000 && threads > 1) num_threads(threads)
+#pragma omp parallel for schedule(static) if(parallel_cluster_scores) num_threads(threads)
 #endif
     for (int c = 0; c < n_clusters; ++c) {
+        observed_cluster_scores.observe_work();
         for (std::int64_t pos = ptr[static_cast<std::size_t>(c)];
              pos < ptr[static_cast<std::size_t>(c + 1)]; ++pos) {
             const Eigen::Index i = order[static_cast<std::size_t>(pos)];
@@ -5143,9 +5552,33 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         const Eigen::VectorXd* weights,
                         bool freq_weights) {
     akm::AkmPhaseProfiler gprof_;
+    const SpecializedThreadResolution thread_resolution =
+        resolve_specialized_threads(options.num_threads);
 #ifdef _OPENMP
-    GelbachScopedThreadState thread_state(options.num_threads);
+    GelbachScopedThreadState thread_state(
+        thread_resolution.effective, thread_resolution.capacity);
 #endif
+    detail::ParallelWorkObserver recovery_observer;
+    detail::ParallelWorkObserver covariance_observer;
+    recovery_observer.reset();
+    covariance_observer.reset();
+    int fullfit_threads_used = 0;
+    int fullfit_active_workers = 0;
+    int recovery_threads_used = 0;
+    int recovery_active_workers = 0;
+    int covariance_threads_used = 0;
+    int covariance_active_workers = 0;
+    bool recovery_phase_executed = false;
+    bool covariance_phase_executed = false;
+    const auto merge_regressor_observation =
+        [&](const v11::HdfeRegressorV11& fitted,
+            int& phase_threads,
+            int& phase_workers) {
+            phase_threads =
+                std::max(phase_threads, fitted.threads_used());
+            phase_workers = std::max(
+                phase_workers, fitted.parallel_workers_active());
+        };
     GelbachProgress progress;
     progress.init(options);
     const Eigen::Index n0 = y_in.size();
@@ -5245,6 +5678,12 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
 
     GelbachResult res;
+    res.threads_requested = thread_resolution.requested;
+    res.threads_effective = thread_resolution.effective;
+    res.thread_capacity = thread_resolution.capacity;
+    res.openmp_enabled = thread_resolution.openmp_enabled;
+    res.thread_limit_code = thread_resolution.limit_code;
+    res.thread_limit_reason = thread_resolution.limit_reason;
     res.n_obs_input = static_cast<long long>(n0);
     res.x1_absorbed = Eigen::VectorXi::Zero(p);
     res.x1_fe_collinear_ratio =
@@ -5267,7 +5706,11 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     res.connectivity_pair_explicit = connectivity_pair_explicit;
     res.connectivity_fe_index1 = connectivity_fe_index1;
     res.connectivity_fe_index2 = connectivity_fe_index2;
-    const int recovery_threads = gelbach_recovery_team(options.num_threads, n0);
+    const bool explicit_thread_request = options.num_threads > 0;
+    const int recovery_threads =
+        gelbach_recovery_team(thread_resolution.effective,
+                             explicit_thread_request, n0);
+    res.recovery_threads_effective = recovery_threads;
     const int G = static_cast<int>(x2_group_sizes.size()) + nfe;
     const int k1 = p + 1;
     const int ka = common_fe_mode ? p : k1;
@@ -5283,6 +5726,12 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (q > 0) X_full.rightCols(q) = X2_in;
     if (weights != nullptr && weights->size() != n0) {
         throw std::runtime_error("gelbach: weights length mismatch");
+    }
+    if (freq_weights) {
+        if (weights == nullptr) {
+            throw std::runtime_error(
+                "gelbach: fweights requested without a weight vector");
+        }
     }
     // Full fit strategy: retain_fixed_effects makes the absorber ineligible
     // for the accelerated (auto-MLSMR) methods, so the 7+-column joint fit
@@ -5311,11 +5760,19 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     v11::HdfeRegressorV11 reg(ho);
     progress.say("fitting the full specification...");
     bool gelbach_cuda_available = false;
-    {
-        GelbachScopedGpuRequest gpu_request(options.use_gpu && !fes_in.empty());
-        gelbach_cuda_available = gpu_request.cuda_available;
+    if (options.use_gpu && !fes_in.empty()) {
+        gelbach_cuda_available = hdfe::detail::cuda_backend_available();
+        // Backend routing is task-local: independent Gelbach fits can select
+        // CPU/CUDA concurrently without racing on XHDFE_GPU_BACKEND.
+        detail::ScopedGpuBackendOverride gpu_request(
+            gelbach_cuda_available ? detail::GpuBackend::Cuda
+                                   : detail::GpuBackend::Cpu);
+        reg.fit(y_in, X_full, fes_in, weights);
+    } else {
         reg.fit(y_in, X_full, fes_in, weights);
     }
+    merge_regressor_observation(
+        reg, fullfit_threads_used, fullfit_active_workers);
     gprof_.mark("gel_full_fit");
     progress.say("full specification fitted: converged=%s, %d thread(s)%s",
                  reg.results().converged ? "yes" : "NO", reg.threads_used(),
@@ -5399,6 +5856,13 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                             ? static_cast<int>(active_x1.size())
                             : p;
     const int score_design_cols = p_score + q;
+#ifdef _OPENMP
+    // The remainder of the command is recovery/decomposition/covariance work.
+    // Its task-local ICV must match the phase budget, especially in automatic
+    // mode where the command capacity can be 48 while the phase policy is 1.
+    omp_set_dynamic(0);
+    omp_set_num_threads(recovery_threads);
+#endif
     // (b) separate FE recovery on the kept sample (fast-fit mode only).
     // A retained 1-column fit would spend ~95% of its time in non-accelerated
     // GS sweeps whose alphas get discarded when the hybrid check falls back to
@@ -5408,6 +5872,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     Eigen::MatrixXd W_pre;  // demeaned [x1, x2] reused by the sandwich VCE below
     std::unique_ptr<v11::HdfeRegressorV11> reg_ret;  // reference-fallback fit
     if (gel_fast_fit && !fes_in.empty()) {
+        recovery_phase_executed = true;
         progress.say("recovering fixed-effect blocks with certified MLSMR "
                      "(%d internal thread%s)...",
                      recovery_threads, recovery_threads == 1 ? "" : "s");
@@ -5424,19 +5889,26 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         if (weights != nullptr) {
             w_k.resize(nk);
         }
-#pragma omp parallel for schedule(static)
-        for (Eigen::Index i = 0; i < nk; ++i) {
-            const Eigen::Index r0 = keep0[i];
-            double acc = y_in[r0];
-            for (int c = 0; c < ncf && c < p + q; ++c) {
-                acc -= X_full(r0, c) * cf[c];
-            }
-            partial[i] = acc;
-            for (std::size_t d = 0; d < fes_in.size(); ++d) {
-                fes_k[d][i] = fes_in[d][r0];
-            }
-            if (weights != nullptr) {
-                w_k[i] = (*weights)[r0];
+        {
+            ObservedParallelRegion observed_recovery_prep(
+                &recovery_observer, nk > 0, recovery_threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(recovery_threads > 1 && nk > 0) num_threads(recovery_threads)
+#endif
+            for (Eigen::Index i = 0; i < nk; ++i) {
+                observed_recovery_prep.observe_work();
+                const Eigen::Index r0 = keep0[i];
+                double acc = y_in[r0];
+                for (int c = 0; c < ncf && c < p + q; ++c) {
+                    acc -= X_full(r0, c) * cf[c];
+                }
+                partial[i] = acc;
+                for (std::size_t d = 0; d < fes_in.size(); ++d) {
+                    fes_k[d][i] = fes_in[d][r0];
+                }
+                if (weights != nullptr) {
+                    w_k[i] = (*weights)[r0];
+                }
             }
         }
         const Eigen::VectorXd* wk_ptr = weights != nullptr ? &w_k : nullptr;
@@ -5461,6 +5933,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             mo.absorption_method = AbsorptionMethod::Mlsmr;
             mo.retain_fixed_effects = true;
             mo.num_threads = recovery_threads;
+            mo.num_threads_explicit = explicit_thread_request;
+            mo.parallel_observer = &recovery_observer;
             // No ridge: with the default krylov_lambda the recovered alphas
             // carry a lambda*A^{-1}*alpha bias that explodes in the slow
             // directions of ill-conditioned FE graphs (observed 1e-5-level
@@ -5471,13 +5945,23 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             Eigen::MatrixXd xin(nk, want_W ? score_design_cols : 0);
             if (want_W) {
                 if (!absorbed_target_mode) {
-#pragma omp parallel for schedule(static)
+                    ObservedParallelRegion observed_w_prep(
+                        &recovery_observer, nk > 0, recovery_threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(recovery_threads > 1 && nk > 0) num_threads(recovery_threads)
+#endif
                     for (Eigen::Index i = 0; i < nk; ++i) {
+                        observed_w_prep.observe_work();
                         xin.row(i) = X_full.row(keep0[i]);
                     }
                 } else {
-#pragma omp parallel for schedule(static)
+                    ObservedParallelRegion observed_w_prep(
+                        &recovery_observer, nk > 0, recovery_threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(recovery_threads > 1 && nk > 0) num_threads(recovery_threads)
+#endif
                     for (Eigen::Index i = 0; i < nk; ++i) {
+                        observed_w_prep.observe_work();
                         int out = 0;
                         for (const int c : active_x1) {
                             xin(i, out++) = X_full(keep0[i], c);
@@ -5499,8 +5983,13 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                     warm[d].resize(nk);
                     const std::vector<int>& gid = ares.fe_group_ids[d];
                     const Eigen::VectorXd& lev = ares.fe_means[d];
-#pragma omp parallel for schedule(static)
+                    ObservedParallelRegion observed_warm_scatter(
+                        &recovery_observer, nk > 0, recovery_threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if(recovery_threads > 1 && nk > 0) num_threads(recovery_threads)
+#endif
                     for (Eigen::Index i = 0; i < nk; ++i) {
+                        observed_warm_scatter.observe_work();
                         const double v = lev[gid[static_cast<std::size_t>(i)]];
                         warm[d][i] = v;
                         resid[i] -= v;
@@ -5519,6 +6008,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 HdfeOptions po = ho;
                 po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
                 po.num_threads = recovery_threads;
+                po.num_threads_explicit = explicit_thread_request;
+                po.parallel_observer = &recovery_observer;
                 detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
                     resid, ares.fe_group_ids, ares.fe_levels, wk_ptr, po,
                     ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
@@ -5561,6 +6052,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             hr.retain_fixed_effects = true;
             reg_ret.reset(new v11::HdfeRegressorV11(hr));
             reg_ret->fit(y_in, X_full, fes_in, weights);
+            merge_regressor_observation(
+                *reg_ret, fullfit_threads_used, fullfit_active_workers);
             gel_fast_fit = false;
             gprof_.mark("gel_fe_recovery");
         }
@@ -5575,7 +6068,6 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     // regu: the regressor every downstream quantity reads from — the fast fit
     // normally, or the reference-fallback retained fit when the gate rejected.
     const v11::HdfeRegressorV11& regu = reg_ret ? *reg_ret : reg;
-    res.threads_used = std::max(regu.threads_used(), recovery_threads);
     res.gpu_used = regu.gpu_used();
     res.gpu_status_code = regu.gpu_status_code();
     res.gpu_attempted = regu.gpu_attempted();
@@ -5792,6 +6284,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     // A/B-reproducible); a failed cross-check sets converged=false and says
     // so in notes, and an unavailable cross-check is noted softly.
     if (!gel_fast_fit && !fes_in.empty() && n > 0) {
+        recovery_phase_executed = true;
         const auto& fe_eff = regu.results().fe_effects;
         if (fe_eff.size() == fes_in.size() &&
             fe_eff[0].size() == n) {
@@ -5802,6 +6295,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             mo.absorption_method = AbsorptionMethod::Mlsmr;
             mo.retain_fixed_effects = true;
             mo.num_threads = recovery_threads;
+            mo.num_threads_explicit = explicit_thread_request;
+            mo.parallel_observer = &recovery_observer;
             mo.krylov_lambda = 0.0;
             Eigen::MatrixXd xin(n, 0);
             detail::AbsorptionResult ares =
@@ -5825,6 +6320,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 HdfeOptions po = ho;
                 po.fe_tolerance = ho.tol > 0.0 ? ho.tol : 1e-8;
                 po.num_threads = recovery_threads;
+                po.num_threads_explicit = explicit_thread_request;
+                po.parallel_observer = &recovery_observer;
                 detail::FeRecoveryResult rec = detail::recover_fixed_effects_group_ids(
                     resid, ares.fe_group_ids, ares.fe_levels, wk_cert, po,
                     ares.fe_weight_sums.empty() ? nullptr : &ares.fe_weight_sums);
@@ -5906,12 +6403,15 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     Eigen::VectorXd wq = Eigen::VectorXd::Ones(n);
     Eigen::VectorXd sf = Eigen::VectorXd::Ones(n);
     double n_eff = static_cast<double>(n);
+    std::int64_t n_eff_frequency = static_cast<std::int64_t>(n);
     if (weights != nullptr) {
         if (freq_weights) {
             wq = w_raw;
             sf = options.vce == GelbachVce::Cluster ? w_raw
                                                     : w_raw.cwiseSqrt();
-            n_eff = w_raw.sum();
+            n_eff_frequency =
+                checked_frequency_weight_sum(w_raw, "gelbach");
+            n_eff = static_cast<double>(n_eff_frequency);
         } else {
             wq = w_raw * (static_cast<double>(n) / w_raw.sum());
             sf = wq;
@@ -5922,7 +6422,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     // the explicit additive field used by human-facing displays.
     res.n_obs = static_cast<long long>(n);
     res.n_obs_effective = freq_weights && weights != nullptr
-                              ? static_cast<long long>(std::llround(n_eff))
+                              ? n_eff_frequency
                               : static_cast<long long>(n);
     if (absorbed_target_mode) {
         res.absorbing_fe_index =
@@ -5950,6 +6450,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     v11::HdfeRegressorV11 breg(hb);
     progress.say("fitting the base specification...");
     breg.fit(y, X1, common_fes, weights != nullptr ? &w_raw : nullptr);
+    covariance_phase_executed = true;
+    merge_regressor_observation(
+        breg, covariance_threads_used, covariance_active_workers);
     if (!breg.results().converged) {
         throw std::runtime_error(
             "gelbach: common-FE base-model absorption did not converge");
@@ -6020,6 +6523,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         const detail::AbsorptionResult cab = creg.partial_out(
             batch.col(0), batch.rightCols(batch_cols - 1), common_fes,
             weights != nullptr ? &w_raw : nullptr);
+        merge_regressor_observation(
+            creg, covariance_threads_used, covariance_active_workers);
         if (!cab.converged) {
             throw std::runtime_error(
                 "gelbach: common-FE auxiliary absorption did not converge");
@@ -6320,6 +6825,8 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                 const detail::AbsorptionResult ab = wreg.partial_out(
                     X1X2.col(0), X1X2.rightCols(Kx - 1), fes,
                     weights != nullptr ? &w_raw : nullptr);
+                merge_regressor_observation(
+                    wreg, covariance_threads_used, covariance_active_workers);
                 W.col(0) = ab.y_tilde;
                 W.rightCols(Kx - 1) = ab.X_tilde;
         gprof_.mark("gel_within_batch");
@@ -6332,6 +6839,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         v11::HdfeRegressorV11 wreg(hw);
                         wreg.fit(col, ones, fes,
                                  weights != nullptr ? &w_raw : nullptr);
+                        merge_regressor_observation(
+                            wreg, covariance_threads_used,
+                            covariance_active_workers);
                         W.col(c) = wreg.results().residuals;
                     }
                 } else {
@@ -6343,6 +6853,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
                         v11::HdfeRegressorV11 wreg(hw);
                         wreg.fit(col, ones, fes,
                                  weights != nullptr ? &w_raw : nullptr);
+                        merge_regressor_observation(
+                            wreg, covariance_threads_used,
+                            covariance_active_workers);
                         W.col(c) = wreg.results().residuals;
                     }
                 }
@@ -6379,7 +6892,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             // n x (Kx + G*ka) stacked-score matrix (multi-GB at AKM scale).
             M = gelbach_cluster_meat_streamed(
                 W, X1t, se_score, sf, vres, u_base, *ccodes_ptr,
-                n_clusters, recovery_threads, &score_base_cross, nullptr);
+                n_clusters, recovery_threads, explicit_thread_request,
+                &score_base_cross, nullptr,
+                &covariance_observer);
         } else {
             Eigen::MatrixXd Z(n, Kx + G * ka);
             Z.leftCols(Kx) = W.array().colwise() * se_score.array();
@@ -6670,6 +7185,33 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         res.converged = false;
         res.notes += "identity gap above tolerance. ";
     }
+    if (recovery_phase_executed) {
+        merge_parallel_observation(
+            recovery_observer, recovery_threads_used,
+            recovery_active_workers);
+    }
+    if (covariance_phase_executed) {
+        merge_parallel_observation(
+            covariance_observer, covariance_threads_used,
+            covariance_active_workers);
+    }
+    res.fullfit_threads_used = fullfit_threads_used;
+    res.fullfit_parallel_workers_active = fullfit_active_workers;
+    res.recovery_threads_used =
+        recovery_phase_executed ? std::max(1, recovery_threads_used) : 0;
+    res.recovery_parallel_workers_active =
+        recovery_phase_executed ? std::max(1, recovery_active_workers) : 0;
+    res.covariance_threads_used =
+        covariance_phase_executed ? std::max(1, covariance_threads_used) : 0;
+    res.covariance_parallel_workers_active =
+        covariance_phase_executed ? std::max(1, covariance_active_workers) : 0;
+    res.threads_used = std::max(
+        {1, res.fullfit_threads_used, res.recovery_threads_used,
+         res.covariance_threads_used});
+    res.parallel_workers_active = std::max(
+        {1, res.fullfit_parallel_workers_active,
+         res.recovery_parallel_workers_active,
+         res.covariance_parallel_workers_active});
     progress.say("done: converged=%s, identity gap %.3e%s",
                  res.converged ? "yes" : "NO", res.identity_gap,
                  res.gpu_used ? ", gpu_used=1" : "");

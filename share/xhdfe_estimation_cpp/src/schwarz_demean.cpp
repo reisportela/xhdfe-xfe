@@ -4,8 +4,10 @@
 // (_akm_opt/schwarz_proto/schwarz7.cpp + schwarz8.cpp). Not yet wired into absorb_fixed_effects.
 
 #include "schwarz_demean.hpp"
+#include "hdfe/deterministic_parallel.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -19,6 +21,32 @@
 
 namespace xhdfe {
 namespace {
+
+#ifdef _OPENMP
+class ScopedOpenMpTeam {
+public:
+    explicit ScopedOpenMpTeam(int threads)
+        : previous_threads_(omp_get_max_threads()),
+          previous_dynamic_(omp_get_dynamic()) {
+        if (threads > 0) {
+            omp_set_dynamic(0);
+            omp_set_num_threads(threads);
+        }
+    }
+
+    ~ScopedOpenMpTeam() {
+        omp_set_num_threads(previous_threads_);
+        omp_set_dynamic(previous_dynamic_);
+    }
+
+    ScopedOpenMpTeam(const ScopedOpenMpTeam&) = delete;
+    ScopedOpenMpTeam& operator=(const ScopedOpenMpTeam&) = delete;
+
+private:
+    int previous_threads_ = 1;
+    int previous_dynamic_ = 0;
+};
+#endif
 
 bool finite_bits(double x) {
     std::uint64_t bits = 0;
@@ -203,8 +231,33 @@ bool schwarz_impl(double* Y, double* X, int64_t n, int k,
     auto dotcol = [&](const std::vector<double>& a, const std::vector<double>& ae,
                       const std::vector<double>& b, const std::vector<double>& be, double* out) {
         double s[S] = {0};
-        #pragma omp parallel for reduction(+ : s[:S]) schedule(static)
-        for (int64_t v = 0; v < N; ++v) { const double* av = &a[v * S]; const double* bv = &b[v * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
+        const int chunks =
+            hdfe::detail::deterministic_parallel_chunk_count(N);
+        hdfe::detail::InlineOrDynamicBuffer<std::array<double, S>>
+            partial(static_cast<std::size_t>(chunks));
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            const int64_t begin =
+                hdfe::detail::deterministic_parallel_chunk_begin(
+                    N, chunk, chunks);
+            const int64_t end =
+                hdfe::detail::deterministic_parallel_chunk_end(
+                    N, chunk, chunks);
+            auto& local = partial[static_cast<std::size_t>(chunk)];
+            for (int64_t v = begin; v < end; ++v) {
+                const double* av = &a[v * S];
+                const double* bv = &b[v * S];
+                for (int c = 0; c < NC; ++c) {
+                    local[static_cast<std::size_t>(c)] += av[c] * bv[c];
+                }
+            }
+        }
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            for (int c = 0; c < NC; ++c) {
+                s[c] += partial[static_cast<std::size_t>(chunk)]
+                                 [static_cast<std::size_t>(c)];
+            }
+        }
         for (int64_t g = 0; g < totE; ++g) { const double* av = &ae[g * S]; const double* bv = &be[g * S]; for (int c = 0; c < NC; ++c) s[c] += av[c] * bv[c]; }
         for (int c = 0; c < NC; ++c) out[c] = s[c];
     };
@@ -369,7 +422,9 @@ bool schwarz_demean_raw(double* Y, double* X, int64_t n, int k,
     if ((int)fe.size() < 2 || (int)nlev.size() != (int)fe.size() || n <= 0 || k < 0) return false;
     const int NC = k + 1;
 #ifdef _OPENMP
-    if (threads > 0) omp_set_num_threads(threads);
+    ScopedOpenMpTeam scoped_team(threads);
+#else
+    (void)threads;
 #endif
     if (NC <= 8) return schwarz_impl<8>(Y, X, n, k, fe, nlev, tol, max_iter, iters_out, collapse);
     // A k=10 (NC=11) design — the pyfixest difficult_*_3fe-class benchmark — would

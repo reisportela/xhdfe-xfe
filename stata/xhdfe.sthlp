@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.21.0 25jul2026}{...}
+{* *! version 2.22.0 28jul2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -493,6 +493,12 @@ xhdfe prints the reghdfe warning at
 Both {cmd:endogenous()} and {cmd:instruments()} must be specified together.
 Factor-variable operators are not supported with IV, and IV is not supported in {cmd:group()} mode.
 
+{pmore}
+With absorbed fixed effects, the reported {cmd:_cons} is the finite
+normalization mean({it:y}) - mean({it:X})*{it:b}, under zero-mean absorbed
+contributions. It is normalization-dependent and is not a structural IV
+parameter.
+
 
 {marker opt_dof}{...}
 {dlgtab:Degrees-of-Freedom Adjustments}
@@ -557,6 +563,20 @@ and for speed benchmarking (state the mode when citing timings).
 {cmd:tolerancemode(strict-residual)} is a heavier audit mode: it treats the final absolute maximum
 group-mean residual check as authoritative, may use additional iterations up to {cmd:maxiter()}, and
 reports non-convergence if that check is not met. The mode used is returned in {cmd:e(tolerance_mode)}.
+
+{phang}
+Independently of the stopping mode, xhdfe verifies the returned within transform against the
+normal equations. {cmd:e(abs_residual)} is the largest absolute
+{cmd:||D' W v_tilde||_2} across the outcome and transformed design columns;
+{cmd:e(abs_residual_rel)} is the largest scale-normalized residual
+{cmd:||D' W v_tilde||_2 / (||D' W||_F ||v||_2)}, where {cmd:v} is the
+corresponding original, pre-absorption right-hand side.
+{cmd:e(precision_certified)} is one when this explicit check is finite and no larger than the
+documented numerical certificate limit. These diagnostics are computed after CPU, GPU, and
+cache-backed absorption. In the combined {cmd:group()}/{cmd:individual()} path the explicit
+certificate is authoritative: additional full sweeps are counted in {cmd:e(iterations)}, and
+{cmd:e(converged)} is one only when {cmd:e(precision_certified)} is also one. Other absorption
+paths retain separate convergence and certificate diagnostics.
 
 {phang}
 New in version 2.11.0: in {cmd:tolerancemode(reghdfe-comparable)} (the default), absorbers on
@@ -635,13 +655,17 @@ compatibility options but do not change xhdfe's estimator or backend selection.{
 {dlgtab:Parallel execution}
 
 {phang}
-{opth numthr:eads(#)} threads used by the absorber (0 = auto).
+{opth numthr:eads(#)} requested OpenMP threads (0 = auto). A positive request
+is authoritative and bypasses the automatic row-count, FE-shape, and
+{cmd:maxthreads()} heuristics. It is clamped only to the logical processors
+and OpenMP runtime limit visible to the process.
 
 {phang}
 {opth defaultthr:eads(#)} default threads when auto-threading is enabled.
 
 {phang}
 {opth maxthr:eads(#)} maximum threads when auto-threading is enabled.
+It never reduces a positive {cmd:numthreads()} request.
 
 {phang}
 {opth minparallelr:ows(#)} minimum rows required to enable parallel absorption.
@@ -651,6 +675,11 @@ compatibility options but do not change xhdfe's estimator or backend selection.{
 
 {phang}
 {bf:OpenMP:} parallel absorption requires a plugin built with OpenMP support.
+If a positive request above one is made against a serial build, xhdfe exits
+with an error rather than reporting fictitious parallelism. {cmd:e(threads_used)}
+is the largest OpenMP team observed while executing a real xhdfe loop;
+{cmd:e(parallel_workers_active)} is the largest number of distinct workers
+that processed useful units in the same observed region.
 On Linux, the build script will try OpenMP automatically; to force it (recommended for performance), from the repository root:
 
 {phang2}
@@ -921,11 +950,21 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {synopt:{cmd:e(iterations)}}absorption iterations{p_end}
 {synopt:{cmd:e(ic)}}alias of {cmd:e(iterations)} for {cmd:estat ic}{p_end}
 {synopt:{cmd:e(converged)}}1 if converged, 0 otherwise{p_end}
+{synopt:{cmd:e(abs_residual)}}verified absolute normal-equation residual after absorption{p_end}
+{synopt:{cmd:e(abs_residual_rel)}}verified relative normal-equation residual after absorption{p_end}
+{synopt:{cmd:e(precision_certified)}}1 if the explicit residual check meets its numerical limit{p_end}
 {synopt:{cmd:e(fe_recovery_converged)}}(only with {cmd:savefe}/{cmd:savefes}) 1 if fixed-effect recovery converged, 0 otherwise{p_end}
 {synopt:{cmd:e(fe_recovery_iterations)}}(only with {cmd:savefe}/{cmd:savefes}) iterations used to recover the fixed effects{p_end}
 {synopt:{cmd:e(fe_recovery_max_delta)}}(only with {cmd:savefe}/{cmd:savefes}) maximum change in the final FE recovery sweep{p_end}
 {synopt:{cmd:e(report_constant)}}1 if the constant is reported, 0 if {cmd:noconstant}{p_end}
-{synopt:{cmd:e(threads_used)}}threads used by backend{p_end}
+{synopt:{cmd:e(threads_requested)}}raw request; 0 denotes automatic selection{p_end}
+{synopt:{cmd:e(threads_effective)}}request after the runtime-visible physical limit and auto policy{p_end}
+{synopt:{cmd:e(threads_used)}}largest OpenMP team observed executing real xhdfe work{p_end}
+{synopt:{cmd:e(parallel_workers_active)}}largest number of distinct workers processing useful work in one observed region{p_end}
+{synopt:{cmd:e(thread_capacity)}}logical processors available after the OpenMP runtime limit{p_end}
+{synopt:{cmd:e(openmp_enabled)}}1 when the loaded plugin was compiled with OpenMP{p_end}
+{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable{p_end}
+{synopt:{cmd:e(thread_limit_reason)}}label corresponding to {cmd:e(thread_limit_code)}{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
 {synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
@@ -1056,7 +1095,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.21.0.
+regression via a C++ backend." Version 2.22.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

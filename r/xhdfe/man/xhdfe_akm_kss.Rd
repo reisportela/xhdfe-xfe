@@ -4,21 +4,41 @@
 \alias{xhdfe_akm_kss}
 \title{AKM estimation with leave-out (KSS) variance decomposition}
 \usage{
-xhdfe_akm_kss(y, worker, firm, X = NULL, leave_out_level = "match",
-  leverages = "auto", jla_draws = 200L, seed = 20260705, prune = TRUE,
-  exact_max_rows = 10000L, direct_max_firms = 50000L, direct_max_nnz = 4e7,
-  cg_tol = 1e-10, cg_max_iter = 0L, num_threads = 0L, fwl_tol = 1e-10,
-  fwl_max_iter = 100000L, compute_se = FALSE, se_nsim = 1000L,
-  eigen_diagnostics = FALSE, eig_trace_nsim = 100L,
-  se_sigma_lowess = FALSE, gpu = FALSE, fweights = NULL, verbose = FALSE)
+xhdfe_akm_kss(
+  y,
+  worker,
+  firm,
+  X = NULL,
+  leave_out_level = "match",
+  leverages = "auto",
+  jla_draws = 200L,
+  seed = 20260705,
+  prune = TRUE,
+  exact_max_rows = 10000L,
+  direct_max_firms = 50000L,
+  direct_max_nnz = 4e+07,
+  cg_tol = 1e-10,
+  cg_max_iter = 0L,
+  num_threads = 0L,
+  fwl_tol = 1e-10,
+  fwl_max_iter = 100000L,
+  compute_se = FALSE,
+  se_nsim = 1000L,
+  eigen_diagnostics = FALSE,
+  eig_trace_nsim = 100L,
+  se_sigma_lowess = FALSE,
+  gpu = FALSE,
+  fweights = NULL,
+  verbose = FALSE
+)
 }
 \arguments{
 \item{y}{Numeric outcome, length n.}
 
 \item{worker, firm}{Identifiers (integer, factor or character), length n.}
 
-\item{X}{Optional numeric matrix of controls (n rows); partialled out at the
-person-year level with the xhdfe absorber (FWL) before the two-way
+\item{X}{Optional numeric matrix of controls (n rows); partialled out at
+the person-year level with the xhdfe absorber (FWL) before the two-way
 machinery runs.}
 
 \item{leave_out_level}{\code{"match"} (default, Saggio's default) or
@@ -36,30 +56,32 @@ last-ulp level because floating-point reductions are reassociated.}
 \item{prune}{Compute the leave-out connected set (default TRUE). Set to
 FALSE only when the input is already a leave-out sample.}
 
-\item{exact_max_rows, direct_max_firms, direct_max_nnz, cg_tol, cg_max_iter}{Solver knobs.}
+\item{exact_max_rows, direct_max_firms, direct_max_nnz, cg_tol, cg_max_iter}{Solver knobs; see the package vignette sources.}
 
-\item{num_threads}{Maximum OpenMP threads for the command (0 = library
-default). The FWL absorber and KSS solver tune their effective teams
-separately; inspect \code{fwl_threads_used} and \code{threads_used}.}
+\item{num_threads}{OpenMP thread request for the command (0 = automatic
+policy). It must be one nonnegative integer. A positive request bypasses
+workload/environment heuristics and is limited only by runtime-visible
+processor capacity. Sample, FWL, and solver diagnostics distinguish
+budgets from observed useful workers.}
 
 \item{fwl_tol, fwl_max_iter}{Absorber controls for the covariate step.}
 
 \item{compute_se}{Component standard errors (KSS leave-out inference).
 Under the canonical leave_out_COMPLETE rule, match level reports firm and
-covariance inference only; var(alpha) SE/CI are missing at match level even
-without stayers. Use \code{leave_out_level = "obs"} for var(alpha)
+covariance inference only; var(alpha) SE/CI are missing at match level
+even without stayers. Use \code{leave_out_level = "obs"} for var(alpha)
 inference.}
 
 \item{se_nsim}{Simulation draws for the SE quadratic part (default 1000).}
 
 \item{eigen_diagnostics}{Weak-identification diagnostics and the
 Andrews-Mikusheva q = 1 confidence intervals (leave_out_COMPLETE
-eigen_diagno path): top eigenvalue/shares of Atilde, Lindeberg condition,
-gamma^2, F statistic, theta_1 and the AM CI per component, returned in
-\code{$weak_id}. Implies \code{compute_se = TRUE}.}
+eigen_diagno path): top eigenvalue/shares of Atilde, Lindeberg
+condition, gamma^2, F statistic, theta_1 and the AM CI per component.
+Implies \code{compute_se = TRUE}.}
 
-\item{eig_trace_nsim}{Hutchinson draws for tr(Atilde^2) (default 100, the
-oracle default).}
+\item{eig_trace_nsim}{Hutchinson draws for tr(Atilde^2) (default 100,
+the oracle default).}
 
 \item{se_sigma_lowess}{Use the llr_fit mode-0 lowess surface fit of
 sigma_i on (Pii, Bii) instead of the binned mode-4 fit (O(n^2);
@@ -76,50 +98,63 @@ solver, JLA draws d/D with elapsed time and an ETA, SE simulations,
 eigen diagnostics). Output only; results are unaffected.}
 }
 \value{
-An object of class \code{xhdfe_akm_kss}: a list with the sample summary,
-observation-level \code{alpha}/\code{psi} on the kept rows, control
-coefficients \code{beta}, and the \code{plugin}/\code{agsu}/\code{kss}
-component tables. Each component table carries \code{var_alpha},
-\code{var_psi}, \code{cov_alpha_psi} plus the derived \code{corr_alpha_psi},
-\code{var_alpha_plus_psi} and the shares of \code{var_y}
-(\code{share_var_alpha}, \code{share_var_psi}, \code{share_2cov}). Also
-returned: \code{var_y}, \code{sigma2_ho}, row-level leverages \code{pii} and
-\code{sigma_i}, and solver diagnostics including \code{fwl_threads_used} and
-\code{threads_used}. With \code{compute_se = TRUE} a
-\code{component_se} list holds the KSS component standard errors and corrected
-point estimates; with \code{eigen_diagnostics = TRUE} a \code{weak_id} list
-holds, per component, the top eigenvalue and shares of Atilde, the Lindeberg
-condition, \code{gamma_sq}, the F statistic, \code{theta_1}, the
-Andrews-Mikusheva q = 1 confidence bounds (\code{ci_lb}/\code{ci_ub}) and the
-curvature.
+An object of class \code{xhdfe_akm_kss}: a list with the sample
+  summary, observation-level \code{alpha}/\code{psi} on the kept rows,
+  control coefficients \code{beta}, and the \code{plugin}/\code{agsu}/
+  \code{kss} component tables. Each component table carries
+  \code{var_alpha}, \code{var_psi}, \code{cov_alpha_psi} plus the derived
+  \code{corr_alpha_psi}, \code{var_alpha_plus_psi} and the shares of
+  \code{var_y} (\code{share_var_alpha}, \code{share_var_psi},
+  \code{share_2cov}). Also returned: \code{var_y}, \code{sigma2_ho},
+  row-level leverages \code{pii} and \code{sigma_i}, and solver
+  diagnostics (\code{leverages_exact}, \code{gpu_requested},
+  \code{gpu_used}, \code{gpu_status_code}, \code{gpu_status},
+  \code{threads_requested}, \code{threads_effective},
+  \code{fwl_threads_used}, \code{fwl_parallel_workers_active},
+  \code{fwl_gpu_used}, \code{fwl_gpu_fallback},
+  \code{fwl_gpu_status}, \code{fwl_abs_residual_rel},
+  \code{fwl_precision_certified},
+  \code{solver_threads_used}, \code{solver_parallel_workers_active},
+  \code{threads_used}, \code{parallel_workers_active},
+  \code{thread_capacity}, \code{converged}, ...).
+  The nested control-FWL phase deliberately uses the strict-residual MLSMR
+  CPU reference path (\code{fwl_gpu_status = "cpu_reference"}); the
+  two-way solver remains independently eligible for CUDA.
+  With \code{compute_se = TRUE} a \code{component_se} list holds the
+  KSS component standard errors and corrected point estimates; with
+  \code{eigen_diagnostics = TRUE} a \code{weak_id} list holds, per
+  component, the top eigenvalue and shares of Atilde, the Lindeberg
+  condition, \code{gamma_sq}, the F statistic, \code{theta_1}, the
+  Andrews-Mikusheva q = 1 confidence bounds (\code{ci_lb}/\code{ci_ub})
+  and the curvature.
 }
 \description{
 Estimates the two-way AKM model \eqn{y = \alpha_{worker} + \psi_{firm} +
 X\beta + \epsilon} on the leave-out connected set and reports the variance
-decomposition in three flavours: plug-in (biased baseline), AGSU (Andrews et
-al. 2008, homoskedastic correction) and KSS (Kline, Saggio & Soelvsten 2020,
-heteroskedastic leave-out correction). Numerical semantics follow Saggio's
-LeaveOutTwoWay: leave-a-match-out by default (collapse to match means with
-sqrt(match-length) FGLS weighting), person-year weighted components with
-denominator (n - 1), and the JLA leverage approximation with deterministic
-seeding for large samples.
+decomposition in three flavours: plug-in (biased baseline), AGSU
+(Andrews et al. 2008, homoskedastic correction) and KSS (Kline, Saggio &
+Soelvsten 2020, heteroskedastic leave-out correction). Numerical semantics
+follow Saggio's LeaveOutTwoWay: leave-a-match-out by default (collapse to
+match means with sqrt(match-length) FGLS weighting), person-year weighted
+components with denominator (n - 1), and the JLA leverage approximation
+with deterministic seeding for large samples.
 }
 \section{Advanced performance environment variables}{
 
-Defaults are tuned and none changes the default numeric output.
-\code{XHDFE_AKM_TEAM} caps the OpenMP team size of the per-iteration
-solver regions (the default caps it by the edge work so a large thread
-pool does not oversubscribe small/medium graphs \emph{--} the dominant
-speed lever below ~10M rows; \code{0} = uncapped, \code{k} forces
-\code{k}). \code{XHDFE_AKM_JLA_BLOCK} / \code{XHDFE_AKM_SE_BLOCK} set the
-multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
-(default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
-(default on) selects the parallel CSR-ordered Rademacher scatter at scale.
-The solves are batched without changing the estimator or solver tolerances;
-different schedules can differ at the last-ulp level. A \code{warning()} fires on
-non-convergence (check \code{$converged}) and on inferential diagnostics
-recorded in \code{$notes}, including omitted collinear controls, truncated
-negative simulated variances and undefined AM intervals.
+  Defaults are tuned and none changes the default numeric output.
+  \code{XHDFE_AKM_TEAM} tunes the automatic
+  (\code{num_threads = 0}) solver team; an explicit positive request
+  bypasses it. \code{XHDFE_AKM_JLA_BLOCK} /
+  \code{XHDFE_AKM_SE_BLOCK} set the
+  multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
+  (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
+  (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
+  The solves are batched without changing the estimator or solver
+  tolerances; different schedules can differ at the last-ulp level. A
+  \code{warning()} fires on non-convergence (check \code{$converged}) and
+  on inferential diagnostics recorded in \code{$notes}, including omitted
+  collinear controls, truncated negative simulated variances and undefined
+  AM intervals.
 }
 
 \examples{
@@ -133,9 +168,7 @@ print(fit)
 }
 }
 \references{
-Kline P., Saggio R., Soelvsten M. (2020), Econometrica; Andrews M. et al.
-(2008), JRSS-A; Abowd J., Kramarz F., Margolis D. (1999), Econometrica.
-}
-\seealso{
-\code{\link{xhdfe_akm_leave_out_set}}
+Kline P., Saggio R., Soelvsten M. (2020), Econometrica;
+  Andrews M. et al. (2008), JRSS-A; Abowd J., Kramarz F., Margolis D.
+  (1999), Econometrica.
 }

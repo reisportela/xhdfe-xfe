@@ -46,7 +46,9 @@ OlsResult run_ols(const Eigen::VectorXd& y,
                   double within_sum_squares,
                   double n_effective = -1.0,
                   bool weights_are_frequencies = false,
-                  const Eigen::MatrixXd* X_for_residuals = nullptr);
+                  const Eigen::MatrixXd* X_for_residuals = nullptr,
+                  bool num_threads_explicit = false,
+                  ParallelWorkObserver* parallel_observer = nullptr);
 
 OlsResult run_ols_fast_from_xtx(const Eigen::VectorXd& y,
                                 const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -57,7 +59,9 @@ OlsResult run_ols_fast_from_xtx(const Eigen::VectorXd& y,
                                 const Eigen::MatrixXd& xtx,
                                 const Eigen::VectorXd& xty,
                                 double n_effective = -1.0,
-                                bool weights_are_frequencies = false);
+                                bool weights_are_frequencies = false,
+                                bool num_threads_explicit = false,
+                                ParallelWorkObserver* parallel_observer = nullptr);
 
 // Raw multiway-cluster sandwich bread * [inclusion-exclusion meat] * bread
 // with NO df scaling of any kind (the caller maps its composite small-sample
@@ -81,7 +85,9 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            ClusterDofMethod g_df = ClusterDofMethod::Conventional,
                            bool g_adj = true,
                            double n_effective = -1.0,
-                           const Eigen::MatrixXd* X_for_residuals = nullptr);
+                           const Eigen::MatrixXd* X_for_residuals = nullptr,
+                           bool num_threads_explicit = false,
+                           ParallelWorkObserver* parallel_observer = nullptr);
 
 }  // namespace detail
 }  // namespace hdfe

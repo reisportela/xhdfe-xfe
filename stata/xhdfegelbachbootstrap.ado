@@ -1,4 +1,4 @@
-*! version 1.0.0  25jul2026
+*! version 1.0.0  28jul2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve
@@ -333,7 +333,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     }
 
     tempname DRAWSB DRAWSM DRAWFS DRAWTS PSB PSM PFS PTS
-    mata: xgel_boot_shares_20260725( ///
+    mata: xgel_boot_shares_20260728( ///
         "`DRAWD'", "`DRAWT'", "`DRAWB'", "`DRAWF'", ///
         "`PDELTA'", "`PTOTAL'", "`PBASE'", "`PFULL'", ///
         "`DRAWSB'", "`DRAWSM'", "`DRAWFS'", "`DRAWTS'", ///
@@ -352,21 +352,21 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     matrix rownames `DRAWTS' = `repnames'
 
     tempname CID CIT CIB CIF CISB CISM CIFS CITS
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWD'", "`PDELTA'", "`CID'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWT'", "`PTOTAL'", "`CIT'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWB'", "`PBASE'", "`CIB'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWF'", "`PFULL'", "`CIF'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWSB'", "`PSB'", "`CISB'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWSM'", "`PSM'", "`CISM'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWFS'", "`PFS'", "`CIFS'", `level' / 100, "`bootci'")
-    mata: xgel_boot_ci_20260725( ///
+    mata: xgel_boot_ci_20260728( ///
         "`DRAWTS'", "`PTS'", "`CITS'", `level' / 100, "`bootci'")
     foreach M in CID CIT CIB CIF CISB CISM CIFS CITS {
         matrix rownames ``M'' = low high se valid_count
@@ -413,7 +413,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return local ci_method "`bootci'"
     return local interval_status ///
         "resampling_based_not_a_nonregularity_cure"
-    return local version "1.0.0 25jul2026"
+    return local version "1.0.0 28jul2026"
     return local rng "Stata_rng_reproducible_seed"
     return local point_vce "`point_vce'"
     return local point_gpu_backend "`point_gpu_backend'"
@@ -453,11 +453,11 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return matrix cov = `POINTCOV'
 end
 
-capture mata: mata drop xgel_boot_q_20260725()
-capture mata: mata drop xgel_boot_ci_20260725()
-capture mata: mata drop xgel_boot_shares_20260725()
+capture mata: mata drop xgel_boot_q_20260728()
+capture mata: mata drop xgel_boot_ci_20260728()
+capture mata: mata drop xgel_boot_shares_20260728()
 mata:
-real scalar xgel_boot_q_20260725(
+real scalar xgel_boot_q_20260728(
     real colvector values,
     real scalar probability)
 {
@@ -474,7 +474,7 @@ real scalar xgel_boot_q_20260725(
     return(values[lower] + fraction * (values[upper] - values[lower]))
 }
 
-void xgel_boot_ci_20260725(
+void xgel_boot_ci_20260728(
     string scalar draws_name,
     string scalar point_name,
     string scalar output_name,
@@ -494,9 +494,9 @@ void xgel_boot_ci_20260725(
         n = rows(values)
         output[4, column] = n
         if (n == 0 | point[column] >= .) continue
-        qlow = xgel_boot_q_20260725(
+        qlow = xgel_boot_q_20260728(
             values, alpha / 2)
-        qhigh = xgel_boot_q_20260725(
+        qhigh = xgel_boot_q_20260728(
             values, 1 - alpha / 2)
         if (method == "percentile") {
             output[1, column] = qlow
@@ -514,7 +514,7 @@ void xgel_boot_ci_20260725(
     st_matrix(output_name, output)
 }
 
-void xgel_boot_shares_20260725(
+void xgel_boot_shares_20260728(
     string scalar delta_name,
     string scalar total_name,
     string scalar base_name,

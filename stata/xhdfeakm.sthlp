@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.7.2  25jul2026}{...}
+{* *! version 1.7.2  28jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -42,7 +42,7 @@
 
 {syntab:Solver / technical}
 {synopt :{opt gpu}}solve the two-way systems on the CUDA backend{p_end}
-{synopt :{opt threads(#)}}maximum OpenMP threads (0 = library default){p_end}
+{synopt :{opt threads(#)}}explicit OpenMP request (0 = automatic policy){p_end}
 {synopt :{opt directmax:firms(#)}}firm cap for the direct sparse solve (default 50000){p_end}
 {synopt :{opt cgtol(#)}}two-way solver tolerance (default 1e-10){p_end}
 {synopt :{opt fwltol(#)}}absorber tolerance for the control step (default 1e-10){p_end}
@@ -210,13 +210,21 @@ binned default. Intended for small/medium-sample sensitivity analysis
 {dlgtab:Solver / technical}
 
 {phang}{opt gpu} solves the two-way linear systems on the CUDA backend when the
-plugin was built with CUDA support; check {cmd:r(gpu_used)}==1. The CPU path is
-the numerical reference and the results are identical to solver tolerance.
+plugin was built with CUDA support; require {cmd:r(gpu_used)}==1 and
+{cmd:r(gpu_status)}=={cmd:"used"}. The CPU path is the numerical reference.
+With {opt controls()}, the FWL absorber reports separate {cmd:r(fwl_gpu_*)}
+diagnostics and deliberately uses the certified CPU reference path
+({cmd:r(fwl_gpu_status)}=={cmd:"cpu_reference"}). This prevents a CUDA
+or CPU update-norm trigger on an ill-conditioned worker-firm graph from being
+mistaken for forward-accurate residualization. The reference FWL uses MLSMR
+and a strict residual certificate without relaxing {opt fwltol()}; the two-way
+solver remains independently eligible for real CUDA execution.
 
-{phang}{opt threads(#)} sets the maximum OpenMP threads for this command
-(0 = library default). The FWL absorber and the two-way KSS solver tune their
-effective teams separately; inspect {cmd:r(fwl_threads_used)} and
-{cmd:r(threads_used)}.
+{phang}{opt threads(#)} sets the OpenMP request for this command (0 =
+automatic policy). A positive request bypasses workload and environment
+heuristics and is limited only by the logical-processor/OpenMP capacity
+visible to the process. The leave-out sample, FWL absorber, and two-way KSS
+solver report their effective teams and useful-worker counts separately.
 
 {phang}{opt directmaxfirms(#)} caps the firm dimension for the direct sparse
 Cholesky solve (default 50000); larger problems use preconditioned CG.
@@ -227,11 +235,9 @@ Cholesky solve (default 50000); larger problems use preconditioned CG.
 
 {phang}{it:Advanced performance environment variables} (defaults are tuned;
 override only for diagnostics or unusual hardware; none changes the default
-numeric output). {cmd:XHDFE_AKM_TEAM} caps the OpenMP team size used by the
-per-iteration solver regions: the default caps it by the edge work so a large
-thread pool does not oversubscribe small/medium graphs (the dominant speed
-lever below ~10M rows); {cmd:0} restores the uncapped team, {it:k} forces
-{it:k} threads. {cmd:XHDFE_AKM_JLA_BLOCK} overrides the JLA multi-RHS block
+numeric output). With {cmd:threads(0)}, {cmd:XHDFE_AKM_TEAM} tunes the
+automatic per-iteration solver team. A positive {cmd:threads()} request
+bypasses it. {cmd:XHDFE_AKM_JLA_BLOCK} overrides the JLA multi-RHS block
 size (default 8; {cmd:0} selects the pre-2.14 sequential solver, whose
 per-edge instruction schedule differs from the batched kernels at the
 last-ulp level). {cmd:XHDFE_AKM_SE_BLOCK} does the same for the component-SE /
@@ -284,11 +290,25 @@ overwrites existing such variables.
 {synopt:{cmd:r(max_pii)} {cmd:r(mean_pii)}}leverage diagnostics{p_end}
 {synopt:{cmd:r(leverages_exact)}}1 if the exact leverage path was used{p_end}
 {synopt:{cmd:r(solver_direct)}}1 if the direct sparse solve was used{p_end}
-{synopt:{cmd:r(fwl_threads_used)}}effective threads in the {opt controls()} FWL absorber (0 without controls){p_end}
-{synopt:{cmd:r(threads_used)}}effective OpenMP team in the two-way KSS solver{p_end}
+{synopt:{cmd:r(threads_requested)} {cmd:r(threads_effective)}}raw request and capacity-limited command budget{p_end}
+{synopt:{cmd:r(threads_used)} {cmd:r(parallel_workers_active)}}largest observed team and useful-worker count over all phases{p_end}
+{synopt:{cmd:r(thread_capacity)} {cmd:r(openmp_enabled)}}runtime-visible capacity and OpenMP availability{p_end}
+{synopt:{cmd:r(thread_limit_code)} {cmd:r(thread_limit_reason)}}capacity/availability limit diagnostics{p_end}
+{synopt:{cmd:r(fwl_threads_effective)}}FWL phase budget (0 without controls){p_end}
+{synopt:{cmd:r(fwl_threads_used)} {cmd:r(fwl_parallel_workers_active)}}observed FWL team/workers (0 without controls){p_end}
+{synopt:{cmd:r(fwl_iterations)} {cmd:r(fwl_abs_residual_rel)} {cmd:r(fwl_precision_certified)}}accepted FWL iterations and independent precision certificate{p_end}
+{synopt:{cmd:r(fwl_gpu_attempted)} {cmd:r(fwl_gpu_used)} {cmd:r(fwl_gpu_fallback)}}FWL CUDA diagnostics; all are 0 under the current CPU-reference policy{p_end}
+{synopt:{cmd:r(fwl_gpu_status_code)} {cmd:r(fwl_gpu_status)}}FWL backend status; code 8 is the certified CPU-reference policy{p_end}
+{synopt:{cmd:r(solver_threads_effective)}}two-way solver phase budget{p_end}
+{synopt:{cmd:r(solver_threads_used)} {cmd:r(solver_parallel_workers_active)}}observed two-way solver team/workers{p_end}
+{synopt:{cmd:r(sample_threads_requested)} {cmd:r(sample_threads_effective)}}leave-out sample request/budget{p_end}
+{synopt:{cmd:r(sample_threads_used)} {cmd:r(sample_parallel_workers_active)}}observed leave-out sample team/workers{p_end}
+{synopt:{cmd:r(sample_thread_capacity)} {cmd:r(sample_openmp_enabled)}}sample-phase capacity/OpenMP status{p_end}
+{synopt:{cmd:r(sample_thread_limit_code)} {cmd:r(sample_thread_limit_reason)}}sample-phase limit diagnostics{p_end}
 {synopt:{cmd:r(jla_draws)} {cmd:r(seed)}}JLA draws and seed actually used{p_end}
 {synopt:{cmd:r(solver_iterations)} {cmd:r(converged)}}solver diagnostics{p_end}
-{synopt:{cmd:r(gpu_used)}}1 if the CUDA backend solved the systems{p_end}
+{synopt:{cmd:r(gpu_requested)} {cmd:r(gpu_used)}}two-way-solver CUDA request and actual use{p_end}
+{synopt:{cmd:r(gpu_status_code)} {cmd:r(gpu_backend)} {cmd:r(gpu_status)}}two-way-solver backend diagnostics{p_end}
 
 {p2col 5 26 30 2: With {opt se} (component {it:C} in {cmd:var_psi}, {cmd:cov}, {cmd:var_alpha})}{p_end}
 {synopt:{cmd:r(se_}{it:C}{cmd:)}}standard error of the KSS component{p_end}

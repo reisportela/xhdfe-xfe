@@ -3,6 +3,8 @@
 
 #include <Eigen/Dense>
 
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "fe_absorption.hpp"
@@ -46,6 +48,14 @@ struct GroupIndividualFeEstimates {
     int iterations = 0;
     bool converged = true;
     double mse = 0.0;
+    int threads_requested = 0;
+    int threads_effective = 1;
+    int threads_used = 1;
+    int parallel_workers_active = 1;
+    int thread_capacity = 1;
+    bool openmp_enabled = false;
+    int thread_limit_code = 0;
+    std::string thread_limit_reason = "none";
 };
 
 /**
@@ -72,6 +82,10 @@ class HdfeRegressorV11 {
 public:
     explicit HdfeRegressorV11(HdfeOptions options = HdfeOptions{},
                               ThreadingOptions threading = ThreadingOptions{});
+    HdfeRegressorV11(const HdfeRegressorV11& other);
+    HdfeRegressorV11& operator=(const HdfeRegressorV11& other);
+    HdfeRegressorV11(HdfeRegressorV11&&) noexcept = default;
+    HdfeRegressorV11& operator=(HdfeRegressorV11&&) noexcept = default;
 
     void fit(const Eigen::Ref<const Eigen::VectorXd>& y,
              const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -113,6 +127,15 @@ public:
 
     const HdfeResults& results() const noexcept { return results_; }
     int threads_used() const noexcept { return threads_used_; }
+    int threads_requested() const noexcept { return threads_requested_; }
+    int threads_effective() const noexcept { return threads_effective_; }
+    int parallel_workers_active() const noexcept { return parallel_workers_active_; }
+    int thread_capacity() const noexcept { return thread_capacity_; }
+    bool openmp_enabled() const noexcept { return openmp_enabled_; }
+    int thread_limit_code() const noexcept { return thread_limit_code_; }
+    const std::string& thread_limit_reason() const noexcept {
+        return thread_limit_reason_;
+    }
     AbsorptionMethod absorption_method_used() const noexcept { return method_used_; }
     bool gpu_used() const noexcept { return gpu_used_; }
     int gpu_status_code() const noexcept { return gpu_status_code_; }
@@ -124,7 +147,18 @@ public:
     }
 
 private:
-    int resolve_threads(int n_rows, int num_fes) const;
+    struct ThreadResolution {
+        int requested = 0;
+        int effective = 1;
+        int capacity = 1;
+        bool openmp_enabled = false;
+        int limit_code = 0;
+        std::string limit_reason = "none";
+    };
+
+    ThreadResolution resolve_threads(int n_rows, int num_fes) const;
+    void begin_parallel_observation(const ThreadResolution& resolution);
+    void end_parallel_observation();
     AbsorptionMethod select_method(std::size_t num_fes) const;
     void apply_common_postprocessing(const Eigen::Ref<const Eigen::VectorXd>& y,
                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -136,6 +170,14 @@ private:
     ThreadingOptions threading_;
     HdfeResults results_;
     int threads_used_ = 1;
+    int threads_requested_ = 0;
+    int threads_effective_ = 1;
+    int parallel_workers_active_ = 1;
+    int thread_capacity_ = 1;
+    bool openmp_enabled_ = false;
+    int thread_limit_code_ = 0;
+    std::string thread_limit_reason_ = "none";
+    std::shared_ptr<detail::ParallelWorkObserver> parallel_observer_;
     AbsorptionMethod method_used_ = AbsorptionMethod::GaussSeidel;
     bool gpu_used_ = false;
     int gpu_status_code_ = 0;

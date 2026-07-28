@@ -446,6 +446,14 @@ compile_plugin() {
         rc=$?
         if [[ $rc -eq 0 ]]; then
           objs+=( "${cuda_obj}" )
+          cuda_certificate_obj="${OBJ_DIR}/fe_absorption_cuda_certificate.o"
+          "${CXX}" "${cxx_flags[@]}" \
+            -c "${STATA_DIR}/src/fe_absorption_cuda_certificate.cpp" \
+            -o "${cuda_certificate_obj}"
+          rc=$?
+        fi
+        if [[ $rc -eq 0 ]]; then
+          objs+=( "${cuda_certificate_obj}" )
           set -e
           break
         fi

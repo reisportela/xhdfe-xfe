@@ -1,4 +1,4 @@
-*! version 1.5.0  25jul2026
+*! version 1.5.0  28jul2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -973,11 +973,28 @@ program define xhdfegelbach, rclass sortpreserve
     return scalar share_t_min = `sharetmin'
     return scalar fe_variance_ratio_min = `fevarmin'
     return scalar sample_info_requested = `sample_requested'
-    foreach name in threads_used gpu_used gpu_status_code gpu_attempted ///
-        gpu_absorption_converged gpu_absorption_iterations {
+    foreach name in threads_requested threads_effective ///
+        fullfit_threads_used recovery_threads_used threads_used ///
+        thread_capacity openmp_enabled thread_limit_code gpu_used ///
+        gpu_status_code gpu_attempted gpu_absorption_converged ///
+        gpu_absorption_iterations {
         return scalar `name' = scalar(__xgel_`name')
         capture scalar drop __xgel_`name'
     }
+    return scalar recovery_threads_effective = ///
+        scalar(__xgel_recovery_thr_eff)
+    return scalar covariance_threads_used = scalar(__xgel_cov_threads_used)
+    return scalar fullfit_parallel_workers_active = ///
+        scalar(__xgel_fullfit_workers_active)
+    return scalar recovery_parallel_workers_active = ///
+        scalar(__xgel_recovery_workers_active)
+    return scalar cov_parallel_workers_active = ///
+        scalar(__xgel_cov_workers_active)
+    return scalar parallel_workers_active = scalar(__xgel_workers_active)
+    capture scalar drop __xgel_recovery_thr_eff __xgel_cov_threads_used ///
+        __xgel_fullfit_workers_active __xgel_recovery_workers_active ///
+        __xgel_cov_workers_active __xgel_workers_active
+    return local thread_limit_reason "`xgel_thread_limit_reason'"
     return scalar gpu_requested = scalar(__xgel_gpu_requested)
     capture scalar drop __xgel_identity_gap __xgel_n_obs_input __xgel_n_obs ///
         __xgel_n_common_fes __xgel_common_fes_applied __xgel_intercept_inf ///

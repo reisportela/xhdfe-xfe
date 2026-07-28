@@ -547,10 +547,11 @@ NULL
 #' @param level the confidence level for the reported intervals, either in
 #'   percent (\code{95}, the default) or as a fraction (\code{0.95}). Must
 #'   lie in (0, 100).
-#' @param threads number of threads used by the absorber; \code{0} (default)
-#'   enables automatic threading. The analogue of Stata's
-#'   \code{numthreads()}. Parallel absorption requires an OpenMP build of
-#'   the package (the default on Linux).
+#' @param threads requested OpenMP threads; \code{0} (default) enables
+#'   automatic threading. A positive request bypasses automatic row-count,
+#'   FE-shape, and \code{max_threads} heuristics and is clamped only to the
+#'   logical processors/OpenMP runtime limit visible to the process. A serial
+#'   build fails explicitly for requests above one.
 #' @param default_threads default thread count applied when automatic
 #'   threading is enabled; \code{0} lets the backend decide (Stata
 #'   \code{defaultthreads()}).
@@ -738,12 +739,14 @@ NULL
 #'     support \code{save_fe}.
 #'   \item No HAC or Driscoll-Kraay standard errors (see \code{ivreghdfe}
 #'     in the \code{reghdfe} ecosystem).
-#'   \item With IV/2SLS and absorbed fixed effects, the reported
-#'     \code{"(Intercept)"} is \emph{not identified}: this is documented
-#'     upstream behavior (Stata prints the same degenerate \code{_cons},
-#'     with a t-statistic near 0 and a p-value near 1), and users should
-#'     ignore that row.
 #' }
+#'
+#' With IV/2SLS and absorbed fixed effects, the reported
+#' \code{"(Intercept)"} is the normalization
+#' \eqn{\bar y-\bar x^\prime\hat\beta}, with zero-mean absorbed
+#' contributions. It is finite and internally consistent, but remains
+#' normalization-dependent and must not be interpreted as a structural IV
+#' parameter.
 #'
 #' @section Environment variables:
 #' The C++ core reads the following runtime knobs:
@@ -945,6 +948,13 @@ NULL
 #'   \item{\code{iterations}}{absorber iterations (\code{e(iterations)}).}
 #'   \item{\code{converged}}{1 if converged, 0 otherwise
 #'     (\code{e(converged)}).}
+#'   \item{\code{abs_residual}, \code{abs_residual_rel}}{explicit absolute and
+#'     relative normal-equation residuals verified after absorption.}
+#'   \item{\code{precision_certified}}{whether the verified relative residual
+#'     meets the numerical certificate limit. In the combined
+#'     \code{group}/\code{individual} path this check is authoritative:
+#'     additional certification sweeps are included in \code{iterations}, and
+#'     \code{converged} is true only when this field is also true.}
 #'   \item{\code{absorption_method_used}}{name of the method effectively
 #'     used (\code{"auto"}, \code{"gauss-seidel"},
 #'     \code{"symmetric-gauss-seidel"}, \code{"jacobi"}, \code{"schwarz"},
@@ -953,8 +963,15 @@ NULL
 #'     as Stata's \code{e(absorption_method_used)}: 0 auto, 1 gauss-seidel,
 #'     2 symmetric-gauss-seidel, 3 jacobi, 4 schwarz, 5 lsmr, 6 mlsmr,
 #'     7 auto-mlsmr.}
-#'   \item{\code{threads_used}}{threads used by the backend
-#'     (\code{e(threads_used)}).}
+#'   \item{\code{threads_requested}, \code{threads_effective}}{raw request
+#'     (0 means auto) and the request after runtime/automatic limits.}
+#'   \item{\code{threads_used}}{largest OpenMP team observed executing a real
+#'     xhdfe loop.}
+#'   \item{\code{parallel_workers_active}}{largest number of distinct workers
+#'     processing useful work in one observed region.}
+#'   \item{\code{thread_capacity}, \code{openmp_enabled},
+#'     \code{thread_limit_code}, \code{thread_limit_reason}}{runtime-visible
+#'     capacity, build capability, and any applied limit.}
 #'   \item{\code{tolerance_mode}}{tolerance mode used
 #'     (\code{e(tolerance_mode)}).}
 #'   \item{\code{gpu_used}}{1 if the GPU backend was effectively used, 0 if

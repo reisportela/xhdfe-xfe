@@ -9,6 +9,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/parallel_work_observer.hpp"
+
 #ifdef HDFE_USE_OPENMP
 #include <omp.h>
 #endif
@@ -30,6 +33,45 @@ struct KahanSum {
         c = (t - sum) - y;
         sum = t;
     }
+};
+
+inline int deterministic_ols_chunk_count(int n) {
+    return deterministic_parallel_chunk_count(n);
+}
+
+inline int deterministic_ols_chunk_begin(int n, int chunk, int chunks) {
+    return deterministic_parallel_chunk_begin(n, chunk, chunks);
+}
+
+inline int deterministic_ols_chunk_end(int n, int chunk, int chunks) {
+    return deterministic_parallel_chunk_end(n, chunk, chunks);
+}
+
+class ObservedOlsRegion {
+public:
+    ObservedOlsRegion(ParallelWorkObserver* observer,
+                      bool has_work,
+                      int expected_team)
+        : observer_(has_work ? observer : nullptr) {
+        if (observer_ != nullptr) {
+            observer_->begin_region(std::max(1, expected_team));
+        }
+    }
+
+    ~ObservedOlsRegion() noexcept(false) {
+        if (observer_ != nullptr) {
+            observer_->end_region();
+        }
+    }
+
+    void observe_work() const noexcept {
+        if (observer_ != nullptr) {
+            observer_->observe_work();
+        }
+    }
+
+private:
+    ParallelWorkObserver* observer_ = nullptr;
 };
 
 double weighted_sum_of_squares(const Eigen::VectorXd& values, const Eigen::VectorXd* weights) {
@@ -66,7 +108,8 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
                             double total_sum_squares,
                             double within_sum_squares,
                             double n_effective,
-                            bool weights_are_frequencies) {
+                            bool weights_are_frequencies,
+                            ParallelWorkObserver* parallel_observer) {
     static_assert(P > 0, "P must be positive");
     if (se_type == StandardErrorType::Cluster) {
         throw std::runtime_error("run_ols_fast_impl does not support clustered inference");
@@ -92,34 +135,34 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
     using MatPP = Eigen::Matrix<double, P, P>;
     using VecP = Eigen::Matrix<double, P, 1>;
 
-    std::vector<MatPP> xtx_tls(static_cast<std::size_t>(threads), MatPP::Zero());
-    std::vector<VecP> xty_tls(static_cast<std::size_t>(threads), VecP::Zero());
+    const int chunks = deterministic_ols_chunk_count(n);
+    std::vector<MatPP> xtx_tls(static_cast<std::size_t>(chunks), MatPP::Zero());
+    std::vector<VecP> xty_tls(static_cast<std::size_t>(chunks), VecP::Zero());
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(threads)
-#endif
     {
-        int tid = 0;
+        ObservedOlsRegion observed(
+            parallel_observer, chunks > 0, threads);
 #ifdef HDFE_USE_OPENMP
-        tid = omp_get_thread_num();
+#pragma omp parallel for schedule(static) num_threads(threads)
 #endif
-        MatPP& xtx_local = xtx_tls[static_cast<std::size_t>(tid)];
-        VecP& xty_local = xty_tls[static_cast<std::size_t>(tid)];
-
-#ifdef HDFE_USE_OPENMP
-#pragma omp for schedule(static)
-#endif
-        for (int i = 0; i < n; ++i) {
-            const double w = w_ptr ? w_ptr[i] : 1.0;
-            const double yi = y_ptr[i];
-            double xvals[P];
-            for (int j = 0; j < P; ++j) {
-                xvals[j] = x_ptrs[j][i];
-            }
-            for (int j = 0; j < P; ++j) {
-                xty_local(j) += w * xvals[j] * yi;
-                for (int k = 0; k <= j; ++k) {
-                    xtx_local(j, k) += w * xvals[j] * xvals[k];
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            observed.observe_work();
+            MatPP& xtx_local = xtx_tls[static_cast<std::size_t>(chunk)];
+            VecP& xty_local = xty_tls[static_cast<std::size_t>(chunk)];
+            const int begin = deterministic_ols_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_ols_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                const double w = w_ptr ? w_ptr[i] : 1.0;
+                const double yi = y_ptr[i];
+                double xvals[P];
+                for (int j = 0; j < P; ++j) {
+                    xvals[j] = x_ptrs[j][i];
+                }
+                for (int j = 0; j < P; ++j) {
+                    xty_local(j) += w * xvals[j] * yi;
+                    for (int k = 0; k <= j; ++k) {
+                        xtx_local(j, k) += w * xvals[j] * xvals[k];
+                    }
                 }
             }
         }
@@ -127,9 +170,9 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
 
     MatPP xtx = MatPP::Zero();
     VecP xty = VecP::Zero();
-    for (int t = 0; t < threads; ++t) {
-        xtx.noalias() += xtx_tls[static_cast<std::size_t>(t)];
-        xty.noalias() += xty_tls[static_cast<std::size_t>(t)];
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        xtx.noalias() += xtx_tls[static_cast<std::size_t>(chunk)];
+        xty.noalias() += xty_tls[static_cast<std::size_t>(chunk)];
     }
     for (int j = 0; j < P; ++j) {
         for (int k = j + 1; k < P; ++k) {
@@ -148,58 +191,58 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
     Eigen::VectorXd residuals(n);
     double* resid_ptr = residuals.data();
 
-    std::vector<long double> rss_tls(static_cast<std::size_t>(threads), 0.0L);
+    std::vector<long double> rss_tls(static_cast<std::size_t>(chunks), 0.0L);
     std::vector<MatPP> meat_tls;
     if (se_type == StandardErrorType::Robust) {
-        meat_tls.assign(static_cast<std::size_t>(threads), MatPP::Zero());
+        meat_tls.assign(static_cast<std::size_t>(chunks), MatPP::Zero());
     }
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(threads)
-#endif
     {
-        int tid = 0;
+        ObservedOlsRegion observed(
+            parallel_observer, chunks > 0, threads);
 #ifdef HDFE_USE_OPENMP
-        tid = omp_get_thread_num();
+#pragma omp parallel for schedule(static) num_threads(threads)
 #endif
-        KahanSum rss_local;
-        MatPP meat_local = MatPP::Zero();
-
-#ifdef HDFE_USE_OPENMP
-#pragma omp for schedule(static)
-#endif
-        for (int i = 0; i < n; ++i) {
-            double xvals[P];
-            for (int j = 0; j < P; ++j) {
-                xvals[j] = x_ptrs[j][i];
-            }
-            double fitted = 0.0;
-            for (int j = 0; j < P; ++j) {
-                fitted += xvals[j] * beta(j);
-            }
-            const double u = y_ptr[i] - fitted;
-            resid_ptr[i] = u;
-
-            const double w = w_ptr ? w_ptr[i] : 1.0;
-            rss_local.add(static_cast<long double>(w) *
-                          static_cast<long double>(u) * static_cast<long double>(u));
-
-            if (se_type == StandardErrorType::Robust) {
-                // fweight: replication semantics -> linear w in the robust meat;
-                // aweight/pweight: w^2 (matches Stata/areg/reghdfe).
-                const double w2 = w_ptr ? (weights_are_frequencies ? w : (w * w)) : 1.0;
-                const double scale = w2 * u * u;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            observed.observe_work();
+            KahanSum rss_local;
+            MatPP meat_local = MatPP::Zero();
+            const int begin = deterministic_ols_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_ols_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                double xvals[P];
                 for (int j = 0; j < P; ++j) {
-                    for (int k = 0; k <= j; ++k) {
-                        meat_local(j, k) += scale * xvals[j] * xvals[k];
+                    xvals[j] = x_ptrs[j][i];
+                }
+                double fitted = 0.0;
+                for (int j = 0; j < P; ++j) {
+                    fitted += xvals[j] * beta(j);
+                }
+                const double u = y_ptr[i] - fitted;
+                resid_ptr[i] = u;
+
+                const double w = w_ptr ? w_ptr[i] : 1.0;
+                rss_local.add(static_cast<long double>(w) *
+                              static_cast<long double>(u) * static_cast<long double>(u));
+
+                if (se_type == StandardErrorType::Robust) {
+                    // fweight: replication semantics -> linear w in the robust meat;
+                    // aweight/pweight: w^2 (matches Stata/areg/reghdfe).
+                    const double w2 =
+                        w_ptr ? (weights_are_frequencies ? w : (w * w)) : 1.0;
+                    const double scale = w2 * u * u;
+                    for (int j = 0; j < P; ++j) {
+                        for (int k = 0; k <= j; ++k) {
+                            meat_local(j, k) += scale * xvals[j] * xvals[k];
+                        }
                     }
                 }
             }
-        }
 
-        rss_tls[static_cast<std::size_t>(tid)] = rss_local.sum;
-        if (se_type == StandardErrorType::Robust) {
-            meat_tls[static_cast<std::size_t>(tid)] = std::move(meat_local);
+            rss_tls[static_cast<std::size_t>(chunk)] = rss_local.sum;
+            if (se_type == StandardErrorType::Robust) {
+                meat_tls[static_cast<std::size_t>(chunk)] = std::move(meat_local);
+            }
         }
     }
 
@@ -211,8 +254,8 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
 
     MatPP meat = MatPP::Zero();
     if (se_type == StandardErrorType::Robust) {
-        for (int t = 0; t < threads; ++t) {
-            meat.noalias() += meat_tls[static_cast<std::size_t>(t)];
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            meat.noalias() += meat_tls[static_cast<std::size_t>(chunk)];
         }
         for (int j = 0; j < P; ++j) {
             for (int k = j + 1; k < P; ++k) {
@@ -279,7 +322,8 @@ OlsResult run_ols_fast_from_xtx_impl(const Eigen::VectorXd& y,
                                      const Eigen::Matrix<double, P, P>& xtx,
                                      const Eigen::Matrix<double, P, 1>& xty,
                                      double n_effective,
-                                     bool weights_are_frequencies) {
+                                     bool weights_are_frequencies,
+                                     ParallelWorkObserver* parallel_observer) {
     static_assert(P > 0, "P must be positive");
     if (se_type == StandardErrorType::Cluster) {
         throw std::runtime_error("run_ols_fast_from_xtx_impl does not support clustered inference");
@@ -314,59 +358,61 @@ OlsResult run_ols_fast_from_xtx_impl(const Eigen::VectorXd& y,
     threads = std::max(1, omp_get_max_threads());
 #endif
 
-    std::vector<long double> rss_tls(static_cast<std::size_t>(threads), 0.0L);
+    const int chunks = deterministic_ols_chunk_count(n);
+    std::vector<long double> rss_tls(static_cast<std::size_t>(chunks), 0.0L);
     std::vector<Eigen::Matrix<double, P, P>> meat_tls;
     if (se_type == StandardErrorType::Robust) {
-        meat_tls.assign(static_cast<std::size_t>(threads),
+        meat_tls.assign(static_cast<std::size_t>(chunks),
                         Eigen::Matrix<double, P, P>::Zero());
     }
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(threads)
-#endif
     {
-        int tid = 0;
+        ObservedOlsRegion observed(
+            parallel_observer, chunks > 0, threads);
 #ifdef HDFE_USE_OPENMP
-        tid = omp_get_thread_num();
+#pragma omp parallel for schedule(static) num_threads(threads)
 #endif
-        KahanSum rss_local;
-        Eigen::Matrix<double, P, P> meat_local = Eigen::Matrix<double, P, P>::Zero();
-
-#ifdef HDFE_USE_OPENMP
-#pragma omp for schedule(static)
-#endif
-        for (int i = 0; i < n; ++i) {
-            double xvals[P];
-            for (int j = 0; j < P; ++j) {
-                xvals[j] = x_ptrs[j][i];
-            }
-            double fitted = 0.0;
-            for (int j = 0; j < P; ++j) {
-                fitted += xvals[j] * beta(j);
-            }
-            const double u = y_ptr[i] - fitted;
-            resid_ptr[i] = u;
-
-            const double w = w_ptr ? w_ptr[i] : 1.0;
-            rss_local.add(static_cast<long double>(w) *
-                          static_cast<long double>(u) * static_cast<long double>(u));
-
-            if (se_type == StandardErrorType::Robust) {
-                // fweight: replication semantics -> linear w in the robust meat;
-                // aweight/pweight: w^2 (matches Stata/areg/reghdfe).
-                const double w2 = w_ptr ? (weights_are_frequencies ? w : (w * w)) : 1.0;
-                const double scale = w2 * u * u;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            observed.observe_work();
+            KahanSum rss_local;
+            Eigen::Matrix<double, P, P> meat_local =
+                Eigen::Matrix<double, P, P>::Zero();
+            const int begin = deterministic_ols_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_ols_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                double xvals[P];
                 for (int j = 0; j < P; ++j) {
-                    for (int k = 0; k <= j; ++k) {
-                        meat_local(j, k) += scale * xvals[j] * xvals[k];
+                    xvals[j] = x_ptrs[j][i];
+                }
+                double fitted = 0.0;
+                for (int j = 0; j < P; ++j) {
+                    fitted += xvals[j] * beta(j);
+                }
+                const double u = y_ptr[i] - fitted;
+                resid_ptr[i] = u;
+
+                const double w = w_ptr ? w_ptr[i] : 1.0;
+                rss_local.add(static_cast<long double>(w) *
+                              static_cast<long double>(u) * static_cast<long double>(u));
+
+                if (se_type == StandardErrorType::Robust) {
+                    // fweight: replication semantics -> linear w in the robust meat;
+                    // aweight/pweight: w^2 (matches Stata/areg/reghdfe).
+                    const double w2 =
+                        w_ptr ? (weights_are_frequencies ? w : (w * w)) : 1.0;
+                    const double scale = w2 * u * u;
+                    for (int j = 0; j < P; ++j) {
+                        for (int k = 0; k <= j; ++k) {
+                            meat_local(j, k) += scale * xvals[j] * xvals[k];
+                        }
                     }
                 }
             }
-        }
 
-        rss_tls[static_cast<std::size_t>(tid)] = rss_local.sum;
-        if (se_type == StandardErrorType::Robust) {
-            meat_tls[static_cast<std::size_t>(tid)] = std::move(meat_local);
+            rss_tls[static_cast<std::size_t>(chunk)] = rss_local.sum;
+            if (se_type == StandardErrorType::Robust) {
+                meat_tls[static_cast<std::size_t>(chunk)] = std::move(meat_local);
+            }
         }
     }
 
@@ -378,8 +424,8 @@ OlsResult run_ols_fast_from_xtx_impl(const Eigen::VectorXd& y,
 
     Eigen::Matrix<double, P, P> meat = Eigen::Matrix<double, P, P>::Zero();
     if (se_type == StandardErrorType::Robust) {
-        for (int t = 0; t < threads; ++t) {
-            meat.noalias() += meat_tls[static_cast<std::size_t>(t)];
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            meat.noalias() += meat_tls[static_cast<std::size_t>(chunk)];
         }
         for (int j = 0; j < P; ++j) {
             for (int k = j + 1; k < P; ++k) {
@@ -448,7 +494,9 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
                                     int* num_clusters_out,
                                     Eigen::VectorXd* cluster_ux_out,
                                     double* cluster_u2_out,
-                                    bool weights_are_frequencies) {
+                                    bool weights_are_frequencies,
+                                    bool num_threads_explicit,
+                                    ParallelWorkObserver* parallel_observer) {
     const int p = static_cast<int>(WX.cols());
     const int n = static_cast<int>(WX.rows());
     Eigen::MatrixXd cov = Eigen::MatrixXd::Zero(p, p);
@@ -541,40 +589,55 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
                 static_cast<std::size_t>(next_cluster) * static_cast<std::size_t>(p));
             std::vector<double> run_u_sums(static_cast<std::size_t>(next_cluster));
 
-#ifdef HDFE_USE_OPENMP
             // Per-run scores are each accumulated serially by one thread in
             // observation order and combined serially in run order below, so
             // the result is bit-identical at any thread count. The historical
-            // 8-thread cap is kept below the large-n gate and lifted above it,
-            // where the scan is memory-bandwidth bound.
-            const int cluster_threads =
-                (n >= 4194304) ? std::max(1, omp_get_max_threads())
-                               : std::min(std::max(1, omp_get_max_threads()), 8);
+            // 8-thread cap remains an auto-only performance heuristic below
+            // the large-n gate. An explicit request is honored up to the
+            // OpenMP runtime capacity.
+            int cluster_threads = 1;
+#ifdef HDFE_USE_OPENMP
+            cluster_threads =
+                (num_threads_explicit || n >= 4194304)
+                    ? std::max(1, omp_get_max_threads())
+                    : std::min(std::max(1, omp_get_max_threads()), 8);
+#endif
+            {
+                ObservedOlsRegion observed(
+                    parallel_observer, next_cluster > 0, cluster_threads);
+#ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(cluster_threads)
 #endif
-            for (int r = 0; r < next_cluster; ++r) {
-                const int start = run_starts[static_cast<std::size_t>(r)];
-                const int end = run_ends[static_cast<std::size_t>(r)];
-                double run_score[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-                double run_u_sum = 0.0;
-                for (int obs = start; obs < end; ++obs) {
-                    const double scaled_u =
-                        sqrt_weights ? residuals(obs) * (*sqrt_weights)(obs) : residuals(obs);
+                for (int r = 0; r < next_cluster; ++r) {
+                    observed.observe_work();
+                    const int start = run_starts[static_cast<std::size_t>(r)];
+                    const int end = run_ends[static_cast<std::size_t>(r)];
+                    double run_score[8] =
+                        {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+                    double run_u_sum = 0.0;
+                    for (int obs = start; obs < end; ++obs) {
+                        const double scaled_u =
+                            sqrt_weights
+                                ? residuals(obs) * (*sqrt_weights)(obs)
+                                : residuals(obs);
+                        for (int j = 0; j < p; ++j) {
+                            run_score[j] += WX(obs, j) * scaled_u;
+                        }
+                        double u_score = scaled_u;
+                        if (sqrt_weights) {
+                            u_score *= (*sqrt_weights)(obs);
+                        }
+                        run_u_sum += u_score;
+                    }
+                    double* score =
+                        run_scores.data() +
+                        static_cast<std::size_t>(r) *
+                            static_cast<std::size_t>(p);
                     for (int j = 0; j < p; ++j) {
-                        run_score[j] += WX(obs, j) * scaled_u;
+                        score[static_cast<std::size_t>(j)] = run_score[j];
                     }
-                    double u_score = scaled_u;
-                    if (sqrt_weights) {
-                        u_score *= (*sqrt_weights)(obs);
-                    }
-                    run_u_sum += u_score;
+                    run_u_sums[static_cast<std::size_t>(r)] = run_u_sum;
                 }
-                double* score = run_scores.data() +
-                                static_cast<std::size_t>(r) * static_cast<std::size_t>(p);
-                for (int j = 0; j < p; ++j) {
-                    score[static_cast<std::size_t>(j)] = run_score[j];
-                }
-                run_u_sums[static_cast<std::size_t>(r)] = run_u_sum;
             }
 
             Eigen::MatrixXd meat = Eigen::MatrixXd::Zero(p, p);
@@ -1097,7 +1160,9 @@ OlsResult run_ols_fast_from_xtx(const Eigen::VectorXd& y,
                                 const Eigen::MatrixXd& xtx,
                                 const Eigen::VectorXd& xty,
                                 double n_effective,
-                                bool weights_are_frequencies) {
+                                bool weights_are_frequencies,
+                                bool num_threads_explicit,
+                                ParallelWorkObserver* parallel_observer) {
     if (se_type == StandardErrorType::Cluster) {
         throw std::runtime_error("run_ols_fast_from_xtx does not support clustered inference");
     }
@@ -1114,40 +1179,49 @@ OlsResult run_ols_fast_from_xtx(const Eigen::VectorXd& y,
         case 1:
             return run_ols_fast_from_xtx_impl<1>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 2:
             return run_ols_fast_from_xtx_impl<2>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 3:
             return run_ols_fast_from_xtx_impl<3>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 4:
             return run_ols_fast_from_xtx_impl<4>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 5:
             return run_ols_fast_from_xtx_impl<5>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 6:
             return run_ols_fast_from_xtx_impl<6>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 7:
             return run_ols_fast_from_xtx_impl<7>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         case 8:
             return run_ols_fast_from_xtx_impl<8>(y, X, weights, se_type, total_sum_squares,
                                                  within_sum_squares, xtx, xty, n_eff,
-                                                 weights_are_frequencies);
+                                                 weights_are_frequencies,
+                                                 parallel_observer);
         default:
             break;
     }
     return run_ols(y, X, weights, nullptr, se_type, total_sum_squares, within_sum_squares, n_eff,
-                   weights_are_frequencies);
+                   weights_are_frequencies, nullptr, num_threads_explicit,
+                   parallel_observer);
 }
 
 OlsResult run_ols(const Eigen::VectorXd& y,
@@ -1159,7 +1233,9 @@ OlsResult run_ols(const Eigen::VectorXd& y,
                   double within_sum_squares,
                   double n_effective,
                   bool weights_are_frequencies,
-                  const Eigen::MatrixXd* X_for_residuals) {
+                  const Eigen::MatrixXd* X_for_residuals,
+                  bool num_threads_explicit,
+                  ParallelWorkObserver* parallel_observer) {
     const int n = static_cast<int>(y.size());
     if (X.rows() != n) {
         throw std::runtime_error("OLS called with inconsistent dimensions");
@@ -1179,28 +1255,36 @@ OlsResult run_ols(const Eigen::VectorXd& y,
         switch (p) {
             case 1:
                 return run_ols_fast_impl<1>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 2:
                 return run_ols_fast_impl<2>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 3:
                 return run_ols_fast_impl<3>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 4:
                 return run_ols_fast_impl<4>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 5:
                 return run_ols_fast_impl<5>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 6:
                 return run_ols_fast_impl<6>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 7:
                 return run_ols_fast_impl<7>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             case 8:
                 return run_ols_fast_impl<8>(y, X, weights, se_type, total_sum_squares,
-                                            within_sum_squares, n_eff, weights_are_frequencies);
+                                            within_sum_squares, n_eff, weights_are_frequencies,
+                                            parallel_observer);
             default:
                 break;
         }
@@ -1208,15 +1292,19 @@ OlsResult run_ols(const Eigen::VectorXd& y,
 
     // Large unweighted problems take a copy-free, thread-parallel path: WX/Wy
     // would be byte-for-byte copies of X/y that are only ever read, and the
-    // Eigen GEMM/matvec passes below run single-threaded over multi-GB
-    // arrays. Below the gate (and for every weighted call) the historical
-    // code runs verbatim, so results there are bit-identical by construction.
+    // Eigen GEMM/matvec passes below run single-threaded over multi-GB arrays.
+    // The size threshold and the weighted serial path are auto-only
+    // profitability choices. An explicit request selects the same
+    // deterministic arithmetic graph whenever there are observations to
+    // process; weighted score storage is still materialized for covariance.
     constexpr int kParallelOlsMinObs = 4194304;
-    bool parallel_unweighted = false;
+    bool parallel_moments = false;
     int ols_threads = 1;
 #ifdef HDFE_USE_OPENMP
     ols_threads = std::max(1, omp_get_max_threads());
-    parallel_unweighted = (weights == nullptr) && n >= kParallelOlsMinObs && ols_threads > 1;
+    parallel_moments =
+        num_threads_explicit ||
+        ((weights == nullptr) && n >= kParallelOlsMinObs);
 #endif
 
     Eigen::VectorXd Wy;
@@ -1224,7 +1312,7 @@ OlsResult run_ols(const Eigen::VectorXd& y,
     Eigen::VectorXd sqrt_weights;
     Eigen::MatrixXd xtx;
     Eigen::VectorXd xty;
-    if (!parallel_unweighted) {
+    if (!parallel_moments) {
         Wy = y;
         WX = X;
         if (weights) {
@@ -1242,38 +1330,66 @@ OlsResult run_ols(const Eigen::VectorXd& y,
     }
 #ifdef HDFE_USE_OPENMP
     else {
-        // Deterministic TLS accumulation: static row ranges per thread,
-        // partials combined in thread-id order.
-        std::vector<Eigen::MatrixXd> xtx_tls(static_cast<std::size_t>(ols_threads),
+        const double* weight_ptr = nullptr;
+        if (weights) {
+            if (weights->size() != n) {
+                throw std::runtime_error(
+                    "Weights must align with y in run_ols");
+            }
+            sqrt_weights = weights->array().sqrt();
+            WX = X;
+            for (int j = 0; j < p; ++j) {
+                WX.col(j).array() *= sqrt_weights.array();
+            }
+            weight_ptr = weights->data();
+        }
+        // Fixed logical chunks make the arithmetic graph independent of the
+        // number of OpenMP workers. Threads only execute chunks; the partials
+        // are always combined in chunk-index order.
+        const int chunks = deterministic_ols_chunk_count(n);
+        std::vector<Eigen::MatrixXd> xtx_tls(static_cast<std::size_t>(chunks),
                                              Eigen::MatrixXd::Zero(p, p));
-        std::vector<Eigen::VectorXd> xty_tls(static_cast<std::size_t>(ols_threads),
+        std::vector<Eigen::VectorXd> xty_tls(static_cast<std::size_t>(chunks),
                                              Eigen::VectorXd::Zero(p));
         const double* y_ptr = y.data();
         const double* x_base = X.data();
         const Eigen::Index x_rows = X.rows();
-#pragma omp parallel num_threads(ols_threads)
         {
-            const int tid = omp_get_thread_num();
-            Eigen::MatrixXd& xtx_local = xtx_tls[static_cast<std::size_t>(tid)];
-            Eigen::VectorXd& xty_local = xty_tls[static_cast<std::size_t>(tid)];
-#pragma omp for schedule(static)
-            for (int i = 0; i < n; ++i) {
-                const double yi = y_ptr[i];
-                for (int j = 0; j < p; ++j) {
-                    const double xij = x_base[static_cast<Eigen::Index>(j) * x_rows + i];
-                    xty_local(j) += xij * yi;
-                    for (int k = 0; k <= j; ++k) {
-                        xtx_local(j, k) +=
-                            xij * x_base[static_cast<Eigen::Index>(k) * x_rows + i];
+            ObservedOlsRegion observed(
+                parallel_observer, chunks > 0, ols_threads);
+#pragma omp parallel for schedule(static) num_threads(ols_threads)
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                observed.observe_work();
+                Eigen::MatrixXd& xtx_local =
+                    xtx_tls[static_cast<std::size_t>(chunk)];
+                Eigen::VectorXd& xty_local =
+                    xty_tls[static_cast<std::size_t>(chunk)];
+                const int begin =
+                    deterministic_ols_chunk_begin(n, chunk, chunks);
+                const int end =
+                    deterministic_ols_chunk_end(n, chunk, chunks);
+                for (int i = begin; i < end; ++i) {
+                    const double yi = y_ptr[i];
+                    const double w = weight_ptr ? weight_ptr[i] : 1.0;
+                    for (int j = 0; j < p; ++j) {
+                        const double xij =
+                            x_base[static_cast<Eigen::Index>(j) * x_rows + i];
+                        xty_local(j) += w * xij * yi;
+                        for (int k = 0; k <= j; ++k) {
+                            xtx_local(j, k) +=
+                                w * xij *
+                                x_base[
+                                    static_cast<Eigen::Index>(k) * x_rows + i];
+                        }
                     }
                 }
             }
         }
         xtx = Eigen::MatrixXd::Zero(p, p);
         xty = Eigen::VectorXd::Zero(p);
-        for (int t = 0; t < ols_threads; ++t) {
-            xtx.noalias() += xtx_tls[static_cast<std::size_t>(t)];
-            xty.noalias() += xty_tls[static_cast<std::size_t>(t)];
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            xtx.noalias() += xtx_tls[static_cast<std::size_t>(chunk)];
+            xty.noalias() += xty_tls[static_cast<std::size_t>(chunk)];
         }
         for (int j = 0; j < p; ++j) {
             for (int k = j + 1; k < p; ++k) {
@@ -1293,7 +1409,7 @@ OlsResult run_ols(const Eigen::VectorXd& y,
 
     Eigen::VectorXd residuals(n);
     double rss = 0.0;
-    if (!parallel_unweighted) {
+    if (!parallel_moments) {
         Eigen::VectorXd fitted =
             X_for_residuals ? Eigen::VectorXd((*X_for_residuals) * beta)
                             : Eigen::VectorXd(X * beta);
@@ -1303,28 +1419,45 @@ OlsResult run_ols(const Eigen::VectorXd& y,
 #ifdef HDFE_USE_OPENMP
     else {
         // Each residual element is written by exactly one thread with the
-        // same per-element column accumulation order as the Eigen matvec;
-        // the RSS uses per-thread Kahan partials combined in thread-id order.
+        // same per-element column accumulation order; RSS chunks and their
+        // combine order are fixed independently of the team size.
         const double* y_ptr = y.data();
         const double* x_base = X_for_residuals ? X_for_residuals->data() : X.data();
         const Eigen::Index x_rows = X_for_residuals ? X_for_residuals->rows() : X.rows();
         double* resid_ptr = residuals.data();
-        std::vector<long double> rss_tls(static_cast<std::size_t>(ols_threads), 0.0L);
-#pragma omp parallel num_threads(ols_threads)
+        const double* weight_ptr = weights ? weights->data() : nullptr;
+        const int chunks = deterministic_ols_chunk_count(n);
+        std::vector<long double> rss_tls(static_cast<std::size_t>(chunks), 0.0L);
         {
-            const int tid = omp_get_thread_num();
-            KahanSum rss_local;
-#pragma omp for schedule(static)
-            for (int i = 0; i < n; ++i) {
-                double fitted_i = 0.0;
-                for (int j = 0; j < p; ++j) {
-                    fitted_i += x_base[static_cast<Eigen::Index>(j) * x_rows + i] * beta(j);
+            ObservedOlsRegion observed(
+                parallel_observer, chunks > 0, ols_threads);
+#pragma omp parallel for schedule(static) num_threads(ols_threads)
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                observed.observe_work();
+                KahanSum rss_local;
+                const int begin =
+                    deterministic_ols_chunk_begin(n, chunk, chunks);
+                const int end =
+                    deterministic_ols_chunk_end(n, chunk, chunks);
+                for (int i = begin; i < end; ++i) {
+                    double fitted_i = 0.0;
+                    for (int j = 0; j < p; ++j) {
+                        fitted_i +=
+                            x_base[
+                                static_cast<Eigen::Index>(j) * x_rows + i] *
+                            beta(j);
+                    }
+                    const double u = y_ptr[i] - fitted_i;
+                    resid_ptr[i] = u;
+                    const long double w =
+                        static_cast<long double>(
+                            weight_ptr ? weight_ptr[i] : 1.0);
+                    rss_local.add(
+                        w * static_cast<long double>(u) *
+                        static_cast<long double>(u));
                 }
-                const double u = y_ptr[i] - fitted_i;
-                resid_ptr[i] = u;
-                rss_local.add(static_cast<long double>(u) * static_cast<long double>(u));
+                rss_tls[static_cast<std::size_t>(chunk)] = rss_local.sum;
             }
-            rss_tls[static_cast<std::size_t>(tid)] = rss_local.sum;
         }
         long double rss_acc = 0.0L;
         for (long double v : rss_tls) {
@@ -1344,13 +1477,16 @@ OlsResult run_ols(const Eigen::VectorXd& y,
     // On the copy-free path WX was never materialized; the unweighted scores
     // read X directly (identical values to the historical WX copy).
     const Eigen::Ref<const Eigen::MatrixXd> WX_used =
-        parallel_unweighted ? Eigen::Ref<const Eigen::MatrixXd>(X)
-                            : Eigen::Ref<const Eigen::MatrixXd>(WX);
+        (parallel_moments && weights == nullptr)
+            ? Eigen::Ref<const Eigen::MatrixXd>(X)
+            : Eigen::Ref<const Eigen::MatrixXd>(WX);
     Eigen::MatrixXd covariance = compute_covariance(xtx_inv, WX_used, residuals, sqrt_ptr, clusters,
                                                     se_type, sigma2, df_resid, n_eff, &num_clusters,
                                                     (se_type == StandardErrorType::Cluster) ? &cluster_ux : nullptr,
                                                     (se_type == StandardErrorType::Cluster) ? &cluster_u2 : nullptr,
-                                                    weights_are_frequencies);
+                                                    weights_are_frequencies,
+                                                    num_threads_explicit,
+                                                    parallel_observer);
     double cov_scale = 1.0;
     if (se_type == StandardErrorType::Cluster) {
         const int G = num_clusters;
@@ -1447,7 +1583,9 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            ClusterDofMethod g_df,
                            bool g_adj,
                            double n_effective,
-                           const Eigen::MatrixXd* X_for_residuals) {
+                           const Eigen::MatrixXd* X_for_residuals,
+                           bool num_threads_explicit,
+                           ParallelWorkObserver* parallel_observer) {
     if (se_type != StandardErrorType::Cluster) {
         throw std::runtime_error("run_ols_multiway is only valid for clustered inference");
     }
@@ -1457,7 +1595,8 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
     }
     if (clusters->size() == 1) {
         return run_ols(y, X, weights, &(*clusters)[0], se_type, total_sum_squares, within_sum_squares,
-                       n_effective, false, X_for_residuals);
+                       n_effective, false, X_for_residuals,
+                       num_threads_explicit, parallel_observer);
     }
 
     const int n = static_cast<int>(y.size());
@@ -1493,8 +1632,81 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
         }
     }
 
-    Eigen::MatrixXd xtx = WX.transpose() * WX;
-    Eigen::VectorXd xty = WX.transpose() * Wy;
+    bool parallel_moments = false;
+    int ols_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    ols_threads = std::max(1, omp_get_max_threads());
+    parallel_moments = num_threads_explicit;
+#endif
+
+    Eigen::MatrixXd xtx;
+    Eigen::VectorXd xty;
+    if (!parallel_moments) {
+        xtx = WX.transpose() * WX;
+        xty = WX.transpose() * Wy;
+    }
+#ifdef HDFE_USE_OPENMP
+    else {
+        // Explicit requests use fixed logical chunks. The arithmetic graph is
+        // therefore identical for explicit 1, 8, 48, or any other runtime-
+        // permitted team size.
+        const int chunks = deterministic_ols_chunk_count(n);
+        std::vector<Eigen::MatrixXd> xtx_tls(
+            static_cast<std::size_t>(chunks),
+            Eigen::MatrixXd::Zero(p, p));
+        std::vector<Eigen::VectorXd> xty_tls(
+            static_cast<std::size_t>(chunks),
+            Eigen::VectorXd::Zero(p));
+        const double* y_ptr = y.data();
+        const double* x_base = X.data();
+        const double* weight_ptr = weights ? weights->data() : nullptr;
+        const Eigen::Index x_rows = X.rows();
+        {
+            ObservedOlsRegion observed(
+                parallel_observer, chunks > 0, ols_threads);
+#pragma omp parallel for schedule(static) num_threads(ols_threads)
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                observed.observe_work();
+                Eigen::MatrixXd& xtx_local =
+                    xtx_tls[static_cast<std::size_t>(chunk)];
+                Eigen::VectorXd& xty_local =
+                    xty_tls[static_cast<std::size_t>(chunk)];
+                const int begin =
+                    deterministic_ols_chunk_begin(n, chunk, chunks);
+                const int end =
+                    deterministic_ols_chunk_end(n, chunk, chunks);
+                for (int i = begin; i < end; ++i) {
+                    const double yi = y_ptr[i];
+                    const double w = weight_ptr ? weight_ptr[i] : 1.0;
+                    for (int j = 0; j < p; ++j) {
+                        const double xij =
+                            x_base[
+                                static_cast<Eigen::Index>(j) * x_rows + i];
+                        xty_local(j) += w * xij * yi;
+                        for (int k = 0; k <= j; ++k) {
+                            xtx_local(j, k) +=
+                                w * xij *
+                                x_base[
+                                    static_cast<Eigen::Index>(k) * x_rows + i];
+                        }
+                    }
+                }
+            }
+        }
+        xtx = Eigen::MatrixXd::Zero(p, p);
+        xty = Eigen::VectorXd::Zero(p);
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            xtx.noalias() += xtx_tls[static_cast<std::size_t>(chunk)];
+            xty.noalias() += xty_tls[static_cast<std::size_t>(chunk)];
+        }
+        for (int j = 0; j < p; ++j) {
+            for (int k = j + 1; k < p; ++k) {
+                xtx(j, k) = xtx(k, j);
+            }
+        }
+    }
+#endif
+
     Eigen::LDLT<Eigen::MatrixXd> solver;
     solver.compute(xtx);
     if (solver.info() != Eigen::Success) {
@@ -1503,17 +1715,76 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
     Eigen::VectorXd beta = solver.solve(xty);
     Eigen::MatrixXd xtx_inv = solver.solve(Eigen::MatrixXd::Identity(p, p));
 
-    Eigen::VectorXd fitted = X_for_residuals ? Eigen::VectorXd((*X_for_residuals) * beta)
-                                             : Eigen::VectorXd(X * beta);
-    Eigen::VectorXd residuals = y - fitted;
+    Eigen::VectorXd residuals(n);
+    double rss = 0.0;
+    if (!parallel_moments) {
+        Eigen::VectorXd fitted =
+            X_for_residuals
+                ? Eigen::VectorXd((*X_for_residuals) * beta)
+                : Eigen::VectorXd(X * beta);
+        residuals = y - fitted;
+        rss = weighted_sum_of_squares(residuals, weights);
+    }
+#ifdef HDFE_USE_OPENMP
+    else {
+        const double* y_ptr = y.data();
+        const double* x_base =
+            X_for_residuals ? X_for_residuals->data() : X.data();
+        const Eigen::Index x_rows =
+            X_for_residuals ? X_for_residuals->rows() : X.rows();
+        const double* weight_ptr = weights ? weights->data() : nullptr;
+        double* residual_ptr = residuals.data();
+        const int chunks = deterministic_ols_chunk_count(n);
+        std::vector<long double> rss_tls(
+            static_cast<std::size_t>(chunks), 0.0L);
+        {
+            ObservedOlsRegion observed(
+                parallel_observer, chunks > 0, ols_threads);
+#pragma omp parallel for schedule(static) num_threads(ols_threads)
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                observed.observe_work();
+                KahanSum rss_local;
+                const int begin =
+                    deterministic_ols_chunk_begin(n, chunk, chunks);
+                const int end =
+                    deterministic_ols_chunk_end(n, chunk, chunks);
+                for (int i = begin; i < end; ++i) {
+                    double fitted_i = 0.0;
+                    for (int j = 0; j < p; ++j) {
+                        fitted_i +=
+                            x_base[
+                                static_cast<Eigen::Index>(j) * x_rows + i] *
+                            beta(j);
+                    }
+                    const double u = y_ptr[i] - fitted_i;
+                    residual_ptr[i] = u;
+                    const long double w =
+                        static_cast<long double>(
+                            weight_ptr ? weight_ptr[i] : 1.0);
+                    rss_local.add(
+                        w * static_cast<long double>(u) *
+                        static_cast<long double>(u));
+                }
+                rss_tls[static_cast<std::size_t>(chunk)] = rss_local.sum;
+            }
+        }
+        long double rss_acc = 0.0L;
+        for (long double value : rss_tls) {
+            rss_acc += value;
+        }
+        rss = static_cast<double>(rss_acc);
+    }
+#endif
 
-    const double rss = weighted_sum_of_squares(residuals, weights);
     const double df_resid = std::max(0.0, n_eff - static_cast<double>(p));
     const double sigma2 =
         (df_resid > 0.0) ? rss / df_resid : 0.0;
 
     const Eigen::VectorXd* sqrt_ptr = weights ? &sqrt_weights : nullptr;
     int min_clusters = 0;
+    // Inclusion-exclusion covariance remains deliberately serial. Only the
+    // deterministic bread/xty and residual/RSS loops above report parallel
+    // work; this serial phase must not manufacture observer evidence.
     Eigen::MatrixXd covariance = compute_covariance_multiway(
         xtx_inv, WX, residuals, sqrt_ptr, *clusters, df_resid, n_eff, &min_clusters, g_df, g_adj);
 

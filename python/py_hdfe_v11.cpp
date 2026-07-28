@@ -593,6 +593,15 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                          py::object ssc_g_df,
                          py::object ssc_t_df,
                          const std::string& tolerance_mode) {
+                 if (num_threads < 0 || default_threads < 0 ||
+                     max_threads < 0) {
+                     throw std::invalid_argument(
+                         "num_threads, default_threads, and max_threads must be nonnegative");
+                 }
+                 if (min_parallel_rows <= 0 || target_rows_per_thread <= 0) {
+                     throw std::invalid_argument(
+                         "min_parallel_rows and target_rows_per_thread must be positive");
+                 }
                  HdfeOptions opts;
                  opts.se_type = parse_se_type(se_type);
                  if (level > 0.0 && level <= 1.0) {
@@ -1019,6 +1028,14 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                 out["iterations"] = res.iterations;
                 out["converged"] = res.converged;
                 out["mse"] = res.mse;
+                out["threads_requested"] = res.threads_requested;
+                out["threads_effective"] = res.threads_effective;
+                out["threads_used"] = res.threads_used;
+                out["parallel_workers_active"] = res.parallel_workers_active;
+                out["thread_capacity"] = res.thread_capacity;
+                out["openmp_enabled"] = res.openmp_enabled;
+                out["thread_limit_code"] = res.thread_limit_code;
+                out["thread_limit_reason"] = res.thread_limit_reason;
                 return out;
             },
             py::arg("y"),
@@ -1143,6 +1160,15 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         .def_property_readonly("num_iterations_", [](const HdfeRegressorV11& self) {
             return self.results().num_iterations;
         })
+        .def_property_readonly("abs_residual_", [](const HdfeRegressorV11& self) {
+            return self.results().abs_residual;
+        })
+        .def_property_readonly("abs_residual_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().abs_residual_rel;
+        })
+        .def_property_readonly("precision_certified_", [](const HdfeRegressorV11& self) {
+            return self.results().precision_certified;
+        })
         .def_property_readonly("groupvar_", [](const HdfeRegressorV11& self) {
             return self.results().groupvar;
         })
@@ -1160,6 +1186,27 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         })
         .def_property_readonly("threads_used_", [](const HdfeRegressorV11& self) {
             return self.threads_used();
+        })
+        .def_property_readonly("threads_requested_", [](const HdfeRegressorV11& self) {
+            return self.threads_requested();
+        })
+        .def_property_readonly("threads_effective_", [](const HdfeRegressorV11& self) {
+            return self.threads_effective();
+        })
+        .def_property_readonly("parallel_workers_active_", [](const HdfeRegressorV11& self) {
+            return self.parallel_workers_active();
+        })
+        .def_property_readonly("thread_capacity_", [](const HdfeRegressorV11& self) {
+            return self.thread_capacity();
+        })
+        .def_property_readonly("openmp_enabled_", [](const HdfeRegressorV11& self) {
+            return self.openmp_enabled();
+        })
+        .def_property_readonly("thread_limit_code_", [](const HdfeRegressorV11& self) {
+            return self.thread_limit_code();
+        })
+        .def_property_readonly("thread_limit_reason_", [](const HdfeRegressorV11& self) {
+            return self.thread_limit_reason();
         })
         .def_property_readonly("gpu_used_", [](const HdfeRegressorV11& self) {
             return self.gpu_used();
@@ -1231,13 +1278,24 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         d["n_movers"] = s.n_movers;
         d["n_stayers"] = s.n_stayers;
         d["prune_iterations"] = s.prune_iterations;
+        d["threads_requested"] = s.threads_requested;
+        d["threads_effective"] = s.threads_effective;
+        d["threads_used"] = s.threads_used;
+        d["parallel_workers_active"] = s.parallel_workers_active;
+        d["thread_capacity"] = s.thread_capacity;
+        d["openmp_enabled"] = s.openmp_enabled;
+        d["thread_limit_code"] = s.thread_limit_code;
+        d["thread_limit_reason"] = s.thread_limit_reason;
+        d["gpu_used"] = s.gpu_used;
+        d["gpu_status_code"] = s.gpu_status_code;
         return d;
     };
 
     m.def(
         "akm_leave_out_set",
         [set_to_dict](py::object worker_obj, py::object firm_obj,
-                      py::object fweights_obj) {
+                      py::object fweights_obj, int num_threads, bool gpu,
+                      int verbose) {
             py::array w_arr = py::array(worker_obj);
             py::array f_arr = py::array(firm_obj);
             if (w_arr.ndim() != 1 || f_arr.ndim() != 1 || w_arr.shape(0) != f_arr.shape(0)) {
@@ -1255,17 +1313,24 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                 }
                 fw_vec = Eigen::Map<const Eigen::VectorXd>(fw_arr.data(), n);
             }
+            hdfe::akm::LeaveOutSetOptions options;
+            options.num_threads = num_threads;
+            options.use_gpu = gpu;
+            options.verbose = verbose;
             hdfe::akm::LeaveOutSetResult s;
             {
                 py::gil_scoped_release release;
-                s = hdfe::akm::leave_out_connected_set(w, f, fw_vec ? &(*fw_vec) : nullptr);
+                s = hdfe::akm::leave_out_connected_set(
+                    w, f, fw_vec ? &(*fw_vec) : nullptr, options);
             }
             return set_to_dict(s);
         },
         py::arg("worker"), py::arg("firm"), py::arg("fweights") = py::none(),
+        py::arg("num_threads") = 0, py::arg("gpu") = false,
+        py::arg("verbose") = 0,
         "Largest leave-one-out connected set of the worker-firm bipartite graph "
         "(LeaveOutTwoWay / KSS semantics). Returns a dict with a boolean 'keep' "
-        "mask over the input rows plus sample counts.");
+        "mask over the input rows plus sample and execution diagnostics.");
 
     m.def(
         "akm_kss",
@@ -1438,10 +1503,37 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["mean_pii"] = r.mean_pii;
             d["n_rows"] = r.n_rows;
             d["leverages_exact"] = r.leverages_exact;
+            d["gpu_requested"] = r.gpu_requested;
             d["gpu_used"] = r.gpu_used;
+            d["gpu_status_code"] = r.gpu_status_code;
+            d["gpu_backend"] = r.gpu_backend;
+            d["gpu_status"] = r.gpu_status;
             d["solver_direct"] = r.solver_direct;
+            d["threads_requested"] = r.threads_requested;
+            d["threads_effective"] = r.threads_effective;
+            d["solver_threads_effective"] = r.solver_threads_effective;
+            d["fwl_threads_effective"] = r.fwl_threads_effective;
             d["fwl_threads_used"] = r.fwl_threads_used;
+            d["fwl_parallel_workers_active"] =
+                r.fwl_parallel_workers_active;
+            d["fwl_gpu_attempted"] = r.fwl_gpu_attempted;
+            d["fwl_gpu_used"] = r.fwl_gpu_used;
+            d["fwl_gpu_fallback"] = r.fwl_gpu_fallback;
+            d["fwl_gpu_status_code"] = r.fwl_gpu_status_code;
+            d["fwl_gpu_status"] = r.fwl_gpu_status;
+            d["fwl_iterations"] = r.fwl_iterations;
+            d["fwl_abs_residual_rel"] = r.fwl_abs_residual_rel;
+            d["fwl_precision_certified"] =
+                r.fwl_precision_certified;
+            d["solver_threads_used"] = r.solver_threads_used;
+            d["solver_parallel_workers_active"] =
+                r.solver_parallel_workers_active;
             d["threads_used"] = r.threads_used;
+            d["parallel_workers_active"] = r.parallel_workers_active;
+            d["thread_capacity"] = r.thread_capacity;
+            d["openmp_enabled"] = r.openmp_enabled;
+            d["thread_limit_code"] = r.thread_limit_code;
+            d["thread_limit_reason"] = r.thread_limit_reason;
             d["jla_draws_used"] = r.jla_draws_used;
             d["seed"] = r.seed_used;
             d["solver_iterations"] = r.solver_iterations;
@@ -1643,7 +1735,25 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             d["absorbed_target_inference_valid"] =
                 r.absorbed_target_inference_valid;
             d["absorbing_fe_index"] = r.absorbing_fe_index;
+            d["threads_requested"] = r.threads_requested;
+            d["threads_effective"] = r.threads_effective;
+            d["recovery_threads_effective"] =
+                r.recovery_threads_effective;
+            d["fullfit_threads_used"] = r.fullfit_threads_used;
+            d["fullfit_parallel_workers_active"] =
+                r.fullfit_parallel_workers_active;
+            d["recovery_threads_used"] = r.recovery_threads_used;
+            d["recovery_parallel_workers_active"] =
+                r.recovery_parallel_workers_active;
+            d["covariance_threads_used"] = r.covariance_threads_used;
+            d["covariance_parallel_workers_active"] =
+                r.covariance_parallel_workers_active;
             d["threads_used"] = r.threads_used;
+            d["parallel_workers_active"] = r.parallel_workers_active;
+            d["thread_capacity"] = r.thread_capacity;
+            d["openmp_enabled"] = r.openmp_enabled;
+            d["thread_limit_code"] = r.thread_limit_code;
+            d["thread_limit_reason"] = r.thread_limit_reason;
             d["gpu_requested"] = r.gpu_requested;
             d["gpu_used"] = r.gpu_used;
             d["gpu_status_code"] = r.gpu_status_code;

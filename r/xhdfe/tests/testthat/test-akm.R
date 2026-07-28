@@ -43,6 +43,26 @@ test_that("leave-out connected set matches the canonical sample", {
   expect_equal(sum(s$keep), 15L)
 })
 
+test_that("AKM front-ends reject malformed thread requests", {
+  worker <- c(1L, 1L, 2L, 2L)
+  firm <- c(1L, 2L, 1L, 2L)
+  y <- c(1, 2, 3, 4)
+  invalid <- list(-1, 1.5, c(1, 2), NA_real_, Inf, TRUE, "2")
+
+  for (value in invalid) {
+    expect_error(
+      xhdfe_akm_leave_out_set(worker, firm, num_threads = value),
+      "num_threads must be one nonnegative integer",
+      fixed = TRUE
+    )
+    expect_error(
+      xhdfe_akm_kss(y, worker, firm, num_threads = value),
+      "num_threads must be one nonnegative integer",
+      fixed = TRUE
+    )
+  }
+})
+
 test_that("exact decomposition reproduces the LeaveOutTwoWay-validated values", {
   d <- felsdv()
   fit <- xhdfe_akm_kss(d$y, d$i, d$j, leverages = "exact")
@@ -126,6 +146,37 @@ test_that("fweights equal the row-expanded run", {
   expect_error(xhdfe_akm_kss(d$y, d$worker, d$firm, fweights = w,
                              compute_se = TRUE),
                "fweights")
+})
+
+test_that("AKM fweights fail closed at int64 boundaries", {
+  worker <- c(1L, 1L, 2L, 2L)
+  firm <- c(1L, 2L, 1L, 2L)
+  max_safe_int64_double <- 9223372036854774784
+
+  boundary <- c(max_safe_int64_double, 1021, 1, 1)
+  fit <- xhdfe_akm_leave_out_set(worker, firm, fweights = boundary)
+  expect_true(all(fit$keep))
+  expect_gt(fit$n_obs_connected, 0)
+  expect_equal(fit$n_obs_connected, sum(boundary))
+  expect_equal(fit$n_obs, sum(boundary))
+
+  overflow <- c(max_safe_int64_double, 1024, 1, 1)
+  expect_error(
+    xhdfe_akm_leave_out_set(worker, firm, fweights = overflow),
+    "total fweight exceeds the supported int64 range",
+    fixed = TRUE
+  )
+
+  invalid <- c(0, -1, 1.5, NaN, Inf, 2^63)
+  for (value in invalid) {
+    weights <- rep(1, 4)
+    weights[1] <- value
+    expect_error(
+      xhdfe_akm_leave_out_set(worker, firm, fweights = weights),
+      "fweights must be positive integers representable as int64",
+      fixed = TRUE
+    )
+  }
 })
 
 test_that("lowess sigma-tilde option runs and preserves thetas", {

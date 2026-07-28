@@ -49,7 +49,9 @@ PKG_CXXFLAGS = $(SHLIB_OPENMP_CXXFLAGS)
 PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
 
 CUDA_OBJECTS =
-OBJECTS = $(patsubst %.cpp,%.o,$(wildcard *.cpp)) $(CUDA_OBJECTS)
+CUDA_HOST_OBJECTS =
+XHDFE_CPP_SOURCES = $(filter-out fe_absorption_cuda_certificate.cpp,$(wildcard *.cpp))
+OBJECTS = $(patsubst %.cpp,%.o,$(XHDFE_CPP_SOURCES)) $(CUDA_OBJECTS) $(CUDA_HOST_OBJECTS)
 
 # Keep the shared library as make's default goal: any explicit rule below
 # (the CUDA one) would otherwise become the default target and the install
@@ -86,6 +88,7 @@ XHDFE_CUDA_LIB ?= $(if $(CUDA_HOME),$(CUDA_HOME)/lib64,$(dir $(shell $(NVCC) --v
 PKG_CPPFLAGS += -DHDFE_USE_CUDA
 PKG_LIBS += -L$(XHDFE_CUDA_LIB) -Wl,-rpath,$(XHDFE_CUDA_LIB) -lcudart
 CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o
+CUDA_HOST_OBJECTS = fe_absorption_cuda_certificate.o
 
 akm_kss_cuda.o: akm_kss_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \

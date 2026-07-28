@@ -42,17 +42,53 @@
 #'
 #' @param worker Worker identifiers (integer, factor or character), length n.
 #' @param firm Firm identifiers (integer, factor or character), length n.
+#' @param fweights Optional positive-integer frequency weights.
+#' @param num_threads OpenMP thread request (0 = automatic policy). It must be
+#'   one nonnegative integer. A positive request bypasses workload heuristics
+#'   and is limited only by the processor/OpenMP capacity visible to the
+#'   process.
+#' @param gpu Use CUDA for the stable match-key sort when the backend is
+#'   available and the operation is large enough to benefit.
+#' @param verbose Print phase progress. Output only.
 #' @return A list with a logical \code{keep} mask over the input rows and the
 #'   sample counts (\code{n_obs}, \code{n_workers}, \code{n_firms},
-#'   \code{n_matches}, \code{n_movers}, \code{n_stayers}, ...).
+#'   \code{n_matches}, \code{n_movers}, \code{n_stayers}, ...), plus truthful
+#'   thread/backend diagnostics including \code{threads_requested},
+#'   \code{threads_effective}, \code{threads_used},
+#'   \code{parallel_workers_active}, and \code{thread_capacity}.
 #' @seealso \code{\link{xhdfe_akm_kss}}
 #' @export
-xhdfe_akm_leave_out_set <- function(worker, firm) {
+xhdfe_akm_leave_out_set <- function(worker, firm, fweights = NULL,
+                                    num_threads = 0L, gpu = FALSE,
+                                    verbose = FALSE) {
   if (length(worker) != length(firm)) {
     stop("worker and firm must have the same length", call. = FALSE)
   }
-  .xhdfe_cpp_akm_leave_out_set(.akm_id_codes(worker, "worker"),
-                               .akm_id_codes(firm, "firm"))
+  if (length(num_threads) != 1L || !is.numeric(num_threads) ||
+      is.logical(num_threads) || is.na(num_threads) ||
+      !is.finite(num_threads) || num_threads < 0 ||
+      num_threads != floor(num_threads)) {
+    stop("num_threads must be one nonnegative integer", call. = FALSE)
+  }
+  if (length(gpu) != 1L || !is.logical(gpu) || is.na(gpu) ||
+      length(verbose) != 1L || !is.logical(verbose) || is.na(verbose)) {
+    stop("gpu and verbose must be single nonmissing logical values",
+         call. = FALSE)
+  }
+  if (!is.null(fweights)) {
+    fweights <- as.numeric(fweights)
+    if (length(fweights) != length(worker)) {
+      stop("fweights must have the same length as worker", call. = FALSE)
+    }
+  }
+  .xhdfe_cpp_akm_leave_out_set_opts(
+    .akm_id_codes(worker, "worker"),
+    .akm_id_codes(firm, "firm"),
+    fweights,
+    as.integer(num_threads),
+    isTRUE(gpu),
+    as.integer(isTRUE(verbose))
+  )
 }
 
 #' AKM estimation with leave-out (KSS) variance decomposition
@@ -84,9 +120,11 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   FALSE only when the input is already a leave-out sample.
 #' @param exact_max_rows,direct_max_firms,direct_max_nnz,cg_tol,cg_max_iter
 #'   Solver knobs; see the package vignette sources.
-#' @param num_threads Maximum OpenMP threads for the command (0 = library
-#'   default). The FWL absorber and KSS solver tune their effective teams
-#'   separately; see \code{fwl_threads_used} and \code{threads_used}.
+#' @param num_threads OpenMP thread request for the command (0 = automatic
+#'   policy). It must be one nonnegative integer. A positive request bypasses
+#'   workload/environment heuristics and is limited only by runtime-visible
+#'   processor capacity. Sample, FWL, and solver diagnostics distinguish
+#'   budgets from observed useful workers.
 #' @param fwl_tol,fwl_max_iter Absorber controls for the covariate step.
 #' @param compute_se Component standard errors (KSS leave-out inference).
 #'   Under the canonical leave_out_COMPLETE rule, match level reports firm and
@@ -112,11 +150,10 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   eigen diagnostics). Output only; results are unaffected.
 #' @section Advanced performance environment variables:
 #'   Defaults are tuned and none changes the default numeric output.
-#'   \code{XHDFE_AKM_TEAM} caps the OpenMP team size of the per-iteration
-#'   solver regions (the default caps it by the edge work so a large thread
-#'   pool does not oversubscribe small/medium graphs \emph{--} the dominant
-#'   speed lever below ~10M rows; \code{0} = uncapped, \code{k} forces
-#'   \code{k}). \code{XHDFE_AKM_JLA_BLOCK} / \code{XHDFE_AKM_SE_BLOCK} set the
+#'   \code{XHDFE_AKM_TEAM} tunes the automatic
+#'   (\code{num_threads = 0}) solver team; an explicit positive request
+#'   bypasses it. \code{XHDFE_AKM_JLA_BLOCK} /
+#'   \code{XHDFE_AKM_SE_BLOCK} set the
 #'   multi-RHS block size for the JLA leverage and the SE/eigen/lincom solves
 #'   (default 8; \code{0} = pre-2.14 sequential). \code{XHDFE_AKM_SCATTER_CSR}
 #'   (default on) selects the parallel CSR-ordered Rademacher scatter at scale.
@@ -136,8 +173,19 @@ xhdfe_akm_leave_out_set <- function(worker, firm) {
 #'   \code{var_y} (\code{share_var_alpha}, \code{share_var_psi},
 #'   \code{share_2cov}). Also returned: \code{var_y}, \code{sigma2_ho},
 #'   row-level leverages \code{pii} and \code{sigma_i}, and solver
-#'   diagnostics (\code{leverages_exact}, \code{gpu_used},
-#'   \code{fwl_threads_used}, \code{threads_used}, \code{converged}, ...).
+#'   diagnostics (\code{leverages_exact}, \code{gpu_requested},
+#'   \code{gpu_used}, \code{gpu_status_code}, \code{gpu_status},
+#'   \code{threads_requested}, \code{threads_effective},
+#'   \code{fwl_threads_used}, \code{fwl_parallel_workers_active},
+#'   \code{fwl_gpu_used}, \code{fwl_gpu_fallback},
+#'   \code{fwl_gpu_status}, \code{fwl_abs_residual_rel},
+#'   \code{fwl_precision_certified},
+#'   \code{solver_threads_used}, \code{solver_parallel_workers_active},
+#'   \code{threads_used}, \code{parallel_workers_active},
+#'   \code{thread_capacity}, \code{converged}, ...).
+#'   The nested control-FWL phase deliberately uses the strict-residual MLSMR
+#'   CPU reference path (\code{fwl_gpu_status = "cpu_reference"}); the
+#'   two-way solver remains independently eligible for CUDA.
 #'   With \code{compute_se = TRUE} a \code{component_se} list holds the
 #'   KSS component standard errors and corrected point estimates; with
 #'   \code{eigen_diagnostics = TRUE} a \code{weak_id} list holds, per
@@ -180,6 +228,12 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                           gpu = FALSE,
                           fweights = NULL,
                           verbose = FALSE) {
+  if (length(num_threads) != 1L || !is.numeric(num_threads) ||
+      is.logical(num_threads) || is.na(num_threads) ||
+      !is.finite(num_threads) || num_threads < 0 ||
+      num_threads != floor(num_threads)) {
+    stop("num_threads must be one nonnegative integer", call. = FALSE)
+  }
   y <- as.numeric(y)
   if (length(worker) != length(y) || length(firm) != length(y)) {
     stop("y, worker and firm must have the same length", call. = FALSE)

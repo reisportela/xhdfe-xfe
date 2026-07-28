@@ -4,24 +4,45 @@
 \alias{xhdfe_akm_leave_out_set}
 \title{Largest leave-one-out connected set (KSS)}
 \usage{
-xhdfe_akm_leave_out_set(worker, firm)
+xhdfe_akm_leave_out_set(
+  worker,
+  firm,
+  fweights = NULL,
+  num_threads = 0L,
+  gpu = FALSE,
+  verbose = FALSE
+)
 }
 \arguments{
 \item{worker}{Worker identifiers (integer, factor or character), length n.}
 
 \item{firm}{Firm identifiers (integer, factor or character), length n.}
+
+\item{fweights}{Optional positive-integer frequency weights.}
+
+\item{num_threads}{OpenMP thread request (0 = automatic policy). It must be
+one nonnegative integer. A positive request bypasses workload heuristics
+and is limited only by the processor/OpenMP capacity visible to the process.}
+
+\item{gpu}{Use CUDA for the stable match-key sort when the backend is
+available and the operation is large enough to benefit.}
+
+\item{verbose}{Print phase progress. Output only.}
 }
 \value{
-A list with a logical \code{keep} mask over the input rows and the sample
-counts (\code{n_obs}, \code{n_workers}, \code{n_firms}, \code{n_matches},
-\code{n_movers}, \code{n_stayers}, ...).
+A list with a logical \code{keep} mask over the input rows and the
+  sample counts (\code{n_obs}, \code{n_workers}, \code{n_firms},
+  \code{n_matches}, \code{n_movers}, \code{n_stayers}, ...), plus truthful
+  thread/backend diagnostics including \code{threads_requested},
+  \code{threads_effective}, \code{threads_used},
+  \code{parallel_workers_active}, and \code{thread_capacity}.
 }
 \description{
 Computes the largest connected set of the worker-firm bipartite graph such
 that removing any single worker keeps it connected (the Kline-Saggio-
 Soelvsten (2020) leave-out sample, following Saggio's LeaveOutTwoWay:
-articulation workers are removed iteratively and workers observed only once
-are dropped).
+articulation workers are removed iteratively and workers observed only
+once are dropped).
 }
 \seealso{
 \code{\link{xhdfe_akm_kss}}

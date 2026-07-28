@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.21.0.20260725 LANGUAGES CXX)
+project(xhdfe VERSION 2.22.0.20260728 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -150,7 +150,10 @@ set(XHDFE_SOURCES
     src/ols.cpp
 )
 if(XHDFE_ENABLE_CUDA)
-    list(APPEND XHDFE_SOURCES src/fe_absorption_cuda.cu src/akm_kss_cuda.cu)
+    list(APPEND XHDFE_SOURCES
+        src/fe_absorption_cuda.cu
+        src/akm_kss_cuda.cu
+        src/fe_absorption_cuda_certificate.cpp)
 endif()
 if(XHDFE_ENABLE_METAL)
     list(APPEND XHDFE_SOURCES src/fe_absorption_metal.mm)

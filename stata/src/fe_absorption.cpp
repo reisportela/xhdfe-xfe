@@ -1,6 +1,7 @@
 #include "fe_absorption.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cctype>
@@ -27,6 +28,8 @@
 
 #include "fe_absorption_cuda.hpp"
 #include "fe_absorption_metal.hpp"
+#include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/parallel_work_observer.hpp"
 #include "schwarz_demean.hpp"
 
 #ifdef HDFE_USE_OPENMP
@@ -41,6 +44,22 @@ namespace {
 #define HDFE_GPU_BACKEND_DEFAULT "cpu"
 #endif
 
+thread_local bool tls_gpu_backend_override_active = false;
+thread_local GpuBackend tls_gpu_backend_override = GpuBackend::Cpu;
+
+// Do not use std::isfinite in convergence guards: production builds may use
+// -ffast-math, under which the compiler is permitted to assume that NaN and
+// infinity never occur.  Inspecting the IEEE-754 exponent bits keeps
+// fail-closed solver checks effective under those builds.
+inline bool finite_double_bits(double value) {
+    static_assert(sizeof(double) == sizeof(std::uint64_t),
+                  "xhdfe requires 64-bit IEEE-754 doubles");
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & UINT64_C(0x7ff0000000000000)) !=
+           UINT64_C(0x7ff0000000000000);
+}
+
 // Mean group occupancy (observations per FE level) at or below which a
 // multi-FE problem is treated as ill-conditioned for plain Gauss-Seidel and is
 // routed to the Irons-Tuck accelerated absorber regardless of n. Sparse
@@ -49,6 +68,210 @@ namespace {
 // sit far above it and keep the previous behaviour. Tunable at runtime via the
 // XHDFE_ACCEL_OCC environment variable (for benchmarking only).
 constexpr double kAccelOccupancyThreshold = 12.0;
+
+// Floating-point reductions that influence an iterate, a routing decision, or
+// a stopping decision must not inherit OpenMP's unspecified reduction tree.
+// The shared deterministic plan preserves the historical 48-chunk graph on
+// this workstation and grows with runtime-visible capacity on larger hosts.
+// It never depends on the team requested for an individual fit.
+constexpr std::size_t kDeterministicScatterScratchBytes =
+    256ULL * 1024ULL * 1024ULL;
+
+template <typename Index>
+inline int deterministic_chunk_count(Index n) {
+    return deterministic_parallel_chunk_count(n);
+}
+
+inline int deterministic_scatter_chunk_count(int n,
+                                             int groups,
+                                             int vectors_per_chunk = 1) {
+    if (n <= 0 || groups <= 0 || vectors_per_chunk <= 0) {
+        return 0;
+    }
+    const std::size_t bytes_per_chunk =
+        static_cast<std::size_t>(groups) *
+        static_cast<std::size_t>(vectors_per_chunk) * sizeof(double);
+    const std::size_t target_chunks =
+        static_cast<std::size_t>(deterministic_chunk_target());
+    const std::size_t scratch_limited =
+        bytes_per_chunk == 0
+            ? target_chunks
+            : std::max<std::size_t>(
+                  1U, kDeterministicScatterScratchBytes / bytes_per_chunk);
+    const int max_chunks = static_cast<int>(std::min<std::size_t>(
+        target_chunks, scratch_limited));
+    return std::max(1, std::min(n, max_chunks));
+}
+
+inline ParallelWorkObserver* observer_if_needed(
+    ParallelWorkObserver* observer,
+    int requested_team,
+    int useful_units) {
+    if (!observer) {
+        return nullptr;
+    }
+    const int team = std::max(1, requested_team);
+    const int active = std::max(1, std::min(team, useful_units));
+    if (observer->max_team_size() >= team &&
+        observer->active_workers() >= active) {
+        return nullptr;
+    }
+    return observer;
+}
+
+class ScopedAbsorptionParallelRuntime {
+public:
+    ScopedAbsorptionParallelRuntime(int threads, int runtime_capacity)
+        : deterministic_capacity_(runtime_capacity) {
+#ifdef HDFE_USE_OPENMP
+        previous_dynamic_ = omp_get_dynamic();
+        previous_threads_ = omp_get_max_threads();
+        omp_set_dynamic(0);
+        omp_set_num_threads(std::max(1, threads));
+#else
+        (void)threads;
+#endif
+    }
+
+    ~ScopedAbsorptionParallelRuntime() {
+#ifdef HDFE_USE_OPENMP
+        omp_set_num_threads(previous_threads_);
+        omp_set_dynamic(previous_dynamic_);
+#endif
+    }
+
+    ScopedAbsorptionParallelRuntime(
+        const ScopedAbsorptionParallelRuntime&) = delete;
+    ScopedAbsorptionParallelRuntime& operator=(
+        const ScopedAbsorptionParallelRuntime&) = delete;
+
+private:
+    ScopedDeterministicParallelCapacity deterministic_capacity_;
+#ifdef HDFE_USE_OPENMP
+    int previous_dynamic_ = 0;
+    int previous_threads_ = 1;
+#endif
+};
+
+template <typename Index>
+inline Index deterministic_chunk_begin(Index n, int chunk, int chunks) {
+    return deterministic_parallel_chunk_begin(n, chunk, chunks);
+}
+
+template <typename Index>
+inline Index deterministic_chunk_end(Index n, int chunk, int chunks) {
+    return deterministic_parallel_chunk_end(n, chunk, chunks);
+}
+
+template <typename Index, typename Body>
+double deterministic_chunked_sum(
+    Index n,
+    int threads,
+    const Body& body,
+    ParallelWorkObserver* observer = nullptr) {
+    const int chunks = deterministic_chunk_count(n);
+    if (chunks == 0) {
+        return 0.0;
+    }
+    InlineOrDynamicBuffer<double> partial(
+        static_cast<std::size_t>(chunks));
+    int local_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    local_threads =
+        std::max(1, threads > 0 ? threads : omp_get_max_threads());
+#else
+    (void)threads;
+#endif
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, chunks);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static, 1) num_threads(local_threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (region_observer) {
+            region_observer->observe_work();
+        }
+        const Index begin = deterministic_chunk_begin(n, chunk, chunks);
+        const Index end = deterministic_chunk_end(n, chunk, chunks);
+        double local = 0.0;
+        for (Index i = begin; i < end; ++i) {
+            local += body(i);
+        }
+        partial[static_cast<std::size_t>(chunk)] = local;
+    }
+    if (region_observer) {
+        region_observer->end_region();
+    }
+    double total = 0.0;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        total += partial[static_cast<std::size_t>(chunk)];
+    }
+    return total;
+}
+
+template <typename Index, typename Body>
+double deterministic_chunked_max(
+    Index n,
+    int threads,
+    const Body& body,
+    ParallelWorkObserver* observer = nullptr) {
+    const int chunks = deterministic_chunk_count(n);
+    if (chunks == 0) {
+        return 0.0;
+    }
+    InlineOrDynamicBuffer<double> partial(
+        static_cast<std::size_t>(chunks));
+    int local_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    local_threads =
+        std::max(1, threads > 0 ? threads : omp_get_max_threads());
+#else
+    (void)threads;
+#endif
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, chunks);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static, 1) num_threads(local_threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (region_observer) {
+            region_observer->observe_work();
+        }
+        const Index begin = deterministic_chunk_begin(n, chunk, chunks);
+        const Index end = deterministic_chunk_end(n, chunk, chunks);
+        double local = 0.0;
+        for (Index i = begin; i < end; ++i) {
+            local = std::max(local, body(i));
+        }
+        partial[static_cast<std::size_t>(chunk)] = local;
+    }
+    if (region_observer) {
+        region_observer->end_region();
+    }
+    double total = 0.0;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        total = std::max(total, partial[static_cast<std::size_t>(chunk)]);
+    }
+    return total;
+}
+
+double deterministic_sumsq_raw(
+    const double* data,
+    Eigen::Index n,
+    int threads = 0,
+    ParallelWorkObserver* observer = nullptr) {
+    return deterministic_chunked_sum<Eigen::Index>(
+        n, threads, [data](Eigen::Index i) {
+            const double value = data[i];
+            return value * value;
+        }, observer);
+}
 
 GpuBackend parse_gpu_backend(const char* raw) {
     if (!raw) {
@@ -68,6 +291,9 @@ GpuBackend parse_gpu_backend(const char* raw) {
 }
 
 GpuBackend resolve_gpu_backend() {
+    if (tls_gpu_backend_override_active) {
+        return tls_gpu_backend_override;
+    }
     const char* env = std::getenv("XHDFE_GPU_BACKEND");
     if (env && *env) {
         return parse_gpu_backend(env);
@@ -92,6 +318,32 @@ bool honest_tol_trigger_enabled() {
     static const bool enabled = []() {
         const char* e = std::getenv("XHDFE_TOL_TRIGGER");
         return e != nullptr && (e[0] == 'c' || e[0] == 'C' || e[0] == '1');
+    }();
+    return enabled;
+}
+
+// The Irons-Tuck divergence safeguard (adaptive restart + CG hand-off) used to
+// be gated on honest_mode, which conflated two independent concerns: *how
+// convergence is declared* (deliberately mode-dependent, see the comment above
+// the honest_mode definition) and *whether a diverging trajectory is detected
+// at all* (a pure safety net that must never depend on the stopping rule).
+//
+// With the safeguard off, xhdfe-fast at a tight tolerance would report
+// converged=true on a drifted state: on `github` at tol=1e-12 the same public
+// 2.21.0 binary returned coefficients [34.27, 128.36, -39.77] after 40118
+// iterations, against the correct [0.962444, 0.955465, 23.854767] the very same
+// binary produces in 385 iterations once the safeguard is active — and the
+// wrong answer was not even reproducible run to run.
+//
+// The safeguard only ever fires when the post-sweep iterate norm rises above
+// its own running minimum, which cannot happen on a healthy trajectory, so
+// enabling it unconditionally leaves well-conditioned runs bit-identical.
+// Set XHDFE_ACCEL_GUARD_ALWAYS=0 to restore the honest_mode-only gating for
+// A/B on the same binary.
+bool accel_guard_always_enabled() {
+    static const bool enabled = []() {
+        const char* e = std::getenv("XHDFE_ACCEL_GUARD_ALWAYS");
+        return !(e != nullptr && e[0] == '0');
     }();
     return enabled;
 }
@@ -141,17 +393,11 @@ void mark_gpu_failure_fallback(AbsorptionResult& result,
 }
 
 bool savefe_profile_enabled() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached == 1;
-    }
-    const char* raw = std::getenv("XHDFE_PROFILE_SAVEFE");
-    if (!raw || *raw == '\0' || *raw == '0') {
-        cached = 0;
-        return false;
-    }
-    cached = 1;
-    return true;
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_SAVEFE");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
 }
 
 void savefe_profile_log(const std::string& msg) {
@@ -162,17 +408,11 @@ void savefe_profile_log(const std::string& msg) {
 }
 
 bool cpu_profile_enabled() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached == 1;
-    }
-    const char* raw = std::getenv("XHDFE_PROFILE_CPU");
-    if (!raw || *raw == '\0' || *raw == '0') {
-        cached = 0;
-        return false;
-    }
-    cached = 1;
-    return true;
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_CPU");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
 }
 
 void cpu_profile_log_elapsed(
@@ -218,6 +458,47 @@ struct FeIndexer {
     int num_levels_present = 0;
     bool groups_contiguous = false;
 };
+
+#ifdef HDFE_USE_CUDA
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, noipa, cold))
+#elif defined(__clang__)
+__attribute__((noinline, cold))
+#endif
+void certify_cuda_absorption_from_indexers(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    const std::vector<HeterogeneousSlopeTerm>& slopes,
+    const std::vector<FeIndexer>& indexers,
+    AbsorptionResult& result) {
+    const int n = static_cast<int>(y.size());
+    std::vector<GpuFeCertificateView> views(indexers.size());
+    for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
+        const FeIndexer& indexer = indexers[dim];
+        GpuFeCertificateView& view = views[dim];
+        view.group_ids = indexer.group_ids.data();
+        view.group_ids_size = indexer.group_ids.size();
+        view.group_ptr = indexer.group_ptr.empty()
+                             ? nullptr
+                             : indexer.group_ptr.data();
+        view.group_ptr_size = indexer.group_ptr.size();
+        view.num_groups = indexer.num_groups;
+        view.groups_contiguous =
+            indexer.groups_contiguous &&
+            static_cast<int>(indexer.group_ids.size()) == n &&
+            indexer.num_groups >= 0 &&
+            indexer.group_ptr.size() ==
+                static_cast<std::size_t>(indexer.num_groups) + 1U;
+    }
+    certify_cuda_absorption_result(
+        y, X, fes, weights, options, slopes, views, result);
+}
+#endif
 
 struct ExactSparseUnionFind {
     std::vector<int> parent;
@@ -341,6 +622,13 @@ struct FeWorkspace {
     std::vector<uint8_t> touched_mask;
     std::vector<int> touched_groups;
     bool sparse_reset = false;
+    // Fixed logical-chunk scratch for deterministic observation-partitioned
+    // reductions. Unlike y_tls/x_tls, its cardinality is independent of the
+    // OpenMP team size.
+    std::vector<Eigen::VectorXd> deterministic_y_chunks;
+    std::vector<Eigen::MatrixXd> deterministic_x_chunks;
+    int deterministic_chunk_slots = 0;
+    int deterministic_chunk_cols = -1;
 #ifdef HDFE_USE_OPENMP
     std::vector<Eigen::VectorXd> y_tls;
     std::vector<Eigen::MatrixXd> x_tls;
@@ -417,6 +705,34 @@ struct FeWorkspace {
             touched_mask[static_cast<std::size_t>(g)] = 0;
         }
         touched_groups.clear();
+    }
+
+    void prepare_deterministic_chunks(int chunks, int cols) {
+        const bool need_resize =
+            chunks != deterministic_chunk_slots ||
+            cols != deterministic_chunk_cols ||
+            static_cast<int>(deterministic_y_chunks.size()) != chunks;
+        if (need_resize) {
+            deterministic_y_chunks.assign(
+                static_cast<std::size_t>(chunks),
+                Eigen::VectorXd::Zero(num_groups()));
+            if (cols > 0) {
+                deterministic_x_chunks.assign(
+                    static_cast<std::size_t>(chunks),
+                    Eigen::MatrixXd::Zero(num_groups(), cols));
+            } else {
+                deterministic_x_chunks.clear();
+            }
+            deterministic_chunk_slots = chunks;
+            deterministic_chunk_cols = cols;
+            return;
+        }
+        for (auto& values : deterministic_y_chunks) {
+            values.setZero();
+        }
+        for (auto& values : deterministic_x_chunks) {
+            values.setZero();
+        }
     }
 
 #ifdef HDFE_USE_OPENMP
@@ -650,6 +966,28 @@ Eigen::VectorXd compute_weight_sums(const FeIndexer& idx,
     }
 
     Eigen::VectorXd sums = Eigen::VectorXd::Zero(idx.num_groups);
+    if (!unit_weights) {
+        const int chunks =
+            deterministic_scatter_chunk_count(n, idx.num_groups);
+        std::vector<Eigen::VectorXd> partial(
+            static_cast<std::size_t>(chunks),
+            Eigen::VectorXd::Zero(idx.num_groups));
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(std::max(1, threads))
+#endif
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            Eigen::VectorXd& local = partial[static_cast<std::size_t>(chunk)];
+            const int begin = deterministic_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                local[idx.group_ids[static_cast<std::size_t>(i)]] += weight_ptr[i];
+            }
+        }
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            sums.noalias() += partial[static_cast<std::size_t>(chunk)];
+        }
+        return sums;
+    }
 #ifdef HDFE_USE_OPENMP
     if (threads > 1) {
         std::vector<Eigen::VectorXd> tls(static_cast<std::size_t>(threads),
@@ -696,8 +1034,30 @@ Eigen::VectorXd compute_weight_sums_from_groups(const int* group_ids,
                                                 int num_groups,
                                                 const double* weight_ptr,
                                                 bool unit_weights,
-                                                int threads = 1) {
+    int threads = 1) {
     Eigen::VectorXd sums = Eigen::VectorXd::Zero(num_groups);
+    if (!unit_weights) {
+        const int chunks =
+            deterministic_scatter_chunk_count(n, num_groups);
+        std::vector<Eigen::VectorXd> partial(
+            static_cast<std::size_t>(chunks),
+            Eigen::VectorXd::Zero(num_groups));
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(std::max(1, threads))
+#endif
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            Eigen::VectorXd& local = partial[static_cast<std::size_t>(chunk)];
+            const int begin = deterministic_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                local[group_ids[i]] += weight_ptr[i];
+            }
+        }
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            sums.noalias() += partial[static_cast<std::size_t>(chunk)];
+        }
+        return sums;
+    }
 #ifdef HDFE_USE_OPENMP
     if (threads > 1) {
         std::vector<Eigen::VectorXd> tls(static_cast<std::size_t>(threads),
@@ -765,6 +1125,176 @@ GroupCSR build_group_csr(const int* group_ids, int n, int num_groups) {
     return csr;
 }
 
+// Stable owner-computes traversal for deterministic scatters.  Contiguous
+// indexers borrow their already-built group_ptr and need no observation
+// permutation.  Non-contiguous indexers own a CSR whose observation lists are
+// stable because build_group_csr() appends rows in ascending input order.
+//
+// Keeping the traversal local to the CPU Krylov implementation avoids changing
+// FeIndexer (and every absorber that consumes it) merely to satisfy the
+// high-cardinality LSMR/MLSMR scatter path.
+struct StableGroupTraversal {
+    const FeIndexer* indexer = nullptr;
+    GroupCSR csr;
+    bool contiguous = false;
+
+    void prepare(const FeIndexer& value, int n) {
+        indexer = &value;
+        contiguous = indexer_has_contiguous_groups(value, n);
+        if (!contiguous) {
+            csr = build_group_csr(
+                value.group_ids.data(), n, value.num_groups);
+        }
+    }
+
+    int num_groups() const noexcept {
+        return indexer ? indexer->num_groups : 0;
+    }
+
+    int group_begin(int group) const noexcept {
+        return contiguous
+                   ? indexer->group_ptr[static_cast<std::size_t>(group)]
+                   : csr.group_ptr[static_cast<std::size_t>(group)];
+    }
+
+    int group_end(int group) const noexcept {
+        return contiguous
+                   ? indexer->group_ptr[static_cast<std::size_t>(group + 1)]
+                   : csr.group_ptr[static_cast<std::size_t>(group + 1)];
+    }
+
+    int observation_at(int position) const noexcept {
+        return contiguous
+                   ? position
+                   : csr.obs_index[static_cast<std::size_t>(position)];
+    }
+
+    std::size_t owned_bytes() const noexcept {
+        return csr.group_ptr.size() * sizeof(int) +
+               csr.obs_index.size() * sizeof(int);
+    }
+};
+
+// Inverse of deterministic_chunk_begin/end for the same balanced contiguous
+// row partition.  The number of logical chunks remains independent of the
+// requested team, so changing the execution axis from row chunks to group
+// owners does not change the arithmetic graph.
+struct DeterministicScatterPlan {
+    int rows = 0;
+    int chunks = 0;
+    int base_rows = 0;
+    int larger_chunks = 0;
+    int larger_rows_end = 0;
+
+    DeterministicScatterPlan(int row_count, int chunk_count)
+        : rows(row_count),
+          chunks(chunk_count),
+          base_rows(chunk_count > 0 ? row_count / chunk_count : 0),
+          larger_chunks(chunk_count > 0 ? row_count % chunk_count : 0),
+          larger_rows_end((base_rows + 1) * larger_chunks) {
+        if (rows <= 0 || chunks <= 0 || chunks > rows || base_rows <= 0) {
+            throw std::runtime_error(
+                "Invalid deterministic scatter row/chunk plan");
+        }
+    }
+
+    int chunk_for_row(int row) const noexcept {
+        if (row < larger_rows_end) {
+            return row / (base_rows + 1);
+        }
+        return larger_chunks +
+               (row - larger_rows_end) / base_rows;
+    }
+};
+
+template <typename Contribution>
+void deterministic_group_owner_scatter(
+    const StableGroupTraversal& traversal,
+    int rows,
+    int logical_chunks,
+    int threads,
+    const Contribution& contribution,
+    double* output,
+    ParallelWorkObserver* observer) {
+    const int groups = traversal.num_groups();
+    if (groups <= 0) {
+        return;
+    }
+    const DeterministicScatterPlan plan(rows, logical_chunks);
+    int local_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    local_threads = std::max(1, threads);
+#else
+    (void)threads;
+#endif
+
+    // Cache-line padding prevents adjacent workers' chunk partials from
+    // sharing a line when the memory cap leaves only a handful of logical
+    // chunks.
+    constexpr std::size_t kCacheLineDoubles = 64U / sizeof(double);
+    const std::size_t partial_stride = std::max<std::size_t>(
+        static_cast<std::size_t>(logical_chunks), kCacheLineDoubles);
+    std::vector<double> partial_storage(
+        static_cast<std::size_t>(local_threads) * partial_stride, 0.0);
+
+    auto process_group = [&](int group, double* partial) {
+        std::fill(partial, partial + logical_chunks, 0.0);
+        const int begin = traversal.group_begin(group);
+        const int end = traversal.group_end(group);
+        for (int position = begin; position < end; ++position) {
+            const int row = traversal.observation_at(position);
+            const int chunk = plan.chunk_for_row(row);
+            partial[chunk] += contribution(row);
+        }
+        // Match the legacy scatter exactly: the destination begins at +0.0
+        // and receives every logical chunk in ascending order.
+        double total = 0.0;
+        for (int chunk = 0; chunk < logical_chunks; ++chunk) {
+            total += partial[chunk];
+        }
+        output[group] = total;
+    };
+
+#ifdef HDFE_USE_OPENMP
+    const bool spawn_team =
+        local_threads > 1 && groups > 1 && !omp_in_parallel();
+    if (spawn_team) {
+        ParallelWorkObserver* region_observer =
+            observer_if_needed(observer, local_threads, groups);
+        if (region_observer) {
+            region_observer->begin_region(local_threads);
+        }
+#pragma omp parallel num_threads(local_threads)
+        {
+            const int tid = omp_get_thread_num();
+            double* partial =
+                partial_storage.data() +
+                static_cast<std::size_t>(tid) * partial_stride;
+            bool observed = false;
+#pragma omp for schedule(static)
+            for (int group = 0; group < groups; ++group) {
+                if (region_observer && !observed) {
+                    region_observer->observe_work();
+                    observed = true;
+                }
+                process_group(group, partial);
+            }
+        }
+        if (region_observer) {
+            region_observer->end_region();
+        }
+        return;
+    }
+#else
+    (void)observer;
+#endif
+
+    double* partial = partial_storage.data();
+    for (int group = 0; group < groups; ++group) {
+        process_group(group, partial);
+    }
+}
+
 double demean_y_only_groups(Eigen::VectorXd& y,
                             const int* group_ids,
                             FeWorkspace& workspace,
@@ -782,10 +1312,62 @@ double demean_y_only_groups(Eigen::VectorXd& y,
     int local_threads = std::max(1, threads);
 #ifndef HDFE_USE_OPENMP
     local_threads = 1;
-#else
-    workspace.prepare_tls(local_threads, 0);
 #endif
 
+    if (groups <= 2048) {
+        const int chunks = deterministic_chunk_count(n);
+        workspace.prepare_deterministic_chunks(chunks, 0);
+        workspace.reset();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            Eigen::VectorXd& local =
+                workspace.deterministic_y_chunks[static_cast<std::size_t>(chunk)];
+            const int begin = deterministic_chunk_begin(n, chunk, chunks);
+            const int end = deterministic_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                const int g = group_ids[i];
+                local[g] += unit_weights ? y_ptr[i] : weight_ptr[i] * y_ptr[i];
+            }
+        }
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            workspace.y_sums.noalias() +=
+                workspace.deterministic_y_chunks[static_cast<std::size_t>(chunk)];
+        }
+
+        const double* weight_sums_inv = workspace.weight_sums_inv.data();
+        double max_abs = 0.0;
+        for (int g = 0; g < groups; ++g) {
+            workspace.y_sums[g] *= weight_sums_inv[g];
+            if (alpha_y) {
+                alpha_y[g] += alpha_scale * workspace.y_sums[g];
+            }
+            if (out_max_abs) {
+                max_abs = std::max(max_abs, std::abs(workspace.y_sums[g]));
+            }
+        }
+        if (out_max_abs) {
+            *out_max_abs = max_abs;
+        }
+        if (subtract) {
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                const int begin = deterministic_chunk_begin(n, chunk, chunks);
+                const int end = deterministic_chunk_end(n, chunk, chunks);
+                for (int i = begin; i < end; ++i) {
+                    y_ptr[i] -= workspace.y_sums[group_ids[i]];
+                }
+            }
+        }
+        return out_max_abs ? max_abs : 0.0;
+    }
+
+#ifdef HDFE_USE_OPENMP
+    workspace.prepare_tls(local_threads, 0);
+#endif
     workspace.reset();
     const double* weight_sums_inv = workspace.weight_sums_inv.data();
 
@@ -961,13 +1543,10 @@ double demean_y_only_csr(Eigen::VectorXd& y,
     double* y_ptr = y.data();
     const int* obs_index = csr.obs_index.data();
     const int* group_ptr = csr.group_ptr.data();
-    double max_abs = 0.0;
     const bool track_max = (out_max_abs != nullptr);
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(std::max(1, threads)) reduction(max : max_abs)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double max_abs = deterministic_chunked_max<int>(
+        groups, threads, [&](int g) {
         double sum = 0.0;
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
@@ -986,19 +1565,14 @@ double demean_y_only_csr(Eigen::VectorXd& y,
         if (alpha_y) {
             alpha_y[g] += alpha_scale * mean;
         }
-        if (track_max) {
-            const double abs_val = std::abs(mean);
-            if (abs_val > max_abs) {
-                max_abs = abs_val;
-            }
-        }
         if (subtract) {
             for (int idx = start; idx < end; ++idx) {
                 const int i = obs_index[idx];
                 y_ptr[i] -= mean;
             }
         }
-    }
+        return track_max ? std::abs(mean) : 0.0;
+    });
 
     if (track_max) {
         *out_max_abs = max_abs;
@@ -1018,7 +1592,8 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                                   double alpha_scale = 1.0,
                                   double* alpha_y = nullptr,
                                   double* alpha_X = nullptr,
-                                  double* out_max_abs = nullptr) {
+                                  double* out_max_abs = nullptr,
+                                  ParallelWorkObserver* observer = nullptr) {
     const int cols = static_cast<int>(X.cols());
     if (cols < 0 || cols > 4) {
         throw std::runtime_error("CSR demeaning kernel only supports 0-4 columns");
@@ -1035,7 +1610,6 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
     const int* group_ptr = csr.group_ptr.data();
     const int local_threads = std::max(1, threads);
     const bool track_max = (out_max_abs != nullptr);
-    double max_abs = 0.0;
 
     // Software prefetch distance for the indirect (gather/scatter) accesses.
     // This kernel is only used for non-contiguous fixed effects (CSR path),
@@ -1054,10 +1628,8 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
     double* x2 = cols > 2 ? (x_ptr + static_cast<Eigen::Index>(2) * rows) : nullptr;
     double* x3 = cols > 3 ? (x_ptr + static_cast<Eigen::Index>(3) * rows) : nullptr;
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(max : max_abs)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double max_abs = deterministic_chunked_max<int>(
+        groups, local_threads, [&](int g) {
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         double sum_y = 0.0;
@@ -1184,12 +1756,6 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
         if (alpha_y) {
             alpha_y[g] += alpha_scale * mean_y;
         }
-        if (track_max) {
-            const double abs_val = std::abs(mean_y);
-            if (abs_val > max_abs) {
-                max_abs = abs_val;
-            }
-        }
 
         switch (cols) {
             case 0:
@@ -1245,7 +1811,9 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                 break;
             }
         }
-    }
+        return track_max ? std::abs(mean_y) : 0.0;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(groups)));
 
     if (track_max) {
         *out_max_abs = max_abs;
@@ -1332,11 +1900,9 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
         return;
     }
 
-    double sumsq = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(+ : sumsq)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double sumsq = deterministic_chunked_sum<int>(
+        groups, local_threads, [&](int g) {
+        double group_sumsq = 0.0;
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         const double mean_y = y_sums[g];
@@ -1346,7 +1912,7 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
                     const double yi = y_ptr[i];
-                    sumsq += yi * yi;
+                    group_sumsq += yi * yi;
                 }
                 break;
             case 1: {
@@ -1355,10 +1921,10 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
                     const double yi = y_ptr[i];
-                    sumsq += yi * yi;
+                    group_sumsq += yi * yi;
                     x0[i] -= mean_x0;
                     const double x0v = x0[i];
-                    sumsq += x0v * x0v;
+                    group_sumsq += x0v * x0v;
                 }
                 break;
             }
@@ -1369,13 +1935,13 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
                     const double yi = y_ptr[i];
-                    sumsq += yi * yi;
+                    group_sumsq += yi * yi;
                     x0[i] -= mean_x0;
                     const double x0v = x0[i];
-                    sumsq += x0v * x0v;
+                    group_sumsq += x0v * x0v;
                     x1[i] -= mean_x1;
                     const double x1v = x1[i];
-                    sumsq += x1v * x1v;
+                    group_sumsq += x1v * x1v;
                 }
                 break;
             }
@@ -1387,16 +1953,16 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
                     const double yi = y_ptr[i];
-                    sumsq += yi * yi;
+                    group_sumsq += yi * yi;
                     x0[i] -= mean_x0;
                     const double x0v = x0[i];
-                    sumsq += x0v * x0v;
+                    group_sumsq += x0v * x0v;
                     x1[i] -= mean_x1;
                     const double x1v = x1[i];
-                    sumsq += x1v * x1v;
+                    group_sumsq += x1v * x1v;
                     x2[i] -= mean_x2;
                     const double x2v = x2[i];
-                    sumsq += x2v * x2v;
+                    group_sumsq += x2v * x2v;
                 }
                 break;
             }
@@ -1418,24 +1984,25 @@ void demean_inplace_csr_smallcols(Eigen::VectorXd& y,
                     const int i = obs_index[idx];
                     y_ptr[i] -= mean_y;
                     const double yi = y_ptr[i];
-                    sumsq += yi * yi;
+                    group_sumsq += yi * yi;
                     x0[i] -= mean_x0;
                     const double x0v = x0[i];
-                    sumsq += x0v * x0v;
+                    group_sumsq += x0v * x0v;
                     x1[i] -= mean_x1;
                     const double x1v = x1[i];
-                    sumsq += x1v * x1v;
+                    group_sumsq += x1v * x1v;
                     x2[i] -= mean_x2;
                     const double x2v = x2[i];
-                    sumsq += x2v * x2v;
+                    group_sumsq += x2v * x2v;
                     x3[i] -= mean_x3;
                     const double x3v = x3[i];
-                    sumsq += x3v * x3v;
+                    group_sumsq += x3v * x3v;
                 }
                 break;
             }
         }
-    }
+        return group_sumsq;
+    });
     *out_sum_squares = sumsq;
 }
 
@@ -1815,7 +2382,8 @@ void demean_inplace_contiguous(Eigen::VectorXd& y,
                                double alpha_scale,
                                double* alpha_y,
                                double* alpha_X,
-                               double* out_max_abs) {
+                               double* out_max_abs,
+                               ParallelWorkObserver* observer) {
     constexpr int kInlineCols = 8;
 
     const int n = static_cast<int>(y.size());
@@ -1837,11 +2405,8 @@ void demean_inplace_contiguous(Eigen::VectorXd& y,
         x_cols[j] = X_ptr + static_cast<Eigen::Index>(j) * rows;
     }
 
-    double local_max = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(max : local_max)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double local_max = deterministic_chunked_max<int>(
+        groups, local_threads, [&](int g) {
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         const double inv = weight_sums_inv[g];
@@ -1870,9 +2435,6 @@ void demean_inplace_contiguous(Eigen::VectorXd& y,
         if (alpha_y) {
             alpha_y[g] += alpha_scale * y_mean;
         }
-        if (track_max) {
-            local_max = std::max(local_max, std::abs(y_mean));
-        }
 
         for (int j = 0; j < cols; ++j) {
             const Eigen::Index offset = static_cast<Eigen::Index>(j) * groups + g;
@@ -1882,7 +2444,9 @@ void demean_inplace_contiguous(Eigen::VectorXd& y,
                 alpha_X[offset] += alpha_scale * x_mean;
             }
         }
-    }
+        return track_max ? std::abs(y_mean) : 0.0;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(groups)));
 
     if (track_max) {
         *out_max_abs = local_max;
@@ -1910,26 +2474,26 @@ void demean_inplace_contiguous(Eigen::VectorXd& y,
         return;
     }
 
-    double sumsq = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for reduction(+ : sumsq) schedule(static) num_threads(local_threads)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double sumsq = deterministic_chunked_sum<int>(
+        groups, local_threads, [&](int g) {
+        double group_sumsq = 0.0;
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         const double y_mean = y_sums[g];
         for (int i = start; i < end; ++i) {
             y_ptr[i] -= y_mean;
             const double yi = y_ptr[i];
-            sumsq += yi * yi;
+            group_sumsq += yi * yi;
             for (int j = 0; j < cols; ++j) {
                 x_cols[j][i] -=
                     x_sums_ptr[static_cast<Eigen::Index>(j) * groups + g];
                 const double xj = x_cols[j][i];
-                sumsq += xj * xj;
+                group_sumsq += xj * xj;
             }
         }
-    }
+        return group_sumsq;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(groups)));
     *out_sum_squares = sumsq;
 }
 
@@ -1945,14 +2509,15 @@ void demean_inplace_csr(Eigen::VectorXd& y,
                         double alpha_scale,
                         double* alpha_y,
                         double* alpha_X,
-                        double* out_max_abs) {
+                        double* out_max_abs,
+                        ParallelWorkObserver* observer) {
     constexpr int kInlineCols = 8;
 
     const int cols = static_cast<int>(X.cols());
     if (cols <= 4) {
         demean_inplace_csr_smallcols(y, X, csr, workspace, weight_ptr, unit_weights, threads,
                                      subtract, out_sum_squares, alpha_scale, alpha_y, alpha_X,
-                                     out_max_abs);
+                                     out_max_abs, observer);
         return;
     }
     const int rows = static_cast<int>(X.rows());
@@ -1987,11 +2552,8 @@ void demean_inplace_csr(Eigen::VectorXd& y,
         }
     }
 
-    double local_max = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(max : local_max)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double local_max = deterministic_chunked_max<int>(
+        groups, local_threads, [&](int g) {
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         const double inv = weight_sums_inv[g];
@@ -2019,9 +2581,6 @@ void demean_inplace_csr(Eigen::VectorXd& y,
         if (alpha_y) {
             alpha_y[g] += alpha_scale * y_mean;
         }
-        if (track_max) {
-            local_max = std::max(local_max, std::abs(y_mean));
-        }
 
         for (int j = 0; j < cols; ++j) {
             const Eigen::Index offset = static_cast<Eigen::Index>(j) * groups + g;
@@ -2031,7 +2590,9 @@ void demean_inplace_csr(Eigen::VectorXd& y,
                 alpha_X[offset] += alpha_scale * x_mean;
             }
         }
-    }
+        return track_max ? std::abs(y_mean) : 0.0;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(groups)));
 
     if (track_max) {
         *out_max_abs = local_max;
@@ -2060,11 +2621,9 @@ void demean_inplace_csr(Eigen::VectorXd& y,
         return;
     }
 
-    double sumsq = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for reduction(+ : sumsq) schedule(static) num_threads(local_threads)
-#endif
-    for (int g = 0; g < groups; ++g) {
+    const double sumsq = deterministic_chunked_sum<int>(
+        groups, local_threads, [&](int g) {
+        double group_sumsq = 0.0;
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         const double y_mean = y_sums[g];
@@ -2072,16 +2631,154 @@ void demean_inplace_csr(Eigen::VectorXd& y,
             const int i = obs_index[idx];
             y_ptr[i] -= y_mean;
             const double yi = y_ptr[i];
-            sumsq += yi * yi;
+            group_sumsq += yi * yi;
             for (int j = 0; j < cols; ++j) {
                 x_cols[j][i] -=
                     x_sums_ptr[static_cast<Eigen::Index>(j) * groups + g];
                 const double xj = x_cols[j][i];
-                sumsq += xj * xj;
+                group_sumsq += xj * xj;
+            }
+        }
+        return group_sumsq;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(groups)));
+    *out_sum_squares = sumsq;
+}
+
+void demean_inplace_obspart_deterministic(
+    Eigen::VectorXd& y,
+    Eigen::MatrixXd& X,
+    const FeIndexer& idx,
+    FeWorkspace& workspace,
+    const double* weight_ptr,
+    bool unit_weights,
+    int threads,
+    bool subtract,
+    double* out_sum_squares,
+    double alpha_scale,
+    double* alpha_y,
+    double* alpha_X,
+    double* out_max_abs,
+    ParallelWorkObserver* observer) {
+    const int n = static_cast<int>(y.size());
+    const int cols = static_cast<int>(X.cols());
+    const int groups = workspace.num_groups();
+    const int chunks = deterministic_chunk_count(n);
+    const int local_threads = std::max(1, threads);
+    const int* group_ids = idx.group_ids.data();
+    double* y_ptr = y.data();
+    double* x_ptr = X.data();
+    const int rows = static_cast<int>(X.rows());
+
+    workspace.prepare_deterministic_chunks(chunks, cols);
+    workspace.reset();
+
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, chunks);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (region_observer) {
+            region_observer->observe_work();
+        }
+        Eigen::VectorXd& y_local =
+            workspace.deterministic_y_chunks[static_cast<std::size_t>(chunk)];
+        Eigen::MatrixXd* x_local =
+            cols > 0
+                ? &workspace.deterministic_x_chunks[static_cast<std::size_t>(chunk)]
+                : nullptr;
+        const int begin = deterministic_chunk_begin(n, chunk, chunks);
+        const int end = deterministic_chunk_end(n, chunk, chunks);
+        for (int i = begin; i < end; ++i) {
+            const int g = group_ids[i];
+            const double w = unit_weights ? 1.0 : weight_ptr[i];
+            y_local[g] += w * y_ptr[i];
+            for (int j = 0; j < cols; ++j) {
+                (*x_local)(g, j) +=
+                    w * x_ptr[static_cast<Eigen::Index>(j) * rows + i];
             }
         }
     }
-    *out_sum_squares = sumsq;
+    if (region_observer) {
+        region_observer->end_region();
+    }
+
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        workspace.y_sums.noalias() +=
+            workspace.deterministic_y_chunks[static_cast<std::size_t>(chunk)];
+        if (cols > 0) {
+            workspace.x_sums.noalias() +=
+                workspace.deterministic_x_chunks[static_cast<std::size_t>(chunk)];
+        }
+    }
+
+    double* y_means = workspace.y_sums.data();
+    double* x_means = cols > 0 ? workspace.x_sums.data() : nullptr;
+    const double* weight_sums_inv = workspace.weight_sums_inv.data();
+    const bool track_max = out_max_abs != nullptr;
+    double max_abs = 0.0;
+    for (int g = 0; g < groups; ++g) {
+        const double inv = weight_sums_inv[g];
+        y_means[g] *= inv;
+        if (alpha_y) {
+            alpha_y[g] += alpha_scale * y_means[g];
+        }
+        if (track_max) {
+            max_abs = std::max(max_abs, std::abs(y_means[g]));
+        }
+        for (int j = 0; j < cols; ++j) {
+            const Eigen::Index offset =
+                static_cast<Eigen::Index>(j) * groups + g;
+            x_means[offset] *= inv;
+            if (alpha_X) {
+                alpha_X[offset] += alpha_scale * x_means[offset];
+            }
+        }
+    }
+    if (track_max) {
+        *out_max_abs = max_abs;
+    }
+    if (!subtract) {
+        return;
+    }
+
+    InlineOrDynamicBuffer<double> partial(
+        static_cast<std::size_t>(chunks));
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const int begin = deterministic_chunk_begin(n, chunk, chunks);
+        const int end = deterministic_chunk_end(n, chunk, chunks);
+        double local_sumsq = 0.0;
+        for (int i = begin; i < end; ++i) {
+            const int g = group_ids[i];
+            y_ptr[i] -= y_means[g];
+            if (out_sum_squares) {
+                local_sumsq += y_ptr[i] * y_ptr[i];
+            }
+            for (int j = 0; j < cols; ++j) {
+                double& value =
+                    x_ptr[static_cast<Eigen::Index>(j) * rows + i];
+                value -= x_means[static_cast<Eigen::Index>(j) * groups + g];
+                if (out_sum_squares) {
+                    local_sumsq += value * value;
+                }
+            }
+        }
+        partial[static_cast<std::size_t>(chunk)] = local_sumsq;
+    }
+    if (out_sum_squares) {
+        double sumsq = 0.0;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            sumsq += partial[static_cast<std::size_t>(chunk)];
+        }
+        *out_sum_squares = sumsq;
+    }
 }
 
 void demean_inplace(Eigen::VectorXd& y,
@@ -2096,14 +2793,22 @@ void demean_inplace(Eigen::VectorXd& y,
                     double alpha_scale = 1.0,
                     double* alpha_y = nullptr,
                     double* alpha_X = nullptr,
-                    double* out_max_abs = nullptr) {
+                    double* out_max_abs = nullptr,
+                    ParallelWorkObserver* observer = nullptr) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const bool accumulate = (alpha_y != nullptr || alpha_X != nullptr);
+    constexpr int kDeterministicObsPartMaxGroups = 2048;
     if (cols <= 8 && indexer_has_contiguous_groups(idx, n)) {
         demean_inplace_contiguous(y, X, idx, workspace, weight_ptr, unit_weights, threads,
                                   subtract, out_sum_squares, alpha_scale,
-                                  alpha_y, alpha_X, out_max_abs);
+                                  alpha_y, alpha_X, out_max_abs, observer);
+        return;
+    }
+    if (cols <= 8 && idx.num_groups <= kDeterministicObsPartMaxGroups) {
+        demean_inplace_obspart_deterministic(
+            y, X, idx, workspace, weight_ptr, unit_weights, threads, subtract,
+            out_sum_squares, alpha_scale, alpha_y, alpha_X, out_max_abs, observer);
         return;
     }
     if (cols == 1) {
@@ -2344,49 +3049,39 @@ void demean_inplace(Eigen::VectorXd& y,
             return;
         }
 
+        if (!out_sum_squares) {
+            ParallelWorkObserver* region_observer =
+                observer_if_needed(observer, local_threads, n);
+            if (region_observer) {
+                region_observer->begin_region(local_threads);
+            }
 #ifdef HDFE_USE_OPENMP
-        if (!out_sum_squares) {
 #pragma omp parallel for schedule(static) num_threads(local_threads)
-            for (int i = 0; i < n; ++i) {
-                const int g = gid[i];
-                y_ptr[i] -= y_sums[g];
-                x0[i] -= x_sums_ptr[g];
-            }
-        } else {
-            double sumsq = 0.0;
-#pragma omp parallel for reduction(+ : sumsq) schedule(static) num_threads(local_threads)
-            for (int i = 0; i < n; ++i) {
-                const int g = gid[i];
-                y_ptr[i] -= y_sums[g];
-                const double yi = y_ptr[i];
-                sumsq += yi * yi;
-                x0[i] -= x_sums_ptr[g];
-                const double xi = x0[i];
-                sumsq += xi * xi;
-            }
-            *out_sum_squares = sumsq;
-        }
-#else
-        if (!out_sum_squares) {
-            for (int i = 0; i < n; ++i) {
-                const int g = gid[i];
-                y_ptr[i] -= y_sums[g];
-                x0[i] -= x_sums_ptr[g];
-            }
-        } else {
-            double sumsq = 0.0;
-            for (int i = 0; i < n; ++i) {
-                const int g = gid[i];
-                y_ptr[i] -= y_sums[g];
-                const double yi = y_ptr[i];
-                sumsq += yi * yi;
-                x0[i] -= x_sums_ptr[g];
-                const double xi = x0[i];
-                sumsq += xi * xi;
-            }
-            *out_sum_squares = sumsq;
-        }
 #endif
+            for (int i = 0; i < n; ++i) {
+                if (region_observer) {
+                    region_observer->observe_work();
+                }
+                const int g = gid[i];
+                y_ptr[i] -= y_sums[g];
+                x0[i] -= x_sums_ptr[g];
+            }
+            if (region_observer) {
+                region_observer->end_region();
+            }
+        } else {
+            const double sumsq = deterministic_chunked_sum<int>(
+                n, local_threads, [&](int i) {
+                const int g = gid[i];
+                y_ptr[i] -= y_sums[g];
+                const double yi = y_ptr[i];
+                x0[i] -= x_sums_ptr[g];
+                const double xi = x0[i];
+                return yi * yi + xi * xi;
+            }, observer_if_needed(observer, local_threads,
+                                  deterministic_chunk_count(n)));
+            *out_sum_squares = sumsq;
+        }
         return;
     }
     const int x_rows = static_cast<int>(X.rows());
@@ -2924,10 +3619,18 @@ void demean_inplace(Eigen::VectorXd& y,
 
     // Subtract means
     if (!out_sum_squares) {
+        ParallelWorkObserver* region_observer =
+            observer_if_needed(observer, local_threads, n);
+        if (region_observer) {
+            region_observer->begin_region(local_threads);
+        }
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(local_threads)
 #endif
         for (int i = 0; i < n; ++i) {
+            if (region_observer) {
+                region_observer->observe_work();
+            }
             const int g = gid[i];
             y_ptr[i] -= y_sums[g];
             switch (cols) {
@@ -2958,105 +3661,88 @@ void demean_inplace(Eigen::VectorXd& y,
                     break;
             }
         }
+        if (region_observer) {
+            region_observer->end_region();
+        }
         return;
     }
 
-    double sumsq = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for reduction(+ : sumsq) schedule(static) num_threads(local_threads)
-#endif
-    for (int i = 0; i < n; ++i) {
+    const double sumsq = deterministic_chunked_sum<int>(
+        n, local_threads, [&](int i) {
+        double row_sumsq = 0.0;
         const int g = gid[i];
         y_ptr[i] -= y_sums[g];
         const double yi = y_ptr[i];
-        sumsq += yi * yi;
+        row_sumsq += yi * yi;
         switch (cols) {
             case 0:
                 break;
             case 1: {
                 x_cols[0][i] -= x_sums_ptr[g];
                 const double xi = x_cols[0][i];
-                sumsq += xi * xi;
+                row_sumsq += xi * xi;
                 break;
             }
             case 2: {
                 x_cols[0][i] -= x_sums_ptr[g];
                 const double x0v = x_cols[0][i];
-                sumsq += x0v * x0v;
+                row_sumsq += x0v * x0v;
                 x_cols[1][i] -= x_sums_ptr[groups + g];
                 const double x1v = x_cols[1][i];
-                sumsq += x1v * x1v;
+                row_sumsq += x1v * x1v;
                 break;
             }
             case 3: {
                 x_cols[0][i] -= x_sums_ptr[g];
                 const double x0v = x_cols[0][i];
-                sumsq += x0v * x0v;
+                row_sumsq += x0v * x0v;
                 x_cols[1][i] -= x_sums_ptr[groups + g];
                 const double x1v = x_cols[1][i];
-                sumsq += x1v * x1v;
+                row_sumsq += x1v * x1v;
                 x_cols[2][i] -= x_sums_ptr[2 * groups + g];
                 const double x2v = x_cols[2][i];
-                sumsq += x2v * x2v;
+                row_sumsq += x2v * x2v;
                 break;
             }
             case 4: {
                 x_cols[0][i] -= x_sums_ptr[g];
                 const double x0v = x_cols[0][i];
-                sumsq += x0v * x0v;
+                row_sumsq += x0v * x0v;
                 x_cols[1][i] -= x_sums_ptr[groups + g];
                 const double x1v = x_cols[1][i];
-                sumsq += x1v * x1v;
+                row_sumsq += x1v * x1v;
                 x_cols[2][i] -= x_sums_ptr[2 * groups + g];
                 const double x2v = x_cols[2][i];
-                sumsq += x2v * x2v;
+                row_sumsq += x2v * x2v;
                 x_cols[3][i] -= x_sums_ptr[3 * groups + g];
                 const double x3v = x_cols[3][i];
-                sumsq += x3v * x3v;
+                row_sumsq += x3v * x3v;
                 break;
             }
             default:
                 for (int j = 0; j < cols; ++j) {
                     x_cols[j][i] -= x_sums_ptr[static_cast<Eigen::Index>(j) * groups + g];
                     const double xj = x_cols[j][i];
-                    sumsq += xj * xj;
+                    row_sumsq += xj * xj;
                 }
                 break;
         }
-    }
+        return row_sumsq;
+    }, observer_if_needed(observer, local_threads,
+                          deterministic_chunk_count(n)));
     *out_sum_squares = sumsq;
 }
 
 double combined_norm(const Eigen::VectorXd& y, const Eigen::MatrixXd& X) {
-#ifdef HDFE_USE_OPENMP
-    double total = 0.0;
-    const Eigen::Index y_size = y.size();
-    const double* y_data = y.data();
-#pragma omp parallel for reduction(+ : total) schedule(static)
-    for (Eigen::Index i = 0; i < y_size; ++i) {
-        const double v = y_data[i];
-        total += v * v;
-    }
+    double total = deterministic_sumsq_raw(y.data(), y.size());
     const Eigen::Index rows = X.rows();
     const Eigen::Index cols = X.cols();
     const double* X_data = X.data();
-#pragma omp parallel for reduction(+ : total) schedule(static)
     for (Eigen::Index j = 0; j < cols; ++j) {
         const double* __restrict__ col = X_data + j * rows;
-        double local = 0.0;
-#pragma omp simd reduction(+ : local)
-        for (Eigen::Index i = 0; i < rows; ++i) {
-            const double v = col[i];
-            local += v * v;
-        }
-        total += local;
+        total += deterministic_sumsq_raw(col, rows);
     }
     return std::sqrt(total);
-#else
-    const double y_norm = y.squaredNorm();
-    const double x_norm = X.squaredNorm();
-    return std::sqrt(y_norm + x_norm);
-#endif
 }
 
 // The heterogeneous-slope (mixed) absorber resolves convergence_criterion =
@@ -3408,7 +4094,8 @@ void slope_project_inplace(Eigen::VectorXd& y,
                            bool unit_weights,
                            int threads,
                            bool subtract,
-                           double* out_sum_squares = nullptr) {
+                           double* out_sum_squares = nullptr,
+                           ParallelWorkObserver* observer = nullptr) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const int rows = static_cast<int>(X.rows());
@@ -3428,8 +4115,14 @@ void slope_project_inplace(Eigen::VectorXd& y,
         ws.gamma_X.setZero();
     }
 
+    const int local_threads = std::max(1, threads);
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, groups);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(std::max(1, threads))
+#pragma omp parallel num_threads(local_threads)
 #endif
     {
         // Fused multi-column accumulation: one walk over each group's rows
@@ -3443,6 +4136,9 @@ void slope_project_inplace(Eigen::VectorXd& y,
 #pragma omp for schedule(static)
 #endif
         for (int g = 0; g < groups; ++g) {
+            if (region_observer) {
+                region_observer->observe_work();
+            }
             double sw = 0.0;
             double sy = 0.0;
             double szy = 0.0;
@@ -3537,6 +4233,9 @@ void slope_project_inplace(Eigen::VectorXd& y,
             }
         }
     }
+    if (region_observer) {
+        region_observer->end_region();
+    }
 
     if (!subtract) {
         if (out_sum_squares) {
@@ -3546,20 +4245,24 @@ void slope_project_inplace(Eigen::VectorXd& y,
         return;
     }
 
-    double sumsq = 0.0;
+    const int reduction_chunks = deterministic_chunk_count(groups);
+    InlineOrDynamicBuffer<double> sumsq_partial(
+        static_cast<std::size_t>(reduction_chunks));
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(std::max(1, threads)) reduction(+ : sumsq)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(std::max(1, threads))
 #endif
-    {
+    for (int chunk = 0; chunk < reduction_chunks; ++chunk) {
+        double local_sumsq = 0.0;
         // Per-group alpha/gamma hoisted out of the row loop: (g, j) indexing
         // into the groups x cols matrices strides by `groups` per column.
         std::vector<double> coef_acc(static_cast<std::size_t>(2 * std::max(cols, 1)), 0.0);
         double* ax = coef_acc.data();
         double* gx = coef_acc.data() + cols;
-#ifdef HDFE_USE_OPENMP
-#pragma omp for schedule(static)
-#endif
-        for (int g = 0; g < groups; ++g) {
+        const int group_begin =
+            deterministic_chunk_begin(groups, chunk, reduction_chunks);
+        const int group_end =
+            deterministic_chunk_end(groups, chunk, reduction_chunks);
+        for (int g = group_begin; g < group_end; ++g) {
             const int start = group_ptr[g];
             const int end = group_ptr[g + 1];
             const double ay = ws.alpha_y[g];
@@ -3574,20 +4277,25 @@ void slope_project_inplace(Eigen::VectorXd& y,
                 const double y_new = y_ptr[i] - ay - gy * zi;
                 y_ptr[i] = y_new;
                 if (out_sum_squares) {
-                    sumsq += y_new * y_new;
+                    local_sumsq += y_new * y_new;
                 }
                 for (int j = 0; j < cols; ++j) {
                     double* x_col = X_ptr + static_cast<Eigen::Index>(j) * rows;
                     const double x_new = x_col[i] - ax[j] - gx[j] * zi;
                     x_col[i] = x_new;
                     if (out_sum_squares) {
-                        sumsq += x_new * x_new;
+                        local_sumsq += x_new * x_new;
                     }
                 }
             }
         }
+        sumsq_partial[static_cast<std::size_t>(chunk)] = local_sumsq;
     }
     if (out_sum_squares) {
+        double sumsq = 0.0;
+        for (int chunk = 0; chunk < reduction_chunks; ++chunk) {
+            sumsq += sumsq_partial[static_cast<std::size_t>(chunk)];
+        }
         *out_sum_squares = sumsq;
     }
 }
@@ -3663,9 +4371,10 @@ int cap_threads_by_fe_shape(int requested,
 // panels (tens of millions of rows) the demean sweeps are memory-bandwidth
 // bound and the cap strands most of a multi-socket machine's bandwidth, so
 // honor the requested thread count there. Every dataset below the gate keeps
-// the capped behavior byte-for-byte; per-dim TLS and >=10M-group protections
-// still apply downstream. Disable with XHDFE_UNCAP_LARGE_N=0 to restore the
-// cap unconditionally.
+// the capped behavior byte-for-byte. Per-dimension TLS and >=10M-group
+// protections remain downstream only for automatic selection; an explicit
+// request bypasses all of these software heuristics. Disable with
+// XHDFE_UNCAP_LARGE_N=0 to restore the auto cap unconditionally.
 int cap_threads_by_fe_shape_gated(int requested,
                                   int n,
                                   const std::vector<FeIndexer>& indexers) {
@@ -3833,7 +4542,8 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
                                  bool unit_weights,
                                  int threads,
                                  bool subtract,
-                                 double* out_sum_squares = nullptr) {
+                                 double* out_sum_squares = nullptr,
+                                 ParallelWorkObserver* observer = nullptr) {
     const int cols = static_cast<int>(X.cols());
     const int rows = static_cast<int>(X.rows());
     const int groups = ws.num_groups;
@@ -3853,8 +4563,14 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
     // registers; the generic path below covers every other shape.
     const bool fast_shape3 = (k == 2 && intercept_off == 1);
 
+    const int local_threads = std::max(1, threads);
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, groups);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(std::max(1, threads))
+#pragma omp parallel num_threads(local_threads)
 #endif
     {
         // Per-thread moment scratch: b[c * m + d] for c over {y, X cols}.
@@ -3866,6 +4582,9 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
 #pragma omp for schedule(static)
 #endif
         for (int g = 0; g < groups; ++g) {
+            if (region_observer) {
+                region_observer->observe_work();
+            }
             const int start = group_ptr[g];
             const int end = group_ptr[g + 1];
             if (fast_shape3) {
@@ -4024,6 +4743,9 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
             }
         }
     }
+    if (region_observer) {
+        region_observer->end_region();
+    }
 
     if (!subtract) {
         if (out_sum_squares) {
@@ -4033,16 +4755,20 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
         return;
     }
 
-    double sumsq = 0.0;
+    const int reduction_chunks = deterministic_chunk_count(groups);
+    InlineOrDynamicBuffer<double> sumsq_partial(
+        static_cast<std::size_t>(reduction_chunks));
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel num_threads(std::max(1, threads)) reduction(+ : sumsq)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(std::max(1, threads))
 #endif
-    {
+    for (int chunk = 0; chunk < reduction_chunks; ++chunk) {
+        double local_sumsq = 0.0;
         std::vector<double> zv(static_cast<std::size_t>(std::max(k, 1)), 0.0);
-#ifdef HDFE_USE_OPENMP
-#pragma omp for schedule(static)
-#endif
-        for (int g = 0; g < groups; ++g) {
+        const int group_begin =
+            deterministic_chunk_begin(groups, chunk, reduction_chunks);
+        const int group_end =
+            deterministic_chunk_end(groups, chunk, reduction_chunks);
+        for (int g = group_begin; g < group_end; ++g) {
             const int start = group_ptr[g];
             const int end = group_ptr[g + 1];
             const double* __restrict beta =
@@ -4058,7 +4784,7 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
                         y_ptr[i] - (beta[0] + beta[1] * za + beta[2] * zb);
                     y_ptr[i] = y_new;
                     if (out_sum_squares) {
-                        sumsq += y_new * y_new;
+                        local_sumsq += y_new * y_new;
                     }
                     for (int j = 0; j < cols; ++j) {
                         const double* __restrict bc =
@@ -4069,7 +4795,7 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
                             x_col[i] - (bc[0] + bc[1] * za + bc[2] * zb);
                         x_col[i] = x_new;
                         if (out_sum_squares) {
-                            sumsq += x_new * x_new;
+                            local_sumsq += x_new * x_new;
                         }
                     }
                 }
@@ -4087,7 +4813,7 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
                 const double y_new = y_ptr[i] - fit_y;
                 y_ptr[i] = y_new;
                 if (out_sum_squares) {
-                    sumsq += y_new * y_new;
+                    local_sumsq += y_new * y_new;
                 }
                 for (int j = 0; j < cols; ++j) {
                     const double* bc = beta + static_cast<std::size_t>(j + 1) * m;
@@ -4099,13 +4825,18 @@ void fused_slope_project_inplace(Eigen::VectorXd& y,
                     const double x_new = x_col[i] - fit_x;
                     x_col[i] = x_new;
                     if (out_sum_squares) {
-                        sumsq += x_new * x_new;
+                        local_sumsq += x_new * x_new;
                     }
                 }
             }
         }
+        sumsq_partial[static_cast<std::size_t>(chunk)] = local_sumsq;
     }
     if (out_sum_squares) {
+        double sumsq = 0.0;
+        for (int chunk = 0; chunk < reduction_chunks; ++chunk) {
+            sumsq += sumsq_partial[static_cast<std::size_t>(chunk)];
+        }
         *out_sum_squares = sumsq;
     }
 }
@@ -4406,11 +5137,9 @@ double schwarz_probe_projected_iters(const std::vector<const int*>& g,
         scatter_add(g[d], ng[d], nullptr, cnt[d].data());
     }
     std::vector<double> yp(y, y + n);
-    auto norm2 = [&]() { double s = 0.0;
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for reduction(+ : s) schedule(static)
-#endif
-        for (int i = 0; i < n; ++i) s += yp[i] * yp[i]; return std::sqrt(s); };
+    auto norm2 = [&]() {
+        return std::sqrt(deterministic_sumsq_raw(yp.data(), n));
+    };
     double prevn = std::max(norm2(), 1e-300);
     double logprod = 0.0; int nr = 0;
     for (int it = 0; it < NS; ++it) {
@@ -4508,39 +5237,35 @@ inline void irons_tuck_accumulate(const double* x,
                                   const double* ggx,
                                   Eigen::Index n,
                                   IronsTuckStats& stats) {
-    double vprod = 0.0;
-    double ssq = 0.0;
-    double d1sq = 0.0;
+    const int chunks = deterministic_chunk_count(n);
+    if (chunks == 0) {
+        return;
+    }
+    InlineOrDynamicBuffer<IronsTuckStats> partial(
+        static_cast<std::size_t>(chunks));
 #ifdef HDFE_USE_OPENMP
-    constexpr Eigen::Index kParallelMinN = 1 << 18;
-    if (n >= kParallelMinN) {
-#pragma omp parallel for reduction(+ : vprod, ssq, d1sq) schedule(static)
-        for (Eigen::Index i = 0; i < n; ++i) {
+#pragma omp parallel for schedule(static)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const Eigen::Index begin = deterministic_chunk_begin(n, chunk, chunks);
+        const Eigen::Index end = deterministic_chunk_end(n, chunk, chunks);
+        IronsTuckStats local;
+        for (Eigen::Index i = begin; i < end; ++i) {
             const double gx_val = gx[i];
             const double delta_gx = ggx[i] - gx_val;
             const double delta2 = delta_gx - gx_val + x[i];
-            vprod += delta_gx * delta2;
-            ssq += delta2 * delta2;
-            d1sq += delta_gx * delta_gx;
+            local.vprod += delta_gx * delta2;
+            local.ssq += delta2 * delta2;
+            local.d1sq += delta_gx * delta_gx;
         }
-        stats.vprod += vprod;
-        stats.ssq += ssq;
-        stats.d1sq += d1sq;
-        return;
+        partial[static_cast<std::size_t>(chunk)] = local;
     }
-#pragma omp simd reduction(+ : vprod, ssq, d1sq)
-#endif
-    for (Eigen::Index i = 0; i < n; ++i) {
-        const double gx_val = gx[i];
-        const double delta_gx = ggx[i] - gx_val;
-        const double delta2 = delta_gx - gx_val + x[i];
-        vprod += delta_gx * delta2;
-        ssq += delta2 * delta2;
-        d1sq += delta_gx * delta_gx;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const IronsTuckStats& local = partial[static_cast<std::size_t>(chunk)];
+        stats.vprod += local.vprod;
+        stats.ssq += local.ssq;
+        stats.d1sq += local.d1sq;
     }
-    stats.vprod += vprod;
-    stats.ssq += ssq;
-    stats.d1sq += d1sq;
 }
 
 inline void irons_tuck_update(double* x,
@@ -4992,12 +5717,21 @@ void packed_demean_grouped(double* __restrict cur,
                            const double* __restrict wsinv,
                            double* __restrict means,
                            int threads,
-                           double* out_sumsq) {
+                           double* out_sumsq,
+                           ParallelWorkObserver* observer) {
     const int local_threads = std::max(1, threads);
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, groups);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(local_threads)
 #endif
     for (int g = 0; g < groups; ++g) {
+        if (region_observer) {
+            region_observer->observe_work();
+        }
         const int start = group_ptr[g];
         const int end = group_ptr[g + 1];
         double acc[S];
@@ -5017,30 +5751,46 @@ void packed_demean_grouped(double* __restrict cur,
         double* __restrict m = means + static_cast<std::size_t>(g) * S;
         for (int l = 0; l < S; ++l) m[l] = acc[l] * inv;
     }
+    if (region_observer) {
+        region_observer->end_region();
+    }
 
     if (out_sumsq) {
-        double sumsq = 0.0;
+        const int chunks = deterministic_chunk_count(groups);
+        InlineOrDynamicBuffer<double> partial(
+            static_cast<std::size_t>(chunks));
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(+ : sumsq)
+#pragma omp parallel for schedule(static) num_threads(local_threads)
 #endif
-        for (int g = 0; g < groups; ++g) {
-            const int start = group_ptr[g];
-            const int end = group_ptr[g + 1];
-            const double* __restrict m = means + static_cast<std::size_t>(g) * S;
-            for (int idx = start; idx < end; ++idx) {
-                if (Random) {
-                    const int pf = idx + kPackedPfDist;
-                    if (pf < n) {
-                        __builtin_prefetch(cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            const int group_begin = deterministic_chunk_begin(groups, chunk, chunks);
+            const int group_end = deterministic_chunk_end(groups, chunk, chunks);
+            double local = 0.0;
+            for (int g = group_begin; g < group_end; ++g) {
+                const int start = group_ptr[g];
+                const int end = group_ptr[g + 1];
+                const double* __restrict m = means + static_cast<std::size_t>(g) * S;
+                for (int idx = start; idx < end; ++idx) {
+                    if (Random) {
+                        const int pf = idx + kPackedPfDist;
+                        if (pf < n) {
+                            __builtin_prefetch(
+                                cur + static_cast<std::size_t>(obs_index[pf]) * S, 1, 1);
+                        }
+                    }
+                    const int i = Random ? obs_index[idx] : idx;
+                    double* __restrict p = cur + static_cast<std::size_t>(i) * S;
+                    for (int l = 0; l < S; ++l) {
+                        p[l] -= m[l];
+                        local += p[l] * p[l];
                     }
                 }
-                const int i = Random ? obs_index[idx] : idx;
-                double* __restrict p = cur + static_cast<std::size_t>(i) * S;
-                for (int l = 0; l < S; ++l) {
-                    p[l] -= m[l];
-                    sumsq += p[l] * p[l];
-                }
             }
+            partial[static_cast<std::size_t>(chunk)] = local;
+        }
+        double sumsq = 0.0;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            sumsq += partial[static_cast<std::size_t>(chunk)];
         }
         *out_sumsq = sumsq;
     } else {
@@ -5067,9 +5817,10 @@ void packed_demean_grouped(double* __restrict cur,
 }
 
 // Observation-partitioned gather/scatter for low-cardinality non-contiguous
-// FEs (e.g. year): each thread accumulates per-group partial sums over its
-// contiguous chunk of observations (sequential reads of `cur`), then the
-// partials are combined. `tls[t]` is per-thread scratch of size groups*S.
+// FEs (e.g. year). Each fixed logical chunk accumulates a per-group partial
+// sum over a contiguous observation range; threads execute those chunks, and
+// the partials are combined in chunk-index order. `tls[c]` is per-logical-
+// chunk scratch of size groups*S, so results are independent of team size.
 template <int S>
 void packed_demean_obspart(double* __restrict cur,
                            const int* __restrict group_ids,
@@ -5079,35 +5830,46 @@ void packed_demean_obspart(double* __restrict cur,
                            double* __restrict means,
                            std::vector<std::vector<double>>& tls,
                            int threads,
-                           double* out_sumsq) {
+                           double* out_sumsq,
+                           ParallelWorkObserver* observer) {
     const int local_threads = std::max(1, threads);
+    const int chunks = deterministic_chunk_count(n);
     const std::size_t msz = static_cast<std::size_t>(groups) * S;
+    if (static_cast<int>(tls.size()) < chunks) {
+        throw std::runtime_error("Insufficient deterministic packed-demean scratch");
+    }
     std::fill(means, means + msz, 0.0);
+    ParallelWorkObserver* region_observer =
+        observer_if_needed(observer, local_threads, chunks);
+    if (region_observer) {
+        region_observer->begin_region(local_threads);
+    }
 #ifdef HDFE_USE_OPENMP
-    if (local_threads > 1) {
-#pragma omp parallel num_threads(local_threads)
-        {
-            const int tid = omp_get_thread_num();
-            double* __restrict t = tls[static_cast<std::size_t>(tid)].data();
-            std::fill(t, t + msz, 0.0);
-#pragma omp for schedule(static)
-            for (int i = 0; i < n; ++i) {
-                const double* __restrict p = cur + static_cast<std::size_t>(i) * S;
-                double* __restrict tg = t + static_cast<std::size_t>(group_ids[i]) * S;
-                for (int l = 0; l < S; ++l) tg[l] += p[l];
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (region_observer) {
+            region_observer->observe_work();
+        }
+        double* __restrict t = tls[static_cast<std::size_t>(chunk)].data();
+        std::fill(t, t + msz, 0.0);
+        const int begin = deterministic_chunk_begin(n, chunk, chunks);
+        const int end = deterministic_chunk_end(n, chunk, chunks);
+        for (int i = begin; i < end; ++i) {
+            const double* __restrict p = cur + static_cast<std::size_t>(i) * S;
+            double* __restrict tg = t + static_cast<std::size_t>(group_ids[i]) * S;
+            for (int l = 0; l < S; ++l) {
+                tg[l] += p[l];
             }
         }
-        for (int tid = 0; tid < local_threads; ++tid) {
-            const double* __restrict t = tls[static_cast<std::size_t>(tid)].data();
-            for (std::size_t k = 0; k < msz; ++k) means[k] += t[k];
-        }
-    } else
-#endif
-    {
-        for (int i = 0; i < n; ++i) {
-            const double* __restrict p = cur + static_cast<std::size_t>(i) * S;
-            double* __restrict mg = means + static_cast<std::size_t>(group_ids[i]) * S;
-            for (int l = 0; l < S; ++l) mg[l] += p[l];
+    }
+    if (region_observer) {
+        region_observer->end_region();
+    }
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const double* __restrict t = tls[static_cast<std::size_t>(chunk)].data();
+        for (std::size_t k = 0; k < msz; ++k) {
+            means[k] += t[k];
         }
     }
     for (int g = 0; g < groups; ++g) {
@@ -5116,17 +5878,28 @@ void packed_demean_obspart(double* __restrict cur,
         for (int l = 0; l < S; ++l) m[l] *= inv;
     }
 
-    double sumsq = 0.0;
+    InlineOrDynamicBuffer<double> partial(
+        static_cast<std::size_t>(chunks));
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(local_threads) reduction(+ : sumsq)
+#pragma omp parallel for schedule(static) num_threads(local_threads)
 #endif
-    for (int i = 0; i < n; ++i) {
-        double* __restrict p = cur + static_cast<std::size_t>(i) * S;
-        const double* __restrict m = means + static_cast<std::size_t>(group_ids[i]) * S;
-        for (int l = 0; l < S; ++l) {
-            p[l] -= m[l];
-            sumsq += p[l] * p[l];
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const int begin = deterministic_chunk_begin(n, chunk, chunks);
+        const int end = deterministic_chunk_end(n, chunk, chunks);
+        double local = 0.0;
+        for (int i = begin; i < end; ++i) {
+            double* __restrict p = cur + static_cast<std::size_t>(i) * S;
+            const double* __restrict m = means + static_cast<std::size_t>(group_ids[i]) * S;
+            for (int l = 0; l < S; ++l) {
+                p[l] -= m[l];
+                local += p[l] * p[l];
+            }
         }
+        partial[static_cast<std::size_t>(chunk)] = local;
+    }
+    double sumsq = 0.0;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        sumsq += partial[static_cast<std::size_t>(chunk)];
     }
     if (out_sumsq) *out_sumsq = sumsq;
 }
@@ -5136,15 +5909,16 @@ void packed_demean_obspart(double* __restrict cur,
 bool packed_demean_grouped_dispatch(int S, bool random, double* cur,
                                     const int* group_ptr, const int* obs_index,
                                     int groups, int n, const double* wsinv,
-                                    double* means, int threads, double* out_sumsq) {
+                                    double* means, int threads, double* out_sumsq,
+                                    ParallelWorkObserver* observer) {
 #define HDFE_PG_CASE(s)                                                                       \
     case s:                                                                                   \
         if (random)                                                                           \
             packed_demean_grouped<s, true>(cur, group_ptr, obs_index, groups, n, wsinv,       \
-                                           means, threads, out_sumsq);                          \
+                                           means, threads, out_sumsq, observer);                \
         else                                                                                  \
             packed_demean_grouped<s, false>(cur, group_ptr, obs_index, groups, n, wsinv,      \
-                                            means, threads, out_sumsq);                         \
+                                            means, threads, out_sumsq, observer);               \
         return true;
     switch (S) {
         HDFE_PG_CASE(2)
@@ -5164,11 +5938,12 @@ bool packed_demean_grouped_dispatch(int S, bool random, double* cur,
 bool packed_demean_obspart_dispatch(int S, double* cur, const int* group_ids,
                                     int groups, int n, const double* wsinv, double* means,
                                     std::vector<std::vector<double>>& tls, int threads,
-                                    double* out_sumsq) {
+                                    double* out_sumsq,
+                                    ParallelWorkObserver* observer) {
 #define HDFE_PO_CASE(s)                                                                       \
     case s:                                                                                   \
         packed_demean_obspart<s>(cur, group_ids, groups, n, wsinv, means, tls, threads,       \
-                                 out_sumsq);                                                  \
+                                 out_sumsq, observer);                                        \
         return true;
     switch (S) {
         HDFE_PO_CASE(2)
@@ -5186,6 +5961,27 @@ bool packed_demean_obspart_dispatch(int S, double* cur, const int* group_ids,
 }
 
 }  // namespace
+
+ScopedGpuBackendOverride::ScopedGpuBackendOverride(
+    GpuBackend backend) noexcept
+    : previous_active_(tls_gpu_backend_override_active),
+      previous_backend_(tls_gpu_backend_override) {
+    tls_gpu_backend_override = backend;
+    tls_gpu_backend_override_active = true;
+}
+
+ScopedGpuBackendOverride::~ScopedGpuBackendOverride() noexcept {
+    tls_gpu_backend_override = previous_backend_;
+    tls_gpu_backend_override_active = previous_active_;
+}
+
+bool has_thread_gpu_backend_override() noexcept {
+    return tls_gpu_backend_override_active;
+}
+
+GpuBackend thread_gpu_backend_override() noexcept {
+    return tls_gpu_backend_override;
+}
 
 AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                       const Eigen::MatrixXd& X,
@@ -5243,7 +6039,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                               : 1;
         idx_threads = std::min<int>(std::max(1, idx_threads),
                                     static_cast<int>(fes.size()));
-        if (idx_threads > 1 && n >= 4194304) {
+        if (idx_threads > 1 &&
+            (options.num_threads_explicit || n >= 4194304)) {
             // Dimensions are independent; each indexer is built and
             // first-touched by a single thread, bit-identical to serial.
 #pragma omp parallel for schedule(dynamic, 1) num_threads(idx_threads)
@@ -5334,7 +6131,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         threads = 1;  // default to single-thread for best cache efficiency on wide datasets
     }
     threads = std::max(1, threads);
-    if (!options.retain_fixed_effects) {
+    if (!options.retain_fixed_effects && !options.num_threads_explicit) {
         threads = cap_threads_by_fe_shape_gated(threads, n, indexers);
     }
     omp_set_dynamic(0);
@@ -5343,7 +6140,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
     threads = std::max(1, threads);
     std::vector<int> threads_by_dim(indexers.size(), threads);
 #ifdef HDFE_USE_OPENMP
-    if (threads > 2) {
+    if (!options.num_threads_explicit && threads > 2) {
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
             const int groups = indexers[dim].num_groups;
             if (groups >= 10000000) {
@@ -5351,7 +6148,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
         }
     }
-    if (threads > 1) {
+    if (!options.num_threads_explicit && threads > 1) {
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
             if (!indexer_has_contiguous_groups(indexers[dim], n)) {
                 threads_by_dim[dim] =
@@ -5438,13 +6235,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
     std::vector<GroupCSR> csr;
     std::vector<uint8_t> use_csr(indexers.size(), 0);
-    const bool allow_csr = (n >= 200000 && num_cols <= 8);
+    const bool allow_csr = (num_cols <= 8);
     if (allow_csr) {
         csr.resize(indexers.size());
-        constexpr int kCsrGroupsThreshold = 100000;
+        constexpr int kCsrGroupsThreshold = 2049;
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
-            if (threads_by_dim[dim] > 1 &&
-                indexers[dim].num_groups >= kCsrGroupsThreshold &&
+            if (indexers[dim].num_groups >= kCsrGroupsThreshold &&
                 !indexer_has_contiguous_groups(indexers[dim], n)) {
                 use_csr[dim] = 1;
                 csr[dim] =
@@ -5465,11 +6261,13 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         if (use_csr[dim]) {
             demean_inplace_csr(y_in, X_in, csr[dim], workspaces[dim], weight_ptr, unit_weights,
                                threads_by_dim[dim], true, out_sumsq, 1.0,
-                               alpha_y_ptr, alpha_x_ptr, nullptr);
+                               alpha_y_ptr, alpha_x_ptr, nullptr,
+                               options.parallel_observer);
         } else {
             demean_inplace(y_in, X_in, indexers[dim], workspaces[dim], weight_ptr, unit_weights,
                            threads_by_dim[dim], true, out_sumsq, 1.0,
-                           alpha_y_ptr, alpha_x_ptr, nullptr);
+                           alpha_y_ptr, alpha_x_ptr, nullptr,
+                           options.parallel_observer);
         }
         if (cpu_profile_enabled()) {
             const auto demean_t1 = std::chrono::steady_clock::now();
@@ -5582,8 +6380,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     pmode[dim] = 0;
                 } else if (groups <= kObsPartMaxGroups) {
                     pmode[dim] = 2;
-                    const int dth = std::max(1, threads_by_dim[dim]);
-                    ptls[dim].assign(static_cast<std::size_t>(dth),
+                    const int chunks = deterministic_chunk_count(n);
+                    ptls[dim].assign(static_cast<std::size_t>(chunks),
                                      std::vector<double>(static_cast<std::size_t>(groups) * Sp, 0.0));
                 } else {
                     pmode[dim] = 1;
@@ -5623,23 +6421,26 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 // Contiguous packed demean parallelizes over groups with no
                 // thread-local state: each group is reduced by exactly one
                 // thread in observation order, so the result is bit-identical
-                // for any thread count. The >=10M-group cap in threads_by_dim
-                // protects the SoA kernels; it only throttles streaming
-                // bandwidth here, so use the solver-wide thread count instead.
+                // for any thread count. The auto-only >=10M-group cap in
+                // threads_by_dim protects the SoA kernels; it only throttles
+                // streaming bandwidth here, so use the solver-wide thread
+                // count instead.
                 const int dth = std::max(1, pmode[dim] == 0 ? threads
                                                             : threads_by_dim[dim]);
                 if (pmode[dim] == 0) {
                     packed_demean_grouped_dispatch(Sp, false, curp,
                                                    indexers[dim].group_ptr.data(), nullptr, groups,
-                                                   n, wsinv, means, dth, out_sumsq);
+                                                   n, wsinv, means, dth, out_sumsq,
+                                                   options.parallel_observer);
                 } else if (pmode[dim] == 1) {
                     const GroupCSR* c = pcsr[dim];
                     packed_demean_grouped_dispatch(Sp, true, curp, c->group_ptr.data(),
                                                    c->obs_index.data(), groups, n, wsinv, means, dth,
-                                                   out_sumsq);
+                                                   out_sumsq, options.parallel_observer);
                 } else {
                     packed_demean_obspart_dispatch(Sp, curp, indexers[dim].group_ids.data(), groups,
-                                                   n, wsinv, means, ptls[dim], dth, out_sumsq);
+                                                   n, wsinv, means, ptls[dim], dth, out_sumsq,
+                                                   options.parallel_observer);
                 }
             };
 
@@ -5674,17 +6475,26 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
             auto packed_col_sumsq = [&](const Eigen::VectorXd& value) {
                 Eigen::VectorXd out = Eigen::VectorXd::Zero(Sp);
+                constexpr int kPackedMaxLanes = 9;
+                const int chunks = deterministic_chunk_count(n);
+                InlineOrDynamicBuffer<
+                    double,
+                    static_cast<std::size_t>(
+                        kLegacyDeterministicChunkFloor * kPackedMaxLanes)>
+                    partial(static_cast<std::size_t>(
+                        chunks * kPackedMaxLanes));
 #ifdef HDFE_USE_OPENMP
-                const int nth = std::max(1, threads);
-                std::vector<double> tls(static_cast<std::size_t>(nth) *
-                                        static_cast<std::size_t>(Sp), 0.0);
-#pragma omp parallel num_threads(threads)
-                {
-                    const int tid = omp_get_thread_num();
-                    double* local = tls.data() + static_cast<std::size_t>(tid) *
-                                                  static_cast<std::size_t>(Sp);
-#pragma omp for schedule(static)
-                    for (Eigen::Index i = 0; i < n; ++i) {
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+                for (int chunk = 0; chunk < chunks; ++chunk) {
+                    double* local =
+                        partial.data() + static_cast<std::size_t>(chunk) *
+                                             static_cast<std::size_t>(kPackedMaxLanes);
+                    const Eigen::Index begin =
+                        deterministic_chunk_begin<Eigen::Index>(n, chunk, chunks);
+                    const Eigen::Index end =
+                        deterministic_chunk_end<Eigen::Index>(n, chunk, chunks);
+                    for (Eigen::Index i = begin; i < end; ++i) {
                         const double* row =
                             value.data() + static_cast<std::size_t>(i) *
                                                static_cast<std::size_t>(Sp);
@@ -5693,40 +6503,40 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         }
                     }
                 }
-                for (int t = 0; t < nth; ++t) {
-                    const double* local = tls.data() + static_cast<std::size_t>(t) *
-                                                        static_cast<std::size_t>(Sp);
+                for (int chunk = 0; chunk < chunks; ++chunk) {
+                    const double* local =
+                        partial.data() + static_cast<std::size_t>(chunk) *
+                                             static_cast<std::size_t>(kPackedMaxLanes);
                     for (int k = 0; k < Sp; ++k) {
                         out[k] += local[k];
                     }
                 }
-#else
-                for (Eigen::Index i = 0; i < n; ++i) {
-                    const double* row =
-                        value.data() + static_cast<std::size_t>(i) *
-                                           static_cast<std::size_t>(Sp);
-                    for (int k = 0; k < Sp; ++k) {
-                        out[k] += row[k] * row[k];
-                    }
-                }
-#endif
                 return out;
             };
 
             auto packed_col_dot = [&](const Eigen::VectorXd& lhs,
                                       const Eigen::VectorXd& rhs) {
                 Eigen::VectorXd out = Eigen::VectorXd::Zero(Sp);
+                constexpr int kPackedMaxLanes = 9;
+                const int chunks = deterministic_chunk_count(n);
+                InlineOrDynamicBuffer<
+                    double,
+                    static_cast<std::size_t>(
+                        kLegacyDeterministicChunkFloor * kPackedMaxLanes)>
+                    partial(static_cast<std::size_t>(
+                        chunks * kPackedMaxLanes));
 #ifdef HDFE_USE_OPENMP
-                const int nth = std::max(1, threads);
-                std::vector<double> tls(static_cast<std::size_t>(nth) *
-                                        static_cast<std::size_t>(Sp), 0.0);
-#pragma omp parallel num_threads(threads)
-                {
-                    const int tid = omp_get_thread_num();
-                    double* local = tls.data() + static_cast<std::size_t>(tid) *
-                                                  static_cast<std::size_t>(Sp);
-#pragma omp for schedule(static)
-                    for (Eigen::Index i = 0; i < n; ++i) {
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+                for (int chunk = 0; chunk < chunks; ++chunk) {
+                    double* local =
+                        partial.data() + static_cast<std::size_t>(chunk) *
+                                             static_cast<std::size_t>(kPackedMaxLanes);
+                    const Eigen::Index begin =
+                        deterministic_chunk_begin<Eigen::Index>(n, chunk, chunks);
+                    const Eigen::Index end =
+                        deterministic_chunk_end<Eigen::Index>(n, chunk, chunks);
+                    for (Eigen::Index i = begin; i < end; ++i) {
                         const std::size_t off =
                             static_cast<std::size_t>(i) * static_cast<std::size_t>(Sp);
                         const double* a = lhs.data() + off;
@@ -5736,24 +6546,14 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         }
                     }
                 }
-                for (int t = 0; t < nth; ++t) {
-                    const double* local = tls.data() + static_cast<std::size_t>(t) *
-                                                        static_cast<std::size_t>(Sp);
+                for (int chunk = 0; chunk < chunks; ++chunk) {
+                    const double* local =
+                        partial.data() + static_cast<std::size_t>(chunk) *
+                                             static_cast<std::size_t>(kPackedMaxLanes);
                     for (int k = 0; k < Sp; ++k) {
                         out[k] += local[k];
                     }
                 }
-#else
-                for (Eigen::Index i = 0; i < n; ++i) {
-                    const std::size_t off =
-                        static_cast<std::size_t>(i) * static_cast<std::size_t>(Sp);
-                    const double* a = lhs.data() + off;
-                    const double* b = rhs.data() + off;
-                    for (int k = 0; k < Sp; ++k) {
-                        out[k] += a[k] * b[k];
-                    }
-                }
-#endif
                 return out;
             };
 
@@ -5795,7 +6595,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     return false;
                 }
 	                int last_check_iter = -1;
-	                double prev_norm = std::sqrt(cur.squaredNorm());
+	                double prev_norm =
+                        std::sqrt(deterministic_sumsq_raw(cur.data(), cur.size(), threads));
 	                int grand_acc = 0;
                 // Adaptive-restart safeguard against Irons-Tuck instability on
                 // ill-conditioned FE graphs. The IT extrapolation can amplify
@@ -5889,9 +6690,10 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         const int step = iter - last_check_iter;
                         last_check_iter = iter;
                         prev_norm = curr_norm;
-                        // Adaptive-restart divergence detection (honest_mode):
-                        // resume on a new best, suspend on runaway growth.
-                        if (honest_mode) {
+                        // Adaptive-restart divergence detection: resume on a new
+                        // best, suspend on runaway growth. Deliberately NOT
+                        // gated on honest_mode — see accel_guard_always_enabled().
+                        if (honest_mode || accel_guard_always_enabled()) {
                             const double ratio = curr_norm / std::max(best_resid, 1e-300);
                             if (ratio > max_ratio_seen) {
                                 max_ratio_seen = ratio;
@@ -5992,9 +6794,17 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         proj[i] = src[i] - proj[i];
                     }
                 };
-                auto safe_ratio = [](double num, double den) {
-                    constexpr double eps = std::numeric_limits<double>::epsilon();
-                    return std::abs(den) <= eps ? 0.0 : num / den;
+                auto column_exact_zero = [&](const Eigen::VectorXd& values,
+                                             int column) {
+                    for (Eigen::Index i = 0; i < n; ++i) {
+                        const std::size_t off =
+                            static_cast<std::size_t>(i) *
+                            static_cast<std::size_t>(Sp);
+                        if (values[off + static_cast<std::size_t>(column)] != 0.0) {
+                            return false;
+                        }
+                    }
+                    return true;
                 };
 
                 Eigen::VectorXd improvement = packed_col_sumsq(cur);
@@ -6004,27 +6814,104 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 Eigen::VectorXd u = r;
                 Eigen::VectorXd v(static_cast<Eigen::Index>(flat_size));
                 Eigen::VectorXd recent = Eigen::VectorXd::Zero(Sp);
+                Eigen::VectorXd alpha = Eigen::VectorXd::Zero(Sp);
+                Eigen::VectorXd beta = Eigen::VectorXd::Zero(Sp);
+                Eigen::VectorXd next_improvement(Sp);
+                std::vector<uint8_t> lane_solved(
+                    static_cast<std::size_t>(Sp), 0);
 
                 converged = false;
                 int cg_iters = 0;
                 for (int iter = 1; iter <= options.max_iter; ++iter) {
                     projection_sweep(u, v);
                     const Eigen::VectorXd denom = packed_col_dot(u, v);
-                    Eigen::VectorXd alpha(Sp);
+                    alpha.setZero();
+                    next_improvement = improvement;
+                    bool cg_breakdown = false;
                     for (int k = 0; k < Sp; ++k) {
-                        alpha[k] = safe_ratio(ssr[k], denom[k]);
+                        if (!finite_double_bits(improvement[k]) ||
+                            !finite_double_bits(ssr[k]) || ssr[k] < 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        if (lane_solved[static_cast<std::size_t>(k)]) {
+                            if (ssr[k] != 0.0) {
+                                cg_breakdown = true;
+                                break;
+                            }
+                            recent[k] = 0.0;
+                            continue;
+                        }
+                        if (ssr[k] == 0.0) {
+                            if (!column_exact_zero(r, k)) {
+                                cg_breakdown = true;
+                                break;
+                            }
+                            lane_solved[static_cast<std::size_t>(k)] = 1;
+                            recent[k] = 0.0;
+                            continue;
+                        }
+                        if (!finite_double_bits(denom[k]) || denom[k] <= 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        alpha[k] = ssr[k] / denom[k];
                         recent[k] = alpha[k] * ssr[k];
-                        improvement[k] -= recent[k];
+                        next_improvement[k] = improvement[k] - recent[k];
+                        if (!finite_double_bits(alpha[k]) || alpha[k] <= 0.0 ||
+                            !finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
+                            !finite_double_bits(next_improvement[k])) {
+                            cg_breakdown = true;
+                            break;
+                        }
                     }
+                    cg_iters = iter;
+                    if (cg_breakdown) {
+                        break;
+                    }
+                    improvement = next_improvement;
 
                     packed_axpy_columns(cur, u, alpha);
                     packed_axpy_columns(r, v, alpha);
 
                     const Eigen::VectorXd ssr_old = ssr;
                     ssr = packed_col_sumsq(r);
-                    Eigen::VectorXd beta(Sp);
+                    beta.setZero();
                     for (int k = 0; k < Sp; ++k) {
-                        beta[k] = safe_ratio(ssr[k], ssr_old[k]);
+                        if (!finite_double_bits(ssr[k]) || ssr[k] < 0.0 ||
+                            !finite_double_bits(ssr_old[k]) || ssr_old[k] < 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        if (lane_solved[static_cast<std::size_t>(k)]) {
+                            if (ssr[k] != 0.0) {
+                                cg_breakdown = true;
+                                break;
+                            }
+                            beta[k] = 0.0;
+                            continue;
+                        }
+                        if (ssr[k] == 0.0) {
+                            if (!column_exact_zero(r, k)) {
+                                cg_breakdown = true;
+                                break;
+                            }
+                            lane_solved[static_cast<std::size_t>(k)] = 1;
+                            beta[k] = 0.0;
+                            continue;
+                        }
+                        if (ssr_old[k] <= 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        beta[k] = ssr[k] / ssr_old[k];
+                        if (!finite_double_bits(beta[k]) || beta[k] <= 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                    }
+                    if (cg_breakdown) {
+                        break;
                     }
 
 #ifdef HDFE_USE_OPENMP
@@ -6042,14 +6929,30 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
                     double update_error = 0.0;
                     for (int k = 0; k < Sp; ++k) {
-                        constexpr double eps_floor = 1e-15;
-                        const double num = std::max(0.0, recent[k]);
-                        const double den = std::max(std::abs(improvement[k]),
-                                                    std::numeric_limits<double>::epsilon());
-                        const double err = std::sqrt(num < eps_floor ? 0.0 : num / den);
+                        if (lane_solved[static_cast<std::size_t>(k)]) {
+                            continue;
+                        }
+                        const double den = std::abs(improvement[k]);
+                        if (!finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
+                            !finite_double_bits(den) || den <= 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        const double ratio = recent[k] / den;
+                        if (!finite_double_bits(ratio) || ratio <= 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        const double err = std::sqrt(ratio);
+                        if (!finite_double_bits(err)) {
+                            cg_breakdown = true;
+                            break;
+                        }
                         update_error = std::max(update_error, err);
                     }
-                    cg_iters = iter;
+                    if (cg_breakdown) {
+                        break;
+                    }
                     if (update_error <= options.tol) {
                         converged = true;
                         break;
@@ -6115,13 +7018,11 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 const char* e = std::getenv("XHDFE_PACKED_POLISH");
                 return e != nullptr && e[0] == '0';
             }();
-            // Only worthwhile for large inputs: on sub-second datasets the
-            // SoA polish costs a few ms and interleaved A/B showed the packed
-            // variant can be marginally slower there; below the threshold the
-            // previous SoA polish path is kept byte-identical.
-            constexpr int kPackedPolishMinObs = 4194304;
-            if (!packed_polish_disabled && converged && n >= kPackedPolishMinObs &&
-                !sweep_order.empty()) {
+            // Keep every packed solve in the packed layout through the final
+            // polish. Returning to the SoA kernels here would reintroduce
+            // thread-count-dependent TLS partitioning after a deterministic
+            // packed solve and would therefore change the final residuals.
+            if (!packed_polish_disabled && converged && !sweep_order.empty()) {
                 const auto packed_polish_t0 = std::chrono::steady_clock::now();
                 constexpr int kPolishSweeps = 6;
                 const bool strict_tolerance = strict_residual_tolerance_mode(options);
@@ -6362,7 +7263,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 const int step = iter - last_check_iter;
                 last_check_iter = iter;
                 prev_norm = curr_norm;
-                if (honest_mode) {
+                // Same decoupling as the packed path: the divergence safeguard is
+                // a safety net and must not depend on the stopping rule.
+                if (honest_mode || accel_guard_always_enabled()) {
                     if (curr_norm <= best_resid) {
                         best_resid = curr_norm;
                         accel_suspended = false;
@@ -6594,9 +7497,24 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 }
                 return out;
             };
-            auto safe_ratio = [](double num, double den) {
-                constexpr double eps = std::numeric_limits<double>::epsilon();
-                return std::abs(den) <= eps ? 0.0 : num / den;
+            auto column_exact_zero = [&](const Eigen::VectorXd& yv,
+                                         const Eigen::MatrixXd& Xm,
+                                         Eigen::Index column) {
+                if (column == 0) {
+                    for (Eigen::Index i = 0; i < yv.size(); ++i) {
+                        if (yv[i] != 0.0) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                const Eigen::Index x_col = column - 1;
+                for (Eigen::Index i = 0; i < Xm.rows(); ++i) {
+                    if (Xm(i, x_col) != 0.0) {
+                        return false;
+                    }
+                }
+                return true;
             };
 
             Eigen::VectorXd improvement = col_sumsq(result.y_tilde, result.X_tilde);
@@ -6609,18 +7527,62 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             Eigen::VectorXd v_y;
             Eigen::MatrixXd v_X;
             Eigen::VectorXd recent = Eigen::VectorXd::Zero(ssr.size());
+            Eigen::VectorXd alpha = Eigen::VectorXd::Zero(ssr.size());
+            Eigen::VectorXd beta = Eigen::VectorXd::Zero(ssr.size());
+            Eigen::VectorXd next_improvement(ssr.size());
+            std::vector<uint8_t> lane_solved(
+                static_cast<std::size_t>(ssr.size()), 0);
 
             bool cg_converged = false;
             int cg_iters = 0;
             for (int iter = 1; iter <= options.max_iter; ++iter) {
                 projection_sweep(u_y, u_X, v_y, v_X);
                 const Eigen::VectorXd denom = col_dot(u_y, u_X, v_y, v_X);
-                Eigen::VectorXd alpha(ssr.size());
+                alpha.setZero();
+                next_improvement = improvement;
+                bool cg_breakdown = false;
                 for (Eigen::Index k = 0; k < ssr.size(); ++k) {
-                    alpha[k] = safe_ratio(ssr[k], denom[k]);
+                    if (!finite_double_bits(improvement[k]) ||
+                        !finite_double_bits(ssr[k]) || ssr[k] < 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    if (lane_solved[static_cast<std::size_t>(k)]) {
+                        if (ssr[k] != 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        recent[k] = 0.0;
+                        continue;
+                    }
+                    if (ssr[k] == 0.0) {
+                        if (!column_exact_zero(r_y, r_X, k)) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        lane_solved[static_cast<std::size_t>(k)] = 1;
+                        recent[k] = 0.0;
+                        continue;
+                    }
+                    if (!finite_double_bits(denom[k]) || denom[k] <= 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    alpha[k] = ssr[k] / denom[k];
                     recent[k] = alpha[k] * ssr[k];
-                    improvement[k] -= recent[k];
+                    next_improvement[k] = improvement[k] - recent[k];
+                    if (!finite_double_bits(alpha[k]) || alpha[k] <= 0.0 ||
+                        !finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
+                        !finite_double_bits(next_improvement[k])) {
+                        cg_breakdown = true;
+                        break;
+                    }
                 }
+                cg_iters = iter;
+                if (cg_breakdown) {
+                    break;
+                }
+                improvement = next_improvement;
 
                 result.y_tilde.noalias() -= alpha[0] * u_y;
                 r_y.noalias() -= alpha[0] * v_y;
@@ -6631,9 +7593,42 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
                 const Eigen::VectorXd ssr_old = ssr;
                 ssr = col_sumsq(r_y, r_X);
-                Eigen::VectorXd beta(ssr.size());
+                beta.setZero();
                 for (Eigen::Index k = 0; k < ssr.size(); ++k) {
-                    beta[k] = safe_ratio(ssr[k], ssr_old[k]);
+                    if (!finite_double_bits(ssr[k]) || ssr[k] < 0.0 ||
+                        !finite_double_bits(ssr_old[k]) || ssr_old[k] < 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    if (lane_solved[static_cast<std::size_t>(k)]) {
+                        if (ssr[k] != 0.0) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        beta[k] = 0.0;
+                        continue;
+                    }
+                    if (ssr[k] == 0.0) {
+                        if (!column_exact_zero(r_y, r_X, k)) {
+                            cg_breakdown = true;
+                            break;
+                        }
+                        lane_solved[static_cast<std::size_t>(k)] = 1;
+                        beta[k] = 0.0;
+                        continue;
+                    }
+                    if (ssr_old[k] <= 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    beta[k] = ssr[k] / ssr_old[k];
+                    if (!finite_double_bits(beta[k]) || beta[k] <= 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                }
+                if (cg_breakdown) {
+                    break;
                 }
 
                 u_y = r_y + beta[0] * u_y;
@@ -6643,14 +7638,30 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
                 double update_error = 0.0;
                 for (Eigen::Index k = 0; k < recent.size(); ++k) {
-                    constexpr double eps_floor = 1e-15;
-                    const double num = std::max(0.0, recent[k]);
-                    const double den = std::max(std::abs(improvement[k]),
-                                                std::numeric_limits<double>::epsilon());
-                    const double err = std::sqrt(num < eps_floor ? 0.0 : num / den);
+                    if (lane_solved[static_cast<std::size_t>(k)]) {
+                        continue;
+                    }
+                    const double den = std::abs(improvement[k]);
+                    if (!finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
+                        !finite_double_bits(den) || den <= 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    const double ratio = recent[k] / den;
+                    if (!finite_double_bits(ratio) || ratio <= 0.0) {
+                        cg_breakdown = true;
+                        break;
+                    }
+                    const double err = std::sqrt(ratio);
+                    if (!finite_double_bits(err)) {
+                        cg_breakdown = true;
+                        break;
+                    }
                     update_error = std::max(update_error, err);
                 }
-                cg_iters = iter;
+                if (cg_breakdown) {
+                    break;
+                }
                 if (update_error <= options.tol) {
                     cg_converged = true;
                     break;
@@ -6706,6 +7717,18 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 	                int last_check_iter = -1;
 	                double prev_norm = combined_norm(result.y_tilde, result.X_tilde);
 	                int grand_acc = 0;
+                // Divergence safeguard state, mirroring the packed and SoA
+                // absorbers. This general path (alphas / weights / savefe) had
+                // no safety net in either mode: the Irons-Tuck coefficient was
+                // applied unconditionally, so on an ill-conditioned graph the
+                // trajectory could diverge and the fast change-of-norm exit
+                // could then fire on a flattened-but-wrong iterate. Same
+                // decoupling decision as the others: the guard must not depend
+                // on the stopping rule. Kill switch shared with them —
+                // XHDFE_ACCEL_GUARD_ALWAYS=0 restores the previous gating.
+                constexpr double kAccelDivergeFactor = 4.0;
+                double best_resid = prev_norm;
+                bool accel_suspended = false;
                 const bool track_alpha = store_alphas && alpha_state && alpha_state->enabled;
                 FeAlphaState alpha_gx;
                 FeAlphaState alpha_ggx;
@@ -6774,7 +7797,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         return true;
                     }
 
-                    const double coef = stats.vprod / stats.ssq;
+                    double coef = stats.vprod / stats.ssq;
+                    if (accel_suspended) {
+                        // Diverging: take the plain (firmly non-expansive)
+                        // sweep step instead of the extrapolated one.
+                        coef = 0.0;
+                    }
                     // Fused update + broadcast: writes new x into both
                     // result.y_tilde and y_gx in a single pass, eliminating the
                     // subsequent copy.
@@ -6801,6 +7829,23 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         const int step = iter - last_check_iter;
                         last_check_iter = iter;
                         prev_norm = curr_norm;
+                        // Same safety net as the packed and SoA paths. This
+                        // absorber never had a guard in ANY mode, so the kill
+                        // switch alone gates it: XHDFE_ACCEL_GUARD_ALWAYS=0
+                        // restores the shipped behaviour byte-for-byte (honest
+                        // mode is safe regardless — its norm-of-change exit
+                        // cannot fire on a diverging trajectory).
+                        if (accel_guard_always_enabled()) {
+                            if (curr_norm <= best_resid) {
+                                best_resid = curr_norm;
+                                accel_suspended = false;
+                            } else if (curr_norm > kAccelDivergeFactor * best_resid) {
+                                if (!accel_suspended) {
+                                    grand_acc = 0;
+                                }
+                                accel_suspended = true;
+                            }
+                        }
                         if (!honest_mode && step > 0 &&
                             (rel_change / static_cast<double>(step)) < convergence_tol) {
                             result.y_tilde = y_gx;
@@ -6815,7 +7860,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         }
                     }
 
-                    if (iter_grand_acc > 0 && ((iter + 1) % iter_grand_acc == 0)) {
+                    if (!accel_suspended && iter_grand_acc > 0 && ((iter + 1) % iter_grand_acc == 0)) {
                         ++grand_acc;
                         if (grand_acc == 1) {
                             y_acc_a = y_gx;
@@ -7308,10 +8353,10 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
     // O(threads x groups x cols) dense accumulators + reduction per apply.
     std::vector<GroupCSR> plain_csr(indexers.size());
     std::vector<uint8_t> plain_use_csr(indexers.size(), 0);
-    if (n >= 200000 && num_cols <= 8) {
-        constexpr int kCsrGroupsThreshold = 100000;
+    if (num_cols <= 8) {
+        constexpr int kCsrGroupsThreshold = 2049;
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
-            if (!is_slope[dim] && threads_by_dim[dim] > 1 &&
+            if (!is_slope[dim] &&
                 indexers[dim].num_groups >= kCsrGroupsThreshold &&
                 !indexer_has_contiguous_groups(indexers[dim], n)) {
                 plain_use_csr[dim] = 1;
@@ -7404,20 +8449,21 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                 fused_slope_project_inplace(y_in, X_in,
                                             fused_units[static_cast<std::size_t>(fu)],
                                             weight_ptr, unit_weights,
-                                            threads_by_dim[dim], true, out_sumsq);
+                                            threads_by_dim[dim], true, out_sumsq,
+                                            options.parallel_observer);
                 return;
             }
             slope_project_inplace(y_in, X_in, *slope_lookup[dim], slope_workspaces[dim],
                                   weight_ptr, unit_weights, threads_by_dim[dim], true,
-                                  out_sumsq);
+                                  out_sumsq, options.parallel_observer);
         } else if (plain_use_csr[dim]) {
             demean_inplace_csr(y_in, X_in, plain_csr[dim], workspaces[dim], weight_ptr,
                                unit_weights, threads_by_dim[dim], true, out_sumsq, 1.0,
-                               nullptr, nullptr, nullptr);
+                               nullptr, nullptr, nullptr, options.parallel_observer);
         } else {
             demean_inplace(y_in, X_in, indexers[dim], workspaces[dim], weight_ptr, unit_weights,
                            threads_by_dim[dim], true, out_sumsq, 1.0, nullptr, nullptr,
-                           nullptr);
+                           nullptr, options.parallel_observer);
         }
     };
 
@@ -7453,6 +8499,16 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
     if (use_accel) {
         double prev_norm = combined_norm(result.y_tilde, result.X_tilde);
         int last_check_iter = -1;
+        // Divergence safeguard, mirroring the packed/SoA/general absorbers.
+        // The mixed (heterogeneous-slope) accelerated loop applied the
+        // Irons-Tuck coefficient unconditionally in every mode; on an
+        // ill-conditioned design the trajectory can diverge and the
+        // change-of-norm exit can then fire on a flattened-but-wrong iterate.
+        // This absorber never had a guard, so the kill switch alone gates it:
+        // XHDFE_ACCEL_GUARD_ALWAYS=0 restores shipped behaviour byte-for-byte.
+        constexpr double kAccelDivergeFactor = 4.0;
+        double best_resid = prev_norm;
+        bool accel_suspended = false;
         const ConvergenceCriterion mixed_criterion =
             resolved_mixed_convergence_criterion(options);
         const bool use_update_error = needs_reghdfe_update_check(mixed_criterion);
@@ -7508,7 +8564,12 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                 break;
             }
 
-            const double coef = stats.vprod / stats.ssq;
+            double coef = stats.vprod / stats.ssq;
+            if (accel_suspended) {
+                // Diverging: take the plain (firmly non-expansive) sweep step
+                // instead of the extrapolated one.
+                coef = 0.0;
+            }
             irons_tuck_update_broadcast(result.y_tilde.data(), y_gx.data(), y_ggx.data(),
                                         y_gx.size(), coef);
             if (result.X_tilde.size() > 0) {
@@ -7525,6 +8586,17 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                 const int step = iter - last_check_iter;
                 last_check_iter = iter;
                 prev_norm = curr_norm;
+                if (accel_guard_always_enabled()) {
+                    if (curr_norm <= best_resid) {
+                        best_resid = curr_norm;
+                        accel_suspended = false;
+                    } else if (curr_norm > kAccelDivergeFactor * best_resid) {
+                        if (!accel_suspended) {
+                            grand_acc = 0;
+                        }
+                        accel_suspended = true;
+                    }
+                }
                 double update_error = std::numeric_limits<double>::max();
                 if (use_update_error) {
                     update_error = mean_reldif_update_error(y_gx, y_prev_update, X_gx,
@@ -7542,7 +8614,7 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                     break;
                 }
             }
-            if (kMixedGrandAccelInterval > 0 &&
+            if (!accel_suspended && kMixedGrandAccelInterval > 0 &&
                 ((iter + 1) % kMixedGrandAccelInterval == 0)) {
                 ++grand_acc;
                 if (grand_acc == 1) {
@@ -7675,6 +8747,10 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                                          const HdfeOptions& options,
                                          AbsorptionMethod method,
                                          const std::vector<HeterogeneousSlopeTerm>& slopes) {
+    auto certified = [&](AbsorptionResult result) {
+        certify_absorption_result(y, X, fes, weights, options, slopes, result);
+        return result;
+    };
     if ((method == AbsorptionMethod::Lsmr || method == AbsorptionMethod::Mlsmr ||
          options.absorption_method == AbsorptionMethod::Lsmr ||
          options.absorption_method == AbsorptionMethod::Mlsmr) &&
@@ -7690,7 +8766,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 "slopes in absorb() yet; use reghdfe-comparable or xhdfe-fast, or an "
                 "explicit convergence() criterion");
         }
-        return absorb_fixed_effects_v6_mixed(y, X, fes, weights, options, method, slopes);
+        return certified(
+            absorb_fixed_effects_v6_mixed(y, X, fes, weights, options, method, slopes));
     }
 
     const int n = static_cast<int>(y.size());
@@ -7708,7 +8785,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         result.X_tilde = X;
         result.iterations = 0;
         result.converged = true;
-        return result;
+        return certified(std::move(result));
     }
 
     {
@@ -7723,7 +8800,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             unavailable.iterations = 0;
             unavailable.converged = false;
             mark_gpu_unavailable(unavailable);
-            return unavailable;
+            return certified(std::move(unavailable));
         }
 
         // ---- Adaptive Schwarz auto-gate (Auto mode, CPU) ----
@@ -7806,7 +8883,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                                     "[schwarz-gate] -> JACOBI-PCG (probe ok, it=%d)\n",
                                     kr.iterations);
                             }
-                            return kr;
+                            return certified(std::move(kr));
                         }
                     }
                     // Jacobi-PCG bailed: a genuine high-mobility AKM/difficult
@@ -7838,12 +8915,12 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                                     "[schwarz-gate] -> MLSMR (PCG-bail, proj=%.0f, it=%d)\n",
                                     proj, mr.iterations);
                             }
-                            return mr;
+                            return certified(std::move(mr));
                         }
                     }
                     HdfeOptions o2 = options;
                     o2.absorption_method = AbsorptionMethod::Schwarz;
-                    return absorb_fixed_effects(y, X, fes, weights, o2);
+                    return certified(absorb_fixed_effects(y, X, fes, weights, o2));
                 }
                 // Reached only when go==false (proj <= mswitch): the moderate-proj MAP
                 // band. On this band the matrix-free MLSMR absorber beats accelerated MAP
@@ -7865,7 +8942,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                                          "[schwarz-gate] -> MLSMR (proj=%.0f, it=%d)\n",
                                          proj, mr.iterations);
                         }
-                        return mr;
+                        return certified(std::move(mr));
                     }
                 }
             }
@@ -7891,7 +8968,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             if (gpu_backend_requested(pre_gpu_backend)) {
                 mark_gpu_unavailable(cpu_result);
             }
-            return cpu_result;
+            return certified(std::move(cpu_result));
         }
         const bool allow_sparse_pre =
             options.use_sparse_solver ||
@@ -7909,7 +8986,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             if (gpu_backend_requested(pre_gpu_backend)) {
                 mark_gpu_unavailable(cpu_result);
             }
-            return cpu_result;
+            return certified(std::move(cpu_result));
         }
     }
 
@@ -7933,7 +9010,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                               : omp_get_max_threads();
         idx_threads = std::min<int>(std::max(1, idx_threads),
                                     static_cast<int>(fes.size()));
-        if (idx_threads > 1 && n >= 4194304) {
+        if (idx_threads > 1 &&
+            (options.num_threads_explicit || n >= 4194304)) {
             // Dimensions are independent; each indexer is built and
             // first-touched by a single thread, bit-identical to serial.
 #pragma omp parallel for schedule(dynamic, 1) num_threads(idx_threads)
@@ -7998,7 +9076,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             mark_gpu_unavailable(sparse_result);
         }
         if (sparse_result.converged) {
-            return sparse_result;
+            return certified(std::move(sparse_result));
         }
     }
 
@@ -8007,7 +9085,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         if (gpu_backend_requested(gpu_backend)) {
             mark_gpu_unavailable(krylov_result);
         }
-        return krylov_result;
+        return certified(std::move(krylov_result));
     }
 
     int threads = 1;
@@ -8016,7 +9094,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         threads = options.num_threads;
     }
     threads = std::max(1, threads);
-    if (!options.retain_fixed_effects) {
+    if (!options.retain_fixed_effects && !options.num_threads_explicit) {
         // Keep the historical shape cap at the dispatch level: the GPU path's
         // CPU-side prep and the post-absorption phases of GPU rows showed a
         // small but consistent slowdown when uncapped under load (A/B
@@ -8051,7 +9129,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         if (gpu_backend_requested(gpu_backend)) {
             mark_gpu_unavailable(cpu_result);
         }
-        return cpu_result;
+        return certified(std::move(cpu_result));
     }
     if (selected != AbsorptionMethod::Jacobi) {
         const bool use_cuda = gpu_cuda;
@@ -8059,7 +9137,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         if (use_cuda || use_metal) {
             std::vector<Eigen::VectorXd> weight_sums(indexers.size());
 #ifdef HDFE_USE_OPENMP
-            if (indexers.size() > 1 && n >= 4194304 && threads > 1) {
+            if (indexers.size() > 1 && threads > 1 &&
+                (options.num_threads_explicit || n >= 4194304)) {
                 // Each dimension's weight-sum vector is computed and
                 // first-touched by a single thread, so per-dimension results
                 // are bit-identical to the serial build.
@@ -8126,7 +9205,17 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 gpu_result.gpu_attempted = true;
                 gpu_result.gpu_absorption_converged = true;
                 gpu_result.gpu_absorption_iterations = gpu_result.iterations;
-                return gpu_result;
+                if (use_cuda) {
+#ifdef HDFE_USE_CUDA
+                    certify_cuda_absorption_from_indexers(
+                        y, X, fes, weights, options, slopes, indexers,
+                        gpu_result);
+                    return gpu_result;
+#else
+                    return certified(std::move(gpu_result));
+#endif
+                }
+                return certified(std::move(gpu_result));
             }
             result.gpu_status_code = ok ? 3 : 4;
             result.gpu_attempted = true;
@@ -8137,7 +9226,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 result.iterations = gpu_result.iterations;
                 result.y_tilde = y;
                 result.X_tilde = X;
-                return result;
+                return certified(std::move(result));
             }
         }
 
@@ -8150,7 +9239,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         } else if (gpu_backend_requested(gpu_backend)) {
             mark_gpu_unavailable(cpu_result);
         }
-        return cpu_result;
+        return certified(std::move(cpu_result));
     }
 
     const bool use_cuda = gpu_cuda;
@@ -8192,7 +9281,17 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             gpu_result.gpu_attempted = true;
             gpu_result.gpu_absorption_converged = true;
             gpu_result.gpu_absorption_iterations = gpu_result.iterations;
-            return gpu_result;
+            if (use_cuda) {
+#ifdef HDFE_USE_CUDA
+                certify_cuda_absorption_from_indexers(
+                    y, X, fes, weights, options, slopes, indexers,
+                    gpu_result);
+                return gpu_result;
+#else
+                return certified(std::move(gpu_result));
+#endif
+            }
+            return certified(std::move(gpu_result));
         }
         result.gpu_status_code = ok ? 3 : 4;
         result.gpu_attempted = true;
@@ -8203,7 +9302,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             result.iterations = gpu_result.iterations;
             result.y_tilde = y;
             result.X_tilde = X;
-            return result;
+            return certified(std::move(result));
         }
     }
 
@@ -8257,7 +9356,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             }
             demean_inplace(result.y_tilde, result.X_tilde, indexers[dim], workspaces[dim],
                            weight_ptr, unit_weights, threads, false, nullptr, relaxation,
-                           alpha_y_ptr, alpha_x_ptr);
+                           alpha_y_ptr, alpha_x_ptr, nullptr,
+                           options.parallel_observer);
         }
 
         apply_jacobi_update(result.y_tilde, result.X_tilde, indexers, workspaces, relaxation,
@@ -8315,7 +9415,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                     }
                     demean_inplace(result.y_tilde, result.X_tilde, indexers[dim], workspaces[dim],
                                    weight_ptr, unit_weights, threads, true, nullptr, 1.0,
-                                   alpha_y_ptr, alpha_x_ptr);
+                                   alpha_y_ptr, alpha_x_ptr, nullptr,
+                                   options.parallel_observer);
                     max_abs = std::max(max_abs, max_abs_means(workspaces[dim]));
                 }
                 final_max = max_abs;
@@ -8363,10 +9464,108 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         mark_gpu_unavailable(result);
     }
 
-    return result;
+    return certified(std::move(result));
 }
 
 namespace {
+
+struct IndividualWaveSchedule {
+    std::vector<int> wave_ptr;
+    std::vector<int> individuals;
+    int max_wave_width = 0;
+    std::size_t total_incidence = 0;
+};
+
+IndividualWaveSchedule build_individual_wave_schedule(
+    const hdfe::detail::GroupIndividualStructure& gi) {
+    const int individuals = gi.num_individuals;
+    const int groups = gi.num_groups;
+    IndividualWaveSchedule schedule;
+    schedule.total_incidence = gi.individual_group.size();
+    if (individuals <= 0) {
+        schedule.wave_ptr.push_back(0);
+        return schedule;
+    }
+
+    // Preserve the serial Gauss-Seidel dependency order exactly.  Individuals
+    // that share a group must remain ordered by individual id; individuals in
+    // the same wave have disjoint group rows and therefore commute.
+    std::vector<int> last_wave_by_group(
+        static_cast<std::size_t>(groups), -1);
+    std::vector<int> wave_by_individual(
+        static_cast<std::size_t>(individuals), 0);
+    int num_waves = 0;
+    for (int i = 0; i < individuals; ++i) {
+        const int begin = gi.individual_ptr[static_cast<std::size_t>(i)];
+        const int end = gi.individual_ptr[static_cast<std::size_t>(i + 1)];
+        int wave = 0;
+        for (int pos = begin; pos < end; ++pos) {
+            const int g =
+                gi.individual_group[static_cast<std::size_t>(pos)];
+            if (g < 0 || g >= groups) {
+                throw std::runtime_error(
+                    "Invalid group index for group/individual FE structure");
+            }
+            wave = std::max(
+                wave,
+                last_wave_by_group[static_cast<std::size_t>(g)] + 1);
+        }
+        wave_by_individual[static_cast<std::size_t>(i)] = wave;
+        num_waves = std::max(num_waves, wave + 1);
+        for (int pos = begin; pos < end; ++pos) {
+            const int g =
+                gi.individual_group[static_cast<std::size_t>(pos)];
+            last_wave_by_group[static_cast<std::size_t>(g)] = wave;
+        }
+    }
+
+    schedule.wave_ptr.assign(
+        static_cast<std::size_t>(num_waves + 1), 0);
+    for (int i = 0; i < individuals; ++i) {
+        const int wave =
+            wave_by_individual[static_cast<std::size_t>(i)];
+        ++schedule.wave_ptr[static_cast<std::size_t>(wave + 1)];
+    }
+    for (int wave = 0; wave < num_waves; ++wave) {
+        schedule.wave_ptr[static_cast<std::size_t>(wave + 1)] +=
+            schedule.wave_ptr[static_cast<std::size_t>(wave)];
+        schedule.max_wave_width = std::max(
+            schedule.max_wave_width,
+            schedule.wave_ptr[static_cast<std::size_t>(wave + 1)] -
+                schedule.wave_ptr[static_cast<std::size_t>(wave)]);
+    }
+
+    schedule.individuals.resize(
+        static_cast<std::size_t>(individuals));
+    std::vector<int> next_position = schedule.wave_ptr;
+    for (int i = 0; i < individuals; ++i) {
+        const int wave =
+            wave_by_individual[static_cast<std::size_t>(i)];
+        schedule.individuals[static_cast<std::size_t>(
+            next_position[static_cast<std::size_t>(wave)]++)] = i;
+    }
+    return schedule;
+}
+
+bool individual_wavefront_profitable(
+    const IndividualWaveSchedule& schedule,
+    int cols,
+    int threads,
+    bool explicit_thread_request) {
+    const int local_threads = std::max(1, threads);
+    const int waves =
+        static_cast<int>(schedule.wave_ptr.size()) - 1;
+    const long long work_per_wave =
+        waves > 0
+            ? static_cast<long long>(schedule.total_incidence) *
+                  static_cast<long long>(std::max(1, cols + 1)) / waves
+            : 0LL;
+    const int useful_team =
+        std::max(1, std::min(local_threads, schedule.max_wave_width));
+    return local_threads > 1 && schedule.max_wave_width > 1 &&
+           (explicit_thread_request ||
+            work_per_wave >= static_cast<long long>(32 * useful_team));
+}
 
 void demean_individual_inplace(Eigen::VectorXd& y,
                                Eigen::MatrixXd& X,
@@ -8374,7 +9573,11 @@ void demean_individual_inplace(Eigen::VectorXd& y,
                                const Eigen::VectorXd& denom,
                                const double* weight_ptr,
                                bool unit_weights,
-                               double* out_max_abs = nullptr) {
+                               const IndividualWaveSchedule* schedule,
+                               int threads,
+                               bool explicit_thread_request,
+                               double* out_max_abs = nullptr,
+                               ParallelWorkObserver* observer = nullptr) {
     const int individuals = gi.num_individuals;
     if (individuals <= 0) {
         if (out_max_abs) {
@@ -8388,18 +9591,21 @@ void demean_individual_inplace(Eigen::VectorXd& y,
     if (static_cast<int>(denom.size()) != individuals) {
         throw std::runtime_error("Invalid denom size for group/individual FE structure");
     }
+    if (schedule &&
+        (schedule->wave_ptr.empty() ||
+         static_cast<int>(schedule->individuals.size()) != individuals ||
+         schedule->wave_ptr.back() != individuals)) {
+        throw std::runtime_error(
+            "Invalid wave schedule for group/individual FE structure");
+    }
 
     const int cols = static_cast<int>(X.cols());
-    Eigen::RowVectorXd numer_x;
-    if (cols > 0) {
-        numer_x = Eigen::RowVectorXd::Zero(cols);
-    }
-    double max_abs = 0.0;
-
-    for (int i = 0; i < individuals; ++i) {
+    auto update_one = [&](int i,
+                          Eigen::RowVectorXd& numer_x,
+                          double& local_max_abs) {
         const double denom_i = denom(i);
         if (denom_i <= 0.0) {
-            continue;
+            return;
         }
 
         double numer_y = 0.0;
@@ -8425,9 +9631,10 @@ void demean_individual_inplace(Eigen::VectorXd& y,
         if (cols > 0) {
             alpha_x = numer_x / denom_i;
         }
-        max_abs = std::max(max_abs, std::abs(alpha_y));
+        local_max_abs = std::max(local_max_abs, std::abs(alpha_y));
         if (cols > 0 && alpha_x.size() > 0) {
-            max_abs = std::max(max_abs, alpha_x.cwiseAbs().maxCoeff());
+            local_max_abs =
+                std::max(local_max_abs, alpha_x.cwiseAbs().maxCoeff());
         }
 
         for (int pos = begin; pos < end; ++pos) {
@@ -8438,6 +9645,83 @@ void demean_individual_inplace(Eigen::VectorXd& y,
                 X.row(g).noalias() -= scale * alpha_x;
             }
         }
+    };
+
+    const int local_threads = std::max(1, threads);
+    const int waves =
+        schedule ? static_cast<int>(schedule->wave_ptr.size()) - 1 : 0;
+    // A barrier is required between dependency waves. Dense chains and stars
+    // can have one individual per wave and are structurally serial. In
+    // automatic mode, also require enough work to amortize the persistent
+    // region barriers. An explicit request bypasses only that profitability
+    // heuristic: it still cannot create independent work where the graph has
+    // width one.
+    const bool use_parallel_wavefront =
+        schedule &&
+        individual_wavefront_profitable(
+            *schedule, cols, local_threads, explicit_thread_request);
+    double max_abs = 0.0;
+    ParallelWorkObserver* region_observer = observer_if_needed(
+        observer, use_parallel_wavefront ? local_threads : 1,
+        use_parallel_wavefront ? schedule->max_wave_width : 1);
+    if (region_observer) {
+        region_observer->begin_region(
+            use_parallel_wavefront ? local_threads : 1);
+    }
+#ifdef HDFE_USE_OPENMP
+    if (use_parallel_wavefront) {
+        std::vector<double> thread_maxima(
+            static_cast<std::size_t>(local_threads), 0.0);
+#pragma omp parallel num_threads(local_threads)
+        {
+            const int tid = omp_get_thread_num();
+            double local_max_abs = 0.0;
+            Eigen::RowVectorXd numer_x;
+            if (cols > 0) {
+                numer_x = Eigen::RowVectorXd::Zero(cols);
+            }
+            for (int wave = 0; wave < waves; ++wave) {
+                const int begin =
+                    schedule->wave_ptr[static_cast<std::size_t>(wave)];
+                const int end =
+                    schedule->wave_ptr[static_cast<std::size_t>(wave + 1)];
+#pragma omp for schedule(static)
+                for (int pos = begin; pos < end; ++pos) {
+                    if (region_observer) {
+                        region_observer->observe_work();
+                    }
+                    const int i =
+                        schedule->individuals[static_cast<std::size_t>(pos)];
+                    update_one(i, numer_x, local_max_abs);
+                }
+            }
+            thread_maxima[static_cast<std::size_t>(tid)] = local_max_abs;
+        }
+        for (int tid = 0; tid < local_threads; ++tid) {
+            max_abs = std::max(
+                max_abs,
+                thread_maxima[static_cast<std::size_t>(tid)]);
+        }
+    } else
+#else
+    (void)local_threads;
+#endif
+    {
+        Eigen::RowVectorXd numer_x;
+        if (cols > 0) {
+            numer_x = Eigen::RowVectorXd::Zero(cols);
+        }
+        if (region_observer) {
+            region_observer->observe_work();
+        }
+        // Keep the one-thread path byte-for-byte ordered like the original
+        // individual-id Gauss-Seidel sweep.
+        for (int i = 0; i < individuals; ++i) {
+            update_one(i, numer_x, max_abs);
+        }
+    }
+    if (region_observer) {
+        region_observer->end_region();
     }
 
     if (out_max_abs) {
@@ -8475,6 +9759,10 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
     AbsorptionResult result;
     result.y_tilde = y;
     result.X_tilde = X;
+    auto record_diagnostics = [&](AbsorptionResult& value) {
+        certify_absorption_result(y, X, standard_fes, weights, options, {},
+                                  value, &gi);
+    };
 
     int threads = 1;
 #ifdef HDFE_USE_OPENMP
@@ -8516,6 +9804,7 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
     if (gpu_backend_requested(gpu_backend) && !gpu_cuda) {
         result.converged = false;
         mark_gpu_unavailable(result);
+        record_diagnostics(result);
         return result;
     }
     if (gpu_cuda) {
@@ -8580,6 +9869,7 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             result.gpu_attempted = true;
             result.gpu_absorption_converged = true;
             result.gpu_absorption_iterations = result.iterations;
+            record_diagnostics(result);
             return result;
         }
         result.gpu_used = false;
@@ -8589,6 +9879,7 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
         result.gpu_absorption_iterations = result.iterations;
         if (gpu_backend_requested(gpu_backend)) {
             result.converged = false;
+            record_diagnostics(result);
             return result;
         }
     }
@@ -8602,7 +9893,7 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
 
     std::vector<int> threads_by_dim(indexers.size(), threads);
 #ifdef HDFE_USE_OPENMP
-    if (threads > 2) {
+    if (!options.num_threads_explicit && threads > 2) {
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
             const int groups = indexers[dim].num_groups;
             if (groups >= 10000000) {
@@ -8610,7 +9901,7 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             }
         }
     }
-    if (threads > 1) {
+    if (!options.num_threads_explicit && threads > 1) {
         for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
             threads_by_dim[dim] =
                 limit_threads_by_tls(threads_by_dim[dim], indexers[dim].num_groups, num_cols);
@@ -8641,6 +9932,26 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
     }
 
     // Precompute denominators for individual updates: sum_g w_g * scale_g^2.
+    std::unique_ptr<IndividualWaveSchedule> individual_schedule;
+    if (threads > 1 || cpu_profile_enabled()) {
+        individual_schedule = std::make_unique<IndividualWaveSchedule>(
+            build_individual_wave_schedule(gi));
+    }
+    if (cpu_profile_enabled() && individual_schedule) {
+        std::cerr
+            << "cpu_profile label=group_individual_wave_schedule"
+            << " individuals=" << gi.num_individuals
+            << " incidence=" << individual_schedule->total_incidence
+            << " waves="
+            << (static_cast<int>(individual_schedule->wave_ptr.size()) - 1)
+            << " max_wave_width=" << individual_schedule->max_wave_width
+            << " threads=" << threads
+            << " parallel="
+            << static_cast<int>(individual_wavefront_profitable(
+                   *individual_schedule, num_cols, threads,
+                   options.num_threads_explicit))
+            << '\n';
+    }
     Eigen::VectorXd denom = Eigen::VectorXd::Zero(gi.num_individuals);
     for (int i = 0; i < gi.num_individuals; ++i) {
         const int begin = gi.individual_ptr[static_cast<std::size_t>(i)];
@@ -8667,19 +9978,27 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             const std::size_t dim = sweep_order[pos];
             const int dim_threads = threads_by_dim[dim];
             demean_inplace(result.y_tilde, result.X_tilde, indexers[dim], workspaces[dim],
-                           weight_ptr, unit_weights, dim_threads);
+                           weight_ptr, unit_weights, dim_threads, true, nullptr, 1.0,
+                           nullptr, nullptr, nullptr, options.parallel_observer);
         }
-        demean_individual_inplace(result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
-                                  unit_weights);
+        demean_individual_inplace(
+            result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
+            unit_weights, individual_schedule.get(), threads,
+            options.num_threads_explicit, nullptr,
+            options.parallel_observer);
 
         if (use_symmetric) {
-            demean_individual_inplace(result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
-                                      unit_weights);
+            demean_individual_inplace(
+                result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
+                unit_weights, individual_schedule.get(), threads,
+                options.num_threads_explicit, nullptr,
+                options.parallel_observer);
             for (std::size_t idx = sweep_order.size(); idx-- > 0;) {
                 const std::size_t dim = sweep_order[idx];
                 const int dim_threads = threads_by_dim[dim];
                 demean_inplace(result.y_tilde, result.X_tilde, indexers[dim], workspaces[dim],
-                               weight_ptr, unit_weights, dim_threads);
+                               weight_ptr, unit_weights, dim_threads, true, nullptr, 1.0,
+                               nullptr, nullptr, nullptr, options.parallel_observer);
             }
         }
 
@@ -8698,65 +10017,58 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
         }
     }
 
-    result.converged = converged;
-    if (!converged) {
-        result.iterations = options.max_iter;
-    } else if (result.iterations == 0) {
-        result.iterations = 1;
-    }
+    result.iterations = converged ? std::max(1, result.iterations)
+                                  : options.max_iter;
 
-    if (result.converged) {
-        constexpr int kPolishSweeps = 16;
-        const bool strict_tolerance = strict_residual_tolerance_mode(options);
-        const int max_polish_sweeps =
-            strict_tolerance ? std::max(0, options.max_iter - result.iterations)
-                             : kPolishSweeps;
-        const double polish_tol =
-            strict_tolerance ? options.tol
-                             : ((limited_polish_tolerance(options) > 0.0)
-                                    ? std::min(limited_polish_tolerance(options), 1.0e-14)
-                                    : 1.0e-14);
-        double final_max = strict_tolerance ? std::numeric_limits<double>::infinity() : 0.0;
-        int polish_done = 0;
-        for (int polish = 0; polish < max_polish_sweeps; ++polish) {
-            double max_abs = 0.0;
-            for (std::size_t pos = 0; pos < sweep_order.size(); ++pos) {
-                const std::size_t dim = sweep_order[pos];
+    auto run_full_sweep = [&]() {
+        double max_abs = 0.0;
+        for (std::size_t pos = 0; pos < sweep_order.size(); ++pos) {
+            const std::size_t dim = sweep_order[pos];
+            const int dim_threads = threads_by_dim[dim];
+            demean_inplace(result.y_tilde, result.X_tilde, indexers[dim],
+                           workspaces[dim], weight_ptr, unit_weights, dim_threads,
+                           true, nullptr, 1.0, nullptr, nullptr, nullptr,
+                           options.parallel_observer);
+            max_abs = std::max(max_abs, max_abs_means(workspaces[dim]));
+        }
+        double individual_max = 0.0;
+        demean_individual_inplace(
+            result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
+            unit_weights, individual_schedule.get(), threads,
+            options.num_threads_explicit, &individual_max,
+            options.parallel_observer);
+        max_abs = std::max(max_abs, individual_max);
+
+        if (use_symmetric) {
+            individual_max = 0.0;
+            demean_individual_inplace(
+                result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
+                unit_weights, individual_schedule.get(), threads,
+                options.num_threads_explicit, &individual_max,
+                options.parallel_observer);
+            max_abs = std::max(max_abs, individual_max);
+            for (std::size_t idx = sweep_order.size(); idx-- > 0;) {
+                const std::size_t dim = sweep_order[idx];
                 const int dim_threads = threads_by_dim[dim];
-                demean_inplace(result.y_tilde, result.X_tilde, indexers[dim], workspaces[dim],
-                               weight_ptr, unit_weights, dim_threads);
+                demean_inplace(result.y_tilde, result.X_tilde, indexers[dim],
+                               workspaces[dim], weight_ptr, unit_weights,
+                               dim_threads, true, nullptr, 1.0, nullptr, nullptr,
+                               nullptr, options.parallel_observer);
                 max_abs = std::max(max_abs, max_abs_means(workspaces[dim]));
             }
-            double individual_max = 0.0;
-            demean_individual_inplace(result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
-                                      unit_weights, &individual_max);
-            max_abs = std::max(max_abs, individual_max);
-
-            if (use_symmetric) {
-                individual_max = 0.0;
-                demean_individual_inplace(result.y_tilde, result.X_tilde, gi, denom, weight_ptr,
-                                          unit_weights, &individual_max);
-                max_abs = std::max(max_abs, individual_max);
-                for (std::size_t idx = sweep_order.size(); idx-- > 0;) {
-                    const std::size_t dim = sweep_order[idx];
-                    const int dim_threads = threads_by_dim[dim];
-                    demean_inplace(result.y_tilde, result.X_tilde, indexers[dim],
-                                   workspaces[dim], weight_ptr, unit_weights, dim_threads);
-                    max_abs = std::max(max_abs, max_abs_means(workspaces[dim]));
-                }
-            }
-
-            final_max = max_abs;
-            ++polish_done;
-            if (max_abs <= polish_tol) {
-                break;
-            }
         }
-        if (strict_tolerance) {
-            result.iterations += polish_done;
-            if (final_max > polish_tol) {
-                result.converged = false;
-            }
+        return max_abs;
+    };
+
+    // Preserve the existing bounded polish as a warm start, but account for
+    // every sweep and never run past max_iter.
+    constexpr int kInitialPolishSweeps = 16;
+    if (converged && result.iterations < options.max_iter) {
+        const int initial_sweeps = std::min(
+            kInitialPolishSweeps, options.max_iter - result.iterations);
+        for (int polish = 0; polish < initial_sweeps; ++polish) {
+            (void)run_full_sweep();
+            ++result.iterations;
         }
     }
 
@@ -8766,6 +10078,25 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
         result.sweep_order_used.push_back(static_cast<int>(dim));
     }
 
+    // The norm-change trigger is only a prefilter.  Continue in bounded
+    // batches until the shared backward-error gate passes or max_iter is
+    // exhausted.  This is the authoritative meaning of converged for the
+    // group()/individual() path.
+    bool certified = certify_group_individual_candidate(
+        y, X, standard_fes, gi, weights, options, result);
+    constexpr int kCertificateBatchSweeps = 64;
+    while (!certified && result.iterations < options.max_iter) {
+        const int batch = std::min(
+            kCertificateBatchSweeps, options.max_iter - result.iterations);
+        for (int sweep = 0; sweep < batch; ++sweep) {
+            (void)run_full_sweep();
+            ++result.iterations;
+        }
+        certified = certify_group_individual_candidate(
+            y, X, standard_fes, gi, weights, options, result);
+    }
+    result.converged = certified;
+    result.precision_certified = certified;
     return result;
 }
 
@@ -8781,7 +10112,6 @@ AbsorptionResult absorb_fixed_effects_krylov(const Eigen::VectorXd& y,
     if (weights && weights->size() != n) {
         throw std::runtime_error("Weights must have the same length as y");
     }
-
     AbsorptionResult result;
     result.y_tilde = y;
     result.X_tilde = X;
@@ -8849,8 +10179,8 @@ AbsorptionResult absorb_fixed_effects_krylov(const Eigen::VectorXd& y,
     }
 
     std::vector<std::vector<Eigen::VectorXd>> tls_out;
-#ifdef HDFE_USE_OPENMP
     std::vector<std::vector<Eigen::VectorXd>> tls_zt;
+#ifdef HDFE_USE_OPENMP
     std::vector<std::vector<double*>> tls_out_ptrs;
 #endif
 #ifdef HDFE_USE_OPENMP
@@ -10516,6 +11846,7 @@ struct MlsmrSchwarzDomain {
 
 struct MlsmrAdditiveSchwarzPreconditioner {
     std::vector<MlsmrSchwarzDomain> domains;
+    std::vector<std::size_t> domain_solution_offsets;
     Eigen::VectorXd diagonal_inv;
     std::vector<uint8_t> covered;
     bool domains_disjoint = false;
@@ -10542,38 +11873,59 @@ struct MlsmrAdditiveSchwarzPreconditioner {
             domains_disjoint &&
             mlsmr_env_enabled("XHDFE_MLSMR_DISJOINT_DIRECT_APPLY", false);
         const int apply_threads = std::max(1, omp_get_max_threads());
-        if (parallel_apply && apply_threads > 1 && domains.size() > 1) {
+        if (parallel_apply && apply_threads > 1 && domains.size() > 1 &&
+            !omp_in_parallel() &&
+            domain_solution_offsets.size() == domains.size() + 1) {
+            // Domain solves are independent, but their global supports may
+            // overlap. Compute every solve in parallel into a stable
+            // domain-index slot, then add contributions in domain order.
+            // The previous atomic scatter made MLSMR results depend on the
+            // OpenMP schedule and thread count.
+            static thread_local std::vector<double> solution_storage;
+            static thread_local std::vector<uint8_t> solution_valid;
+            solution_storage.resize(domain_solution_offsets.back());
+            solution_valid.assign(domains.size(), static_cast<uint8_t>(0));
 #pragma omp parallel num_threads(apply_threads)
             {
                 Eigen::VectorXd rhs_scratch;
-                Eigen::VectorXd sol_scratch;
 #pragma omp for schedule(dynamic)
                 for (int d = 0; d < static_cast<int>(domains.size()); ++d) {
                     const auto& domain = domains[static_cast<std::size_t>(d)];
                     const int n = domain.n_local;
                     if (rhs_scratch.size() < n) {
                         rhs_scratch.resize(n);
-                        sol_scratch.resize(n);
                     }
                     Eigen::Ref<Eigen::VectorXd> rhs = rhs_scratch.head(n);
                     for (int i = 0; i < n; ++i) {
                         const int g = domain.global_indices[static_cast<std::size_t>(i)];
                         rhs[i] = domain.partition_weights[static_cast<std::size_t>(i)] * r[g];
                     }
-                    Eigen::Ref<Eigen::VectorXd> sol = sol_scratch.head(n);
-                    if (!domain.solve(rhs, sol)) {
-                        continue;
-                    }
-                    for (int i = 0; i < n; ++i) {
-                        const int g = domain.global_indices[static_cast<std::size_t>(i)];
-                        const double contribution =
-                            domain.partition_weights[static_cast<std::size_t>(i)] * sol[i];
-                        if (disjoint_direct_apply) {
-                            z[g] = contribution;
-                        } else {
-#pragma omp atomic update
-                            z[g] += contribution;
-                        }
+                    Eigen::Map<Eigen::VectorXd> sol(
+                        solution_storage.data() +
+                            domain_solution_offsets[static_cast<std::size_t>(d)],
+                        n);
+                    solution_valid[static_cast<std::size_t>(d)] =
+                        domain.solve(rhs, sol) ? static_cast<uint8_t>(1)
+                                               : static_cast<uint8_t>(0);
+                }
+            }
+
+            for (std::size_t d = 0; d < domains.size(); ++d) {
+                if (!solution_valid[d]) {
+                    continue;
+                }
+                const auto& domain = domains[d];
+                const int n = domain.n_local;
+                Eigen::Map<const Eigen::VectorXd> sol(
+                    solution_storage.data() + domain_solution_offsets[d], n);
+                for (int i = 0; i < n; ++i) {
+                    const int g = domain.global_indices[static_cast<std::size_t>(i)];
+                    const double contribution =
+                        domain.partition_weights[static_cast<std::size_t>(i)] * sol[i];
+                    if (disjoint_direct_apply) {
+                        z[g] = contribution;
+                    } else {
+                        z[g] += contribution;
                     }
                 }
             }
@@ -11436,54 +12788,54 @@ MlsmrAdditiveSchwarzPreconditioner build_mlsmr_additive_preconditioner(
             const auto domain_start = std::chrono::steady_clock::now();
             std::vector<MlsmrSchwarzDomain> built_domains;
             auto build_component_domain = [&](std::size_t comp_idx,
-                                              std::vector<MlsmrSchwarzDomain>& out_domains) {
+                                              MlsmrSchwarzDomain& domain) {
                 auto& comp = components[comp_idx];
                 std::sort(comp.q_nodes.begin(), comp.q_nodes.end());
                 std::sort(comp.r_nodes.begin(), comp.r_nodes.end());
                 const int local_n =
                     static_cast<int>(comp.q_nodes.size() + comp.r_nodes.size());
                 if (local_n <= 0 || local_n > max_local) {
-                    return;
+                    return false;
                 }
-                MlsmrSchwarzDomain domain;
-                if (build_mlsmr_domain_from_component(comp, q, r, offsets, diagA,
-                                                       full_dense_threshold,
-                                                       dense_schur_threshold,
-                                                       exact_star_threshold,
-                                                       full_fallback_max_local,
-                                                       ridge_scale,
-                                                       normalized_operator,
-                                                       domain)) {
-                    out_domains.push_back(std::move(domain));
-                }
+                return build_mlsmr_domain_from_component(
+                    comp, q, r, offsets, diagA, full_dense_threshold,
+                    dense_schur_threshold, exact_star_threshold,
+                    full_fallback_max_local, ridge_scale, normalized_operator,
+                    domain);
             };
 
+            // Building components may be parallel, but the preconditioner is
+            // additive and its application sums domains in storage order.
+            // Store each result in its component-index slot and compact only
+            // afterwards in component order. Merging per-real-thread vectors
+            // made that floating-point order depend on the OpenMP team size.
+            std::vector<MlsmrSchwarzDomain> component_domains(components.size());
+            std::vector<uint8_t> component_accepted(components.size(), 0);
 #ifdef HDFE_USE_OPENMP
             const int omp_threads = std::max(1, omp_get_max_threads());
             if (components.size() > 1 && omp_threads > 1) {
-                std::vector<std::vector<MlsmrSchwarzDomain>> local_domains(
-                    static_cast<std::size_t>(omp_threads));
-#pragma omp parallel for schedule(dynamic) num_threads(omp_threads)
+#pragma omp parallel for schedule(static) num_threads(omp_threads)
                 for (int ci = 0; ci < static_cast<int>(components.size()); ++ci) {
-                    const int tid = omp_get_thread_num();
-                    build_component_domain(
-                        static_cast<std::size_t>(ci),
-                        local_domains[static_cast<std::size_t>(tid)]);
-                }
-                std::size_t total_new = 0;
-                for (const auto& local : local_domains) {
-                    total_new += local.size();
-                }
-                built_domains.reserve(total_new);
-                for (auto& local : local_domains) {
-                    std::move(local.begin(), local.end(), std::back_inserter(built_domains));
+                    const std::size_t idx = static_cast<std::size_t>(ci);
+                    component_accepted[idx] =
+                        build_component_domain(idx, component_domains[idx])
+                            ? static_cast<uint8_t>(1)
+                            : static_cast<uint8_t>(0);
                 }
             } else
 #endif
             {
-                built_domains.reserve(components.size());
                 for (std::size_t ci = 0; ci < components.size(); ++ci) {
-                    build_component_domain(ci, built_domains);
+                    component_accepted[ci] =
+                        build_component_domain(ci, component_domains[ci])
+                            ? static_cast<uint8_t>(1)
+                            : static_cast<uint8_t>(0);
+                }
+            }
+            built_domains.reserve(components.size());
+            for (std::size_t ci = 0; ci < components.size(); ++ci) {
+                if (component_accepted[ci]) {
+                    built_domains.push_back(std::move(component_domains[ci]));
                 }
             }
 
@@ -11535,6 +12887,12 @@ MlsmrAdditiveSchwarzPreconditioner build_mlsmr_additive_preconditioner(
                 pre.covered[static_cast<std::size_t>(g)] = 1;
             }
         }
+    }
+    pre.domain_solution_offsets.assign(pre.domains.size() + 1, 0);
+    for (std::size_t d = 0; d < pre.domains.size(); ++d) {
+        pre.domain_solution_offsets[d + 1] =
+            pre.domain_solution_offsets[d] +
+            static_cast<std::size_t>(std::max(0, pre.domains[d].n_local));
     }
 
     if (trace) {
@@ -11693,6 +13051,26 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
     if (weights && weights->size() != n) {
         throw std::runtime_error("Weights must have the same length as y");
     }
+    if (options.num_threads < 0) {
+        throw std::runtime_error("num_threads must be non-negative");
+    }
+#ifdef HDFE_USE_OPENMP
+    // This function is also a public standalone entry point.  A positive
+    // num_threads value is therefore an explicit contract here even when a
+    // direct C++ caller did not set the regressor-only provenance marker
+    // num_threads_explicit.  Never silently serialize such a request inside
+    // an already-active OpenMP region.
+    if (omp_in_parallel() && options.num_threads > 1) {
+        throw std::runtime_error(
+            "absorb_fixed_effects_mlsmr cannot honor an explicit "
+            "num_threads > 1 inside an active OpenMP region");
+    }
+#else
+    if (options.num_threads > 1) {
+        throw std::runtime_error(
+            "num_threads > 1 requires an xhdfe build with OpenMP support");
+    }
+#endif
 
     AbsorptionResult result;
     result.y_tilde = y;
@@ -11705,15 +13083,18 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
     }
 
     int threads = 1;
+    int runtime_capacity = 1;
 #ifdef HDFE_USE_OPENMP
-    if (options.num_threads > 0) {
-        threads = options.num_threads;
+    runtime_capacity = runtime_thread_capacity();
+    if (omp_in_parallel()) {
+        threads = 1;
+    } else if (options.num_threads > 0) {
+        threads = std::min(options.num_threads, runtime_capacity);
     }
-    threads = std::max(1, threads);
-    omp_set_dynamic(0);
-    omp_set_num_threads(threads);
 #endif
     threads = std::max(1, threads);
+    ScopedAbsorptionParallelRuntime parallel_runtime(
+        threads, runtime_capacity);
 
     std::vector<FeIndexer> indexers;
     indexers.reserve(fes.size());
@@ -11729,6 +13110,13 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
     const bool unit_weights = (weights == nullptr);
 
     const int dims = static_cast<int>(indexers.size());
+    const int cols = static_cast<int>(result.X_tilde.cols());
+    const int rhs_count = cols + 1;
+    const bool mlsmr_batch_rhs_candidate =
+        options.absorption_method == AbsorptionMethod::Mlsmr &&
+        cols > 0 &&
+        threads > 1 &&
+        mlsmr_env_enabled("XHDFE_MLSMR_BATCH_RHS", true);
     std::vector<int> offsets(static_cast<std::size_t>(dims) + 1, 0);
     for (int d = 0; d < dims; ++d) {
         offsets[static_cast<std::size_t>(d + 1)] =
@@ -11764,9 +13152,15 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         options.absorption_method != AbsorptionMethod::Lsmr &&
         options.absorption_method != AbsorptionMethod::Mlsmr;
 
+    std::vector<int> scatter_chunks_per_dim(
+        static_cast<std::size_t>(dims), 0);
+    std::vector<uint8_t> use_group_owner_scatter(
+        static_cast<std::size_t>(dims), 0);
+    std::vector<StableGroupTraversal> group_owner_traversal(
+        static_cast<std::size_t>(dims));
+    std::vector<std::vector<Eigen::VectorXd>> tls_zt;
     std::vector<std::vector<Eigen::VectorXd>> tls_out;
 #ifdef HDFE_USE_OPENMP
-    std::vector<std::vector<Eigen::VectorXd>> tls_zt;
     std::vector<std::vector<double*>> tls_out_ptrs;
     std::vector<uint8_t> krylov_atomic_scatter(static_cast<std::size_t>(dims), 0);
     const bool allow_krylov_atomic_scatter =
@@ -11796,32 +13190,65 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         std::cerr << std::endl;
     }
 #endif
-#ifdef HDFE_USE_OPENMP
-    if (threads > 1) {
-        if (needs_normal_eq_operator) {
-            tls_out.resize(static_cast<std::size_t>(dims));
+    tls_zt.resize(static_cast<std::size_t>(dims));
+    for (int d = 0; d < dims; ++d) {
+        const int scatter_chunks = deterministic_scatter_chunk_count(
+            n, groups_per_dim[static_cast<std::size_t>(d)]);
+        scatter_chunks_per_dim[static_cast<std::size_t>(d)] =
+            scatter_chunks;
+        const bool owner_scatter =
+            !needs_normal_eq_operator &&
+            options.num_threads_explicit &&
+            threads > scatter_chunks &&
+            !mlsmr_batch_rhs_candidate;
+        use_group_owner_scatter[static_cast<std::size_t>(d)] =
+            owner_scatter ? static_cast<uint8_t>(1)
+                          : static_cast<uint8_t>(0);
+        if (owner_scatter) {
+            group_owner_traversal[static_cast<std::size_t>(d)].prepare(
+                indexers[static_cast<std::size_t>(d)], n);
+        } else {
+            tls_zt[static_cast<std::size_t>(d)].assign(
+                static_cast<std::size_t>(scatter_chunks),
+                Eigen::VectorXd::Zero(
+                    groups_per_dim[static_cast<std::size_t>(d)]));
         }
-        tls_zt.resize(static_cast<std::size_t>(dims));
+    }
+    if (mlsmr_trace_enabled() && !needs_normal_eq_operator) {
+        std::cerr << "xhdfe_krylov_trace deterministic_scatter=";
         for (int d = 0; d < dims; ++d) {
-            if (needs_normal_eq_operator) {
-                tls_out[static_cast<std::size_t>(d)].assign(
-                    static_cast<std::size_t>(threads),
-                    Eigen::VectorXd::Zero(groups_per_dim[static_cast<std::size_t>(d)]));
+            if (d > 0) {
+                std::cerr << ",";
             }
-            if (!krylov_atomic_scatter[static_cast<std::size_t>(d)]) {
-                tls_zt[static_cast<std::size_t>(d)].assign(
-                    static_cast<std::size_t>(threads),
-                    Eigen::VectorXd::Zero(groups_per_dim[static_cast<std::size_t>(d)]));
-            }
+            const StableGroupTraversal& traversal =
+                group_owner_traversal[static_cast<std::size_t>(d)];
+            std::cerr
+                << (use_group_owner_scatter[static_cast<std::size_t>(d)]
+                        ? "csr_group_owner"
+                        : "row_chunk_private")
+                << ":chunks="
+                << scatter_chunks_per_dim[static_cast<std::size_t>(d)]
+                << ":groups="
+                << groups_per_dim[static_cast<std::size_t>(d)]
+                << ":owned_bytes="
+                << traversal.owned_bytes();
         }
-        if (needs_normal_eq_operator) {
-            tls_out_ptrs.assign(static_cast<std::size_t>(threads),
-                                std::vector<double*>(static_cast<std::size_t>(dims)));
-            for (int t = 0; t < threads; ++t) {
-                for (int d = 0; d < dims; ++d) {
-                    tls_out_ptrs[static_cast<std::size_t>(t)][static_cast<std::size_t>(d)] =
-                        tls_out[static_cast<std::size_t>(d)][static_cast<std::size_t>(t)].data();
-                }
+        std::cerr << std::endl;
+    }
+#ifdef HDFE_USE_OPENMP
+    if (threads > 1 && needs_normal_eq_operator) {
+        tls_out.resize(static_cast<std::size_t>(dims));
+        for (int d = 0; d < dims; ++d) {
+            tls_out[static_cast<std::size_t>(d)].assign(
+                static_cast<std::size_t>(threads),
+                Eigen::VectorXd::Zero(groups_per_dim[static_cast<std::size_t>(d)]));
+        }
+        tls_out_ptrs.assign(static_cast<std::size_t>(threads),
+                            std::vector<double*>(static_cast<std::size_t>(dims)));
+        for (int t = 0; t < threads; ++t) {
+            for (int d = 0; d < dims; ++d) {
+                tls_out_ptrs[static_cast<std::size_t>(t)][static_cast<std::size_t>(d)] =
+                    tls_out[static_cast<std::size_t>(d)][static_cast<std::size_t>(t)].data();
             }
         }
     }
@@ -11836,60 +13263,31 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         for (int d = 0; d < dims; ++d) {
             const int groups = groups_per_dim[static_cast<std::size_t>(d)];
             double* b_seg = b.data() + offsets[static_cast<std::size_t>(d)];
+            auto& chunks = tls_zt[static_cast<std::size_t>(d)];
+            const int chunk_count = static_cast<int>(chunks.size());
+            const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
 #ifdef HDFE_USE_OPENMP
-            if (threads > 1 && krylov_atomic_scatter[static_cast<std::size_t>(d)]) {
-                const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
-                if (unit_weights) {
-#pragma omp parallel for schedule(static) num_threads(threads)
-                    for (int i = 0; i < n; ++i) {
-                        const int g = gid[i];
-#pragma omp atomic update
-                        b_seg[g] += v_ptr[i];
-                    }
-                } else {
-#pragma omp parallel for schedule(static) num_threads(threads)
-                    for (int i = 0; i < n; ++i) {
-                        const int g = gid[i];
-                        const double value = weight_ptr[i] * v_ptr[i];
-#pragma omp atomic update
-                        b_seg[g] += value;
-                    }
-                }
-            } else if (threads > 1) {
-#pragma omp parallel num_threads(threads)
-                {
-                    const int tid = omp_get_thread_num();
-                    Eigen::VectorXd& local =
-                        tls_zt[static_cast<std::size_t>(d)][static_cast<std::size_t>(tid)];
-                    local.setZero();
-                    const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
-#pragma omp for schedule(static)
-                    for (int i = 0; i < n; ++i) {
-                        const int g = gid[i];
-                        if (unit_weights) {
-                            local[g] += v_ptr[i];
-                        } else {
-                            local[g] += weight_ptr[i] * v_ptr[i];
-                        }
-                    }
-                }
-                Eigen::Map<Eigen::VectorXd> b_seg_vec(b_seg, groups);
-                for (const auto& local : tls_zt[static_cast<std::size_t>(d)]) {
-                    b_seg_vec.noalias() += local;
-                }
-            } else
+#pragma omp parallel for schedule(dynamic, 1) \
+    num_threads(std::min(threads, chunk_count))
 #endif
-            {
-                const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
+            for (int chunk = 0; chunk < chunk_count; ++chunk) {
+                Eigen::VectorXd& local = chunks[static_cast<std::size_t>(chunk)];
+                local.setZero();
+                const int begin = deterministic_chunk_begin(n, chunk, chunk_count);
+                const int end = deterministic_chunk_end(n, chunk, chunk_count);
                 if (unit_weights) {
-                    for (int i = 0; i < n; ++i) {
-                        b_seg[gid[i]] += v_ptr[i];
+                    for (int i = begin; i < end; ++i) {
+                        local[gid[i]] += v_ptr[i];
                     }
                 } else {
-                    for (int i = 0; i < n; ++i) {
-                        b_seg[gid[i]] += weight_ptr[i] * v_ptr[i];
+                    for (int i = begin; i < end; ++i) {
+                        local[gid[i]] += weight_ptr[i] * v_ptr[i];
                     }
                 }
+            }
+            Eigen::Map<Eigen::VectorXd> b_seg_vec(b_seg, groups);
+            for (const auto& local : chunks) {
+                b_seg_vec.noalias() += local;
             }
         }
         return b;
@@ -12288,7 +13686,8 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             b = v;
         } else {
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(threads)
+#pragma omp parallel for schedule(static) num_threads(threads) \
+    if(!omp_in_parallel())
 #endif
             for (int i = 0; i < n; ++i) {
                 b[i] = sqrt_weights[i] * v[i];
@@ -12310,13 +13709,15 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         const double* __restrict x_ptr = x.data();
         const double* __restrict cs = column_scale.data();
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(threads)
+#pragma omp parallel for schedule(static) num_threads(threads) \
+    if(!omp_in_parallel())
 #endif
         for (int g = 0; g < total_fe; ++g) {
             sx[g] = cs[g] * x_ptr[g];
         }
 #ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(threads)
+#pragma omp parallel for schedule(static) num_threads(threads) \
+    if(!omp_in_parallel())
 #endif
         for (int i = 0; i < n; ++i) {
             double sum = 0.0;
@@ -12330,24 +13731,17 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
 
     auto make_lsmr_At_tls = [&]() {
         std::vector<std::vector<Eigen::VectorXd>> local_tls;
-#ifdef HDFE_USE_OPENMP
-        // Inside a batch lane (outer parallel-for over RHS columns) nested
-        // parallelism is inactive, so the scatter team has exactly one
-        // thread: allocate one accumulator per dim instead of `threads`.
-        // Removes an O(threads x total_fe) always-zero reduce per apply and
-        // the matching RSS spike; the surviving accumulation is unchanged.
-        const int tls_threads = omp_in_parallel() ? 1 : threads;
-        if (threads > 1) {
-            local_tls.resize(static_cast<std::size_t>(dims));
-            for (int d = 0; d < dims; ++d) {
-                if (!krylov_atomic_scatter[static_cast<std::size_t>(d)]) {
-                    local_tls[static_cast<std::size_t>(d)].assign(
-                        static_cast<std::size_t>(tls_threads),
-                        Eigen::VectorXd::Zero(groups_per_dim[static_cast<std::size_t>(d)]));
-                }
+        local_tls.resize(static_cast<std::size_t>(dims));
+        for (int d = 0; d < dims; ++d) {
+            if (use_group_owner_scatter[static_cast<std::size_t>(d)]) {
+                continue;
             }
+            const int scatter_chunks =
+                scatter_chunks_per_dim[static_cast<std::size_t>(d)];
+            local_tls[static_cast<std::size_t>(d)].assign(
+                static_cast<std::size_t>(scatter_chunks),
+                Eigen::VectorXd::Zero(groups_per_dim[static_cast<std::size_t>(d)]));
         }
-#endif
         return local_tls;
     };
 
@@ -12361,45 +13755,61 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             const int groups = groups_per_dim[static_cast<std::size_t>(d)];
             const int offset = offsets[static_cast<std::size_t>(d)];
             double* out_seg = out.data() + offset;
+            const int chunk_count =
+                scatter_chunks_per_dim[static_cast<std::size_t>(d)];
+            if (use_group_owner_scatter[static_cast<std::size_t>(d)]) {
+                const StableGroupTraversal& traversal =
+                    group_owner_traversal[static_cast<std::size_t>(d)];
+                deterministic_group_owner_scatter(
+                    traversal, n, chunk_count, threads,
+                    [&](int row) {
+                        const double sw =
+                            unit_weights ? 1.0 : sqrt_weights[row];
+                        return sw * u_ptr[row];
+                    },
+                    out_seg, options.parallel_observer);
+                Eigen::Map<Eigen::VectorXd> scaled(out_seg, groups);
+                scaled.array() *=
+                    column_scale.segment(offset, groups).array();
+                continue;
+            }
+
+            auto& zt_storage = tls_override ? *tls_override : tls_zt;
+            auto& chunks = zt_storage[static_cast<std::size_t>(d)];
+            const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
+            const int scatter_team =
+                std::max(1, std::min(threads, chunk_count));
+            ParallelWorkObserver* region_observer = nullptr;
 #ifdef HDFE_USE_OPENMP
-            if (threads > 1 && krylov_atomic_scatter[static_cast<std::size_t>(d)]) {
-                const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
-#pragma omp parallel for schedule(static) num_threads(threads)
-                for (int i = 0; i < n; ++i) {
-                    const double sw = unit_weights ? 1.0 : sqrt_weights[i];
-                    const double value = sw * u_ptr[i];
-#pragma omp atomic update
-                    out_seg[gid[i]] += value;
+            if (!omp_in_parallel()) {
+                region_observer = observer_if_needed(
+                    options.parallel_observer, scatter_team, chunk_count);
+                if (region_observer) {
+                    region_observer->begin_region(scatter_team);
                 }
-            } else if (threads > 1) {
-                auto& zt_storage = tls_override ? *tls_override : tls_zt;
-                const int tls_count = static_cast<int>(
-                    zt_storage[static_cast<std::size_t>(d)].size());
-#pragma omp parallel num_threads(std::min(threads, tls_count))
-                {
-                    const int tid = omp_get_thread_num();
-                    Eigen::VectorXd& local =
-                        zt_storage[static_cast<std::size_t>(d)][static_cast<std::size_t>(tid)];
-                    local.setZero();
-                    const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
-#pragma omp for schedule(static)
-                    for (int i = 0; i < n; ++i) {
-                        const double sw = unit_weights ? 1.0 : sqrt_weights[i];
-                        local[gid[i]] += sw * u_ptr[i];
-                    }
-                }
-                Eigen::Map<Eigen::VectorXd> out_seg_vec(out_seg, groups);
-                for (const auto& local : zt_storage[static_cast<std::size_t>(d)]) {
-                    out_seg_vec.noalias() += local;
-                }
-            } else
+            }
+#pragma omp parallel for schedule(dynamic, 1) \
+    num_threads(scatter_team) if(!omp_in_parallel())
 #endif
-            {
-                const int* gid = gid_ptrs[static_cast<std::size_t>(d)];
-                for (int i = 0; i < n; ++i) {
-                    const double sw = unit_weights ? 1.0 : sqrt_weights[i];
-                    out_seg[gid[i]] += sw * u_ptr[i];
+            for (int chunk = 0; chunk < chunk_count; ++chunk) {
+                if (region_observer) {
+                    region_observer->observe_work();
                 }
+                Eigen::VectorXd& local = chunks[static_cast<std::size_t>(chunk)];
+                local.setZero();
+                const int begin = deterministic_chunk_begin(n, chunk, chunk_count);
+                const int end = deterministic_chunk_end(n, chunk, chunk_count);
+                for (int i = begin; i < end; ++i) {
+                    const double sw = unit_weights ? 1.0 : sqrt_weights[i];
+                    local[gid[i]] += sw * u_ptr[i];
+                }
+            }
+            if (region_observer) {
+                region_observer->end_region();
+            }
+            Eigen::Map<Eigen::VectorXd> out_seg_vec(out_seg, groups);
+            for (const auto& local : chunks) {
+                out_seg_vec.noalias() += local;
             }
             Eigen::Map<Eigen::VectorXd> scaled(out_seg, groups);
             scaled.array() *= column_scale.segment(offset, groups).array();
@@ -12871,33 +14281,57 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
     int iters_y = 0;
     bool ok_y = true;
     Eigen::VectorXd alpha_y;
-    const int cols = static_cast<int>(result.X_tilde.cols());
-    bool mlsmr_batch_rhs_safe = false;
+    // Run independent RHS solves concurrently whenever more than one right
+    // hand side is available.  This is the proven bandwidth-efficient layout
+    // for large panels: each lane retains the same deterministic row-chunk
+    // arithmetic graph, while the command-level thread observer still records
+    // the full explicit team in material setup/certification regions.  Forcing
+    // every RHS to run sequentially merely to make each inner operator spawn
+    // the whole team doubled the ready/QP CPU runtime (about 62s -> 123s in
+    // absorption at 16 threads) without changing estimates or precision.
+    bool use_mlsmr_batch_rhs = mlsmr_batch_rhs_candidate;
 #ifdef HDFE_USE_OPENMP
-    if (options.absorption_method == AbsorptionMethod::Mlsmr && threads > 1) {
-        mlsmr_batch_rhs_safe = true;
-    }
+    // An xhdfe call reached from an unrelated active OpenMP region must not
+    // manufacture a nested RHS team.  Explicit requests are rejected by the
+    // central resolver; auto mode executes this phase serially and reports the
+    // resulting one-worker limit truthfully.
+    use_mlsmr_batch_rhs = use_mlsmr_batch_rhs && !omp_in_parallel();
 #endif
-    const bool use_mlsmr_batch_rhs =
-        options.absorption_method == AbsorptionMethod::Mlsmr &&
-        cols > 0 &&
-        mlsmr_env_enabled("XHDFE_MLSMR_BATCH_RHS", true) &&
-        mlsmr_batch_rhs_safe;
+    if (mlsmr_trace_enabled() && use_mlsmr_batch_rhs &&
+        options.num_threads_explicit && threads > rhs_count) {
+        std::cerr
+            << "xhdfe_mlsmr_trace batch_rhs_structural_team"
+            << " rhs_count=" << rhs_count
+            << " outer_team=" << std::min(threads, rhs_count)
+            << " command_team=" << threads
+            << std::endl;
+    }
     if (use_mlsmr_batch_rhs) {
-        const int rhs_count = cols + 1;
         std::vector<Eigen::VectorXd> alphas(static_cast<std::size_t>(rhs_count));
         std::vector<int> rhs_iters(static_cast<std::size_t>(rhs_count), 0);
         std::vector<uint8_t> rhs_ok(static_cast<std::size_t>(rhs_count), 0);
         const bool trace = mlsmr_trace_enabled();
         if (trace) {
             std::cerr << "xhdfe_mlsmr_trace batch_rhs_start rhs_count="
-                      << rhs_count << " private_scatter=1" << std::endl;
+                      << rhs_count
+                      << " team=" << std::min(threads, rhs_count)
+                      << " nested=0" << std::endl;
         }
+        int batch_threads = 1;
+        ParallelWorkObserver* batch_observer = nullptr;
 #ifdef HDFE_USE_OPENMP
-        const int batch_threads = std::max(1, std::min(threads, rhs_count));
-#pragma omp parallel for schedule(dynamic) num_threads(batch_threads)
+        batch_threads = std::max(1, std::min(threads, rhs_count));
+        batch_observer = observer_if_needed(
+            options.parallel_observer, batch_threads, rhs_count);
+        if (batch_observer) {
+            batch_observer->begin_region(batch_threads);
+        }
+#pragma omp parallel for schedule(static, 1) num_threads(batch_threads)
 #endif
         for (int rhs_idx = 0; rhs_idx < rhs_count; ++rhs_idx) {
+            if (batch_observer) {
+                batch_observer->observe_work();
+            }
             int rhs_it = 0;
             bool rhs_converged = true;
             Eigen::VectorXd beta;
@@ -12914,6 +14348,9 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             rhs_iters[static_cast<std::size_t>(rhs_idx)] = rhs_it;
             rhs_ok[static_cast<std::size_t>(rhs_idx)] =
                 rhs_converged ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
+        }
+        if (batch_observer) {
+            batch_observer->end_region();
         }
         if (trace) {
             std::cerr << "xhdfe_mlsmr_trace batch_rhs_done rhs_count="
@@ -13049,7 +14486,7 @@ FeRecoveryResult recover_fixed_effects_impl(const Eigen::VectorXd& partial,
 
         threads_by_dim.assign(dims, threads);
 #ifdef HDFE_USE_OPENMP
-        if (threads > 1) {
+        if (!options.num_threads_explicit && threads > 1) {
             for (std::size_t dim = 0; dim < dims; ++dim) {
                 threads_by_dim[dim] =
                     limit_threads_by_tls(threads_by_dim[dim], indexers[dim].num_groups, 0);
@@ -13122,12 +14559,12 @@ FeRecoveryResult recover_fixed_effects_impl(const Eigen::VectorXd& partial,
         sweep_order = resolve_sweep_order();
         use_symmetric = options.symmetric_sweep && sweep_order.size() > 1;
 
-        const bool allow_csr = (n >= 200000);
+        const bool allow_csr = true;
         if (allow_csr) {
             csr.resize(dims);
-            constexpr int kCsrGroupsThreshold = 200000;
+            constexpr int kCsrGroupsThreshold = 2049;
             for (std::size_t dim = 0; dim < dims; ++dim) {
-                if (threads_by_dim[dim] > 1 && indexers[dim].num_groups >= kCsrGroupsThreshold) {
+                if (indexers[dim].num_groups >= kCsrGroupsThreshold) {
                     use_csr[dim] = 1;
                     csr[dim] = build_group_csr(indexers[dim].group_ids, n, indexers[dim].num_groups);
                 }
@@ -13492,7 +14929,382 @@ FeRecoveryResult recover_fixed_effects_impl(const Eigen::VectorXd& partial,
     return result;
 }
 
+
 }  // namespace
+
+void certify_absorption_result(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    const std::vector<HeterogeneousSlopeTerm>& slopes,
+    AbsorptionResult& result,
+    const GroupIndividualStructure* group_individual) {
+    result.abs_residual = 0.0;
+    result.abs_residual_rel = 0.0;
+    result.precision_certified = result.converged;
+
+    const int n = static_cast<int>(y.size());
+    if (X.rows() != n || result.y_tilde.size() != n ||
+        result.X_tilde.rows() != n || result.X_tilde.cols() != X.cols() ||
+        (weights && weights->size() != n)) {
+        throw std::runtime_error(
+            "Cannot certify absorption: original and transformed dimensions differ");
+    }
+    if (fes.empty() && group_individual == nullptr) {
+        return;
+    }
+    for (const auto& fe : fes) {
+        if (fe.size() != n) {
+            throw std::runtime_error(
+                "Cannot certify absorption: FE vector length differs from outcome");
+        }
+    }
+    if (group_individual != nullptr) {
+        const GroupIndividualStructure& gi = *group_individual;
+        if (gi.num_groups != n || gi.num_individuals <= 0 ||
+            static_cast<int>(gi.group_ptr.size()) != n + 1 ||
+            static_cast<int>(gi.group_scale.size()) != n ||
+            gi.group_ptr.front() != 0 ||
+            gi.group_ptr.back() !=
+                static_cast<int>(gi.group_individual.size())) {
+            throw std::runtime_error(
+                "Cannot certify absorption: invalid group/individual structure");
+        }
+    }
+
+    std::vector<FeIndexer> indexers;
+    indexers.reserve(fes.size());
+    for (const auto& fe : fes) {
+        indexers.push_back(build_indexer(fe));
+    }
+    const std::vector<const HeterogeneousSlopeTerm*> slope_lookup =
+        build_slope_lookup(slopes, indexers.size(), n);
+
+    int threads = 1;
+#ifdef HDFE_USE_OPENMP
+    threads = std::max(1, options.num_threads > 0 ? options.num_threads : 1);
+#endif
+    const bool unit_weights = (weights == nullptr);
+    const double* weight_ptr = unit_weights ? nullptr : weights->data();
+    const int rhs_count = static_cast<int>(X.cols()) + 1;
+    std::vector<long double> original_norm_sq(
+        static_cast<std::size_t>(rhs_count), 0.0L);
+    std::vector<long double> residual_norm_sq(static_cast<std::size_t>(rhs_count), 0.0L);
+    original_norm_sq[0] = static_cast<long double>(
+        deterministic_sumsq_raw(y.data(), n, threads,
+                                options.parallel_observer));
+    for (int rhs = 1; rhs < rhs_count; ++rhs) {
+        original_norm_sq[static_cast<std::size_t>(rhs)] =
+            static_cast<long double>(deterministic_sumsq_raw(
+                X.col(rhs - 1).data(), n, threads,
+                options.parallel_observer));
+    }
+    long double operator_norm_sq = 0.0L;
+
+    using CertificateMatrix =
+        Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
+        const FeIndexer& indexer = indexers[dim];
+        const HeterogeneousSlopeTerm* slope = slope_lookup[dim];
+        const int moment_count = slope ? (slope->include_intercept ? 2 : 1) : 1;
+        const int values_per_group = rhs_count * moment_count;
+        const int chunk_count = deterministic_scatter_chunk_count(
+            n, indexer.num_groups, values_per_group);
+        std::vector<CertificateMatrix> chunks;
+        std::vector<std::vector<double>> operator_partials(
+            static_cast<std::size_t>(chunk_count),
+            std::vector<double>(static_cast<std::size_t>(moment_count), 0.0));
+        chunks.reserve(static_cast<std::size_t>(chunk_count));
+        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            chunks.emplace_back(
+                CertificateMatrix::Zero(indexer.num_groups, values_per_group));
+        }
+
+        const int* group_ids = indexer.group_ids.data();
+        const double* slope_values = slope ? slope->values.data() : nullptr;
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) \
+    num_threads(std::min(threads, chunk_count))
+#endif
+        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            CertificateMatrix& local = chunks[static_cast<std::size_t>(chunk)];
+            std::vector<double>& local_operator =
+                operator_partials[static_cast<std::size_t>(chunk)];
+            const int begin = deterministic_chunk_begin(n, chunk, chunk_count);
+            const int end = deterministic_chunk_end(n, chunk, chunk_count);
+            for (int i = begin; i < end; ++i) {
+                const int group = group_ids[i];
+                const double weight = unit_weights ? 1.0 : weight_ptr[i];
+                for (int moment = 0; moment < moment_count; ++moment) {
+                    double multiplier = weight;
+                    if (slope) {
+                        const bool intercept_moment =
+                            slope->include_intercept && moment == 0;
+                        if (!intercept_moment) {
+                            multiplier *= slope_values[i];
+                        }
+                    }
+                    local_operator[static_cast<std::size_t>(moment)] +=
+                        multiplier * multiplier;
+                    const int base = moment * rhs_count;
+                    local(group, base) += multiplier * result.y_tilde[i];
+                    for (int rhs = 1; rhs < rhs_count; ++rhs) {
+                        const int col = rhs - 1;
+                        local(group, base + rhs) +=
+                            multiplier * result.X_tilde(i, col);
+                    }
+                }
+            }
+        }
+
+        CertificateMatrix sums = std::move(chunks[0]);
+        for (int chunk = 1; chunk < chunk_count; ++chunk) {
+            sums.noalias() += chunks[static_cast<std::size_t>(chunk)];
+        }
+        for (int moment = 0; moment < moment_count; ++moment) {
+            for (int chunk = 0; chunk < chunk_count; ++chunk) {
+                operator_norm_sq += static_cast<long double>(
+                    operator_partials[static_cast<std::size_t>(chunk)]
+                                     [static_cast<std::size_t>(moment)]);
+            }
+            const int base = moment * rhs_count;
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                const double residual_sq = deterministic_chunked_sum<int>(
+                    indexer.num_groups, threads, [&](int group) {
+                        const double value = sums(group, base + rhs);
+                        return value * value;
+                    }, options.parallel_observer);
+                residual_norm_sq[static_cast<std::size_t>(rhs)] +=
+                    static_cast<long double>(residual_sq);
+            }
+        }
+    }
+
+    if (group_individual != nullptr) {
+        const GroupIndividualStructure& gi = *group_individual;
+        const int values_per_individual = rhs_count;
+        const int chunk_count = deterministic_scatter_chunk_count(
+            n, gi.num_individuals, values_per_individual);
+        std::vector<CertificateMatrix> chunks;
+        std::vector<double> operator_partials(
+            static_cast<std::size_t>(chunk_count), 0.0);
+        chunks.reserve(static_cast<std::size_t>(chunk_count));
+        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            chunks.emplace_back(CertificateMatrix::Zero(
+                gi.num_individuals, values_per_individual));
+        }
+
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) \
+    num_threads(std::min(threads, chunk_count))
+#endif
+        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            CertificateMatrix& local = chunks[static_cast<std::size_t>(chunk)];
+            double local_operator = 0.0;
+            const int begin = deterministic_chunk_begin(n, chunk, chunk_count);
+            const int end = deterministic_chunk_end(n, chunk, chunk_count);
+            for (int group = begin; group < end; ++group) {
+                const double weight = unit_weights ? 1.0 : weight_ptr[group];
+                const double multiplier =
+                    weight * gi.group_scale[static_cast<std::size_t>(group)];
+                const int incidence_begin =
+                    gi.group_ptr[static_cast<std::size_t>(group)];
+                const int incidence_end =
+                    gi.group_ptr[static_cast<std::size_t>(group + 1)];
+                for (int pos = incidence_begin; pos < incidence_end; ++pos) {
+                    const int individual =
+                        gi.group_individual[static_cast<std::size_t>(pos)];
+                    if (individual < 0 || individual >= gi.num_individuals) {
+                        throw std::runtime_error(
+                            "Cannot certify absorption: invalid individual index");
+                    }
+                    local_operator += multiplier * multiplier;
+                    local(individual, 0) +=
+                        multiplier * result.y_tilde[group];
+                    for (int rhs = 1; rhs < rhs_count; ++rhs) {
+                        local(individual, rhs) +=
+                            multiplier * result.X_tilde(group, rhs - 1);
+                    }
+                }
+            }
+            operator_partials[static_cast<std::size_t>(chunk)] =
+                local_operator;
+        }
+
+        CertificateMatrix sums = std::move(chunks[0]);
+        for (int chunk = 1; chunk < chunk_count; ++chunk) {
+            sums.noalias() += chunks[static_cast<std::size_t>(chunk)];
+        }
+        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+            operator_norm_sq += static_cast<long double>(
+                operator_partials[static_cast<std::size_t>(chunk)]);
+        }
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            const double residual_sq = deterministic_chunked_sum<int>(
+                gi.num_individuals, threads, [&](int individual) {
+                    const double value = sums(individual, rhs);
+                    return value * value;
+                }, options.parallel_observer);
+            residual_norm_sq[static_cast<std::size_t>(rhs)] +=
+                static_cast<long double>(residual_sq);
+        }
+    }
+
+    double max_absolute = 0.0;
+    double max_relative = 0.0;
+    const double operator_norm = std::sqrt(
+        static_cast<double>(std::max(0.0L, operator_norm_sq)));
+    for (int rhs = 0; rhs < rhs_count; ++rhs) {
+        const double absolute = std::sqrt(static_cast<double>(
+            std::max(0.0L, residual_norm_sq[static_cast<std::size_t>(rhs)])));
+        const double original_norm = std::sqrt(static_cast<double>(
+            std::max(0.0L, original_norm_sq[static_cast<std::size_t>(rhs)])));
+        const double scale = operator_norm * original_norm;
+        double relative = 0.0;
+        if (scale > 0.0) {
+            relative = absolute / scale;
+        } else if (absolute > 0.0) {
+            relative = std::numeric_limits<double>::max();
+        }
+        max_absolute = std::max(max_absolute, absolute);
+        max_relative = std::max(max_relative, relative);
+    }
+    result.abs_residual = max_absolute;
+    result.abs_residual_rel = max_relative;
+
+    const double requested_tol = effective_absorption_tolerance(options);
+    const double certificate_limit =
+        std::max(8.0 * std::max(0.0, requested_tol),
+                 64.0 * std::numeric_limits<double>::epsilon());
+    result.precision_certified =
+        result.converged && max_relative <= certificate_limit;
+}
+
+bool certify_group_individual_candidate(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& standard_fes,
+    const GroupIndividualStructure& group_individual,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+    // A candidate must be judged independently of the norm-change proxy.
+    result.converged = true;
+    certify_absorption_result(
+        y, X, standard_fes, weights, options, {}, result, &group_individual);
+    bool passed = result.precision_certified;
+
+    if (passed && strict_residual_tolerance_mode(options)) {
+        const int n = static_cast<int>(result.y_tilde.size());
+        const int rhs_count = static_cast<int>(result.X_tilde.cols()) + 1;
+        const bool unit_weights = (weights == nullptr);
+        const double* weight_ptr = unit_weights ? nullptr : weights->data();
+        double max_mean = 0.0;
+
+        auto rhs_value = [&](int row, int rhs) {
+            return rhs == 0 ? result.y_tilde(row)
+                            : result.X_tilde(row, rhs - 1);
+        };
+
+        for (const auto& fe : standard_fes) {
+            const FeIndexer indexer = build_indexer(fe);
+            std::vector<long double> denominators(
+                static_cast<std::size_t>(indexer.num_groups), 0.0L);
+            for (int row = 0; row < n; ++row) {
+                const int group = indexer.group_ids[row];
+                const long double weight =
+                    unit_weights ? 1.0L
+                                 : static_cast<long double>(weight_ptr[row]);
+                denominators[static_cast<std::size_t>(group)] += weight;
+            }
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                std::vector<long double> numerators(
+                    static_cast<std::size_t>(indexer.num_groups), 0.0L);
+                for (int row = 0; row < n; ++row) {
+                    const int group = indexer.group_ids[row];
+                    const long double weight =
+                        unit_weights ? 1.0L
+                                     : static_cast<long double>(weight_ptr[row]);
+                    numerators[static_cast<std::size_t>(group)] +=
+                        weight * static_cast<long double>(rhs_value(row, rhs));
+                }
+                for (int group = 0; group < indexer.num_groups; ++group) {
+                    const long double denominator =
+                        denominators[static_cast<std::size_t>(group)];
+                    if (denominator > 0.0L) {
+                        const double mean = static_cast<double>(
+                            numerators[static_cast<std::size_t>(group)] /
+                            denominator);
+                        max_mean = std::max(max_mean, std::abs(mean));
+                    }
+                }
+            }
+        }
+
+        const GroupIndividualStructure& gi = group_individual;
+        std::vector<long double> denominators(
+            static_cast<std::size_t>(gi.num_individuals), 0.0L);
+        for (int individual = 0; individual < gi.num_individuals;
+             ++individual) {
+            const int begin =
+                gi.individual_ptr[static_cast<std::size_t>(individual)];
+            const int end =
+                gi.individual_ptr[static_cast<std::size_t>(individual + 1)];
+            long double denominator = 0.0L;
+            for (int pos = begin; pos < end; ++pos) {
+                const int group =
+                    gi.individual_group[static_cast<std::size_t>(pos)];
+                const long double scale = static_cast<long double>(
+                    gi.group_scale[static_cast<std::size_t>(group)]);
+                const long double weight =
+                    unit_weights ? 1.0L
+                                 : static_cast<long double>(weight_ptr[group]);
+                denominator += weight * scale * scale;
+            }
+            denominators[static_cast<std::size_t>(individual)] = denominator;
+        }
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            for (int individual = 0; individual < gi.num_individuals;
+                 ++individual) {
+                const int begin =
+                    gi.individual_ptr[static_cast<std::size_t>(individual)];
+                const int end =
+                    gi.individual_ptr[static_cast<std::size_t>(individual + 1)];
+                long double numerator = 0.0L;
+                for (int pos = begin; pos < end; ++pos) {
+                    const int group =
+                        gi.individual_group[static_cast<std::size_t>(pos)];
+                    const long double scale = static_cast<long double>(
+                        gi.group_scale[static_cast<std::size_t>(group)]);
+                    const long double weight =
+                        unit_weights ? 1.0L
+                                     : static_cast<long double>(weight_ptr[group]);
+                    numerator +=
+                        weight * scale *
+                        static_cast<long double>(rhs_value(group, rhs));
+                }
+                const long double denominator =
+                    denominators[static_cast<std::size_t>(individual)];
+                if (denominator > 0.0L) {
+                    const double mean =
+                        static_cast<double>(numerator / denominator);
+                    max_mean = std::max(max_mean, std::abs(mean));
+                }
+            }
+        }
+
+        const double strict_limit =
+            std::max(std::max(0.0, options.tol),
+                     64.0 * std::numeric_limits<double>::epsilon());
+        passed = std::isfinite(max_mean) && max_mean <= strict_limit;
+    }
+
+    result.converged = passed;
+    result.precision_certified = passed;
+    return passed;
+}
 
 FeRecoveryResult recover_fixed_effects(const Eigen::VectorXd& partial,
                                        const std::vector<Eigen::VectorXi>& fes,
@@ -13838,7 +15650,7 @@ double fe_recovery_max_delta(Eigen::VectorXd& residual,
 
     std::vector<int> threads_by_dim(dims, threads);
 #ifdef HDFE_USE_OPENMP
-    if (threads > 1) {
+    if (!options.num_threads_explicit && threads > 1) {
         for (std::size_t dim = 0; dim < dims; ++dim) {
             threads_by_dim[dim] =
                 limit_threads_by_tls(threads_by_dim[dim], views[dim].num_groups, 0);
@@ -13871,15 +15683,14 @@ double fe_recovery_max_delta(Eigen::VectorXd& residual,
     }
 
     double max_abs = 0.0;
-    const bool allow_csr = (n >= 200000);
-    constexpr int kCsrGroupsThreshold = 200000;
+    const bool allow_csr = true;
+    constexpr int kCsrGroupsThreshold = 2049;
     std::vector<uint8_t> use_csr(dims, 0);
     std::vector<GroupCSR> csr;
     if (allow_csr) {
         csr.resize(dims);
         for (std::size_t dim = 0; dim < dims; ++dim) {
-            if (threads_by_dim[dim] > 1 &&
-                views[dim].num_groups >= kCsrGroupsThreshold) {
+            if (views[dim].num_groups >= kCsrGroupsThreshold) {
                 use_csr[dim] = 1;
                 csr[dim] = build_group_csr(views[dim].group_ids, n, views[dim].num_groups);
             }

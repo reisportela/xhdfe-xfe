@@ -10,6 +10,20 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
                        level, dof, ssc, tolerance_mode, fe_tolerance,
                        fe_recovery_method, stats_style, weights_type,
                        groupvar) {
+  thread_values <- c(threads, default_threads, max_threads)
+  if (any(lengths(list(threads, default_threads, max_threads)) != 1L) ||
+      any(!is.finite(thread_values)) || any(thread_values < 0) ||
+      any(thread_values != floor(thread_values))) {
+    stop("threads, default_threads, and max_threads must be nonnegative integers",
+         call. = FALSE)
+  }
+  sizing_values <- c(min_parallel_rows, target_rows_per_thread)
+  if (any(lengths(list(min_parallel_rows, target_rows_per_thread)) != 1L) ||
+      any(!is.finite(sizing_values)) || any(sizing_values <= 0) ||
+      any(sizing_values != floor(sizing_values))) {
+    stop("min_parallel_rows and target_rows_per_thread must be positive integers",
+         call. = FALSE)
+  }
   ssc <- parse_ssc(ssc)
   opts <- list(
     se_type = se_type,
@@ -91,19 +105,11 @@ parse_ssc <- function(ssc) {
   out
 }
 
-# Run the fit with the requested backend env override and fail-closed GPU
+# Run the fit with a task-local native backend override and fail-closed GPU
 # semantics (mirrors Stata's error 498 contract for gpubackend(cuda|metal)).
 run_with_backend <- function(backend, fun) {
   backend <- match.arg(backend, c("default", "cpu", "cuda", "metal"))
-  if (backend != "default") {
-    old <- Sys.getenv("XHDFE_GPU_BACKEND", unset = NA)
-    Sys.setenv(XHDFE_GPU_BACKEND = backend)
-    on.exit({
-      if (is.na(old)) Sys.unsetenv("XHDFE_GPU_BACKEND")
-      else Sys.setenv(XHDFE_GPU_BACKEND = old)
-    }, add = TRUE)
-  }
-  res <- fun()
+  res <- .xhdfe_cpp_run_with_backend(backend, fun)
   if (backend %in% c("cuda", "metal") && !isTRUE(res$gpu_used)) {
     stop("backend = \"", backend, "\" was requested but the GPU was not used (status: ",
          gpu_status_label(res$gpu_status_code),
@@ -268,9 +274,19 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     fe_labels = fe_labels,
     iterations = res$num_iterations,
     converged = res$converged,
+    abs_residual = res$abs_residual,
+    abs_residual_rel = res$abs_residual_rel,
+    precision_certified = res$precision_certified,
     absorption_method_used = res$absorption_method_used,
     absorption_method_code = res$absorption_method_code,
     threads_used = res$threads_used,
+    threads_requested = res$threads_requested,
+    threads_effective = res$threads_effective,
+    parallel_workers_active = res$parallel_workers_active,
+    thread_capacity = res$thread_capacity,
+    openmp_enabled = res$openmp_enabled,
+    thread_limit_code = res$thread_limit_code,
+    thread_limit_reason = res$thread_limit_reason,
     gpu_used = res$gpu_used,
     gpu_status_code = res$gpu_status_code,
     gpu_status = gpu_status_label(res$gpu_status_code),

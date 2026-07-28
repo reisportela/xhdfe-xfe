@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.0  25jul2026}{...}
+{* *! version 1.0.0  28jul2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
 {vieweralsosee "xhdfegelbachetable" "help xhdfegelbachetable"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachcoefplot} {hline 2}}Identity-preserving Gelbach waterfall{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.0 (25jul2026), distributed with xhdfegelbach 1.5.0.}{p_end}
+{pstd}{bf:Version 1.0.0 (28jul2026), distributed with xhdfegelbach 1.5.0.}{p_end}
 
 
 {title:Syntax}

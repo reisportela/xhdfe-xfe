@@ -22,8 +22,13 @@
 #include <utility>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
+#include "fe_absorption_cuda.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
 // with OpenMP, as used by the plugin build); otherwise fall back to std::sort.
@@ -57,6 +62,52 @@ constexpr double kGroupConstantTol = 1e-12;
 
 [[noreturn]] void throw_with_prefix(const char* prefix, const std::string& msg);
 
+// The plugin performs categorical dense-ranking before HdfeRegressorV11 is
+// constructed.  Apply an explicit num_threads request to that preprocessing
+// too, then restore Stata's caller ICV on every normal/exceptional exit.
+class ScopedPluginThreadRequest {
+public:
+    explicit ScopedPluginThreadRequest(int requested) {
+#ifdef _OPENMP
+        if (requested <= 0) return;
+        if (requested > 1 && omp_in_parallel()) {
+            throw std::runtime_error(
+                "xhdfe plugin: explicit num_threads > 1 cannot be guaranteed "
+                "inside an active OpenMP region");
+        }
+        previous_dynamic_ = omp_get_dynamic();
+        previous_threads_ = omp_get_max_threads();
+        const int capacity = std::max(
+            1, std::min(omp_get_num_procs(), omp_get_thread_limit()));
+        omp_set_dynamic(0);
+        omp_set_num_threads(std::max(1, std::min(requested, capacity)));
+        active_ = true;
+#else
+        (void)requested;
+#endif
+    }
+
+    ~ScopedPluginThreadRequest() {
+#ifdef _OPENMP
+        if (active_) {
+            omp_set_num_threads(previous_threads_);
+            omp_set_dynamic(previous_dynamic_);
+        }
+#endif
+    }
+
+    ScopedPluginThreadRequest(const ScopedPluginThreadRequest&) = delete;
+    ScopedPluginThreadRequest& operator=(const ScopedPluginThreadRequest&) =
+        delete;
+
+private:
+#ifdef _OPENMP
+    bool active_ = false;
+    int previous_dynamic_ = 0;
+    int previous_threads_ = 1;
+#endif
+};
+
 std::string to_lower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
@@ -70,6 +121,13 @@ std::string normalize_gpu_backend(const std::string& raw) {
         return name;
     }
     throw_with_prefix("xhdfe plugin: ", "invalid gpu_backend: " + raw);
+}
+
+hdfe::detail::GpuBackend parse_gpu_backend_override(
+    const std::string& backend) {
+    if (backend == "cuda") return hdfe::detail::GpuBackend::Cuda;
+    if (backend == "metal") return hdfe::detail::GpuBackend::Metal;
+    return hdfe::detail::GpuBackend::Cpu;
 }
 
 void set_env_value(const std::string& key, const std::string& value) {
@@ -608,6 +666,29 @@ void maybe_save_gpu_diagnostics(const std::optional<std::string>& s_gpu_status_c
                       gpu_absorption_converged);
     maybe_save_scalar(s_gpu_absorption_iterations,
                       gpu_absorption_iterations);
+}
+
+void maybe_save_thread_diagnostics(
+    const std::optional<std::string>& s_threads_used,
+    const std::optional<std::string>& s_threads_requested,
+    const std::optional<std::string>& s_threads_effective,
+    const std::optional<std::string>& s_parallel_workers_active,
+    const std::optional<std::string>& s_thread_capacity,
+    const std::optional<std::string>& s_openmp_enabled,
+    const std::optional<std::string>& s_thread_limit_code,
+    const HdfeRegressorV11& reg) {
+    maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+    maybe_save_scalar(s_threads_requested,
+                      static_cast<double>(reg.threads_requested()));
+    maybe_save_scalar(s_threads_effective,
+                      static_cast<double>(reg.threads_effective()));
+    maybe_save_scalar(s_parallel_workers_active,
+                      static_cast<double>(reg.parallel_workers_active()));
+    maybe_save_scalar(s_thread_capacity,
+                      static_cast<double>(reg.thread_capacity()));
+    maybe_save_scalar(s_openmp_enabled, reg.openmp_enabled() ? 1.0 : 0.0);
+    maybe_save_scalar(s_thread_limit_code,
+                      static_cast<double>(reg.thread_limit_code()));
 }
 
 double stata_value_or_missing(double value) {
@@ -1286,7 +1367,20 @@ ST_retcode run_akm_leave_out_set(const ParsedArgs& args) {
     akm_save_scalar("__xakm_n_stayers", static_cast<double>(set.n_stayers));
     akm_save_scalar("__xakm_prune_iterations",
                     static_cast<double>(set.prune_iterations));
+    akm_save_scalar("__xakm_threads_requested",
+                    static_cast<double>(set.threads_requested));
+    akm_save_scalar("__xakm_threads_effective",
+                    static_cast<double>(set.threads_effective));
     akm_save_scalar("__xakm_threads_used", static_cast<double>(set.threads_used));
+    akm_save_scalar("__xakm_workers_active",
+                    static_cast<double>(set.parallel_workers_active));
+    akm_save_scalar("__xakm_thread_capacity",
+                    static_cast<double>(set.thread_capacity));
+    akm_save_scalar("__xakm_openmp_enabled", set.openmp_enabled ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_thread_limit_code",
+                    static_cast<double>(set.thread_limit_code));
+    SF_macro_save(const_cast<char*>("_xakm_thread_limit_reason"),
+                  const_cast<char*>(set.thread_limit_reason.c_str()));
     akm_save_scalar("__xakm_gpu_used", set.gpu_used ? 1.0 : 0.0);
     akm_save_scalar("__xakm_gpu_status_code",
                     static_cast<double>(set.gpu_status_code));
@@ -1487,13 +1581,74 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
     akm_save_scalar("__xakm_mean_pii", res.mean_pii);
     akm_save_scalar("__xakm_leverages_exact", res.leverages_exact ? 1.0 : 0.0);
     akm_save_scalar("__xakm_solver_direct", res.solver_direct ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_threads_requested",
+                    static_cast<double>(res.threads_requested));
+    akm_save_scalar("__xakm_threads_effective",
+                    static_cast<double>(res.threads_effective));
+    akm_save_scalar("__xakm_solver_threads_effective",
+                    static_cast<double>(res.solver_threads_effective));
+    akm_save_scalar("__xakm_fwl_threads_effective",
+                    static_cast<double>(res.fwl_threads_effective));
     akm_save_scalar("__xakm_fwl_threads_used", static_cast<double>(res.fwl_threads_used));
+    akm_save_scalar("__xakm_fwl_workers_active",
+                    static_cast<double>(res.fwl_parallel_workers_active));
+    akm_save_scalar("__xakm_solver_threads_used",
+                    static_cast<double>(res.solver_threads_used));
+    akm_save_scalar("__xakm_solver_workers_active",
+                    static_cast<double>(res.solver_parallel_workers_active));
     akm_save_scalar("__xakm_threads_used", static_cast<double>(res.threads_used));
+    akm_save_scalar("__xakm_workers_active",
+                    static_cast<double>(res.parallel_workers_active));
+    akm_save_scalar("__xakm_thread_capacity",
+                    static_cast<double>(res.thread_capacity));
+    akm_save_scalar("__xakm_openmp_enabled", res.openmp_enabled ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_thread_limit_code",
+                    static_cast<double>(res.thread_limit_code));
+    SF_macro_save(const_cast<char*>("_xakm_thread_limit_reason"),
+                  const_cast<char*>(res.thread_limit_reason.c_str()));
+    akm_save_scalar("__xakm_samp_threads_req",
+                    static_cast<double>(res.sample.threads_requested));
+    akm_save_scalar("__xakm_samp_threads_eff",
+                    static_cast<double>(res.sample.threads_effective));
+    akm_save_scalar("__xakm_samp_threads_used",
+                    static_cast<double>(res.sample.threads_used));
+    akm_save_scalar("__xakm_samp_workers_active",
+                    static_cast<double>(res.sample.parallel_workers_active));
+    akm_save_scalar("__xakm_samp_thread_capacity",
+                    static_cast<double>(res.sample.thread_capacity));
+    akm_save_scalar("__xakm_samp_openmp_enabled",
+                    res.sample.openmp_enabled ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_samp_thread_limit_code",
+                    static_cast<double>(res.sample.thread_limit_code));
+    SF_macro_save(const_cast<char*>("_xakm_samp_limit_reason"),
+                  const_cast<char*>(res.sample.thread_limit_reason.c_str()));
     akm_save_scalar("__xakm_jla_draws", static_cast<double>(res.jla_draws_used));
     akm_save_scalar("__xakm_seed", static_cast<double>(res.seed_used));
     akm_save_scalar("__xakm_solver_iterations", static_cast<double>(res.solver_iterations));
     akm_save_scalar("__xakm_converged", res.converged ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_gpu_requested", res.gpu_requested ? 1.0 : 0.0);
     akm_save_scalar("__xakm_gpu_used", res.gpu_used ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_gpu_status_code",
+                    static_cast<double>(res.gpu_status_code));
+    SF_macro_save(const_cast<char*>("_xakm_gpu_backend"),
+                  const_cast<char*>(res.gpu_backend.c_str()));
+    SF_macro_save(const_cast<char*>("_xakm_gpu_status"),
+                  const_cast<char*>(res.gpu_status.c_str()));
+    akm_save_scalar("__xakm_fwl_gpu_attempted",
+                    res.fwl_gpu_attempted ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_fwl_gpu_used", res.fwl_gpu_used ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_fwl_gpu_fallback",
+                    res.fwl_gpu_fallback ? 1.0 : 0.0);
+    akm_save_scalar("__xakm_fwl_gpu_status_code",
+                    static_cast<double>(res.fwl_gpu_status_code));
+    SF_macro_save(const_cast<char*>("_xakm_fwl_gpu_status"),
+                  const_cast<char*>(res.fwl_gpu_status.c_str()));
+    akm_save_scalar("__xakm_fwl_iterations",
+                    static_cast<double>(res.fwl_iterations));
+    akm_save_scalar("__xakm_fwl_abs_residual_rel",
+                    res.fwl_abs_residual_rel);
+    akm_save_scalar("__xakm_fwl_precision_certified",
+                    res.fwl_precision_certified ? 1.0 : 0.0);
     if (options.compute_se) {
         akm_save_scalar("__xakm_se_var_psi", res.se_var_psi);
         akm_save_scalar("__xakm_se_cov", res.se_cov_alpha_psi);
@@ -1935,7 +2090,38 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     akm_save_scalar("__xgel_regularity_alpha",
                     res.regularity_test_alpha);
     akm_save_scalar("__xgel_converged", res.converged ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_threads_requested",
+                    static_cast<double>(res.threads_requested));
+    akm_save_scalar("__xgel_threads_effective",
+                    static_cast<double>(res.threads_effective));
+    akm_save_scalar("__xgel_recovery_thr_eff",
+                    static_cast<double>(res.recovery_threads_effective));
+    akm_save_scalar("__xgel_fullfit_threads_used",
+                    static_cast<double>(res.fullfit_threads_used));
+    akm_save_scalar("__xgel_fullfit_workers_active",
+                    static_cast<double>(
+                        res.fullfit_parallel_workers_active));
+    akm_save_scalar("__xgel_recovery_threads_used",
+                    static_cast<double>(res.recovery_threads_used));
+    akm_save_scalar("__xgel_recovery_workers_active",
+                    static_cast<double>(
+                        res.recovery_parallel_workers_active));
+    akm_save_scalar("__xgel_cov_threads_used",
+                    static_cast<double>(res.covariance_threads_used));
+    akm_save_scalar("__xgel_cov_workers_active",
+                    static_cast<double>(
+                        res.covariance_parallel_workers_active));
     akm_save_scalar("__xgel_threads_used", static_cast<double>(res.threads_used));
+    akm_save_scalar("__xgel_workers_active",
+                    static_cast<double>(res.parallel_workers_active));
+    akm_save_scalar("__xgel_thread_capacity",
+                    static_cast<double>(res.thread_capacity));
+    akm_save_scalar("__xgel_openmp_enabled",
+                    res.openmp_enabled ? 1.0 : 0.0);
+    akm_save_scalar("__xgel_thread_limit_code",
+                    static_cast<double>(res.thread_limit_code));
+    SF_macro_save(const_cast<char*>("_xgel_thread_limit_reason"),
+                  const_cast<char*>(res.thread_limit_reason.c_str()));
     akm_save_scalar("__xgel_gpu_requested",
                     res.gpu_requested ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_used", res.gpu_used ? 1.0 : 0.0);
@@ -2022,6 +2208,7 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.max_iter = parse_int(args.get_required("max_iter"), "max_iter");
         opts.fit_intercept = parse_bool(args.get_required("fit_intercept"), "fit_intercept");
         opts.num_threads = parse_int(args.get_required("num_threads"), "num_threads");
+        ScopedPluginThreadRequest plugin_thread_request(opts.num_threads);
         opts.drop_singletons = parse_bool(args.get_required("drop_singletons"), "drop_singletons");
         opts.retain_fixed_effects = parse_bool(args.get_required("retain_fes"), "retain_fes");
         opts.refine_stored_residuals = store_resid;
@@ -2091,10 +2278,10 @@ STDLL stata_call(int argc, char* argv[]) {
             parse_int(args.get_required("target_rows_per_thread"), "target_rows_per_thread");
         threading.symmetric_sweep = opts.symmetric_sweep;
 
-        std::optional<ScopedEnvVar> gpu_env;
+        std::optional<hdfe::detail::ScopedGpuBackendOverride> gpu_backend_scope;
         if (auto val = args.get_optional("gpu_backend")) {
             const std::string backend = normalize_gpu_backend(*val);
-            gpu_env.emplace("XHDFE_GPU_BACKEND", backend);
+            gpu_backend_scope.emplace(parse_gpu_backend_override(backend));
         }
         std::optional<ScopedEnvVar> mobility_profile_env;
         if (auto val = args.get_optional("mobility_profile")) {
@@ -2478,6 +2665,12 @@ STDLL stata_call(int argc, char* argv[]) {
         const std::optional<std::string> s_saturated = args.get_optional("s_saturated");
         const std::optional<std::string> s_iterations = args.get_optional("s_iterations");
         const std::optional<std::string> s_converged = args.get_optional("s_converged");
+        const std::optional<std::string> s_abs_residual =
+            args.get_optional("s_abs_residual");
+        const std::optional<std::string> s_abs_residual_rel =
+            args.get_optional("s_abs_residual_rel");
+        const std::optional<std::string> s_precision_certified =
+            args.get_optional("s_precision_certified");
         const std::optional<std::string> s_fe_recovery_converged =
             args.get_optional("s_fe_recovery_converged");
         const std::optional<std::string> s_fe_recovery_iterations =
@@ -2485,6 +2678,18 @@ STDLL stata_call(int argc, char* argv[]) {
         const std::optional<std::string> s_fe_recovery_max_delta =
             args.get_optional("s_fe_recovery_max_delta");
         const std::optional<std::string> s_threads_used = args.get_optional("s_threads_used");
+        const std::optional<std::string> s_threads_requested =
+            args.get_optional("s_threads_requested");
+        const std::optional<std::string> s_threads_effective =
+            args.get_optional("s_threads_effective");
+        const std::optional<std::string> s_parallel_workers_active =
+            args.get_optional("s_parallel_workers_active");
+        const std::optional<std::string> s_thread_capacity =
+            args.get_optional("s_thread_capacity");
+        const std::optional<std::string> s_openmp_enabled =
+            args.get_optional("s_openmp_enabled");
+        const std::optional<std::string> s_thread_limit_code =
+            args.get_optional("s_thread_limit_code");
         const std::optional<std::string> s_gpu_used = args.get_optional("s_gpu_used");
         const std::optional<std::string> s_gpu_status_code = args.get_optional("s_gpu_status_code");
         const std::optional<std::string> s_gpu_attempted = args.get_optional("s_gpu_attempted");
@@ -2648,10 +2853,17 @@ STDLL stata_call(int argc, char* argv[]) {
                 maybe_save_scalar(s_saturated, r.is_saturated() ? 1.0 : 0.0);
                 maybe_save_scalar(s_iterations, static_cast<double>(r.num_iterations));
                 maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
+                maybe_save_scalar(s_abs_residual, r.abs_residual);
+                maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+                maybe_save_scalar(s_precision_certified,
+                                  r.precision_certified ? 1.0 : 0.0);
                 maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
                 maybe_save_scalar(s_fe_recovery_iterations, static_cast<double>(r.fe_recovery_iterations));
                 maybe_save_scalar(s_fe_recovery_max_delta, r.fe_recovery_max_delta);
-                maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+                maybe_save_thread_diagnostics(
+                    s_threads_used, s_threads_requested, s_threads_effective,
+                    s_parallel_workers_active, s_thread_capacity,
+                    s_openmp_enabled, s_thread_limit_code, reg);
                 maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
                 maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                            s_gpu_absorption_converged,
@@ -2762,10 +2974,17 @@ STDLL stata_call(int argc, char* argv[]) {
             maybe_save_scalar(s_saturated, r.is_saturated() ? 1.0 : 0.0);
             maybe_save_scalar(s_iterations, static_cast<double>(r.num_iterations));
             maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
+            maybe_save_scalar(s_abs_residual, r.abs_residual);
+            maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+            maybe_save_scalar(s_precision_certified,
+                              r.precision_certified ? 1.0 : 0.0);
             maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
             maybe_save_scalar(s_fe_recovery_iterations, static_cast<double>(r.fe_recovery_iterations));
             maybe_save_scalar(s_fe_recovery_max_delta, r.fe_recovery_max_delta);
-            maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+            maybe_save_thread_diagnostics(
+                s_threads_used, s_threads_requested, s_threads_effective,
+                s_parallel_workers_active, s_thread_capacity,
+                s_openmp_enabled, s_thread_limit_code, reg);
             maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
             maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                        s_gpu_absorption_converged,
@@ -2840,10 +3059,17 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_saturated, r.is_saturated() ? 1.0 : 0.0);
         maybe_save_scalar(s_iterations, static_cast<double>(r.num_iterations));
         maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
+        maybe_save_scalar(s_abs_residual, r.abs_residual);
+        maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+        maybe_save_scalar(s_precision_certified,
+                          r.precision_certified ? 1.0 : 0.0);
         maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
         maybe_save_scalar(s_fe_recovery_iterations, static_cast<double>(r.fe_recovery_iterations));
         maybe_save_scalar(s_fe_recovery_max_delta, r.fe_recovery_max_delta);
-        maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+        maybe_save_thread_diagnostics(
+            s_threads_used, s_threads_requested, s_threads_effective,
+            s_parallel_workers_active, s_thread_capacity,
+            s_openmp_enabled, s_thread_limit_code, reg);
         maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
         maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                    s_gpu_absorption_converged,

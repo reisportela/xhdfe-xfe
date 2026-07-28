@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.2.1  25jul2026}{...}
+{* *! version 1.2.1  28jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -71,8 +71,10 @@ outside it. Rows excluded by {it:if}/{it:in} or missing worker/firm ids remain
 missing; use {cmd:if newvar == 1}, not merely {cmd:if newvar}, in a subsequent
 command. {opt replace} permits overwriting an existing target variable.
 
-{phang}{opt threads(#)} sets the OpenMP budget. The selected sample is
-deterministic and invariant to the thread count.
+{phang}{opt threads(#)} sets the OpenMP request. Zero uses the automatic
+policy. A positive request bypasses workload heuristics and is limited only
+by the logical-processor/OpenMP capacity visible to the process. The selected
+sample is deterministic and invariant to the thread count.
 
 {phang}{opt gpu} requests a hybrid CUDA path. Stable 64-bit match keys are
 sorted with CUB radix sort on the GPU; exact largest-component, union-find,
@@ -88,11 +90,9 @@ selection, largest-component construction, pruning, and finalization. Each
 line is flushed before the next phase; it does not alter the graph or returned
 flag.
 
-{pstd}The {cmd:threads()}/{cmd:gpu}/{cmd:verbose} execution controls and backend
-diagnostics documented here are currently exposed by the Stata companion.
-The Python convenience function {cmd:xhdfe.akm.leave_out_set()} and the R
-surface retain their existing CPU-only signatures; extending those APIs is a
-recorded parity follow-up, not a silent CUDA fallback.{p_end}
+{pstd}The {cmd:threads()}/{cmd:gpu}/{cmd:verbose} execution controls and
+backend diagnostics are also exposed by the Python and R companion
+surfaces.{p_end}
 
 
 {title:Stored results}
@@ -102,7 +102,14 @@ recorded parity follow-up, not a silent CUDA fallback.{p_end}
 {cmd:r(n_workers)}, {cmd:r(n_firms)}, {cmd:r(n_matches)}, {cmd:r(n_movers)},
 {cmd:r(n_stayers)}, {cmd:r(prune_iterations)}.
 
-{pstd}Backend diagnostics: {cmd:r(threads_used)},
+{pstd}Thread diagnostics: {cmd:r(threads_requested)},
+{cmd:r(threads_effective)}, {cmd:r(threads_used)},
+{cmd:r(parallel_workers_active)}, {cmd:r(thread_capacity)},
+{cmd:r(openmp_enabled)}, {cmd:r(thread_limit_code)}, and
+{cmd:r(thread_limit_reason)}. Team and active-worker counts are observed
+during useful graph/sample work; they are not copies of the request.
+
+{pstd}Backend diagnostics:
 {cmd:r(gpu_requested)}, {cmd:r(gpu_used)}, and
 {cmd:r(gpu_status_code)} (0 not requested, 1 used, 2 unavailable, 4 failed,
 6 not beneficial), plus macros {cmd:r(gpu_backend)} ({cmd:cpu}/{cmd:cuda}) and

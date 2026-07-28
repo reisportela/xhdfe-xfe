@@ -1,6 +1,7 @@
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -18,12 +19,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "fe_absorption.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/parallel_work_observer.hpp"
 #include "iv.hpp"
 #include "ols.hpp"
 
@@ -38,6 +40,77 @@ namespace {
 constexpr double kInvSqrt2 = 0.70710678118654752440084436210485;
 constexpr int kMaxSingletonIterations = 100;
 
+inline bool ieee_finite(double value) noexcept {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & UINT64_C(0x7ff0000000000000)) !=
+           UINT64_C(0x7ff0000000000000);
+}
+
+std::int64_t checked_frequency_weight_value(double raw) {
+    constexpr double kMaxSafeInt64AsDouble =
+        9223372036854774784.0;
+    if (!ieee_finite(raw) || !(raw > 0.0) ||
+        raw > kMaxSafeInt64AsDouble ||
+        std::floor(raw) != raw) {
+        throw std::runtime_error(
+            "Frequency weights must be positive integers "
+            "representable as int64");
+    }
+    const std::int64_t value = static_cast<std::int64_t>(raw);
+    if (value <= 0) {
+        throw std::runtime_error(
+            "Frequency weights must be positive integers "
+            "representable as int64");
+    }
+    return value;
+}
+
+void validate_frequency_weight_values(
+    const Eigen::Ref<const Eigen::VectorXd>& weights) {
+    for (Eigen::Index i = 0; i < weights.size(); ++i) {
+        (void)checked_frequency_weight_value(weights[i]);
+    }
+}
+
+std::int64_t checked_frequency_weight_sum(
+    const Eigen::Ref<const Eigen::VectorXd>& weights,
+    std::vector<std::int64_t>* integer_weights = nullptr) {
+    if (integer_weights != nullptr) {
+        integer_weights->resize(static_cast<std::size_t>(weights.size()));
+    }
+    std::int64_t total = 0;
+    for (Eigen::Index i = 0; i < weights.size(); ++i) {
+        const std::int64_t value =
+            checked_frequency_weight_value(weights[i]);
+        if (value > std::numeric_limits<std::int64_t>::max() - total) {
+            throw std::runtime_error(
+                "Total frequency weight exceeds the supported int64 range");
+        }
+        if (integer_weights != nullptr) {
+            (*integer_weights)[static_cast<std::size_t>(i)] = value;
+        }
+        total += value;
+    }
+    return total;
+}
+
+inline int deterministic_moment_chunk_count(Eigen::Index n) {
+    return detail::deterministic_parallel_chunk_count(n);
+}
+
+inline Eigen::Index deterministic_moment_chunk_begin(
+    Eigen::Index n, int chunk, int chunks) {
+    return detail::deterministic_parallel_chunk_begin(
+        n, chunk, chunks);
+}
+
+inline Eigen::Index deterministic_moment_chunk_end(
+    Eigen::Index n, int chunk, int chunks) {
+    return detail::deterministic_parallel_chunk_end(
+        n, chunk, chunks);
+}
+
 struct KahanSum {
     long double sum = 0.0L;
     long double c = 0.0L;
@@ -50,17 +123,11 @@ struct KahanSum {
 };
 
 bool savefe_profile_enabled() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached == 1;
-    }
-    const char* raw = std::getenv("XHDFE_PROFILE_SAVEFE");
-    if (!raw || *raw == '\0' || *raw == '0') {
-        cached = 0;
-        return false;
-    }
-    cached = 1;
-    return true;
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_SAVEFE");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
 }
 
 void savefe_profile_log(const std::string& msg) {
@@ -71,17 +138,11 @@ void savefe_profile_log(const std::string& msg) {
 }
 
 bool cpu_profile_enabled() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached == 1;
-    }
-    const char* raw = std::getenv("XHDFE_PROFILE_CPU");
-    if (!raw || *raw == '\0' || *raw == '0') {
-        cached = 0;
-        return false;
-    }
-    cached = 1;
-    return true;
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_CPU");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
 }
 
 void cpu_profile_log_elapsed(
@@ -118,6 +179,38 @@ private:
     const char* label_;
     bool enabled_;
     std::chrono::steady_clock::time_point start_;
+};
+
+class ScopedParallelRuntime {
+public:
+    ScopedParallelRuntime(int threads, int runtime_capacity)
+        : deterministic_capacity_(runtime_capacity) {
+#ifdef HDFE_USE_OPENMP
+        previous_dynamic_ = omp_get_dynamic();
+        previous_threads_ = omp_get_max_threads();
+        omp_set_dynamic(0);
+        omp_set_num_threads(std::max(1, threads));
+#else
+        (void)threads;
+#endif
+    }
+
+    ~ScopedParallelRuntime() {
+#ifdef HDFE_USE_OPENMP
+        omp_set_num_threads(previous_threads_);
+        omp_set_dynamic(previous_dynamic_);
+#endif
+    }
+
+    ScopedParallelRuntime(const ScopedParallelRuntime&) = delete;
+    ScopedParallelRuntime& operator=(const ScopedParallelRuntime&) = delete;
+
+private:
+    detail::ScopedDeterministicParallelCapacity deterministic_capacity_;
+#ifdef HDFE_USE_OPENMP
+    int previous_dynamic_ = 0;
+    int previous_threads_ = 1;
+#endif
 };
 
 
@@ -181,6 +274,84 @@ double weighted_mean(const Eigen::Ref<const Eigen::VectorXd>& values,
         *sum_weights_out = static_cast<double>(denom);
     }
     return static_cast<double>(sum_yw.sum / denom);
+}
+
+double fixed_chunk_weighted_mean(
+    const Eigen::Ref<const Eigen::VectorXd>& values,
+    const Eigen::VectorXd* weights,
+    int requested_threads = 0,
+    double* sum_weights_out = nullptr,
+    detail::ParallelWorkObserver* observer = nullptr) {
+    const Eigen::Index n = values.size();
+    if (n == 0) {
+        if (sum_weights_out) {
+            *sum_weights_out = 0.0;
+        }
+        return 0.0;
+    }
+    const int chunks = deterministic_moment_chunk_count(n);
+    detail::InlineOrDynamicBuffer<long double> numerator(
+        static_cast<std::size_t>(chunks));
+    detail::InlineOrDynamicBuffer<long double> denominator(
+        static_cast<std::size_t>(chunks));
+    const double* value_ptr = values.data();
+    const double* weight_ptr = weights ? weights->data() : nullptr;
+    int threads = 1;
+#ifdef HDFE_USE_OPENMP
+    threads = requested_threads > 0 ? requested_threads : omp_get_max_threads();
+    threads = std::max(1, threads);
+#else
+    (void)requested_threads;
+#endif
+
+    if (observer) {
+        observer->begin_region(threads);
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static, 1) num_threads(threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (observer) {
+            observer->observe_work();
+        }
+        const Eigen::Index begin =
+            deterministic_moment_chunk_begin(n, chunk, chunks);
+        const Eigen::Index end =
+            deterministic_moment_chunk_end(n, chunk, chunks);
+        KahanSum num;
+        KahanSum den;
+        if (weight_ptr) {
+            for (Eigen::Index i = begin; i < end; ++i) {
+                const long double w = static_cast<long double>(weight_ptr[i]);
+                den.add(w);
+                num.add(static_cast<long double>(value_ptr[i]) * w);
+            }
+        } else {
+            for (Eigen::Index i = begin; i < end; ++i) {
+                num.add(static_cast<long double>(value_ptr[i]));
+            }
+            den.sum = static_cast<long double>(end - begin);
+        }
+        numerator[static_cast<std::size_t>(chunk)] = num.sum;
+        denominator[static_cast<std::size_t>(chunk)] = den.sum;
+    }
+    if (observer) {
+        observer->end_region();
+    }
+
+    KahanSum num_total;
+    KahanSum den_total;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        num_total.add(numerator[static_cast<std::size_t>(chunk)]);
+        den_total.add(denominator[static_cast<std::size_t>(chunk)]);
+    }
+    if (!(den_total.sum > 0.0L)) {
+        throw std::runtime_error("Weights must sum to a positive value");
+    }
+    if (sum_weights_out) {
+        *sum_weights_out = static_cast<double>(den_total.sum);
+    }
+    return static_cast<double>(num_total.sum / den_total.sum);
 }
 
 enum class FeNormalizeStyle { Reghdfe, Component };
@@ -670,7 +841,7 @@ ClusterInterceptMeat compute_multiway_intercept_meat(
 bool update_intercept_covariance(
     HdfeResults& results,
     const Eigen::Ref<const Eigen::MatrixXd>& X_used,
-    const Eigen::Ref<const Eigen::MatrixXd>& X_tilde_used,
+    const Eigen::Ref<const Eigen::MatrixXd>& score_X_tilde,
     const Eigen::Ref<const Eigen::VectorXd>& residuals,
     const Eigen::VectorXd* weights,
     const std::vector<int>& kept_slope_cols,
@@ -695,37 +866,28 @@ bool update_intercept_covariance(
         return false;
     }
 
-    const int n = static_cast<int>(X_tilde_used.rows());
+    const int n = static_cast<int>(score_X_tilde.rows());
     if (residuals.size() != n) {
         return false;
     }
     const int k_active = static_cast<int>(kept_slope_cols.size());
-    if (k_active != X_tilde_used.cols()) {
+    if (k_active != score_X_tilde.cols()) {
         return false;
     }
 
     double sum_w = 0.0;
-    if (weights) {
-        sum_w = weights->sum();
-    } else {
-        sum_w = static_cast<double>(n);
-    }
+    const double residual_mean =
+        fixed_chunk_weighted_mean(residuals, weights, 0, &sum_w);
+    (void)residual_mean;
     if (!(sum_w > 0.0)) {
         return false;
     }
 
     Eigen::VectorXd xbar = Eigen::VectorXd::Zero(k_active);
     if (k_active > 0) {
-        if (!weights) {
-            for (int pos = 0; pos < k_active; ++pos) {
-                const int col = kept_slope_cols[static_cast<std::size_t>(pos)];
-                xbar(pos) = X_used.col(col).mean();
-            }
-        } else {
-            for (int pos = 0; pos < k_active; ++pos) {
-                const int col = kept_slope_cols[static_cast<std::size_t>(pos)];
-                xbar(pos) = X_used.col(col).dot(*weights) / sum_w;
-            }
+        for (int pos = 0; pos < k_active; ++pos) {
+            const int col = kept_slope_cols[static_cast<std::size_t>(pos)];
+            xbar(pos) = fixed_chunk_weighted_mean(X_used.col(col), weights);
         }
     }
 
@@ -787,7 +949,7 @@ bool update_intercept_covariance(
                 return false;
             }
             B = ols_result.xtx_inv * xbar;
-            const Eigen::VectorXd r = X_tilde_used * B;
+            const Eigen::VectorXd r = score_X_tilde * B;
             if (weights) {
                 const double inv_sum_w = 1.0 / sum_w;
                 c_vec = weights->array() * (inv_sum_w - r.array());
@@ -816,7 +978,7 @@ bool update_intercept_covariance(
                 var_alpha = static_cast<long double>(((c * u).square() / wv).sum());
                 if (k_active > 0) {
                     const Eigen::VectorXd vec =
-                        X_tilde_used.transpose() * (u.square() * c).matrix();
+                        score_X_tilde.transpose() * (u.square() * c).matrix();
                     cov_beta_alpha = ols_result.xtx_inv * vec;
                 }
             } else {
@@ -827,7 +989,7 @@ bool update_intercept_covariance(
                         w = weights->array();
                     }
                     const Eigen::VectorXd vec =
-                        X_tilde_used.transpose() * (w * u.square() * c).matrix();
+                        score_X_tilde.transpose() * (w * u.square() * c).matrix();
                     cov_beta_alpha = ols_result.xtx_inv * vec;
                 }
             }
@@ -836,7 +998,7 @@ bool update_intercept_covariance(
         } else if (se_type == StandardErrorType::Cluster && clusters && !clusters->empty()) {
             if (clusters->size() == 1) {
                 const ClusterInterceptMeat meat = compute_cluster_intercept_meat(
-                    X_tilde_used, residuals, weights, c_vec, (*clusters)[0]);
+                    score_X_tilde, residuals, weights, c_vec, (*clusters)[0]);
                 if (k_active > 0) {
                     cov_beta_alpha = ols_result.xtx_inv * meat.cross;
                 }
@@ -846,7 +1008,7 @@ bool update_intercept_covariance(
                 var_alpha *= static_cast<long double>(scale);
             } else {
                 const ClusterInterceptMeat meat = compute_multiway_intercept_meat(
-                    X_tilde_used, residuals, weights, c_vec, *clusters, g_df, g_adj,
+                    score_X_tilde, residuals, weights, c_vec, *clusters, g_df, g_adj,
                     ols_result.df_resid);
                 if (k_active > 0) {
                     cov_beta_alpha = ols_result.xtx_inv * meat.cross;
@@ -1414,6 +1576,10 @@ std::string trim_ascii(const std::string& s) {
 }
 
 bool gpu_backend_env_requested() {
+    if (detail::has_thread_gpu_backend_override()) {
+        return detail::thread_gpu_backend_override() !=
+               detail::GpuBackend::Cpu;
+    }
     const char* raw = std::getenv("XHDFE_GPU_BACKEND");
     if (!raw || *raw == '\0') {
         return false;
@@ -1659,7 +1825,7 @@ std::uint64_t hash_fe_structure_cache_signature(const std::vector<Eigen::VectorX
     return hash;
 }
 
-constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v1";
+constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v2";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
 
@@ -1691,6 +1857,8 @@ void hash_update_double(std::uint64_t& hash, double value) {
     hash = fnv1a_update(hash, hash_double_bits(value));
 }
 
+bool gpu_backend_env_requested();
+
 AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::VectorXd>& y,
                                              const Eigen::Ref<const Eigen::MatrixXd>& X,
                                              const std::vector<Eigen::VectorXi>& fes,
@@ -1710,6 +1878,13 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(weights ? 1ULL : 0ULL);
     update(options.fit_intercept ? 1ULL : 0ULL);
     update(options.drop_singletons ? 1ULL : 0ULL);
+    update(static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(options.num_threads)));
+    update(options.num_threads_explicit ? 1ULL : 0ULL);
+    // CPU and accelerator transforms must never share a cache entry.  This
+    // also makes a ScopedGpuBackendOverride(Cpu) in a nested estimator immune
+    // to a previously certified-but-forward-different CUDA transform.
+    update(gpu_backend_env_requested() ? 1ULL : 0ULL);
     update(static_cast<std::uint64_t>(options.max_iter));
     update(static_cast<std::uint64_t>(static_cast<int>(options.tolerance_mode)));
     hash_update_double(h1, options.tol);
@@ -3662,7 +3837,10 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
 std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::VectorXi>& fes,
                                                        int max_iter,
                                                        int* dropped_out,
-                                                       int num_threads_hint = 0) {
+                                                       int num_threads_hint,
+                                                       int runtime_capacity,
+                                                       bool explicit_thread_request,
+                                                       detail::ParallelWorkObserver* observer) {
     if (dropped_out) {
         *dropped_out = 0;
     }
@@ -3685,25 +3863,40 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
     int scan_threads = 1;
 #ifdef HDFE_USE_OPENMP
     scan_threads = num_threads_hint > 0
-                       ? std::min(num_threads_hint, omp_get_max_threads())
+                       ? num_threads_hint
                        : omp_get_max_threads();
     scan_threads = std::max(1, scan_threads);
 #else
     (void)num_threads_hint;
 #endif
+    // num_threads_hint has already been resolved against affinity, OpenMP's
+    // thread limit, and the machine capacity by the public entry point.  Make
+    // that resolved request authoritative for this phase too: inherited ICVs
+    // and OpenMP dynamic teams must not silently shrink an explicit request.
+    ScopedParallelRuntime scan_runtime(scan_threads, runtime_capacity);
 
     std::vector<FeIndexerLite> indexers(fes.size());
 #ifdef HDFE_USE_OPENMP
-    if (scan_threads > 1 && fes.size() > 1 && n >= kParallelScanMinObs) {
+    if (scan_threads > 1 && fes.size() > 1 &&
+        (explicit_thread_request || n >= kParallelScanMinObs)) {
         // Each dimension's dense-rank mapping is independent; building them
         // concurrently keeps the per-dimension first-appearance order (and
         // therefore the result) bit-identical to the serial build.
         const int dim_threads =
             std::min<int>(scan_threads, static_cast<int>(fes.size()));
+        if (observer) {
+            observer->begin_region(dim_threads);
+        }
 #pragma omp parallel for schedule(dynamic, 1) num_threads(dim_threads)
         for (std::ptrdiff_t d = 0; d < static_cast<std::ptrdiff_t>(fes.size()); ++d) {
+            if (observer) {
+                observer->observe_work();
+            }
             indexers[static_cast<std::size_t>(d)] =
                 build_indexer_lite(fes[static_cast<std::size_t>(d)]);
+        }
+        if (observer) {
+            observer->end_region();
         }
     } else
 #endif
@@ -3722,7 +3915,8 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
     }
 
 #ifdef HDFE_USE_OPENMP
-    if (scan_threads > 1 && n >= kParallelScanMinObs) {
+    if (scan_threads > 1 &&
+        (explicit_thread_request || n >= kParallelScanMinObs)) {
         // Integer add and xor are associative and commutative, so any
         // aggregation order produces bit-identical counts/xor values. These
         // are transient scratch arrays, not solver state. Low-cardinality
@@ -3737,19 +3931,36 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
             int* __restrict cnt = counts[d].data();
             int* __restrict axr = active_xor[d].data();
             if (groups >= kAtomicMinGroups) {
-#pragma omp parallel for schedule(static) num_threads(scan_threads)
-                for (int i = 0; i < n; ++i) {
-                    const int g = gid[i];
+                if (observer) {
+                    observer->begin_region(scan_threads);
+                }
+#pragma omp parallel num_threads(scan_threads)
+                {
+                    bool observed_work = false;
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        if (observer && !observed_work) {
+                            observer->observe_work();
+                            observed_work = true;
+                        }
+                        const int g = gid[i];
 #pragma omp atomic
-                    cnt[g] += 1;
+                        cnt[g] += 1;
 #pragma omp atomic
-                    axr[g] ^= i;
+                        axr[g] ^= i;
+                    }
+                }
+                if (observer) {
+                    observer->end_region();
                 }
             } else {
                 std::vector<std::vector<int>> cnt_tls(
                     static_cast<std::size_t>(scan_threads));
                 std::vector<std::vector<int>> axr_tls(
                     static_cast<std::size_t>(scan_threads));
+                if (observer) {
+                    observer->begin_region(scan_threads);
+                }
 #pragma omp parallel num_threads(scan_threads)
                 {
                     const int tid = omp_get_thread_num();
@@ -3757,12 +3968,20 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                     std::vector<int>& a = axr_tls[static_cast<std::size_t>(tid)];
                     c.assign(static_cast<std::size_t>(groups), 0);
                     a.assign(static_cast<std::size_t>(groups), 0);
+                    bool observed_work = false;
 #pragma omp for schedule(static)
                     for (int i = 0; i < n; ++i) {
+                        if (observer && !observed_work) {
+                            observer->observe_work();
+                            observed_work = true;
+                        }
                         const int g = gid[i];
                         c[static_cast<std::size_t>(g)] += 1;
                         a[static_cast<std::size_t>(g)] ^= i;
                     }
+                }
+                if (observer) {
+                    observer->end_region();
                 }
                 for (int t = 0; t < scan_threads; ++t) {
                     const std::vector<int>& c = cnt_tls[static_cast<std::size_t>(t)];
@@ -3868,7 +4087,12 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
     const Eigen::Ref<const Eigen::VectorXd>& weights,
     int max_iter,
     int* dropped_rows_out,
-    double* dropped_weighted_out) {
+    double* dropped_weighted_out,
+    int num_threads_hint,
+    int runtime_capacity,
+    bool explicit_thread_request,
+    const std::vector<std::int64_t>* validated_integer_weights,
+    detail::ParallelWorkObserver* observer) {
     if (dropped_rows_out) {
         *dropped_rows_out = 0;
     }
@@ -3891,70 +4115,198 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
         return {};
     }
 
-    std::vector<FeIndexerLite> indexers;
-    indexers.reserve(fes.size());
-    for (const auto& fe : fes) {
-        indexers.push_back(build_indexer_lite(fe));
+    constexpr int kParallelScanMinObs = 4194304;
+    int scan_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    scan_threads = num_threads_hint > 0
+                       ? num_threads_hint
+                       : omp_get_max_threads();
+    scan_threads = std::max(1, scan_threads);
+#else
+    (void)num_threads_hint;
+    (void)explicit_thread_request;
+    (void)observer;
+#endif
+    ScopedParallelRuntime scan_runtime(scan_threads, runtime_capacity);
+
+    // Validate and integerize before any parallel region. This preserves the
+    // deterministic first-invalid-row failure and proves that no per-group
+    // weighted count can overflow int64_t.
+    std::vector<std::int64_t> owned_integer_weights;
+    const std::vector<std::int64_t>* row_weights_ptr =
+        validated_integer_weights;
+    if (row_weights_ptr == nullptr) {
+        (void)checked_frequency_weight_sum(
+            weights, &owned_integer_weights);
+        row_weights_ptr = &owned_integer_weights;
+    } else if (row_weights_ptr->size() != static_cast<std::size_t>(n)) {
+        throw std::logic_error(
+            "Validated frequency-weight cache has the wrong length");
+    }
+    const std::vector<std::int64_t>& row_weights = *row_weights_ptr;
+
+    std::vector<FeIndexerLite> indexers(fes.size());
+#ifdef HDFE_USE_OPENMP
+    if (scan_threads > 1 && fes.size() > 1 &&
+        (explicit_thread_request || n >= kParallelScanMinObs)) {
+        const int dim_threads =
+            std::min<int>(scan_threads, static_cast<int>(fes.size()));
+        if (observer) {
+            observer->begin_region(dim_threads);
+        }
+#pragma omp parallel for schedule(dynamic, 1) num_threads(dim_threads)
+        for (std::ptrdiff_t d = 0;
+             d < static_cast<std::ptrdiff_t>(fes.size()); ++d) {
+            if (observer) {
+                observer->observe_work();
+            }
+            indexers[static_cast<std::size_t>(d)] =
+                build_indexer_lite(fes[static_cast<std::size_t>(d)]);
+        }
+        if (observer) {
+            observer->end_region();
+        }
+    } else
+#endif
+    {
+        for (std::size_t d = 0; d < fes.size(); ++d) {
+            indexers[d] = build_indexer_lite(fes[d]);
+        }
     }
 
     std::vector<std::vector<std::int64_t>> counts(indexers.size());
-    std::vector<std::vector<int>> stamps(indexers.size());
+    std::vector<std::vector<int>> active_xor(indexers.size());
     for (std::size_t d = 0; d < indexers.size(); ++d) {
-        const int groups = indexers[d].num_groups;
-        counts[d].assign(static_cast<std::size_t>(groups), 0);
-        stamps[d].assign(static_cast<std::size_t>(groups), 0);
+        const std::size_t groups =
+            static_cast<std::size_t>(indexers[d].num_groups);
+        counts[d].assign(groups, 0);
+        active_xor[d].assign(groups, 0);
     }
 
-    std::vector<uint8_t> keep(static_cast<std::size_t>(n), 1);
-    int dropped_rows_total = 0;
-    double dropped_w_total = 0.0;
-    const int iters = std::max(1, max_iter);
-    int stamp = 1;
-    for (int iter = 0; iter < iters; ++iter) {
-        if (stamp == std::numeric_limits<int>::max()) {
-            for (auto& s : stamps) {
-                std::fill(s.begin(), s.end(), 0);
-            }
-            stamp = 1;
-        }
-        ++stamp;
-
-        for (int i = 0; i < n; ++i) {
-            if (!keep[static_cast<std::size_t>(i)]) {
-                continue;
-            }
-            const double w_raw = weights(i);
-            // Stata fweights are strictly positive integers. Treat non-finite or non-positive
-            // weights as invalid here rather than silently miscounting.
-            if (!(w_raw > 0.0) || !std::isfinite(w_raw)) {
-                throw std::runtime_error("Invalid fweight encountered (must be positive and finite)");
-            }
-            const std::int64_t w = static_cast<std::int64_t>(std::llround(w_raw));
-            if (w <= 0) {
-                throw std::runtime_error("Invalid fweight encountered (must be >= 1)");
-            }
-            for (std::size_t d = 0; d < fes.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
-                int& seen = stamps[d][static_cast<std::size_t>(g)];
-                std::int64_t& count = counts[d][static_cast<std::size_t>(g)];
-                if (seen != stamp) {
-                    seen = stamp;
-                    count = w;
-                } else {
-                    count += w;
+#ifdef HDFE_USE_OPENMP
+    if (scan_threads > 1 &&
+        (explicit_thread_request || n >= kParallelScanMinObs)) {
+        constexpr int kAtomicMinGroups = 65536;
+        for (std::size_t d = 0; d < indexers.size(); ++d) {
+            const int groups = indexers[d].num_groups;
+            const int* __restrict gid = indexers[d].group_ids.data();
+            std::int64_t* __restrict cnt = counts[d].data();
+            int* __restrict axr = active_xor[d].data();
+            if (groups >= kAtomicMinGroups) {
+                if (observer) {
+                    observer->begin_region(scan_threads);
+                }
+#pragma omp parallel num_threads(scan_threads)
+                {
+                    bool observed_work = false;
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        if (observer && !observed_work) {
+                            observer->observe_work();
+                            observed_work = true;
+                        }
+                        const int g = gid[i];
+                        const std::int64_t w =
+                            row_weights[static_cast<std::size_t>(i)];
+#pragma omp atomic
+                        cnt[g] += w;
+#pragma omp atomic
+                        axr[g] ^= i;
+                    }
+                }
+                if (observer) {
+                    observer->end_region();
+                }
+            } else {
+                std::vector<std::vector<std::int64_t>> cnt_tls(
+                    static_cast<std::size_t>(scan_threads));
+                std::vector<std::vector<int>> axr_tls(
+                    static_cast<std::size_t>(scan_threads));
+                if (observer) {
+                    observer->begin_region(scan_threads);
+                }
+#pragma omp parallel num_threads(scan_threads)
+                {
+                    const int tid = omp_get_thread_num();
+                    std::vector<std::int64_t>& local =
+                        cnt_tls[static_cast<std::size_t>(tid)];
+                    std::vector<int>& local_xor =
+                        axr_tls[static_cast<std::size_t>(tid)];
+                    local.assign(static_cast<std::size_t>(groups), 0);
+                    local_xor.assign(static_cast<std::size_t>(groups), 0);
+                    bool observed_work = false;
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        if (observer && !observed_work) {
+                            observer->observe_work();
+                            observed_work = true;
+                        }
+                        local[static_cast<std::size_t>(gid[i])] +=
+                            row_weights[static_cast<std::size_t>(i)];
+                        local_xor[static_cast<std::size_t>(gid[i])] ^= i;
+                    }
+                }
+                if (observer) {
+                    observer->end_region();
+                }
+                for (int t = 0; t < scan_threads; ++t) {
+                    const std::vector<std::int64_t>& local =
+                        cnt_tls[static_cast<std::size_t>(t)];
+                    const std::vector<int>& local_xor =
+                        axr_tls[static_cast<std::size_t>(t)];
+                    for (int g = 0; g < groups; ++g) {
+                        cnt[g] += local[static_cast<std::size_t>(g)];
+                        axr[g] ^= local_xor[static_cast<std::size_t>(g)];
+                    }
                 }
             }
         }
-
-        int dropped_rows_iter = 0;
-        double dropped_w_iter = 0.0;
+    } else
+#endif
+    {
         for (int i = 0; i < n; ++i) {
+            const std::int64_t w =
+                row_weights[static_cast<std::size_t>(i)];
+            for (std::size_t d = 0; d < indexers.size(); ++d) {
+                const int g =
+                    indexers[d].group_ids[static_cast<std::size_t>(i)];
+                counts[d][static_cast<std::size_t>(g)] += w;
+                active_xor[d][static_cast<std::size_t>(g)] ^= i;
+            }
+        }
+    }
+
+    std::vector<int> current;
+    std::vector<int> next;
+    std::vector<int> to_drop;
+    current.reserve(static_cast<std::size_t>(n / 32 + 1024));
+    for (std::size_t d = 0; d < indexers.size(); ++d) {
+        for (std::size_t g = 0; g < counts[d].size(); ++g) {
+            if (counts[d][g] == 1) {
+                current.push_back(active_xor[d][g]);
+            }
+        }
+    }
+
+    std::vector<uint8_t> keep(static_cast<std::size_t>(n), 1);
+    to_drop.reserve(static_cast<std::size_t>(n / 32 + 1024));
+    int dropped_rows_total = 0;
+    double dropped_w_total = 0.0;
+    const int iters = std::max(1, max_iter);
+    for (int iter = 0; iter < iters; ++iter) {
+        if (current.empty()) {
+            break;
+        }
+        to_drop.clear();
+        to_drop.reserve(current.size());
+        for (const int i : current) {
             if (!keep[static_cast<std::size_t>(i)]) {
                 continue;
             }
             bool singleton = false;
-            for (std::size_t d = 0; d < fes.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
+            for (std::size_t d = 0; d < indexers.size(); ++d) {
+                const int g =
+                    indexers[d].group_ids[static_cast<std::size_t>(i)];
                 if (counts[d][static_cast<std::size_t>(g)] == 1) {
                     singleton = true;
                     break;
@@ -3962,15 +4314,39 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
             }
             if (singleton) {
                 keep[static_cast<std::size_t>(i)] = 0;
-                ++dropped_rows_iter;
-                dropped_w_iter += weights(i);
+                to_drop.push_back(i);
+                dropped_w_total += static_cast<double>(
+                    row_weights[static_cast<std::size_t>(i)]);
             }
         }
-        dropped_rows_total += dropped_rows_iter;
-        dropped_w_total += dropped_w_iter;
-        if (dropped_rows_iter == 0) {
+        if (to_drop.empty()) {
             break;
         }
+        dropped_rows_total += static_cast<int>(to_drop.size());
+        for (const int i : to_drop) {
+            const std::int64_t w =
+                row_weights[static_cast<std::size_t>(i)];
+            for (std::size_t d = 0; d < indexers.size(); ++d) {
+                const int g =
+                    indexers[d].group_ids[static_cast<std::size_t>(i)];
+                counts[d][static_cast<std::size_t>(g)] -= w;
+                active_xor[d][static_cast<std::size_t>(g)] ^= i;
+            }
+        }
+
+        next.clear();
+        next.reserve(to_drop.size());
+        for (const int i : to_drop) {
+            for (std::size_t d = 0; d < indexers.size(); ++d) {
+                const int g =
+                    indexers[d].group_ids[static_cast<std::size_t>(i)];
+                if (counts[d][static_cast<std::size_t>(g)] == 1) {
+                    next.push_back(
+                        active_xor[d][static_cast<std::size_t>(g)]);
+                }
+            }
+        }
+        current.swap(next);
     }
 
     if (dropped_rows_out) {
@@ -4487,7 +4863,8 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
     const Eigen::VectorXd* weights,
     double rank_collinear_tol,
     int threads,
-    const std::vector<int>& collinear_priority) {
+    const std::vector<int>& collinear_priority,
+    detail::ParallelWorkObserver* observer) {
     std::vector<uint8_t> drop_mask(static_cast<std::size_t>(std::max(0, slope_cols)), 0);
     if (kept_slope_cols.empty() || slope_cols <= 0) {
         return drop_mask;
@@ -4530,75 +4907,55 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
 #ifdef HDFE_USE_OPENMP
     use_threads = std::max(1, threads);
 #endif
-    if (use_threads > 1) {
+    const int chunks = deterministic_moment_chunk_count(n);
+    std::vector<Eigen::VectorXd> sum_x_tls(
+        static_cast<std::size_t>(chunks), Eigen::VectorXd::Zero(p));
+    std::vector<Eigen::MatrixXd> sum_xx_tls(
+        static_cast<std::size_t>(chunks), Eigen::MatrixXd::Zero(p, p));
+    std::vector<double> sum_w_tls(static_cast<std::size_t>(chunks), 0.0);
+    if (observer) {
+        observer->begin_region(use_threads);
+    }
 #ifdef HDFE_USE_OPENMP
-        std::vector<Eigen::VectorXd> sum_x_tls(static_cast<std::size_t>(use_threads),
-                                               Eigen::VectorXd::Zero(p));
-        std::vector<Eigen::MatrixXd> sum_xx_tls(static_cast<std::size_t>(use_threads),
-                                                Eigen::MatrixXd::Zero(p, p));
-        std::vector<double> sum_w_tls(static_cast<std::size_t>(use_threads), 0.0);
-#pragma omp parallel num_threads(use_threads)
-        {
-            const int tid = omp_get_thread_num();
-            Eigen::VectorXd& sum_x_local = sum_x_tls[static_cast<std::size_t>(tid)];
-            Eigen::MatrixXd& sum_xx_local = sum_xx_tls[static_cast<std::size_t>(tid)];
-            double sum_w_local = 0.0;
-            std::vector<double> xvals(static_cast<std::size_t>(p), 0.0);
-#pragma omp for schedule(static)
-            for (Eigen::Index i = 0; i < n; ++i) {
-                const double w = weights ? weights->data()[i] : 1.0;
-                if (weights) {
-                    sum_w_local += w;
-                }
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                    sum_x_local(j) += w * xvals[j];
-                }
-                for (int j = 0; j < p; ++j) {
-                    for (int k = 0; k <= j; ++k) {
-                        sum_xx_local(j, k) += w * xvals[j] * xvals[k];
-                    }
-                }
-            }
-            sum_w_tls[static_cast<std::size_t>(tid)] = sum_w_local;
-        }
-
-        for (int t = 0; t < use_threads; ++t) {
-            sum_x.noalias() += sum_x_tls[static_cast<std::size_t>(t)];
-            sum_xx.noalias() += sum_xx_tls[static_cast<std::size_t>(t)];
-            sum_w += sum_w_tls[static_cast<std::size_t>(t)];
-        }
+#pragma omp parallel for schedule(static, 1) num_threads(use_threads)
 #endif
-    } else {
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (observer) {
+            observer->observe_work();
+        }
+        Eigen::VectorXd& sum_x_local = sum_x_tls[static_cast<std::size_t>(chunk)];
+        Eigen::MatrixXd& sum_xx_local = sum_xx_tls[static_cast<std::size_t>(chunk)];
+        double sum_w_local = 0.0;
         std::vector<double> xvals(static_cast<std::size_t>(p), 0.0);
-        if (weights) {
-            const double* w_ptr = weights->data();
-            for (Eigen::Index i = 0; i < n; ++i) {
-                const double w = w_ptr[i];
-                sum_w += w;
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                    sum_x(j) += w * xvals[j];
-                }
-                for (int j = 0; j < p; ++j) {
-                    for (int k = 0; k <= j; ++k) {
-                        sum_xx(j, k) += w * xvals[j] * xvals[k];
-                    }
-                }
+        const Eigen::Index begin =
+            deterministic_moment_chunk_begin(n, chunk, chunks);
+        const Eigen::Index end =
+            deterministic_moment_chunk_end(n, chunk, chunks);
+        for (Eigen::Index i = begin; i < end; ++i) {
+            const double w = weights ? weights->data()[i] : 1.0;
+            if (weights) {
+                sum_w_local += w;
             }
-        } else {
-            for (Eigen::Index i = 0; i < n; ++i) {
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                    sum_x(j) += xvals[j];
-                }
-                for (int j = 0; j < p; ++j) {
-                    for (int k = 0; k <= j; ++k) {
-                        sum_xx(j, k) += xvals[j] * xvals[k];
-                    }
+            for (int j = 0; j < p; ++j) {
+                xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
+                sum_x_local(j) += w * xvals[j];
+            }
+            for (int j = 0; j < p; ++j) {
+                for (int k = 0; k <= j; ++k) {
+                    sum_xx_local(j, k) += w * xvals[j] * xvals[k];
                 }
             }
         }
+        sum_w_tls[static_cast<std::size_t>(chunk)] = sum_w_local;
+    }
+    if (observer) {
+        observer->end_region();
+    }
+
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        sum_x.noalias() += sum_x_tls[static_cast<std::size_t>(chunk)];
+        sum_xx.noalias() += sum_xx_tls[static_cast<std::size_t>(chunk)];
+        sum_w += sum_w_tls[static_cast<std::size_t>(chunk)];
     }
 
     if (!weights) {
@@ -4701,7 +5058,8 @@ CrossproductResult compute_crossproducts_selected(
     int intercept_col,
     const Eigen::VectorXd* weights,
     bool center_slopes,
-    int threads) {
+    int threads,
+    detail::ParallelWorkObserver* observer) {
     CrossproductResult out;
     std::vector<int> cols = slope_cols;
     if (intercept_col >= 0) {
@@ -4731,101 +5089,70 @@ CrossproductResult compute_crossproducts_selected(
 #ifdef HDFE_USE_OPENMP
     use_threads = std::max(1, threads);
 #endif
-    if (use_threads > 1) {
+    const int chunks = deterministic_moment_chunk_count(n);
+    std::vector<Eigen::MatrixXd> xtx_tls(
+        static_cast<std::size_t>(chunks), Eigen::MatrixXd::Zero(p, p));
+    std::vector<Eigen::VectorXd> xty_tls(
+        static_cast<std::size_t>(chunks), Eigen::VectorXd::Zero(p));
+    std::vector<Eigen::VectorXd> sum_x_tls;
+    if (center_slopes) {
+        sum_x_tls.assign(static_cast<std::size_t>(chunks),
+                         Eigen::VectorXd::Zero(k));
+    }
+    std::vector<double> sum_w_tls(static_cast<std::size_t>(chunks), 0.0);
+
+    if (observer) {
+        observer->begin_region(use_threads);
+    }
 #ifdef HDFE_USE_OPENMP
-        std::vector<Eigen::MatrixXd> xtx_tls(static_cast<std::size_t>(use_threads),
-                                             Eigen::MatrixXd::Zero(p, p));
-        std::vector<Eigen::VectorXd> xty_tls(static_cast<std::size_t>(use_threads),
-                                             Eigen::VectorXd::Zero(p));
-        std::vector<Eigen::VectorXd> sum_x_tls;
-        if (center_slopes) {
-            sum_x_tls.assign(static_cast<std::size_t>(use_threads), Eigen::VectorXd::Zero(k));
-        }
-        std::vector<double> sum_w_tls(static_cast<std::size_t>(use_threads), 0.0);
-
-#pragma omp parallel num_threads(use_threads)
-        {
-            const int tid = omp_get_thread_num();
-            Eigen::MatrixXd& xtx_local = xtx_tls[static_cast<std::size_t>(tid)];
-            Eigen::VectorXd& xty_local = xty_tls[static_cast<std::size_t>(tid)];
-            Eigen::VectorXd* sum_x_local =
-                center_slopes ? &sum_x_tls[static_cast<std::size_t>(tid)] : nullptr;
-            double sum_w_local = 0.0;
-            std::vector<double> xvals(static_cast<std::size_t>(p), 0.0);
-#pragma omp for schedule(static)
-            for (Eigen::Index i = 0; i < n; ++i) {
-                const double w = weights ? weights->data()[i] : 1.0;
-                if (center_slopes && weights) {
-                    sum_w_local += w;
-                }
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                }
-                for (int j = 0; j < p; ++j) {
-                    xty_local(j) += w * xvals[j] * y(i);
-                    for (int l = 0; l <= j; ++l) {
-                        xtx_local(j, l) += w * xvals[j] * xvals[l];
-                    }
-                }
-                if (sum_x_local) {
-                    for (int j = 0; j < k; ++j) {
-                        (*sum_x_local)(j) += w * xvals[j];
-                    }
-                }
-            }
-            sum_w_tls[static_cast<std::size_t>(tid)] = sum_w_local;
-        }
-
-        for (int t = 0; t < use_threads; ++t) {
-            out.xtx.noalias() += xtx_tls[static_cast<std::size_t>(t)];
-            out.xty.noalias() += xty_tls[static_cast<std::size_t>(t)];
-            if (center_slopes) {
-                out.sum_x.noalias() += sum_x_tls[static_cast<std::size_t>(t)];
-                out.sum_w += sum_w_tls[static_cast<std::size_t>(t)];
-            }
-        }
+#pragma omp parallel for schedule(static, 1) num_threads(use_threads)
 #endif
-    } else {
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (observer) {
+            observer->observe_work();
+        }
+        Eigen::MatrixXd& xtx_local = xtx_tls[static_cast<std::size_t>(chunk)];
+        Eigen::VectorXd& xty_local = xty_tls[static_cast<std::size_t>(chunk)];
+        Eigen::VectorXd* sum_x_local =
+            center_slopes ? &sum_x_tls[static_cast<std::size_t>(chunk)] : nullptr;
+        double sum_w_local = 0.0;
         std::vector<double> xvals(static_cast<std::size_t>(p), 0.0);
-        if (weights) {
-            const double* w_ptr = weights->data();
-            for (Eigen::Index i = 0; i < n; ++i) {
-                const double w = w_ptr[i];
-                if (center_slopes) {
-                    out.sum_w += w;
-                }
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                }
-                for (int j = 0; j < p; ++j) {
-                    out.xty(j) += w * xvals[j] * y(i);
-                    for (int l = 0; l <= j; ++l) {
-                        out.xtx(j, l) += w * xvals[j] * xvals[l];
-                    }
-                }
-                if (center_slopes) {
-                    for (int j = 0; j < k; ++j) {
-                        out.sum_x(j) += w * xvals[j];
-                    }
+        const Eigen::Index begin =
+            deterministic_moment_chunk_begin(n, chunk, chunks);
+        const Eigen::Index end =
+            deterministic_moment_chunk_end(n, chunk, chunks);
+        for (Eigen::Index i = begin; i < end; ++i) {
+            const double w = weights ? weights->data()[i] : 1.0;
+            if (center_slopes && weights) {
+                sum_w_local += w;
+            }
+            for (int j = 0; j < p; ++j) {
+                xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
+            }
+            for (int j = 0; j < p; ++j) {
+                xty_local(j) += w * xvals[j] * y(i);
+                for (int l = 0; l <= j; ++l) {
+                    xtx_local(j, l) += w * xvals[j] * xvals[l];
                 }
             }
-        } else {
-            for (Eigen::Index i = 0; i < n; ++i) {
-                for (int j = 0; j < p; ++j) {
-                    xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                }
-                for (int j = 0; j < p; ++j) {
-                    out.xty(j) += xvals[j] * y(i);
-                    for (int l = 0; l <= j; ++l) {
-                        out.xtx(j, l) += xvals[j] * xvals[l];
-                    }
-                }
-                if (center_slopes) {
-                    for (int j = 0; j < k; ++j) {
-                        out.sum_x(j) += xvals[j];
-                    }
+            if (sum_x_local) {
+                for (int j = 0; j < k; ++j) {
+                    (*sum_x_local)(j) += w * xvals[j];
                 }
             }
+        }
+        sum_w_tls[static_cast<std::size_t>(chunk)] = sum_w_local;
+    }
+    if (observer) {
+        observer->end_region();
+    }
+
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        out.xtx.noalias() += xtx_tls[static_cast<std::size_t>(chunk)];
+        out.xty.noalias() += xty_tls[static_cast<std::size_t>(chunk)];
+        if (center_slopes) {
+            out.sum_x.noalias() += sum_x_tls[static_cast<std::size_t>(chunk)];
+            out.sum_w += sum_w_tls[static_cast<std::size_t>(chunk)];
         }
     }
 
@@ -4961,6 +5288,7 @@ GroupCollapsedData collapse_group_long_format(const Eigen::VectorXd& y,
                                               int individual_fe_index,
                                               GroupAggregation aggregation,
                                               const Eigen::VectorXd* weights,
+                                              bool weights_are_frequencies,
                                               const std::vector<Eigen::VectorXi>* clusters) {
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
@@ -4977,6 +5305,12 @@ GroupCollapsedData collapse_group_long_format(const Eigen::VectorXd& y,
     }
     if (weights && weights->size() != n) {
         throw std::runtime_error("weights must have the same length as y");
+    }
+    if (weights_are_frequencies && weights) {
+        // Validate every long-format row before choosing one representative
+        // per group.  Do not sum here: repeated individual rows must not make
+        // an otherwise valid group-level frequency total overflow.
+        validate_frequency_weight_values(*weights);
     }
     if (clusters) {
         for (const auto& c : *clusters) {
@@ -5077,8 +5411,15 @@ GroupCollapsedData collapse_group_long_format(const Eigen::VectorXd& y,
                 throw std::runtime_error("X is not constant within group_ids");
             }
         }
-        if (weights && !approx_equal((*weights)(i), (*weights)(r))) {
-            throw std::runtime_error("weights are not constant within group_ids");
+        if (weights) {
+            const bool weights_match =
+                weights_are_frequencies
+                    ? ((*weights)(i) == (*weights)(r))
+                    : approx_equal((*weights)(i), (*weights)(r));
+            if (!weights_match) {
+                throw std::runtime_error(
+                    "weights are not constant within group_ids");
+            }
         }
         if (clusters) {
             for (const auto& c : *clusters) {
@@ -5307,7 +5648,8 @@ struct GroupSingletonDropResult {
 
 GroupSingletonDropResult drop_singletons_group_individual(
     const std::vector<Eigen::VectorXi>& standard_fes,
-    const hdfe::detail::GroupIndividualStructure& gi) {
+    const hdfe::detail::GroupIndividualStructure& gi,
+    const Eigen::VectorXd* frequency_weights) {
     const int G = gi.num_groups;
     const int I = gi.num_individuals;
     GroupSingletonDropResult res;
@@ -5322,17 +5664,44 @@ GroupSingletonDropResult drop_singletons_group_individual(
         throw std::runtime_error("Invalid group/individual structure");
     }
 
+    std::vector<std::int64_t> group_frequency(
+        static_cast<std::size_t>(G), INT64_C(1));
+    if (frequency_weights) {
+        if (frequency_weights->size() != G) {
+            throw std::runtime_error(
+                "Frequency weights must be group-level in group/individual mode");
+        }
+        (void)checked_frequency_weight_sum(
+            *frequency_weights, &group_frequency);
+    }
+
+    // individual_degrees records structural group connections for rebuilding
+    // the filtered graph.  singleton decisions use frequency_degree, which
+    // is the degree in the literal fweight-expanded sample.
+    std::vector<std::int64_t> frequency_degree(
+        static_cast<std::size_t>(I), INT64_C(0));
     for (int i = 0; i < I; ++i) {
         res.individual_degrees[static_cast<std::size_t>(i)] =
             gi.individual_ptr[static_cast<std::size_t>(i + 1)] -
             gi.individual_ptr[static_cast<std::size_t>(i)];
+        const int begin =
+            gi.individual_ptr[static_cast<std::size_t>(i)];
+        const int end =
+            gi.individual_ptr[static_cast<std::size_t>(i + 1)];
+        std::int64_t degree = 0;
+        for (int pos = begin; pos < end; ++pos) {
+            const int group =
+                gi.individual_group[static_cast<std::size_t>(pos)];
+            degree += group_frequency[static_cast<std::size_t>(group)];
+        }
+        frequency_degree[static_cast<std::size_t>(i)] = degree;
     }
 
     struct FeLevelIndex {
         FeLookup lookup;
         std::vector<int> level_id;
         std::vector<std::vector<int>> groups_by_level;
-        std::vector<int> counts;
+        std::vector<std::int64_t> counts;
     };
 
     std::vector<FeLevelIndex> feinfo;
@@ -5350,10 +5719,12 @@ GroupSingletonDropResult drop_singletons_group_individual(
             info.level_id[static_cast<std::size_t>(g)] = lid;
             info.groups_by_level[static_cast<std::size_t>(lid)].push_back(g);
         }
-        info.counts.assign(static_cast<std::size_t>(info.lookup.num_groups), 0);
-        for (int lid = 0; lid < info.lookup.num_groups; ++lid) {
-            info.counts[static_cast<std::size_t>(lid)] =
-                static_cast<int>(info.groups_by_level[static_cast<std::size_t>(lid)].size());
+        info.counts.assign(
+            static_cast<std::size_t>(info.lookup.num_groups), INT64_C(0));
+        for (int g = 0; g < G; ++g) {
+            const int lid = info.level_id[static_cast<std::size_t>(g)];
+            info.counts[static_cast<std::size_t>(lid)] +=
+                group_frequency[static_cast<std::size_t>(g)];
         }
         feinfo.push_back(std::move(info));
     }
@@ -5387,7 +5758,7 @@ GroupSingletonDropResult drop_singletons_group_individual(
     }
 
     for (int i = 0; i < I; ++i) {
-        if (res.individual_degrees[static_cast<std::size_t>(i)] == 1) {
+        if (frequency_degree[static_cast<std::size_t>(i)] == 1) {
             const int only =
                 gi.individual_group[static_cast<std::size_t>(gi.individual_ptr[static_cast<std::size_t>(i)])];
             enqueue_group(only);
@@ -5404,14 +5775,17 @@ GroupSingletonDropResult drop_singletons_group_individual(
 
         res.keep_groups[static_cast<std::size_t>(g)] = 0;
         res.dropped_groups += 1;
+        const std::int64_t dropped_frequency =
+            group_frequency[static_cast<std::size_t>(g)];
 
         for (auto& info : feinfo) {
             const int lid = info.level_id[static_cast<std::size_t>(g)];
-            int& count = info.counts[static_cast<std::size_t>(lid)];
+            std::int64_t& count =
+                info.counts[static_cast<std::size_t>(lid)];
             if (count <= 0) {
                 continue;
             }
-            count -= 1;
+            count -= dropped_frequency;
             if (count == 1) {
                 int remaining = -1;
                 for (const int gg : info.groups_by_level[static_cast<std::size_t>(lid)]) {
@@ -5433,7 +5807,10 @@ GroupSingletonDropResult drop_singletons_group_individual(
                 continue;
             }
             deg -= 1;
-            if (deg == 1) {
+            std::int64_t& weighted_degree =
+                frequency_degree[static_cast<std::size_t>(i)];
+            weighted_degree -= dropped_frequency;
+            if (weighted_degree == 1) {
                 int remaining = -1;
                 const int ibegin = gi.individual_ptr[static_cast<std::size_t>(i)];
                 const int iend = gi.individual_ptr[static_cast<std::size_t>(i + 1)];
@@ -5633,6 +6010,8 @@ GroupCollapsedData filter_group_collapsed(const GroupCollapsedData& data,
 struct FeIndexMap {
     Eigen::VectorXi level_index;  // length G: 0..L-1
     Eigen::VectorXi raw_values;   // length L: raw ids for each level
+    std::vector<int> level_ptr;   // length L+1: stable groups-by-level CSR
+    std::vector<int> level_groups;
 };
 
 FeIndexMap build_fe_index_map(const Eigen::VectorXi& raw_ids) {
@@ -5663,15 +6042,34 @@ FeIndexMap build_fe_index_map(const Eigen::VectorXi& raw_ids) {
     for (int i = 0; i < next; ++i) {
         levels(i) = raw_values[static_cast<std::size_t>(i)];
     }
+    std::vector<int> level_ptr(static_cast<std::size_t>(next + 1), 0);
+    for (int g = 0; g < n; ++g) {
+        ++level_ptr[static_cast<std::size_t>(idx(g) + 1)];
+    }
+    for (int lid = 0; lid < next; ++lid) {
+        level_ptr[static_cast<std::size_t>(lid + 1)] +=
+            level_ptr[static_cast<std::size_t>(lid)];
+    }
+    std::vector<int> level_groups(static_cast<std::size_t>(n));
+    std::vector<int> next_position = level_ptr;
+    for (int g = 0; g < n; ++g) {
+        const int lid = idx(g);
+        level_groups[static_cast<std::size_t>(
+            next_position[static_cast<std::size_t>(lid)]++)] = g;
+    }
     FeIndexMap out;
     out.level_index = std::move(idx);
     out.raw_values = std::move(levels);
+    out.level_ptr = std::move(level_ptr);
+    out.level_groups = std::move(level_groups);
     return out;
 }
 
 void gi_group_sum(const hdfe::detail::GroupIndividualStructure& gi,
                   const Eigen::VectorXd& x,
-                  Eigen::VectorXd& out) {
+                  Eigen::VectorXd& out,
+                  int threads,
+                  detail::ParallelWorkObserver* observer) {
     const int G = gi.num_groups;
     if (G <= 0) {
         out.resize(0);
@@ -5687,7 +6085,33 @@ void gi_group_sum(const hdfe::detail::GroupIndividualStructure& gi,
         throw std::runtime_error("gi_group_sum: invalid group_scale size");
     }
     out.setZero(G);
+#ifdef HDFE_USE_OPENMP
+    const int local_threads = std::max(1, threads);
+#else
+    (void)threads;
+#endif
+    if (observer) {
+        observer->begin_region(
+#ifdef HDFE_USE_OPENMP
+            local_threads
+#else
+            1
+#endif
+        );
+    }
+#ifndef HDFE_USE_OPENMP
+    if (observer) {
+        observer->observe_work();
+    }
+#else
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
     for (int g = 0; g < G; ++g) {
+#ifdef HDFE_USE_OPENMP
+        if (observer) {
+            observer->observe_work();
+        }
+#endif
         const int begin = gi.group_ptr[static_cast<std::size_t>(g)];
         const int end = gi.group_ptr[static_cast<std::size_t>(g + 1)];
         double sum = 0.0;
@@ -5697,11 +6121,16 @@ void gi_group_sum(const hdfe::detail::GroupIndividualStructure& gi,
         }
         out(g) = gi.group_scale[static_cast<std::size_t>(g)] * sum;
     }
+    if (observer) {
+        observer->end_region();
+    }
 }
 
 void gi_individual_sum(const hdfe::detail::GroupIndividualStructure& gi,
                        const Eigen::VectorXd& x,
-                       Eigen::VectorXd& out) {
+                       Eigen::VectorXd& out,
+                       int threads,
+                       detail::ParallelWorkObserver* observer) {
     const int I = gi.num_individuals;
     if (I <= 0) {
         out.resize(0);
@@ -5717,7 +6146,33 @@ void gi_individual_sum(const hdfe::detail::GroupIndividualStructure& gi,
         throw std::runtime_error("gi_individual_sum: invalid group_scale size");
     }
     out.setZero(I);
+#ifdef HDFE_USE_OPENMP
+    const int local_threads = std::max(1, threads);
+#else
+    (void)threads;
+#endif
+    if (observer) {
+        observer->begin_region(
+#ifdef HDFE_USE_OPENMP
+            local_threads
+#else
+            1
+#endif
+        );
+    }
+#ifndef HDFE_USE_OPENMP
+    if (observer) {
+        observer->observe_work();
+    }
+#else
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
     for (int i = 0; i < I; ++i) {
+#ifdef HDFE_USE_OPENMP
+        if (observer) {
+            observer->observe_work();
+        }
+#endif
         const int begin = gi.individual_ptr[static_cast<std::size_t>(i)];
         const int end = gi.individual_ptr[static_cast<std::size_t>(i + 1)];
         double sum = 0.0;
@@ -5727,10 +6182,15 @@ void gi_individual_sum(const hdfe::detail::GroupIndividualStructure& gi,
         }
         out(i) = sum;
     }
+    if (observer) {
+        observer->end_region();
+    }
 }
 
 Eigen::VectorXd gi_preconditioner(const hdfe::detail::GroupIndividualStructure& gi,
-                                  const Eigen::VectorXd* weights) {
+                                  const Eigen::VectorXd* weights,
+                                  int threads,
+                                  detail::ParallelWorkObserver* observer) {
     const int I = gi.num_individuals;
     const int G = gi.num_groups;
     if (I <= 0 || G <= 0) {
@@ -5743,7 +6203,33 @@ Eigen::VectorXd gi_preconditioner(const hdfe::detail::GroupIndividualStructure& 
         throw std::runtime_error("gi_preconditioner: invalid individual_ptr size");
     }
     Eigen::VectorXd diag = Eigen::VectorXd::Ones(I);
+#ifdef HDFE_USE_OPENMP
+    const int local_threads = std::max(1, threads);
+#else
+    (void)threads;
+#endif
+    if (observer) {
+        observer->begin_region(
+#ifdef HDFE_USE_OPENMP
+            local_threads
+#else
+            1
+#endif
+        );
+    }
+#ifndef HDFE_USE_OPENMP
+    if (observer) {
+        observer->observe_work();
+    }
+#else
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
     for (int i = 0; i < I; ++i) {
+#ifdef HDFE_USE_OPENMP
+        if (observer) {
+            observer->observe_work();
+        }
+#endif
         const int begin = gi.individual_ptr[static_cast<std::size_t>(i)];
         const int end = gi.individual_ptr[static_cast<std::size_t>(i + 1)];
         double acc = 0.0;
@@ -5754,6 +6240,9 @@ Eigen::VectorXd gi_preconditioner(const hdfe::detail::GroupIndividualStructure& 
             acc += w * scale * scale;
         }
         diag(i) = acc > 0.0 ? acc : 1.0;
+    }
+    if (observer) {
+        observer->end_region();
     }
     return diag;
 }
@@ -5796,7 +6285,9 @@ void update_standard_fe(const Eigen::VectorXd& residual,
                         const FeIndexMap& map,
                         const Eigen::VectorXd* weights,
                         Eigen::VectorXd& level_values,
-                        Eigen::VectorXd& group_values) {
+                        Eigen::VectorXd& group_values,
+                        int threads,
+                        detail::ParallelWorkObserver* observer) {
     const int G = static_cast<int>(residual.size());
     if (map.level_index.size() != G) {
         throw std::runtime_error("update_standard_fe: FE index length mismatch");
@@ -5806,24 +6297,81 @@ void update_standard_fe(const Eigen::VectorXd& residual,
     }
     const int L = static_cast<int>(map.raw_values.size());
     level_values.setZero(L);
-    Eigen::VectorXd counts = Eigen::VectorXd::Zero(L);
-    for (int g = 0; g < G; ++g) {
-        const int lid = map.level_index(g);
-        const double w = weights ? (*weights)(g) : 1.0;
-        level_values(lid) += w * residual(g);
-        counts(lid) += w;
+    if (static_cast<int>(map.level_ptr.size()) != L + 1 ||
+        static_cast<int>(map.level_groups.size()) != G) {
+        throw std::runtime_error("update_standard_fe: invalid groups-by-level index");
     }
+#ifdef HDFE_USE_OPENMP
+    const int local_threads = std::max(1, threads);
+#else
+    (void)threads;
+#endif
+    if (observer) {
+        observer->begin_region(
+#ifdef HDFE_USE_OPENMP
+            local_threads
+#else
+            1
+#endif
+        );
+    }
+#ifndef HDFE_USE_OPENMP
+    if (observer) {
+        observer->observe_work();
+    }
+#else
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
     for (int lid = 0; lid < L; ++lid) {
-        const double denom = counts(lid);
+        if (observer) {
+            observer->observe_work();
+        }
+        double numerator = 0.0;
+        double denom = 0.0;
+        const int begin = map.level_ptr[static_cast<std::size_t>(lid)];
+        const int end = map.level_ptr[static_cast<std::size_t>(lid + 1)];
+        for (int pos = begin; pos < end; ++pos) {
+            const int g = map.level_groups[static_cast<std::size_t>(pos)];
+            const double w = weights ? (*weights)(g) : 1.0;
+            numerator += w * residual(g);
+            denom += w;
+        }
         if (denom > 0.0) {
-            level_values(lid) /= denom;
+            level_values(lid) = numerator / denom;
         } else {
             level_values(lid) = 0.0;
         }
     }
+    if (observer) {
+        observer->end_region();
+    }
     group_values.resize(G);
+    if (observer) {
+        observer->begin_region(
+#ifdef HDFE_USE_OPENMP
+            local_threads
+#else
+            1
+#endif
+        );
+    }
+#ifndef HDFE_USE_OPENMP
+    if (observer) {
+        observer->observe_work();
+    }
+#else
+#pragma omp parallel for schedule(static) num_threads(local_threads)
+#endif
     for (int g = 0; g < G; ++g) {
+#ifdef HDFE_USE_OPENMP
+        if (observer) {
+            observer->observe_work();
+        }
+#endif
         group_values(g) = level_values(map.level_index(g));
+    }
+    if (observer) {
+        observer->end_region();
     }
 }
 
@@ -5834,7 +6382,9 @@ Eigen::VectorXd solve_a1(Eigen::VectorXd x,
                          const Eigen::VectorXd& precond,
                          int max_iter,
                          double tol,
-                         int verbose) {
+                         int verbose,
+                         int threads,
+                         detail::ParallelWorkObserver* observer) {
     const int I = gi.num_individuals;
     const int G = gi.num_groups;
     if (dd.size() != G) {
@@ -5852,18 +6402,18 @@ Eigen::VectorXd solve_a1(Eigen::VectorXd x,
 
     Eigen::VectorXd tmp_group(G);
     Eigen::VectorXd ax(I);
-    gi_group_sum(gi, x, tmp_group);
+    gi_group_sum(gi, x, tmp_group, threads, observer);
     if (weights) {
         tmp_group.array() *= weights->array();
     }
-    gi_individual_sum(gi, tmp_group, ax);
+    gi_individual_sum(gi, tmp_group, ax, threads, observer);
 
     Eigen::VectorXd rhs_group = dd;
     if (weights) {
         rhs_group.array() *= weights->array();
     }
     Eigen::VectorXd b(I);
-    gi_individual_sum(gi, rhs_group, b);
+    gi_individual_sum(gi, rhs_group, b, threads, observer);
 
     Eigen::VectorXd r = b - ax;
     Eigen::VectorXd z = r.array() / precond.array();
@@ -5873,11 +6423,11 @@ Eigen::VectorXd solve_a1(Eigen::VectorXd x,
     Eigen::VectorXd q(I);
     int it = 0;
     while (std::sqrt(rsold) > tol && it < max_iter) {
-        gi_group_sum(gi, p, tmp_group);
+        gi_group_sum(gi, p, tmp_group, threads, observer);
         if (weights) {
             tmp_group.array() *= weights->array();
         }
-        gi_individual_sum(gi, tmp_group, q);
+        gi_individual_sum(gi, tmp_group, q, threads, observer);
         const double denom = p.dot(q);
         if (!std::isfinite(denom) || denom == 0.0) {
             break;
@@ -6389,16 +6939,86 @@ FeComponentStats compute_first_pair_component_stats(
 }
 
 HdfeRegressorV11::HdfeRegressorV11(HdfeOptions options, ThreadingOptions threading)
-    : options_(options), threading_(threading) {
+    : options_(options),
+      threading_(threading),
+      parallel_observer_(std::make_shared<detail::ParallelWorkObserver>()) {
     if (!options_.symmetric_sweep) {
         options_.symmetric_sweep = threading_.symmetric_sweep;
     }
 }
 
-int HdfeRegressorV11::resolve_threads(int n_rows, int num_fes) const {
+HdfeRegressorV11::HdfeRegressorV11(const HdfeRegressorV11& other)
+    : options_(other.options_),
+      threading_(other.threading_),
+      results_(other.results_),
+      threads_used_(other.threads_used_),
+      threads_requested_(other.threads_requested_),
+      threads_effective_(other.threads_effective_),
+      parallel_workers_active_(other.parallel_workers_active_),
+      thread_capacity_(other.thread_capacity_),
+      openmp_enabled_(other.openmp_enabled_),
+      thread_limit_code_(other.thread_limit_code_),
+      thread_limit_reason_(other.thread_limit_reason_),
+      parallel_observer_(std::make_shared<detail::ParallelWorkObserver>()),
+      method_used_(other.method_used_),
+      gpu_used_(other.gpu_used_),
+      gpu_status_code_(other.gpu_status_code_),
+      gpu_attempted_(other.gpu_attempted_),
+      gpu_absorption_converged_(other.gpu_absorption_converged_),
+      gpu_absorption_iterations_(other.gpu_absorption_iterations_),
+      first_pair_component_stats_(other.first_pair_component_stats_) {}
+
+HdfeRegressorV11& HdfeRegressorV11::operator=(
+    const HdfeRegressorV11& other) {
+    if (this == &other) {
+        return *this;
+    }
+    options_ = other.options_;
+    threading_ = other.threading_;
+    results_ = other.results_;
+    threads_used_ = other.threads_used_;
+    threads_requested_ = other.threads_requested_;
+    threads_effective_ = other.threads_effective_;
+    parallel_workers_active_ = other.parallel_workers_active_;
+    thread_capacity_ = other.thread_capacity_;
+    openmp_enabled_ = other.openmp_enabled_;
+    thread_limit_code_ = other.thread_limit_code_;
+    thread_limit_reason_ = other.thread_limit_reason_;
+    parallel_observer_ = std::make_shared<detail::ParallelWorkObserver>();
+    method_used_ = other.method_used_;
+    gpu_used_ = other.gpu_used_;
+    gpu_status_code_ = other.gpu_status_code_;
+    gpu_attempted_ = other.gpu_attempted_;
+    gpu_absorption_converged_ = other.gpu_absorption_converged_;
+    gpu_absorption_iterations_ = other.gpu_absorption_iterations_;
+    first_pair_component_stats_ = other.first_pair_component_stats_;
+    return *this;
+}
+
+HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
+    int n_rows, int num_fes) const {
+    ThreadResolution resolution;
+    resolution.requested = options_.num_threads;
+    if (options_.num_threads < 0) {
+        throw std::invalid_argument("num_threads must be nonnegative");
+    }
 #ifdef HDFE_USE_OPENMP
-    if (n_rows < threading_.min_parallel_rows) {
-        return 1;
+    resolution.openmp_enabled = true;
+    if (options_.num_threads > 1 && omp_in_parallel()) {
+        throw std::runtime_error(
+            "an explicit num_threads > 1 request cannot be guaranteed from "
+            "inside an active OpenMP region; call xhdfe outside that region");
+    }
+    const int available_processors = std::max(1, omp_get_num_procs());
+    const int runtime_limit = std::max(1, omp_get_thread_limit());
+    resolution.capacity = std::max(
+        1, std::min(available_processors, runtime_limit));
+
+    if (options_.num_threads == 0 && omp_in_parallel()) {
+        resolution.effective = 1;
+        resolution.limit_code = 5;
+        resolution.limit_reason = "active_openmp_region";
+        return resolution;
     }
 
     auto cap_for_problem_size = [&](int requested) {
@@ -6415,50 +7035,85 @@ int HdfeRegressorV11::resolve_threads(int n_rows, int num_fes) const {
         return std::max(1, capped);
     };
 
-    int threads_cap = 1;
     if (options_.num_threads > 0) {
-        threads_cap = std::max(1, options_.num_threads);
-        if (threading_.max_threads > 0) {
-            threads_cap = std::min(threads_cap, threading_.max_threads);
+        resolution.effective =
+            std::min(options_.num_threads, resolution.capacity);
+        if (resolution.effective < options_.num_threads) {
+            resolution.limit_code = 1;
+            resolution.limit_reason = "runtime_capacity";
         }
-        threads_cap = cap_for_problem_size(threads_cap);
-        return threads_cap;
+        return resolution;
+    }
+
+    int threads_cap = threading_.default_threads;
+    if (threads_cap <= 0) {
+        threads_cap = omp_get_max_threads();
+    }
+    threads_cap = std::max(1, std::min(threads_cap, resolution.capacity));
+
+    if (n_rows < threading_.min_parallel_rows) {
+        threads_cap = 1;
+        resolution.limit_code = 2;
+        resolution.limit_reason = "auto_policy";
     } else {
-        threads_cap = threading_.default_threads;
-        if (threads_cap <= 0) {
-            threads_cap = omp_get_max_threads();
-            if (threads_cap <= 1 && std::getenv("OMP_NUM_THREADS") == nullptr) {
-                const unsigned hc = std::thread::hardware_concurrency();
-                if (hc > 0) {
-                    threads_cap = static_cast<int>(hc);
-                }
-            }
-        }
-        if (threads_cap <= 0) {
-            threads_cap = 1;
-        }
-        threads_cap = std::max(1, threads_cap);
         if (threading_.target_rows_per_thread > 0) {
             const int by_rows =
                 std::max(1, n_rows / std::max(1, threading_.target_rows_per_thread));
-            threads_cap = std::min(threads_cap, by_rows);
+            if (by_rows < threads_cap) {
+                threads_cap = by_rows;
+                resolution.limit_code = 2;
+                resolution.limit_reason = "auto_policy";
+            }
         }
-        if (threading_.max_threads > 0) {
-            threads_cap = std::min(threads_cap, threading_.max_threads);
+        if (threading_.max_threads > 0 &&
+            threading_.max_threads < threads_cap) {
+            threads_cap = threading_.max_threads;
+            resolution.limit_code = 3;
+            resolution.limit_reason = "auto_max_threads";
         }
-        threads_cap = cap_for_problem_size(threads_cap);
+        const int problem_capped = cap_for_problem_size(threads_cap);
+        if (problem_capped < threads_cap) {
+            threads_cap = problem_capped;
+            resolution.limit_code = 2;
+            resolution.limit_reason = "auto_policy";
+        }
     }
 
-    if (threads_cap <= 1) {
-        return 1;
-    }
-
-    return threads_cap;
+    resolution.effective = std::max(1, threads_cap);
+    return resolution;
 #else
     (void)n_rows;
     (void)num_fes;
-    return options_.num_threads > 0 ? options_.num_threads : 1;
+    resolution.openmp_enabled = false;
+    resolution.capacity = 1;
+    resolution.effective = 1;
+    resolution.limit_code = 4;
+    resolution.limit_reason = "openmp_unavailable";
+    if (options_.num_threads > 1) {
+        throw std::runtime_error(
+            "num_threads > 1 requires an xhdfe build with OpenMP support");
+    }
+    return resolution;
 #endif
+}
+
+void HdfeRegressorV11::begin_parallel_observation(
+    const ThreadResolution& resolution) {
+    threads_requested_ = resolution.requested;
+    threads_effective_ = resolution.effective;
+    thread_capacity_ = resolution.capacity;
+    openmp_enabled_ = resolution.openmp_enabled;
+    thread_limit_code_ = resolution.limit_code;
+    thread_limit_reason_ = resolution.limit_reason;
+    threads_used_ = 1;
+    parallel_workers_active_ = 1;
+    parallel_observer_->reset();
+}
+
+void HdfeRegressorV11::end_parallel_observation() {
+    threads_used_ = std::max(1, parallel_observer_->max_team_size());
+    parallel_workers_active_ =
+        std::max(1, parallel_observer_->active_workers());
 }
 
 AbsorptionMethod HdfeRegressorV11::select_method(std::size_t num_fes) const {
@@ -6520,6 +7175,9 @@ void HdfeRegressorV11::apply_common_postprocessing(const Eigen::Ref<const Eigen:
     results_.fe_recovery_iterations = 0;
     results_.fe_recovery_max_delta = 0.0;
     results_.fe_recovery_converged = true;
+    results_.abs_residual = 0.0;
+    results_.abs_residual_rel = 0.0;
+    results_.precision_certified = true;
     results_.num_clusters = ols_result.num_clusters;
     results_.cluster_counts.clear();
     results_.cluster_combo_counts.clear();
@@ -6586,18 +7244,52 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
 
     const bool has_fes = !fes.empty();
-    const bool drop_intercept = options_.fit_intercept && has_fes && !wants_iv && !has_instruments;
+    // A constant is in the span of any absorbed level FE.  Never pass that
+    // zero within-column to OLS/2SLS: recover the reported normalization
+    // ybar - xbar'b after estimating the identified slopes instead.
+    const bool drop_intercept = options_.fit_intercept && has_fes;
     const MobilityProfileConfig mobility_cfg = load_mobility_profile_config();
     const AbsorptionCacheConfig abs_cache_cfg = load_absorption_cache_config();
     const FeStructureCacheConfig fe_cache_cfg = load_fe_structure_cache_config();
     const int nobs_full = static_cast<int>(y.size());
+    // Resolve before singleton preprocessing: that phase can itself create an
+    // OpenMP team on large inputs.  This makes explicit nested requests fail
+    // before any work and makes auto mode use one worker inside an already
+    // active OpenMP region, just like the estimator proper.
+    const ThreadResolution preprocessing_thread_resolution =
+        resolve_threads(nobs_full, static_cast<int>(fes.size()));
 
+    std::vector<std::int64_t> integer_frequency_weights;
+    const std::int64_t nobs_full_frequency =
+        (options_.weights_are_frequencies && weights)
+            ? checked_frequency_weight_sum(
+                  *weights,
+                  (options_.drop_singletons && has_fes)
+                      ? &integer_frequency_weights
+                      : nullptr)
+            : static_cast<std::int64_t>(nobs_full);
     const double nobs_full_effective =
-        (options_.weights_are_frequencies && weights) ? weights->sum()
-                                                      : static_cast<double>(nobs_full);
-
+        static_cast<double>(nobs_full_frequency);
     int singletons_dropped_rows = 0;
+    auto current_nobs_effective = [&](Eigen::Index row_count) -> double {
+        if (options_.weights_are_frequencies && weights) {
+            // In the ordinary FE path, a row can be a weighted singleton only
+            // when its positive integer frequency is exactly one.  Preserve
+            // the subtraction in int64 so a small singleton count is not lost
+            // next to totals close to 2^63.
+            const std::int64_t kept_frequency =
+                nobs_full_frequency -
+                static_cast<std::int64_t>(singletons_dropped_rows);
+            return static_cast<double>(kept_frequency);
+        }
+        return static_cast<double>(row_count);
+    };
+
     double singletons_dropped_effective = 0.0;
+    detail::ParallelWorkObserver preprocessing_observer;
+    int preprocessing_threads_used = 1;
+    int preprocessing_parallel_workers_active = 1;
+    bool preprocessing_parallel_observed = false;
     std::vector<int> kept_idx;
     std::optional<Eigen::VectorXd> y_work;
     std::optional<Eigen::MatrixXd> X_work;
@@ -6634,17 +7326,18 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 "dropped as a singleton)");
         }
         const auto fit_t0 = std::chrono::steady_clock::now();
-        const int threads = resolve_threads(static_cast<int>(y_use.size()),
-                                            static_cast<int>(fes_use.size()));
-        threads_used_ = threads;
-#ifdef HDFE_USE_OPENMP
-        omp_set_dynamic(0);
-        omp_set_num_threads(std::max(1, threads));
-        Eigen::setNbThreads(std::max(1, threads));
-#endif
+        const ThreadResolution thread_resolution =
+            resolve_threads(static_cast<int>(y_use.size()),
+                            static_cast<int>(fes_use.size()));
+        begin_parallel_observation(thread_resolution);
+        const int threads = thread_resolution.effective;
+        ScopedParallelRuntime parallel_runtime(
+            threads, thread_resolution.capacity);
 
         HdfeOptions tuned = options_;
         tuned.from_auto = (options_.absorption_method == AbsorptionMethod::Auto);
+        tuned.num_threads_explicit = options_.num_threads > 0;
+        tuned.parallel_observer = parallel_observer_.get();
         const std::optional<bool> env_krylov = read_env_bool("XHDFE_USE_KRYLOV");
         tuned.num_threads = threads;
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
@@ -6803,9 +7496,22 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             // is uncapped. Tune the cap with XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES.
             const int default_promote_max_fes =
                 read_env_int("XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES", 3, 1);
+            // A bounded four-FE band covers medium matched-panel designs such
+            // as `workers`, where the selector chooses a faster and materially
+            // tighter MLSMR solve. Keep very large four-way designs on their
+            // established sweep path: the 173M-row simulated panel is
+            // well-connected and MLSMR is about 46x slower there. The row cap
+            // is deliberately independent of thread count.
+            const int default_four_fe_max_rows = read_env_int(
+                "XHDFE_AUTO_MLSMR_DEFAULT_4FE_MAX_ROWS", 2000000, 1);
+            const bool bounded_four_fe_promote =
+                default_promote_max_fes >= 3 &&
+                fes_use.size() == 4 &&
+                y_use.size() <= default_four_fe_max_rows;
             const bool default_auto_promote_eff =
                 default_auto_promote &&
-                static_cast<int>(fes_use.size()) <= default_promote_max_fes;
+                (static_cast<int>(fes_use.size()) <= default_promote_max_fes ||
+                 bounded_four_fe_promote);
             const bool use_auto_mlsmr_selector =
                 explicit_auto_mlsmr || default_auto_promote_eff;
             if (use_auto_mlsmr_selector && !has_slopes_use &&
@@ -6839,6 +7545,16 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
+        // Cache identity must not depend on whether ensure_cache_key() first
+        // runs before or after the solve.  The compute path mutates `tuned`
+        // below to record the concrete method selected from Auto; hashing that
+        // mutable object made a write-only run produce a different key from an
+        // otherwise identical read-only run.  Freeze the fully resolved
+        // pre-solve configuration (including effective threads, explicit-team
+        // status, mobility/env choices and the effective GPU request) once and
+        // use the same immutable snapshot for both reads and writes.
+        const HdfeOptions cache_key_options = tuned;
+
         detail::AbsorptionResult absorption;
         const auto absorption_t0 = std::chrono::steady_clock::now();
         bool absorption_ready = false;
@@ -6846,12 +7562,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (abs_cache_key_ready) {
                 return;
             }
-            abs_cache_key = hash_absorption_signature(y_use, design, fes_use, w_ptr, options_);
+            abs_cache_key =
+                hash_absorption_signature(
+                    y_use, design, fes_use, w_ptr, cache_key_options);
             abs_cache_key_ready = true;
         };
         auto try_load_cache = [&](const Eigen::Ref<const Eigen::MatrixXd>& design,
                                   int design_cols) -> bool {
-            if (has_slopes_use || !allow_cache_read || cache_path.empty()) {
+            if (has_slopes_use || !allow_cache_read || cache_path.empty() ||
+                gpu_backend_env_requested()) {
                 return false;
             }
             ensure_cache_key(design);
@@ -6877,13 +7596,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             absorption.sweep_order_used = std::move(cached.sweep_order);
             absorption.iterations = cached.iterations;
             absorption.converged = cached.converged;
-            if (gpu_backend_env_requested()) {
-                absorption.gpu_status_code = 5;
-                absorption.gpu_attempted = false;
-                absorption.gpu_absorption_converged = false;
-                absorption.gpu_absorption_iterations = 0;
-            }
             method_used_ = cached.method;
+            detail::certify_absorption_result(
+                y_use, design, fes_use, w_ptr, tuned, slope_terms, absorption);
+            if (!absorption.precision_certified) {
+                absorption = detail::AbsorptionResult{};
+                return false;
+            }
             cache_hit = true;
             return true;
         };
@@ -6931,7 +7650,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 const double elapsed =
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-                if (!res.converged) {
+                if (!res.converged || !res.precision_certified) {
                     continue;
                 }
                 if (elapsed < best_time) {
@@ -6993,7 +7712,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     method_used_ = AbsorptionMethod::Mlsmr;     // adaptive gate diverted to MLSMR
                 }
             }
-            if (allow_cache_write && !cache_hit && absorption.converged && !cache_path.empty()) {
+            if (allow_cache_write && !cache_hit && absorption.converged &&
+                absorption.precision_certified && !cache_path.empty()) {
                 ensure_cache_key(X_use);
                 write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                        absorption.X_tilde, absorption.fe_levels,
@@ -7049,7 +7769,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         method_used_ = AbsorptionMethod::Mlsmr;
                     }
                 }
-                if (allow_cache_write && !cache_hit && absorption.converged && !cache_path.empty()) {
+                if (allow_cache_write && !cache_hit && absorption.converged &&
+                    absorption.precision_certified && !cache_path.empty()) {
                     ensure_cache_key(combined);
                     write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                            absorption.X_tilde, absorption.fe_levels,
@@ -7108,7 +7829,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             method_used_ = AbsorptionMethod::Mlsmr;
                         }
                     }
-                    if (allow_cache_write && !cache_hit && absorption.converged && !cache_path.empty()) {
+                    if (allow_cache_write && !cache_hit && absorption.converged &&
+                        absorption.precision_certified && !cache_path.empty()) {
                         ensure_cache_key(design);
                         write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                                absorption.X_tilde, absorption.fe_levels,
@@ -7163,7 +7885,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             method_used_ = AbsorptionMethod::Mlsmr;
                         }
                     }
-                    if (allow_cache_write && !cache_hit && absorption.converged && !cache_path.empty()) {
+                    if (allow_cache_write && !cache_hit && absorption.converged &&
+                        absorption.precision_certified && !cache_path.empty()) {
                         ensure_cache_key(combined);
                         write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                                absorption.X_tilde, absorption.fe_levels,
@@ -7298,7 +8021,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             const int intercept_col = transformed_has_intercept ? (transformed_full_cols - 1) : -1;
             const CrossproductResult cp = compute_crossproducts_selected(
                 absorption.y_tilde, transformed_X, kept_slope_cols, intercept_col, w_ptr,
-                options_.fit_intercept, tuned.num_threads);
+                options_.fit_intercept, tuned.num_threads, tuned.parallel_observer);
 
             std::vector<int> keep_positions;
             keep_positions.reserve(kept_slope_cols.size());
@@ -7353,8 +8076,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             have_precomputed = true;
         } else if (!kept_slope_cols.empty()) {
             const std::vector<uint8_t> drop_mask = compute_rank_collinearity_mask(
-                transformed_X, kept_slope_cols, transformed_slope_cols, options_.fit_intercept,
-                w_ptr, rank_collinear_tol, tuned.num_threads, options_.collinear_priority);
+                transformed_X, kept_slope_cols, transformed_slope_cols,
+                transformed_has_intercept,
+                w_ptr, rank_collinear_tol, tuned.num_threads,
+                options_.collinear_priority, tuned.parallel_observer);
 
             std::vector<int> new_kept;
             std::vector<int> new_omitted;
@@ -7413,10 +8138,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         const int df_m_effective = static_cast<int>(kept_slope_cols.size());
         const double nobs_effective =
-            (tuned.weights_are_frequencies && w_ptr) ? w_ptr->sum()
-                                                     : static_cast<double>(y_use.size());
+            current_nobs_effective(y_use.size());
 
         detail::OlsResult ols_result;
+        // For IV sandwich inference the score design is X-hat, while
+        // residuals and the normalization means use the actual regressors.
+        // Keep X-hat alive through intercept-covariance postprocessing.
+        Eigen::MatrixXd iv_score_X_storage;
         const auto ols_t0 = std::chrono::steady_clock::now();
         if (!wants_iv) {
             if (transformed_X_used.cols() == 0) {
@@ -7445,11 +8173,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
                 if (c_ptr->size() == 1) {
                     ols_result = detail::run_ols(absorption.y_tilde, transformed_X_used, w_ptr, &(*c_ptr)[0],
-                                                 tuned.se_type, total_tss, within_tss, nobs_effective);
+                                                 tuned.se_type, total_tss, within_tss, nobs_effective,
+                                                 false, nullptr, tuned.num_threads_explicit,
+                                                 tuned.parallel_observer);
                 } else {
                     ols_result = detail::run_ols_multiway(absorption.y_tilde, transformed_X_used, w_ptr, c_ptr,
                                                          tuned.se_type, total_tss, within_tss,
-                                                         tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective);
+                                                         tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective,
+                                                         nullptr, tuned.num_threads_explicit,
+                                                         tuned.parallel_observer);
                 }
             } else if (have_precomputed &&
                        xtx_used.rows() == transformed_X_used.cols() &&
@@ -7457,11 +8189,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 ols_result = detail::run_ols_fast_from_xtx(absorption.y_tilde, transformed_X_used, w_ptr,
                                                            tuned.se_type, total_tss, within_tss,
                                                            xtx_used, xty_used, nobs_effective,
-                                                           tuned.weights_are_frequencies);
+                                                           tuned.weights_are_frequencies,
+                                                           tuned.num_threads_explicit,
+                                                           tuned.parallel_observer);
             } else {
                 ols_result = detail::run_ols(absorption.y_tilde, transformed_X_used, w_ptr, nullptr, tuned.se_type,
                                              total_tss, within_tss, nobs_effective,
-                                             tuned.weights_are_frequencies);
+                                             tuned.weights_are_frequencies, nullptr,
+                                             tuned.num_threads_explicit,
+                                             tuned.parallel_observer);
             }
         } else {
             if (!inst_use || inst_use->cols() == 0) {
@@ -7513,7 +8249,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             Eigen::MatrixXd projected =
                 detail::project_endogenous(instrument_matrix, X_endog,
                                            static_cast<int>(X_exog.cols()), w_ptr);
-            Eigen::MatrixXd second_stage = transformed_X_used;
+            iv_score_X_storage = transformed_X_used;
+            Eigen::MatrixXd& second_stage = iv_score_X_storage;
             for (int idx = 0; idx < static_cast<int>(active_endog_cols.size()); ++idx) {
                 second_stage.col(active_endog_cols[static_cast<std::size_t>(idx)]) = projected.col(idx);
             }
@@ -7529,20 +8266,29 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (c_ptr->size() == 1) {
                     ols_result = detail::run_ols(absorption.y_tilde, second_stage, w_ptr, &(*c_ptr)[0],
                                                  tuned.se_type, total_tss, within_tss, nobs_effective,
-                                                 false, &iv_actual_X);
+                                                 false, &iv_actual_X,
+                                                 tuned.num_threads_explicit,
+                                                 tuned.parallel_observer);
                 } else {
                     ols_result = detail::run_ols_multiway(absorption.y_tilde, second_stage, w_ptr, c_ptr,
                                                          tuned.se_type, total_tss, within_tss,
                                                          tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective,
-                                                         &iv_actual_X);
+                                                         &iv_actual_X, tuned.num_threads_explicit,
+                                                         tuned.parallel_observer);
                 }
             } else {
                 ols_result = detail::run_ols(absorption.y_tilde, second_stage, w_ptr, nullptr, tuned.se_type,
                                              total_tss, within_tss, nobs_effective,
-                                             tuned.weights_are_frequencies, &iv_actual_X);
+                                             tuned.weights_are_frequencies, &iv_actual_X,
+                                             tuned.num_threads_explicit,
+                                             tuned.parallel_observer);
             }
         }
         cpu_profile_log_elapsed("ols", ols_t0);
+
+        const Eigen::Ref<const Eigen::MatrixXd> score_X_tilde_used =
+            wants_iv ? Eigen::Ref<const Eigen::MatrixXd>(iv_score_X_storage)
+                     : Eigen::Ref<const Eigen::MatrixXd>(transformed_X_used);
 
         const auto post_t0 = std::chrono::steady_clock::now();
         auto post_phase_t0 = std::chrono::steady_clock::now();
@@ -7550,10 +8296,16 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         cpu_profile_log_elapsed("post_common", post_phase_t0);
         results_.nobs_effective = nobs_effective;
         results_.nobs_full_effective = nobs_full_effective;
-        results_.num_singletons_effective = std::max(0.0, nobs_full_effective - nobs_effective);
+        results_.num_singletons_effective =
+            options_.weights_are_frequencies && weights
+                ? static_cast<double>(singletons_dropped_rows)
+                : std::max(0.0, nobs_full_effective - nobs_effective);
         results_.vcv_psd_fixed = false;
         results_.num_iterations = absorption.iterations;
         results_.converged = absorption.converged;
+        results_.abs_residual = absorption.abs_residual;
+        results_.abs_residual_rel = absorption.abs_residual_rel;
+        results_.precision_certified = absorption.precision_certified;
         if (allow_profile_write) {
             MobilityProfile profile = compute_mobility_profile(
                 fes_use, nobs_full, singletons_dropped_rows, options_.drop_singletons,
@@ -7638,18 +8390,17 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (drop_intercept) {
             post_phase_t0 = std::chrono::steady_clock::now();
             const int slope_cols = static_cast<int>(results_.coefficients.size());
-            const double y_mean = weighted_mean(y_use, w_ptr);
-            const double denom = w_ptr ? w_ptr->sum() : static_cast<double>(y_use.size());
+            double denom = 0.0;
+            const double y_mean =
+                fixed_chunk_weighted_mean(y_use, w_ptr, tuned.num_threads, &denom,
+                                          tuned.parallel_observer);
             Eigen::VectorXd x_means = Eigen::VectorXd::Zero(slope_cols);
-            if (slope_cols > 0) {
-                if (!w_ptr) {
-                    for (int j = 0; j < slope_cols; ++j) {
-                        x_means(j) = X_use.col(j).mean();
-                    }
-                } else if (denom > 0.0) {
-                    for (int j = 0; j < slope_cols; ++j) {
-                        x_means(j) = X_use.col(j).dot(*w_ptr) / denom;
-                    }
+            if (slope_cols > 0 && denom > 0.0) {
+                for (int j = 0; j < slope_cols; ++j) {
+                    x_means(j) =
+                        fixed_chunk_weighted_mean(X_use.col(j), w_ptr,
+                                                  tuned.num_threads, nullptr,
+                                                  tuned.parallel_observer);
                 }
             }
             const double intercept = y_mean - x_means.dot(results_.coefficients);
@@ -8437,7 +9188,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (drop_intercept && options_.fit_intercept && !saturated_model) {
             post_phase_t0 = std::chrono::steady_clock::now();
             intercept_cov_updated = update_intercept_covariance(
-                results_, X_use, transformed_X_used, ols_result.residuals, w_ptr,
+                results_, X_use, score_X_tilde_used, ols_result.residuals, w_ptr,
                 kept_slope_cols, ols_result, tuned.se_type, c_ptr, tuned.ssc_g_df,
                 tuned.ssc_g_adj, results_.sigma2, robust_scale, cluster_ratio,
                 tuned.weights_are_frequencies);
@@ -8454,10 +9205,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 const int cov_cols = static_cast<int>(results_.covariance.cols());
                 const int slope_cols_aug = cov_cols - 1;
                 if (slope_cols_aug > 0 &&
-                    slope_cols_aug == static_cast<int>(transformed_X_used.cols()) &&
+                    slope_cols_aug == static_cast<int>(score_X_tilde_used.cols()) &&
                     slope_cols_aug == static_cast<int>(ols_result.xtx_inv.cols()) &&
                     slope_cols_aug == static_cast<int>(kept_slope_cols.size())) {
-                    const int n_rows = static_cast<int>(transformed_X_used.rows());
+                    const int n_rows = static_cast<int>(score_X_tilde_used.rows());
                     Eigen::RowVectorXd means_x(slope_cols_aug);
                     for (int j = 0; j < slope_cols_aug; ++j) {
                         means_x(j) = weighted_mean(
@@ -8468,7 +9219,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     // back, plus the constant column.
                     Eigen::MatrixXd scores(n_rows, cov_cols);
                     scores.leftCols(slope_cols_aug) =
-                        transformed_X_used.rowwise() + means_x;
+                        score_X_tilde_used.rowwise() + means_x;
                     scores.col(slope_cols_aug).setOnes();
                     // Extended bread (partitioned inverse; reghdfe_extend_b_and_xx).
                     const double n_bread =
@@ -8581,10 +9332,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         cpu_profile_log_elapsed("post_inference", post_phase_t0);
         cpu_profile_log_elapsed("postprocess", post_t0);
         cpu_profile_log_elapsed("fit_inner_total", fit_t0);
-
-#ifdef HDFE_USE_OPENMP
-        Eigen::setNbThreads(1);
-#endif
+        end_parallel_observation();
     };
 
     if (!has_slopes && fe_cache_cfg.mode != "off" && has_fes) {
@@ -8642,8 +9390,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             run_fit(*y_work, *X_work, *fes_work, w_ptr, c_ptr, inst_use, slopes_use);
 
             if (options_.weights_are_frequencies && weights_work) {
-                singletons_dropped_effective =
-                    std::max(0.0, nobs_full_effective - weights_work->sum());
+                std::int64_t kept_weight = 0;
+                for (const int row : kept_idx) {
+                    kept_weight += integer_frequency_weights[
+                        static_cast<std::size_t>(row)];
+                }
+                singletons_dropped_effective = static_cast<double>(
+                    nobs_full_frequency - kept_weight);
             } else {
                 singletons_dropped_effective = static_cast<double>(singletons_dropped_rows);
             }
@@ -8657,13 +9410,28 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (options_.weights_are_frequencies && weights) {
             keep = compute_keep_mask_drop_singletons_fweights(
                 fes, *weights, kMaxSingletonIterations, &singletons_dropped_rows,
-                &singletons_dropped_effective);
+                &singletons_dropped_effective,
+                preprocessing_thread_resolution.effective,
+                preprocessing_thread_resolution.capacity,
+                options_.num_threads > 0,
+                &integer_frequency_weights,
+                &preprocessing_observer);
         } else {
             keep = compute_keep_mask_drop_singletons(fes, kMaxSingletonIterations,
                                                      &singletons_dropped_rows,
-                                                     options_.num_threads);
+                                                     preprocessing_thread_resolution.effective,
+                                                     preprocessing_thread_resolution.capacity,
+                                                     options_.num_threads > 0,
+                                                     &preprocessing_observer);
             singletons_dropped_effective = static_cast<double>(singletons_dropped_rows);
         }
+        preprocessing_threads_used =
+            std::max(1, preprocessing_observer.max_team_size());
+        preprocessing_parallel_workers_active =
+            std::max(1, preprocessing_observer.active_workers());
+        preprocessing_parallel_observed =
+            preprocessing_threads_used > 1 ||
+            preprocessing_parallel_workers_active > 1;
         cpu_profile_log_elapsed("singleton_scan", singleton_t0);
 
         if (singletons_dropped_rows > 0) {
@@ -8714,6 +9482,19 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
     } else {
         run_fit(y, X, fes, weights, clusters, inst_ptr, slopes_in);
+    }
+    if (preprocessing_parallel_observed) {
+        if (preprocessing_thread_resolution.effective > threads_effective_) {
+            threads_effective_ = preprocessing_thread_resolution.effective;
+            thread_capacity_ = preprocessing_thread_resolution.capacity;
+            openmp_enabled_ = preprocessing_thread_resolution.openmp_enabled;
+            thread_limit_code_ = preprocessing_thread_resolution.limit_code;
+            thread_limit_reason_ = preprocessing_thread_resolution.limit_reason;
+        }
+        threads_used_ = std::max(threads_used_, preprocessing_threads_used);
+        parallel_workers_active_ =
+            std::max(parallel_workers_active_,
+                     preprocessing_parallel_workers_active);
     }
     const bool allow_fe_cache_write =
         fe_cache_cfg.mode == "write" ||
@@ -8809,12 +9590,35 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     const bool has_fes = !fes.empty();
     const FeStructureCacheConfig fe_cache_cfg = load_fe_structure_cache_config();
     const int nobs_full = static_cast<int>(y.size());
+    const ThreadResolution preprocessing_thread_resolution =
+        resolve_threads(nobs_full, static_cast<int>(fes.size()));
+    std::vector<std::int64_t> integer_frequency_weights;
+    const std::int64_t nobs_full_frequency =
+        (options_.weights_are_frequencies && weights)
+            ? checked_frequency_weight_sum(
+                  *weights,
+                  (options_.drop_singletons && has_fes)
+                      ? &integer_frequency_weights
+                      : nullptr)
+            : static_cast<std::int64_t>(nobs_full);
     const double nobs_full_effective =
-        (options_.weights_are_frequencies && weights) ? weights->sum()
-                                                      : static_cast<double>(nobs_full);
-
+        static_cast<double>(nobs_full_frequency);
     int singletons_dropped_rows = 0;
+    auto current_nobs_effective = [&](Eigen::Index row_count) -> double {
+        if (options_.weights_are_frequencies && weights) {
+            const std::int64_t kept_frequency =
+                nobs_full_frequency -
+                static_cast<std::int64_t>(singletons_dropped_rows);
+            return static_cast<double>(kept_frequency);
+        }
+        return static_cast<double>(row_count);
+    };
+
     double singletons_dropped_effective = 0.0;
+    detail::ParallelWorkObserver preprocessing_observer;
+    int preprocessing_threads_used = 1;
+    int preprocessing_parallel_workers_active = 1;
+    bool preprocessing_parallel_observed = false;
     std::vector<int> kept_idx;
     std::optional<Eigen::VectorXd> y_work;
     std::optional<Eigen::MatrixXd> X_work;
@@ -8862,16 +9666,17 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                            const Eigen::VectorXd* w_ptr,
                            const std::vector<Eigen::VectorXi>* c_ptr,
                            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) -> detail::AbsorptionResult {
-        const int threads = resolve_threads(static_cast<int>(y_use.size()),
-                                            static_cast<int>(fes_use.size()));
-        threads_used_ = threads;
-#ifdef HDFE_USE_OPENMP
-        omp_set_dynamic(0);
-        omp_set_num_threads(std::max(1, threads));
-        Eigen::setNbThreads(std::max(1, threads));
-#endif
+        const ThreadResolution thread_resolution =
+            resolve_threads(static_cast<int>(y_use.size()),
+                            static_cast<int>(fes_use.size()));
+        begin_parallel_observation(thread_resolution);
+        const int threads = thread_resolution.effective;
+        ScopedParallelRuntime parallel_runtime(
+            threads, thread_resolution.capacity);
 
         HdfeOptions tuned = options_;
+        tuned.num_threads_explicit = options_.num_threads > 0;
+        tuned.parallel_observer = parallel_observer_.get();
         tuned.num_threads = threads;
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
@@ -8905,8 +9710,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.nobs_full = results_.nobs;
         results_.num_singletons = 0;
         results_.nobs_effective =
-            (options_.weights_are_frequencies && w_ptr) ? w_ptr->sum()
-                                                        : static_cast<double>(results_.nobs);
+            current_nobs_effective(results_.nobs);
         results_.nobs_full_effective = results_.nobs_effective;
         results_.num_singletons_effective = 0.0;
         results_.sample_index.resize(0);
@@ -8937,6 +9741,9 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.fe_recovery_max_delta = 0.0;
         results_.fe_recovery_converged = true;
         results_.converged = absorption.converged;
+        results_.abs_residual = absorption.abs_residual;
+        results_.abs_residual_rel = absorption.abs_residual_rel;
+        results_.precision_certified = absorption.precision_certified;
         results_.num_clusters = 0;
         results_.cluster_counts.clear();
         results_.cluster_combo_counts.clear();
@@ -9110,9 +9917,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.df_a = static_cast<double>(df_a_report);
         results_.df_a_nested = static_cast<double>(nested_report);
 
-#ifdef HDFE_USE_OPENMP
-        Eigen::setNbThreads(1);
-#endif
+        end_parallel_observation();
         return absorption;
     };
 
@@ -9161,8 +9966,13 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             }
             absorption = run_partial(*y_work, *X_work, *fes_work, w_ptr, c_ptr, slopes_use);
             if (options_.weights_are_frequencies && weights_work) {
-                singletons_dropped_effective =
-                    std::max(0.0, nobs_full_effective - weights_work->sum());
+                std::int64_t kept_weight = 0;
+                for (const int row : kept_idx) {
+                    kept_weight += integer_frequency_weights[
+                        static_cast<std::size_t>(row)];
+                }
+                singletons_dropped_effective = static_cast<double>(
+                    nobs_full_frequency - kept_weight);
             } else {
                 singletons_dropped_effective = static_cast<double>(singletons_dropped_rows);
             }
@@ -9175,13 +9985,28 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         if (options_.weights_are_frequencies && weights) {
             keep = compute_keep_mask_drop_singletons_fweights(
                 fes, *weights, kMaxSingletonIterations, &singletons_dropped_rows,
-                &singletons_dropped_effective);
+                &singletons_dropped_effective,
+                preprocessing_thread_resolution.effective,
+                preprocessing_thread_resolution.capacity,
+                options_.num_threads > 0,
+                &integer_frequency_weights,
+                &preprocessing_observer);
         } else {
             keep = compute_keep_mask_drop_singletons(fes, kMaxSingletonIterations,
                                                      &singletons_dropped_rows,
-                                                     options_.num_threads);
+                                                     preprocessing_thread_resolution.effective,
+                                                     preprocessing_thread_resolution.capacity,
+                                                     options_.num_threads > 0,
+                                                     &preprocessing_observer);
             singletons_dropped_effective = static_cast<double>(singletons_dropped_rows);
         }
+        preprocessing_threads_used =
+            std::max(1, preprocessing_observer.max_team_size());
+        preprocessing_parallel_workers_active =
+            std::max(1, preprocessing_observer.active_workers());
+        preprocessing_parallel_observed =
+            preprocessing_threads_used > 1 ||
+            preprocessing_parallel_workers_active > 1;
         if (singletons_dropped_rows > 0) {
             kept_idx = build_keep_indices(keep);
             y_work = filter_vector(y, kept_idx);
@@ -9223,6 +10048,19 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     } else {
         absorption = run_partial(y, X, fes, weights, clusters, slopes_in);
     }
+    if (preprocessing_parallel_observed) {
+        if (preprocessing_thread_resolution.effective > threads_effective_) {
+            threads_effective_ = preprocessing_thread_resolution.effective;
+            thread_capacity_ = preprocessing_thread_resolution.capacity;
+            openmp_enabled_ = preprocessing_thread_resolution.openmp_enabled;
+            thread_limit_code_ = preprocessing_thread_resolution.limit_code;
+            thread_limit_reason_ = preprocessing_thread_resolution.limit_reason;
+        }
+        threads_used_ = std::max(threads_used_, preprocessing_threads_used);
+        parallel_workers_active_ =
+            std::max(parallel_workers_active_,
+                     preprocessing_parallel_workers_active);
+    }
 
     const bool allow_fe_cache_write =
         fe_cache_cfg.mode == "write" ||
@@ -9254,14 +10092,12 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     results_.nobs_full = nobs_full;
     results_.num_singletons = singletons_dropped_rows;
     const double nobs_effective =
-        (options_.weights_are_frequencies && weights)
-            ? (weights_work ? weights_work->sum() : weights->sum())
-            : static_cast<double>(results_.nobs);
+        current_nobs_effective(results_.nobs);
     results_.nobs_effective = nobs_effective;
     results_.nobs_full_effective = nobs_full_effective;
     results_.num_singletons_effective =
-        options_.weights_are_frequencies
-            ? std::max(0.0, nobs_full_effective - nobs_effective)
+        options_.weights_are_frequencies && weights
+            ? static_cast<double>(singletons_dropped_rows)
             : singletons_dropped_effective;
     results_.sample_index.resize(results_.nobs);
     if (!kept_idx.empty()) {
@@ -9293,7 +10129,9 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     first_pair_component_stats_ = FeComponentStats{};
     if (!individual_ids) {
         GroupCollapsedData collapsed =
-            collapse_group_long_format(y, X, fes, group_ids, nullptr, -1, aggregation, weights, clusters);
+            collapse_group_long_format(
+                y, X, fes, group_ids, nullptr, -1, aggregation, weights,
+                options_.weights_are_frequencies, clusters);
         const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
         const std::vector<Eigen::VectorXi>* c_ptr = collapsed.clusters ? &(*collapsed.clusters) : nullptr;
         fit(collapsed.y, collapsed.X, collapsed.standard_fes, w_ptr, c_ptr, nullptr, {});
@@ -9316,16 +10154,24 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
 
     GroupCollapsedData collapsed = collapse_group_long_format(
-        y, X, fes, group_ids, individual_ids, individual_fe_index, aggregation, weights, clusters);
+        y, X, fes, group_ids, individual_ids, individual_fe_index, aggregation,
+        weights, options_.weights_are_frequencies, clusters);
     const int collapsed_full = static_cast<int>(collapsed.y.size());
+    const std::int64_t nobs_full_frequency =
+        (options_.weights_are_frequencies && collapsed.weights)
+            ? checked_frequency_weight_sum(*collapsed.weights)
+            : static_cast<std::int64_t>(collapsed_full);
     const double nobs_full_effective =
-        (options_.weights_are_frequencies && collapsed.weights) ? collapsed.weights->sum()
-                                                                : static_cast<double>(collapsed_full);
+        static_cast<double>(nobs_full_frequency);
     int group_singletons_dropped = 0;
 
     if (options_.drop_singletons) {
         const GroupSingletonDropResult dropped =
-            drop_singletons_group_individual(collapsed.standard_fes, collapsed.gi);
+            drop_singletons_group_individual(
+                collapsed.standard_fes, collapsed.gi,
+                options_.weights_are_frequencies && collapsed.weights
+                    ? &(*collapsed.weights)
+                    : nullptr);
         group_singletons_dropped = dropped.dropped_groups;
         if (dropped.dropped_groups > 0) {
             collapsed =
@@ -9335,6 +10181,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
     const std::vector<Eigen::VectorXi>* c_ptr = collapsed.clusters ? &(*collapsed.clusters) : nullptr;
+    const std::int64_t nobs_frequency =
+        (options_.weights_are_frequencies && w_ptr)
+            ? checked_frequency_weight_sum(*w_ptr)
+            : static_cast<std::int64_t>(collapsed.y.size());
+    const double nobs_effective =
+        static_cast<double>(nobs_frequency);
 
     const bool has_fes = true;
     const bool drop_intercept = options_.fit_intercept && has_fes;
@@ -9348,16 +10200,17 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         drop_intercept ? X_work : maybe_add_intercept(X_work, options_.fit_intercept);
     const int design_cols = static_cast<int>(design.cols());
 
-    const int threads = resolve_threads(static_cast<int>(y_work.size()),
-                                        static_cast<int>(standard_fes_work.size() + 1));
-    threads_used_ = threads;
-#ifdef HDFE_USE_OPENMP
-    omp_set_dynamic(0);
-    omp_set_num_threads(std::max(1, threads));
-    Eigen::setNbThreads(std::max(1, threads));
-#endif
+    const ThreadResolution thread_resolution =
+        resolve_threads(static_cast<int>(y_work.size()),
+                        static_cast<int>(standard_fes_work.size() + 1));
+    begin_parallel_observation(thread_resolution);
+    const int threads = thread_resolution.effective;
+    ScopedParallelRuntime parallel_runtime(
+        threads, thread_resolution.capacity);
 
     HdfeOptions tuned = options_;
+    tuned.num_threads_explicit = options_.num_threads > 0;
+    tuned.parallel_observer = parallel_observer_.get();
     tuned.num_threads = threads;
 
     MobilityHint mobility_hint;
@@ -9550,7 +10403,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         const int intercept_col = transformed_has_intercept ? (transformed_full_cols - 1) : -1;
         const CrossproductResult cp = compute_crossproducts_selected(
             absorption.y_tilde, transformed_X, kept_slope_cols, intercept_col, w_ptr,
-            transformed_has_intercept, tuned.num_threads);
+            transformed_has_intercept, tuned.num_threads, tuned.parallel_observer);
 
         std::vector<int> keep_positions;
         keep_positions.reserve(kept_slope_cols.size());
@@ -9606,7 +10459,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     } else if (!kept_slope_cols.empty()) {
         const std::vector<uint8_t> drop_mask = compute_rank_collinearity_mask(
             transformed_X, kept_slope_cols, transformed_slope_cols, transformed_has_intercept,
-            w_ptr, rank_collinear_tol, tuned.num_threads, options_.collinear_priority);
+            w_ptr, rank_collinear_tol, tuned.num_threads,
+            options_.collinear_priority, tuned.parallel_observer);
 
         std::vector<int> new_kept;
         std::vector<int> new_omitted;
@@ -9650,7 +10504,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         empty.pvalues.resize(0);
         empty.conf_int.resize(0, 2);
         empty.residuals = absorption.y_tilde;
-        empty.df_resid = static_cast<double>(absorption.y_tilde.size());
+        empty.df_resid = nobs_effective;
         empty.rss = weighted_sum_of_squares(empty.residuals, w_ptr);
         empty.tss = total_tss;
         empty.within_tss = within_tss;
@@ -9666,37 +10520,46 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
         if (c_ptr->size() == 1) {
             ols_result = detail::run_ols(absorption.y_tilde, transformed_X_used, w_ptr, &(*c_ptr)[0],
-                                         tuned.se_type, total_tss, within_tss);
+                                         tuned.se_type, total_tss, within_tss, nobs_effective,
+                                         false, nullptr, tuned.num_threads_explicit,
+                                         tuned.parallel_observer);
         } else {
             ols_result = detail::run_ols_multiway(absorption.y_tilde, transformed_X_used, w_ptr, c_ptr,
                                                  tuned.se_type, total_tss, within_tss,
-                                                 tuned.ssc_g_df, tuned.ssc_g_adj);
+                                                 tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective,
+                                                 nullptr, tuned.num_threads_explicit,
+                                                 tuned.parallel_observer);
         }
     } else if (have_precomputed &&
                xtx_used.rows() == transformed_X_used.cols() &&
                xty_used.size() == transformed_X_used.cols()) {
         ols_result = detail::run_ols_fast_from_xtx(absorption.y_tilde, transformed_X_used, w_ptr,
                                                    tuned.se_type, total_tss, within_tss,
-                                                   xtx_used, xty_used, -1.0,
-                                                   tuned.weights_are_frequencies);
+                                                   xtx_used, xty_used, nobs_effective,
+                                                   tuned.weights_are_frequencies,
+                                                   tuned.num_threads_explicit,
+                                                   tuned.parallel_observer);
     } else {
         ols_result = detail::run_ols(absorption.y_tilde, transformed_X_used, w_ptr, nullptr, tuned.se_type,
-                                     total_tss, within_tss, -1.0,
-                                     tuned.weights_are_frequencies);
+                                     total_tss, within_tss, nobs_effective,
+                                     tuned.weights_are_frequencies, nullptr,
+                                     tuned.num_threads_explicit,
+                                     tuned.parallel_observer);
     }
 
     apply_common_postprocessing(y_work, X_work, w_ptr, absorption.fe_levels, ols_result);
-    const double nobs_effective =
-        (options_.weights_are_frequencies && w_ptr) ? w_ptr->sum()
-                                                    : static_cast<double>(y_work.size());
     results_.nobs_effective = nobs_effective;
     results_.nobs_full_effective = nobs_full_effective;
-    results_.num_singletons_effective = std::max(0.0, nobs_full_effective - nobs_effective);
+    results_.num_singletons_effective =
+        static_cast<double>(nobs_full_frequency - nobs_frequency);
     results_.vcv_psd_fixed = false;
     results_.nobs_full = collapsed_full;
     results_.num_singletons = group_singletons_dropped;
     results_.num_iterations = absorption.iterations;
     results_.converged = absorption.converged;
+    results_.abs_residual = absorption.abs_residual;
+    results_.abs_residual_rel = absorption.abs_residual_rel;
+    results_.precision_certified = absorption.precision_certified;
     // For group/individual mode, map each collapsed group observation back to a representative
     // row in the original long-format input.
     if (static_cast<int>(collapsed.rep_row.size()) != results_.nobs) {
@@ -9785,18 +10648,17 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     if (drop_intercept) {
         const int slope_cols = static_cast<int>(results_.coefficients.size());
-        const double y_mean = weighted_mean(y_work, w_ptr);
-        const double denom = w_ptr ? w_ptr->sum() : static_cast<double>(y_work.size());
+        double denom = 0.0;
+        const double y_mean =
+            fixed_chunk_weighted_mean(y_work, w_ptr, tuned.num_threads, &denom,
+                                      tuned.parallel_observer);
         Eigen::VectorXd x_means = Eigen::VectorXd::Zero(slope_cols);
-        if (slope_cols > 0) {
-            if (!w_ptr) {
-                for (int j = 0; j < slope_cols; ++j) {
-                    x_means(j) = X_work.col(j).mean();
-                }
-            } else if (denom > 0.0) {
-                for (int j = 0; j < slope_cols; ++j) {
-                    x_means(j) = X_work.col(j).dot(*w_ptr) / denom;
-                }
+        if (slope_cols > 0 && denom > 0.0) {
+            for (int j = 0; j < slope_cols; ++j) {
+                x_means(j) =
+                    fixed_chunk_weighted_mean(X_work.col(j), w_ptr,
+                                              tuned.num_threads, nullptr,
+                                              tuned.parallel_observer);
             }
         }
         const double intercept = y_mean - x_means.dot(results_.coefficients);
@@ -9840,7 +10702,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
 
     // Degrees-of-freedom adjustments (extend the standard FE DoF with the individual FE count).
-    const int nobs = results_.nobs;
+    const double nobs = results_.nobs_effective;
     const int df_m = df_m_effective;  // excludes constant
     results_.df_m = static_cast<double>(df_m);
 
@@ -10058,12 +10920,14 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     // Preserve the raw (possibly non-positive) df_r for reghdfe-compatible
     // reporting: reghdfe surfaces a negative e(df_r) and missing inference
     // when the model is saturated or over-specified.
-    const int df_r_raw = nobs - df_m - df_a_report;
-    const int df_r_unadj = std::max(0, df_r_raw);
-    results_.df_resid_unadj = static_cast<double>(df_r_raw);
-    if (df_r_unadj > 0) {
+    const double df_r_raw =
+        nobs - static_cast<double>(df_m) -
+        static_cast<double>(df_a_report);
+    const double df_r_unadj = std::max(0.0, df_r_raw);
+    results_.df_resid_unadj = df_r_raw;
+    if (df_r_unadj > 0.0) {
         const double sigma2_old = results_.sigma2;
-        const double sigma2_new = results_.rss / static_cast<double>(df_r_unadj);
+        const double sigma2_new = results_.rss / df_r_unadj;
         results_.sigma2 = sigma2_new;
         if (tuned.se_type == StandardErrorType::Homoskedastic && sigma2_old > 0.0) {
             const double ratio = sigma2_new / sigma2_old;
@@ -10073,9 +10937,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     } else {
         results_.sigma2 = 0.0;
     }
-    const bool saturated_model = (df_r_raw <= 0);
+    const bool saturated_model = !(df_r_raw > 0.0);
 
-    int df_r_model = std::max(0, nobs - df_m - df_a_used);
+    double df_r_model =
+        nobs - static_cast<double>(df_m) -
+        static_cast<double>(df_a_used);
+    df_r_model = std::max(0.0, df_r_model);
 
     if (c_ptr && !c_ptr->empty()) {
         results_.num_clusters = ols_result.num_clusters;
@@ -10094,28 +10961,32 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     double robust_scale = 1.0;
     double cluster_ratio = 1.0;
-    if (tuned.se_type == StandardErrorType::Robust && df_r_model > 0) {
+    if (tuned.se_type == StandardErrorType::Robust && df_r_model > 0.0) {
         if (tuned.ssc_k_adj) {
-            robust_scale = static_cast<double>(nobs) / static_cast<double>(df_r_model);
+            robust_scale = nobs / df_r_model;
             const double scale = std::sqrt(robust_scale);
             results_.std_errors *= scale;
             results_.covariance *= robust_scale;
         }
-        results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : static_cast<double>(df_r_model);
+        results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : df_r_model;
     } else if (tuned.se_type == StandardErrorType::Cluster && df_m > 0 && c_ptr && !c_ptr->empty()) {
         const int Gc = ols_result.num_clusters;
         if (use_reghdfe_stats) {
-            const int df_r_unclust = df_r_model;
-            const int df_r_cluster = std::max(0, Gc - 1);
-            results_.df_resid = static_cast<double>(std::min(df_r_unclust, df_r_cluster));
+            const double df_r_unclust = df_r_model;
+            const double df_r_cluster =
+                static_cast<double>(std::max(0, Gc - 1));
+            results_.df_resid = std::min(df_r_unclust, df_r_cluster);
             double ratio = 1.0;
             if (tuned.ssc_k_adj) {
-                const int denom = std::max(0, nobs - df_m - df_a_report - nested_adj);
-                if (denom > 0) {
-                    ratio *= ols_result.df_resid / static_cast<double>(denom);
+                const double denom = std::max(
+                    0.0, nobs - static_cast<double>(df_m) -
+                             static_cast<double>(df_a_report) -
+                             static_cast<double>(nested_adj));
+                if (denom > 0.0) {
+                    ratio *= ols_result.df_resid / denom;
                 }
             } else {
-                const double denom = std::max(1.0, static_cast<double>(nobs) - 1.0);
+                const double denom = std::max(1.0, nobs - 1.0);
                 ratio *= ols_result.df_resid / denom;
             }
             if (c_ptr->size() == 1 && !tuned.ssc_g_adj && Gc > 1) {
@@ -10135,12 +11006,15 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             results_.df_resid = static_cast<double>(std::max(0, Gc - 1));
             double ratio = 1.0;
             if (tuned.ssc_k_adj) {
-                const int df_denom = std::max(0, df_r_model + nested_dof_used - nested_adj);
-                if (df_denom > 0) {
-                    ratio *= ols_result.df_resid / static_cast<double>(df_denom);
+                const double df_denom = std::max(
+                    0.0, df_r_model +
+                             static_cast<double>(nested_dof_used) -
+                             static_cast<double>(nested_adj));
+                if (df_denom > 0.0) {
+                    ratio *= ols_result.df_resid / df_denom;
                 }
             } else {
-                const double denom = std::max(1.0, static_cast<double>(nobs) - 1.0);
+                const double denom = std::max(1.0, nobs - 1.0);
                 ratio *= ols_result.df_resid / denom;
             }
             if (c_ptr->size() == 1 && !tuned.ssc_g_adj && Gc > 1) {
@@ -10157,12 +11031,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 results_.df_resid = tuned.ssc_t_df;
             }
         }
-    } else if (df_r_model > 0) {
-        results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : static_cast<double>(df_r_model);
+    } else if (df_r_model > 0.0) {
+        results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : df_r_model;
     }
     if (saturated_model) {
         // Report the raw (possibly negative) residual df_r, matching reghdfe.
-        results_.df_resid = static_cast<double>(df_r_raw);
+        results_.df_resid = df_r_raw;
     }
 
     bool intercept_cov_updated = false;
@@ -10296,9 +11170,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         mark_invalid_inference_for_saturated(results_);
     }
 
-#ifdef HDFE_USE_OPENMP
-    Eigen::setNbThreads(1);
-#endif
+    end_parallel_observation();
 }
 
 GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
@@ -10340,11 +11212,21 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
 
     GroupCollapsedData collapsed =
         collapse_group_long_format(y, X, fes, group_ids, &individual_ids, individual_fe_index,
-                                   aggregation, weights, nullptr);
+                                   aggregation, weights,
+                                   options_.weights_are_frequencies, nullptr);
 
     if (options_.drop_singletons) {
+        if (options_.weights_are_frequencies && collapsed.weights) {
+            // Validate the collapsed total even when this extraction call is
+            // reached independently of the preceding fit.
+            (void)checked_frequency_weight_sum(*collapsed.weights);
+        }
         const GroupSingletonDropResult dropped =
-            drop_singletons_group_individual(collapsed.standard_fes, collapsed.gi);
+            drop_singletons_group_individual(
+                collapsed.standard_fes, collapsed.gi,
+                options_.weights_are_frequencies && collapsed.weights
+                    ? &(*collapsed.weights)
+                    : nullptr);
         if (dropped.dropped_groups > 0) {
             collapsed = filter_group_collapsed(collapsed, dropped.keep_groups,
                                                dropped.individual_degrees, aggregation);
@@ -10352,6 +11234,14 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     }
 
     const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
+    const ThreadResolution extraction_thread_resolution =
+        resolve_threads(static_cast<int>(collapsed.y.size()),
+                        static_cast<int>(collapsed.standard_fes.size() + 1));
+    const int extraction_threads = extraction_thread_resolution.effective;
+    ScopedParallelRuntime parallel_runtime(
+        extraction_threads, extraction_thread_resolution.capacity);
+    detail::ParallelWorkObserver extraction_observer;
+    extraction_observer.reset();
 
     const int coef_size = static_cast<int>(results_.coefficients.size());
     const int x_cols = static_cast<int>(collapsed.X.cols());
@@ -10371,7 +11261,10 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     // Compute it as (y - Xb) - M(y - Xb), where M is the within transformation that partials out
     // the group/individual and standard fixed effects.
     HdfeOptions tuned = options_;
-    tuned.num_threads = 1;
+    tuned.num_threads = extraction_threads;
+    tuned.num_threads_explicit =
+        extraction_thread_resolution.requested > 0;
+    tuned.parallel_observer = &extraction_observer;
     tuned.max_iter = std::max(tuned.max_iter, 20000);
     tuned.tol = std::min(tuned.tol, 1e-15);
     Eigen::MatrixXd empty_X(static_cast<int>(y_minus_xb.size()), 0);
@@ -10411,7 +11304,9 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     Eigen::VectorXd a_prev2 = Eigen::VectorXd::Zero(I);
     Eigen::VectorXd a_long(G);
 
-    const Eigen::VectorXd precond = gi_preconditioner(collapsed.gi, w_ptr);
+    const Eigen::VectorXd precond =
+        gi_preconditioner(collapsed.gi, w_ptr, tuned.num_threads,
+                          &extraction_observer);
 
     double tols = options.tol_start;
     double mse = options.tol_main + 1.0;
@@ -10420,7 +11315,8 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     double constant = 0.0;
 
     while (mse > options.tol_main) {
-        gi_group_sum(collapsed.gi, a, a_long);
+        gi_group_sum(collapsed.gi, a, a_long, tuned.num_threads,
+                     &extraction_observer);
 
         if (K == 0) {
             Eigen::VectorXd resid = d - a_long;
@@ -10438,7 +11334,8 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
                                    maps[static_cast<std::size_t>(k)],
                                    w_ptr,
                                    fe_level_values[static_cast<std::size_t>(k)],
-                                   fe_group_values[static_cast<std::size_t>(k)]);
+                                   fe_group_values[static_cast<std::size_t>(k)],
+                                   tuned.num_threads, &extraction_observer);
             }
         }
 
@@ -10454,7 +11351,8 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
         a_prev2 = a_prev1;
         a_prev1 = a;
         a = solve_a1(std::move(a), collapsed.gi, dd, w_ptr, precond,
-                     options.max_iter_solver, tols, options.verbose);
+                     options.max_iter_solver, tols, options.verbose,
+                     tuned.num_threads, &extraction_observer);
 
         if (mse < options.factor * tols) {
             tols = std::max(tols / 10.0, options.tol_final);
@@ -10466,7 +11364,8 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
                          options.a2p2);
         }
 
-        gi_group_sum(collapsed.gi, a, a_long);
+        gi_group_sum(collapsed.gi, a, a_long, tuned.num_threads,
+                     &extraction_observer);
 
         Eigen::VectorXd resid = d - a_long;
         if (K == 0) {
@@ -10499,6 +11398,15 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     out.iterations = iter;
     out.converged = converged;
     out.mse = mse;
+    out.threads_requested = extraction_thread_resolution.requested;
+    out.threads_effective = extraction_thread_resolution.effective;
+    out.threads_used = std::max(1, extraction_observer.max_team_size());
+    out.parallel_workers_active =
+        std::max(1, extraction_observer.active_workers());
+    out.thread_capacity = extraction_thread_resolution.capacity;
+    out.openmp_enabled = extraction_thread_resolution.openmp_enabled;
+    out.thread_limit_code = extraction_thread_resolution.limit_code;
+    out.thread_limit_reason = extraction_thread_resolution.limit_reason;
     return out;
 }
 

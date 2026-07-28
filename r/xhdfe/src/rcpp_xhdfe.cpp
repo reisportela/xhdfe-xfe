@@ -27,6 +27,7 @@
 
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
+#include "fe_absorption_cuda.hpp"
 
 namespace {
 
@@ -465,6 +466,9 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
 
     out["num_iterations"] = res.num_iterations;
     out["converged"] = res.converged;
+    out["abs_residual"] = res.abs_residual;
+    out["abs_residual_rel"] = res.abs_residual_rel;
+    out["precision_certified"] = res.precision_certified;
 
     out["groupvar"] = wrap_vector(res.groupvar);
     out["fe_effects"] = wrap_vector_list(res.fe_effects);
@@ -479,6 +483,13 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["vcv_psd_fixed"] = res.vcv_psd_fixed;
 
     out["threads_used"] = reg.threads_used();
+    out["threads_requested"] = reg.threads_requested();
+    out["threads_effective"] = reg.threads_effective();
+    out["parallel_workers_active"] = reg.parallel_workers_active();
+    out["thread_capacity"] = reg.thread_capacity();
+    out["openmp_enabled"] = reg.openmp_enabled();
+    out["thread_limit_code"] = reg.thread_limit_code();
+    out["thread_limit_reason"] = reg.thread_limit_reason();
     out["absorption_method_used"] = std::string(method_name(reg.absorption_method_used()));
     out["absorption_method_code"] = method_code(reg.absorption_method_used());
     out["gpu_used"] = reg.gpu_used();
@@ -491,6 +502,29 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
 }
 
 }  // namespace
+
+// Keep backend routing on the calling R task.  The callback executes while
+// the C++ scope is alive, so nested .Call entry points see the override
+// without mutating XHDFE_GPU_BACKEND for the whole process.
+// [[Rcpp::export(name = ".xhdfe_cpp_run_with_backend")]]
+SEXP xhdfe_cpp_run_with_backend(std::string backend, Rcpp::Function fun) {
+    backend = to_lower(backend);
+    if (backend == "default") {
+        return fun();
+    }
+    hdfe::detail::GpuBackend selected;
+    if (backend == "cpu") {
+        selected = hdfe::detail::GpuBackend::Cpu;
+    } else if (backend == "cuda") {
+        selected = hdfe::detail::GpuBackend::Cuda;
+    } else if (backend == "metal") {
+        selected = hdfe::detail::GpuBackend::Metal;
+    } else {
+        throw std::runtime_error("Unknown GPU backend: " + backend);
+    }
+    hdfe::detail::ScopedGpuBackendOverride backend_scope(selected);
+    return fun();
+}
 
 // [[Rcpp::export(name = ".xhdfe_cpp_fit")]]
 Rcpp::List xhdfe_cpp_fit(Rcpp::NumericVector y,
@@ -636,12 +670,22 @@ Rcpp::List xhdfe_cpp_partial_out(Rcpp::NumericVector y,
     out["fe_num_levels"] = wrap_vector(partial.fe_levels);
     out["iterations"] = partial.iterations;
     out["converged"] = partial.converged;
+    out["abs_residual"] = partial.abs_residual;
+    out["abs_residual_rel"] = partial.abs_residual_rel;
+    out["precision_certified"] = partial.precision_certified;
     out["schwarz_used"] = partial.schwarz_used;
     out["mlsmr_used"] = partial.mlsmr_used;
     out["gpu_used"] = partial.gpu_used;
     out["gpu_status_code"] = partial.gpu_status_code;
     out["gpu_attempted"] = partial.gpu_attempted;
     out["threads_used"] = reg.threads_used();
+    out["threads_requested"] = reg.threads_requested();
+    out["threads_effective"] = reg.threads_effective();
+    out["parallel_workers_active"] = reg.parallel_workers_active();
+    out["thread_capacity"] = reg.thread_capacity();
+    out["openmp_enabled"] = reg.openmp_enabled();
+    out["thread_limit_code"] = reg.thread_limit_code();
+    out["thread_limit_reason"] = reg.thread_limit_reason();
     out["absorption_method_used"] = std::string(method_name(reg.absorption_method_used()));
     return out;
 }
@@ -726,6 +770,14 @@ Rcpp::List xhdfe_cpp_extract_group_fes(Rcpp::NumericVector y,
     out["iterations"] = est.iterations;
     out["converged"] = est.converged;
     out["mse"] = est.mse;
+    out["threads_requested"] = est.threads_requested;
+    out["threads_effective"] = est.threads_effective;
+    out["threads_used"] = est.threads_used;
+    out["parallel_workers_active"] = est.parallel_workers_active;
+    out["thread_capacity"] = est.thread_capacity;
+    out["openmp_enabled"] = est.openmp_enabled;
+    out["thread_limit_code"] = est.thread_limit_code;
+    out["thread_limit_reason"] = est.thread_limit_reason;
     return out;
 }
 
@@ -820,6 +872,16 @@ Rcpp::List akm_set_to_list(const hdfe::akm::LeaveOutSetResult& s) {
     out["n_movers"] = s.n_movers;
     out["n_stayers"] = s.n_stayers;
     out["prune_iterations"] = s.prune_iterations;
+    out["threads_requested"] = s.threads_requested;
+    out["threads_effective"] = s.threads_effective;
+    out["threads_used"] = s.threads_used;
+    out["parallel_workers_active"] = s.parallel_workers_active;
+    out["thread_capacity"] = s.thread_capacity;
+    out["openmp_enabled"] = s.openmp_enabled;
+    out["thread_limit_code"] = s.thread_limit_code;
+    out["thread_limit_reason"] = s.thread_limit_reason;
+    out["gpu_used"] = s.gpu_used;
+    out["gpu_status_code"] = s.gpu_status_code;
     return out;
 }
 
@@ -852,6 +914,46 @@ Rcpp::List xhdfe_cpp_akm_leave_out_set(Rcpp::IntegerVector worker, Rcpp::Integer
     const Eigen::VectorXi w = as_vector_xi(worker);
     const Eigen::VectorXi f = as_vector_xi(firm);
     return akm_set_to_list(hdfe::akm::leave_out_connected_set(w, f));
+}
+
+// Additive execution-control surface; the historical two-argument native
+// entry point above remains available for callers compiled against it.
+// [[Rcpp::export(name = ".xhdfe_cpp_akm_leave_out_set_opts")]]
+Rcpp::List xhdfe_cpp_akm_leave_out_set_opts(
+    Rcpp::IntegerVector worker,
+    Rcpp::IntegerVector firm,
+    SEXP fweights,
+    int num_threads,
+    bool gpu,
+    int verbose) {
+    if (worker.size() != firm.size()) {
+        throw std::runtime_error("worker and firm must have the same length");
+    }
+    const Eigen::VectorXi w = as_vector_xi(worker);
+    const Eigen::VectorXi f = as_vector_xi(firm);
+    std::optional<Eigen::VectorXd> fw_vec;
+    if (!Rf_isNull(fweights)) {
+        Rcpp::NumericVector fw(fweights);
+        if (fw.size() != worker.size()) {
+            throw std::runtime_error(
+                "fweights must have the same length as worker");
+        }
+        fw_vec = Eigen::VectorXd(fw.size());
+        for (R_xlen_t i = 0; i < fw.size(); ++i) {
+            (*fw_vec)[i] = fw[i];
+        }
+    }
+    hdfe::akm::LeaveOutSetOptions options;
+    options.num_threads = num_threads;
+    options.use_gpu = gpu;
+    options.verbose = verbose;
+    if (options.verbose > 0) {
+        options.progress = [](const char* line, void*) {
+            REprintf("%s\n", line);
+        };
+    }
+    return akm_set_to_list(hdfe::akm::leave_out_connected_set(
+        w, f, fw_vec ? &(*fw_vec) : nullptr, options));
 }
 
 // [[Rcpp::export(name = ".xhdfe_cpp_akm_kss")]]
@@ -1028,10 +1130,37 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
     out["mean_pii"] = res.mean_pii;
     out["n_rows"] = static_cast<double>(res.n_rows);
     out["leverages_exact"] = res.leverages_exact;
+    out["gpu_requested"] = res.gpu_requested;
     out["gpu_used"] = res.gpu_used;
+    out["gpu_status_code"] = res.gpu_status_code;
+    out["gpu_backend"] = res.gpu_backend;
+    out["gpu_status"] = res.gpu_status;
     out["solver_direct"] = res.solver_direct;
+    out["threads_requested"] = res.threads_requested;
+    out["threads_effective"] = res.threads_effective;
+    out["solver_threads_effective"] = res.solver_threads_effective;
+    out["fwl_threads_effective"] = res.fwl_threads_effective;
     out["fwl_threads_used"] = res.fwl_threads_used;
+    out["fwl_parallel_workers_active"] =
+        res.fwl_parallel_workers_active;
+    out["fwl_gpu_attempted"] = res.fwl_gpu_attempted;
+    out["fwl_gpu_used"] = res.fwl_gpu_used;
+    out["fwl_gpu_fallback"] = res.fwl_gpu_fallback;
+    out["fwl_gpu_status_code"] = res.fwl_gpu_status_code;
+    out["fwl_gpu_status"] = res.fwl_gpu_status;
+    out["fwl_iterations"] = res.fwl_iterations;
+    out["fwl_abs_residual_rel"] = res.fwl_abs_residual_rel;
+    out["fwl_precision_certified"] =
+        res.fwl_precision_certified;
+    out["solver_threads_used"] = res.solver_threads_used;
+    out["solver_parallel_workers_active"] =
+        res.solver_parallel_workers_active;
     out["threads_used"] = res.threads_used;
+    out["parallel_workers_active"] = res.parallel_workers_active;
+    out["thread_capacity"] = res.thread_capacity;
+    out["openmp_enabled"] = res.openmp_enabled;
+    out["thread_limit_code"] = res.thread_limit_code;
+    out["thread_limit_reason"] = res.thread_limit_reason;
     out["jla_draws_used"] = res.jla_draws_used;
     out["seed"] = static_cast<double>(res.seed_used);
     out["solver_iterations"] = static_cast<double>(res.solver_iterations);
@@ -1258,7 +1387,25 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
         r.absorbed_target_inference_valid;
     out["absorbing_fe_index"] = r.absorbing_fe_index;
     out["converged"] = r.converged;
+    out["threads_requested"] = r.threads_requested;
+    out["threads_effective"] = r.threads_effective;
+    out["recovery_threads_effective"] =
+        r.recovery_threads_effective;
+    out["fullfit_threads_used"] = r.fullfit_threads_used;
+    out["fullfit_parallel_workers_active"] =
+        r.fullfit_parallel_workers_active;
+    out["recovery_threads_used"] = r.recovery_threads_used;
+    out["recovery_parallel_workers_active"] =
+        r.recovery_parallel_workers_active;
+    out["covariance_threads_used"] = r.covariance_threads_used;
+    out["covariance_parallel_workers_active"] =
+        r.covariance_parallel_workers_active;
     out["threads_used"] = r.threads_used;
+    out["parallel_workers_active"] = r.parallel_workers_active;
+    out["thread_capacity"] = r.thread_capacity;
+    out["openmp_enabled"] = r.openmp_enabled;
+    out["thread_limit_code"] = r.thread_limit_code;
+    out["thread_limit_reason"] = r.thread_limit_reason;
     out["gpu_requested"] = r.gpu_requested;
     out["gpu_used"] = r.gpu_used;
     out["gpu_status_code"] = r.gpu_status_code;

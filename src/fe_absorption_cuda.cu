@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -20,6 +21,15 @@ namespace detail {
 namespace {
 
 constexpr int kBlockSize = 256;
+
+inline bool finite_double_bits(double value) {
+    static_assert(sizeof(double) == sizeof(std::uint64_t),
+                  "xhdfe requires 64-bit IEEE-754 doubles");
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return (bits & UINT64_C(0x7ff0000000000000)) !=
+           UINT64_C(0x7ff0000000000000);
+}
 
 bool strict_residual_tolerance_mode(const HdfeOptions& options) {
     return options.tolerance_mode == ToleranceMode::StrictResidual;
@@ -47,6 +57,20 @@ bool honest_tol_trigger_enabled() {
     static const bool enabled = []() {
         const char* e = std::getenv("XHDFE_TOL_TRIGGER");
         return e != nullptr && (e[0] == 'c' || e[0] == 'C' || e[0] == '1');
+    }();
+    return enabled;
+}
+
+// See the fe_absorption.cpp counterpart for the full rationale: the Irons-Tuck
+// divergence safeguard must not be gated on the stopping rule. The CUDA solver
+// carried the identical defect — on `github` at tol=1e-12 the GPU path returned
+// converged=true with coefficients [37.44, 83.27, -17.21] against the correct
+// [0.962444, 0.955465, 23.854767].
+// Set XHDFE_ACCEL_GUARD_ALWAYS=0 to restore the honest_mode-only gating.
+bool accel_guard_always_enabled() {
+    static const bool enabled = []() {
+        const char* e = std::getenv("XHDFE_ACCEL_GUARD_ALWAYS");
+        return !(e != nullptr && e[0] == '0');
     }();
     return enabled;
 }
@@ -279,6 +303,46 @@ __global__ __launch_bounds__(256, 4) void accumulate_sums_atomic_kernel(const do
     for (int j = 0; j < cols; ++j) {
         atomicAdd(&sum_x[static_cast<std::size_t>(j) * groups + g],
                   w * X[static_cast<std::size_t>(j) * ld + i]);
+    }
+}
+
+// Deterministic small-path accumulator.  Each lane owns one whole RHS column
+// (lane 0 owns y), so no two CUDA threads update the same output array.  This
+// removes atomic-order variation from the small, nearly saturated 2-FE CG
+// route while still executing the absorption on the GPU.
+__global__ __launch_bounds__(256, 2) void accumulate_sums_deterministic_columns_kernel(
+    const double* y,
+    const double* X,
+    int n,
+    int cols,
+    int ld,
+    const int* gid,
+    const double* weights,
+    bool unit_weights,
+    double* sum_y,
+    double* sum_x,
+    int groups) {
+    const int component = blockIdx.x * blockDim.x + threadIdx.x;
+    if (component > cols) {
+        return;
+    }
+    if (component == 0) {
+        for (int i = 0; i < n; ++i) {
+            const int g = gid[i];
+            const double w = unit_weights ? 1.0 : weights[i];
+            sum_y[g] += w * y[i];
+        }
+        return;
+    }
+    const int column = component - 1;
+    double* out =
+        sum_x + static_cast<std::size_t>(column) * groups;
+    const double* in =
+        X + static_cast<std::size_t>(column) * ld;
+    for (int i = 0; i < n; ++i) {
+        const int g = gid[i];
+        const double w = unit_weights ? 1.0 : weights[i];
+        out[g] += w * in[i];
     }
 }
 
@@ -937,6 +1001,29 @@ __global__ __launch_bounds__(256, 4) void scaled_subtract_columns_kernel(double*
     }
 }
 
+__global__ __launch_bounds__(256, 4) void scale_columns_kernel(
+    double* y,
+    double* X,
+    const double* scale,
+    std::size_t total,
+    int n,
+    int ld) {
+    const std::size_t tid =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t stride =
+        static_cast<std::size_t>(blockDim.x) * gridDim.x;
+    for (std::size_t idx = tid; idx < total; idx += stride) {
+        if (idx < static_cast<std::size_t>(n)) {
+            y[idx] *= scale[0];
+        } else {
+            const std::size_t x_idx = idx - static_cast<std::size_t>(n);
+            const int j =
+                static_cast<int>(x_idx / static_cast<std::size_t>(ld));
+            X[x_idx] *= scale[j + 1];
+        }
+    }
+}
+
 __global__ __launch_bounds__(256, 4) void cg_direction_update_kernel(double* u_y,
                                                                      double* u_x,
                                                                      const double* r_y,
@@ -954,6 +1041,21 @@ __global__ __launch_bounds__(256, 4) void cg_direction_update_kernel(double* u_y
             const std::size_t x_idx = idx - static_cast<std::size_t>(n);
             const int j = static_cast<int>(x_idx / static_cast<std::size_t>(ld));
             u_x[x_idx] = r_x[x_idx] + beta[j + 1] * u_x[x_idx];
+        }
+    }
+}
+
+__global__ void any_nonzero_bits_kernel(const double* values,
+                                        int n,
+                                        unsigned int* any_nonzero) {
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < n; i += stride) {
+        const unsigned long long bits =
+            static_cast<unsigned long long>(__double_as_longlong(values[i]));
+        if ((bits & UINT64_C(0x7fffffffffffffff)) != 0U) {
+            atomicExch(any_nonzero, 1U);
+            return;
         }
     }
 }
@@ -1657,6 +1759,47 @@ bool should_use_cuda_auto_default_reghdfe_cg(const std::vector<GpuFeInput>& fe_i
     return max_share >= threshold;
 }
 
+bool should_use_cuda_pathlike_cg(const std::vector<GpuFeInput>& fe_inputs,
+                                 int n,
+                                 const Eigen::VectorXd* weights,
+                                 const HdfeOptions& options,
+                                 bool store_alphas) {
+    if (store_alphas || options.retain_fixed_effects ||
+        fe_inputs.size() != 2 || n <= 0 || n > 20000) {
+        return false;
+    }
+    std::int64_t total_levels = 0;
+    for (const auto& fe : fe_inputs) {
+        if (fe.is_slope || fe.num_groups <= 0) {
+            return false;
+        }
+        total_levels += static_cast<std::int64_t>(fe.num_groups);
+    }
+    if (total_levels < static_cast<std::int64_t>(n) - 2 ||
+        total_levels > static_cast<std::int64_t>(n) + 2) {
+        return false;
+    }
+    if (!weights) {
+        return true;
+    }
+    if (weights->size() != n) {
+        return false;
+    }
+    // This gate is deliberately bit-exact.  Treating nearly-unit weights as
+    // unitary would silently change a weighted estimator; the small-n
+    // path-like cap keeps the one-time validation outside every large hot path.
+    constexpr std::uint64_t kOneBits = UINT64_C(0x3ff0000000000000);
+    for (Eigen::Index i = 0; i < weights->size(); ++i) {
+        std::uint64_t bits = 0;
+        const double value = (*weights)[i];
+        std::memcpy(&bits, &value, sizeof(bits));
+        if (bits != kOneBits) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool should_use_cuda_reghdfe_cg(const std::vector<GpuFeInput>& fe_inputs,
                                 int n,
                                 const Eigen::VectorXd* weights,
@@ -1668,7 +1811,10 @@ bool should_use_cuda_reghdfe_cg(const std::vector<GpuFeInput>& fe_inputs,
     const bool auto_default =
         should_use_cuda_auto_default_reghdfe_cg(fe_inputs, n, weights, options,
                                                 store_alphas);
-    if (!explicit_reghdfe && !auto_default) {
+    const bool pathlike =
+        should_use_cuda_pathlike_cg(fe_inputs, n, weights, options,
+                                    store_alphas);
+    if (!explicit_reghdfe && !auto_default && !pathlike) {
         return false;
     }
     const std::size_t dims = fe_inputs.size();
@@ -1679,7 +1825,7 @@ bool should_use_cuda_reghdfe_cg(const std::vector<GpuFeInput>& fe_inputs,
     if (disabled != nullptr && disabled[0] == '0') {
         return false;
     }
-    return weights == nullptr;
+    return weights == nullptr || pathlike;
 }
 
 struct ExactEdgeUnionFind {
@@ -2124,6 +2270,11 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         use_reghdfe_cg =
             should_use_cuda_adaptive_cg(fe_inputs, n, weights, options, store_alphas, y);
     }
+    // Small CG problems are latency-bound.  Use deterministic column-owned
+    // accumulation and one-block scalar reductions throughout this regime;
+    // this also makes the CG stopping path invariant to global-atomic order.
+    const bool deterministic_small_cg =
+        use_reghdfe_cg && n <= 20000 && !any_slope;
     const bool use_accel =
         use_reghdfe_cg ||
         (fe_inputs.size() >= 2 && (n >= 200000 || ill_conditioned_graph_gpu));
@@ -2189,9 +2340,30 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     }();
     // The block-CG handles only the no-alpha, unit-weight, multi-FE case (same
     // preconditions as should_use_cuda_reghdfe_cg minus the criterion gate).
-    const bool cuda_cg_fallback_ok =
-        cuda_cg_fallback_enabled && honest_mode && !store_alphas &&
+    const bool cuda_cg_capable =
+        cuda_cg_fallback_enabled && !store_alphas &&
         !options.retain_fixed_effects && fe_inputs.size() >= 2 && weights == nullptr;
+    // Divergence-triggered hand-off mirrors the CPU packed absorber: available
+    // whenever the safeguard itself is active, not only in honest mode. After
+    // the safeguard decoupling, the fast-mode guard would otherwise suspend
+    // extrapolation and grind plain sweeps to the finish (github, tol<=1e-11:
+    // ~13k GPU iterations vs ~450 total on the CPU, which does hand off). The
+    // CG stops on update_error <= options.tol — the rigorous norm-of-change
+    // criterion at the nominal tolerance — so the hand-off cannot weaken the
+    // fast-mode result; it replaces a diverging trajectory with a convergent
+    // one. The iteration-cap hand-off below keeps its honest_mode gate: the
+    // cap can trigger on healthy-but-slow fast runs (workers legitimately
+    // needs 1020 accelerated iterations at tol=1e-12) and altering those is
+    // not authorized. Kill switch: XHDFE_CUDA_GUARD_CG_BAIL=0 restores the
+    // suspend-only fast-mode behaviour.
+    static const bool cuda_guard_cg_bail_enabled = []() {
+        const char* e = std::getenv("XHDFE_CUDA_GUARD_CG_BAIL");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    const bool cuda_cg_fallback_ok =
+        cuda_cg_capable &&
+        (honest_mode ||
+         (accel_guard_always_enabled() && cuda_guard_cg_bail_enabled));
     bool accel_diverged = false;
     if (store_alphas && fe_tol > 0.0 && convergence_tol > 0.0) {
         constexpr double kFeTolScale = 1e-8;
@@ -2474,11 +2646,11 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	            if (cols > 0) {
 	                d_x_prev_update.allocate(x_size);
 	            }
-	            d_update_sums.allocate(static_cast<std::size_t>(cols + 2));
-	        } else if (cuda_cg_fallback_ok) {
-	            // The CG divergence fallback uses d_update_sums (size cg_width =
-	            // cols+1) for its per-column reductions; allocate it even when the
-	            // reghdfe update check is not otherwise active.
+	        }
+	        if (use_update_error || use_reghdfe_cg || cuda_cg_fallback_ok) {
+	            // Explicit/adaptive CG and the divergence fallback all use this
+	            // workspace for their per-column reductions.  Allocate it even
+	            // when the reghdfe update check itself is inactive.
 	            d_update_sums.allocate(static_cast<std::size_t>(cols + 2));
 	        }
 
@@ -2624,7 +2796,26 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 return;
             }
 
-            if (fe.use_privatized_sums) {
+            if (deterministic_small_cg) {
+                const int component_blocks =
+                    (cols + 1 + kBlockSize - 1) / kBlockSize;
+                accumulate_sums_deterministic_columns_kernel
+                    <<<component_blocks, kBlockSize>>>(
+                        y_ptr,
+                        x_ptr,
+                        n,
+                        cols,
+                        ld,
+                        fe.gid.data(),
+                        unit_weights ? nullptr : d_weights.data(),
+                        unit_weights,
+                        fe.sum_y.data(),
+                        fe.sum_x.data(),
+                        fe.num_groups);
+                cuda_check(
+                    cudaGetLastError(),
+                    "accumulate_sums (deterministic small-CG) kernel launch failed");
+            } else if (fe.use_privatized_sums) {
                 accumulate_sums_privatized_kernel<<<blocks_n, kBlockSize,
                                                      fe.privatized_shmem_bytes>>>(
                     y_ptr,
@@ -2780,7 +2971,26 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 return;
             }
 
-            if (fe.use_privatized_sums) {
+            if (deterministic_small_cg) {
+                const int component_blocks =
+                    (cols + 1 + kBlockSize - 1) / kBlockSize;
+                accumulate_sums_deterministic_columns_kernel
+                    <<<component_blocks, kBlockSize>>>(
+                        y_ptr,
+                        x_ptr,
+                        n,
+                        cols,
+                        ld,
+                        fe.gid.data(),
+                        unit_weights ? nullptr : d_weights.data(),
+                        unit_weights,
+                        fe.sum_y.data(),
+                        fe.sum_x.data(),
+                        fe.num_groups);
+                cuda_check(
+                    cudaGetLastError(),
+                    "accumulate_sums (deterministic small-CG) kernel launch failed");
+            } else if (fe.use_privatized_sums) {
                 accumulate_sums_privatized_kernel<<<blocks_n, kBlockSize,
                                                      fe.privatized_shmem_bytes>>>(
                     y_ptr,
@@ -3350,7 +3560,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                             const int step = iter - last_check_iter;
                             last_check_iter = iter;
                             prev_norm = curr_norm;
-                            if (honest_mode) {
+                            // Deliberately NOT gated on honest_mode — see
+                            // accel_guard_always_enabled().
+                            if (honest_mode || accel_guard_always_enabled()) {
                                 const double ratio =
                                     curr_norm / std::max(best_resid, 1e-300);
                                 if (ratio > max_ratio_seen) {
@@ -3435,7 +3647,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                             }
                         }
 
-                        if (cuda_cg_fallback_ok && cg_iter_cap > 0 &&
+                        if (cuda_cg_fallback_ok && honest_mode && cg_iter_cap > 0 &&
                             !accel_diverged && (iter + 1) >= cg_iter_cap) {
                             // Still grinding far past where any well-conditioned
                             // graph converges: hand the post-sweep iterate to CG.
@@ -3600,10 +3812,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                     // divergence fallback run_accel_phase has finished, so setting
                     // it here only affects the CG sweeps, matching the gate.
                     use_symmetric = true;
-                    auto safe_ratio = [](double num, double den) {
-                        constexpr double eps = std::numeric_limits<double>::epsilon();
-                        return std::abs(den) <= eps ? 0.0 : num / den;
-                    };
+                    converged = false;
                     auto compute_component_sumsq = [&](const double* y_ptr,
                                                         const double* x_ptr,
                                                         std::vector<double>& out) {
@@ -3612,7 +3821,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                               sizeof(double) *
                                                   static_cast<std::size_t>(cg_width)),
                                    "cudaMemset CG sumsq failed");
-                        const dim3 grid(blocks_n, cg_width);
+                        const int reduction_blocks =
+                            deterministic_small_cg ? 1 : blocks_n;
+                        const dim3 grid(reduction_blocks, cg_width);
                         component_sumsq_kernel<kBlockSize><<<grid, kBlockSize>>>(
                             y_ptr, x_ptr, n, cols, ld, d_update_sums.data());
                         cuda_check(cudaGetLastError(), "CG sumsq kernel launch failed");
@@ -3621,6 +3832,32 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                   static_cast<std::size_t>(cg_width),
                                               cudaMemcpyDeviceToHost),
                                    "cudaMemcpy CG sumsq failed");
+                    };
+                    auto component_exact_zero = [&](const double* y_ptr,
+                                                    const double* x_ptr,
+                                                    int component) {
+                        const double* values =
+                            component == 0
+                                ? y_ptr
+                                : x_ptr +
+                                      static_cast<std::size_t>(component - 1) *
+                                          static_cast<std::size_t>(ld);
+                        cuda_check(cudaMemset(d_update_sums.data(), 0,
+                                              sizeof(unsigned int)),
+                                   "cudaMemset CG exact-zero flag failed");
+                        any_nonzero_bits_kernel<<<blocks_n, kBlockSize>>>(
+                            values, n,
+                            reinterpret_cast<unsigned int*>(
+                                d_update_sums.data()));
+                        cuda_check(cudaGetLastError(),
+                                   "CG exact-zero kernel launch failed");
+                        unsigned int any_nonzero = 0;
+                        cuda_check(cudaMemcpy(
+                                       &any_nonzero, d_update_sums.data(),
+                                       sizeof(any_nonzero),
+                                       cudaMemcpyDeviceToHost),
+                                   "cudaMemcpy CG exact-zero flag failed");
+                        return any_nonzero == 0U;
                     };
                     auto compute_component_dot = [&](const double* y_a,
                                                      const double* y_b,
@@ -3632,7 +3869,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                               sizeof(double) *
                                                   static_cast<std::size_t>(cg_width)),
                                    "cudaMemset CG dot failed");
-                        const dim3 grid(blocks_n, cg_width);
+                        const int reduction_blocks =
+                            deterministic_small_cg ? 1 : blocks_n;
+                        const dim3 grid(reduction_blocks, cg_width);
                         component_dot_kernel<kBlockSize><<<grid, kBlockSize>>>(
                             y_a, y_b, x_a, x_b, n, cols, ld, d_update_sums.data());
                         cuda_check(cudaGetLastError(), "CG dot kernel launch failed");
@@ -3697,8 +3936,54 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                     std::vector<double> alpha(static_cast<std::size_t>(cg_width), 0.0);
                     std::vector<double> beta(static_cast<std::size_t>(cg_width), 0.0);
                     std::vector<double> recent(static_cast<std::size_t>(cg_width), 0.0);
+                    std::vector<double> next_improvement(
+                        static_cast<std::size_t>(cg_width), 0.0);
+                    std::vector<uint8_t> lane_solved(
+                        static_cast<std::size_t>(cg_width), 0);
+                    std::vector<double> restore_scale(
+                        static_cast<std::size_t>(cg_width), 1.0);
+                    bool normalized_small_cg = false;
 
                     compute_component_sumsq(d_y.data(), d_x.data(), improvement);
+                    if (deterministic_small_cg) {
+                        std::vector<double> normalize_scale(
+                            static_cast<std::size_t>(cg_width), 1.0);
+                        for (int k = 0; k < cg_width; ++k) {
+                            const std::size_t lane =
+                                static_cast<std::size_t>(k);
+                            const double ss = improvement[lane];
+                            if (!finite_double_bits(ss) || ss <= 0.0) {
+                                continue;
+                            }
+                            const double norm = std::sqrt(ss);
+                            const double inv = 1.0 / norm;
+                            if (!finite_double_bits(norm) || norm <= 0.0 ||
+                                !finite_double_bits(inv) || inv <= 0.0) {
+                                continue;
+                            }
+                            normalize_scale[lane] = inv;
+                            restore_scale[lane] = norm;
+                            normalized_small_cg = true;
+                        }
+                        if (normalized_small_cg) {
+                            cuda_check(
+                                cudaMemcpy(
+                                    d_cg_alpha.data(),
+                                    normalize_scale.data(),
+                                    sizeof(double) *
+                                        static_cast<std::size_t>(cg_width),
+                                    cudaMemcpyHostToDevice),
+                                "cudaMemcpy CG normalization scale failed");
+                            scale_columns_kernel<<<blocks_values, kBlockSize>>>(
+                                d_y.data(), d_x.data(), d_cg_alpha.data(),
+                                total_values, n, ld);
+                            cuda_check(
+                                cudaGetLastError(),
+                                "CG normalization kernel launch failed");
+                            compute_component_sumsq(
+                                d_y.data(), d_x.data(), improvement);
+                        }
+                    }
                     projection_sweep(d_y.data(), d_x.data(), d_y_gx.data(), d_x_gx.data());
                     compute_component_sumsq(d_y_gx.data(), d_x_gx.data(), ssr);
                     cuda_check(cudaMemcpy(d_y_ggx.data(), d_y_gx.data(), sizeof(double) * n,
@@ -3710,6 +3995,17 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                               cudaMemcpyDeviceToDevice),
                                    "cudaMemcpy CG direction X failed");
                     }
+                    auto report_cg_breakdown =
+                        [&](const char* stage, int iter, int lane,
+                            double a, double b, double c) {
+                            if (std::getenv("XHDFE_ACCEL_DEBUG") != nullptr) {
+                                std::fprintf(
+                                    stderr,
+                                    "[ACCEL cuda CG breakdown stage=%s "
+                                    "iter=%d lane=%d a=%.17g b=%.17g c=%.17g]\n",
+                                    stage, iter, lane, a, b, c);
+                            }
+                        };
 
                     int cg_iters = 0;
                     for (int iter = 1; iter <= options.max_iter; ++iter) {
@@ -3717,16 +4013,74 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                          d_y_acc_a.data(), d_x_acc_a.data());
                         compute_component_dot(d_y_ggx.data(), d_y_acc_a.data(),
                                               d_x_ggx.data(), d_x_acc_a.data(), denom);
+                        std::fill(alpha.begin(), alpha.end(), 0.0);
+                        next_improvement = improvement;
+                        bool cg_breakdown = false;
                         for (int k = 0; k < cg_width; ++k) {
-                            alpha[static_cast<std::size_t>(k)] =
-                                safe_ratio(ssr[static_cast<std::size_t>(k)],
-                                           denom[static_cast<std::size_t>(k)]);
-                            recent[static_cast<std::size_t>(k)] =
-                                alpha[static_cast<std::size_t>(k)] *
-                                ssr[static_cast<std::size_t>(k)];
-                            improvement[static_cast<std::size_t>(k)] -=
-                                recent[static_cast<std::size_t>(k)];
+                            const std::size_t lane = static_cast<std::size_t>(k);
+                            if (!finite_double_bits(improvement[lane]) ||
+                                !finite_double_bits(ssr[lane]) ||
+                                ssr[lane] < 0.0) {
+                                report_cg_breakdown(
+                                    "initial", iter, k, improvement[lane],
+                                    ssr[lane], 0.0);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            if (lane_solved[lane]) {
+                                if (ssr[lane] != 0.0) {
+                                    report_cg_breakdown(
+                                        "solved-alpha", iter, k, ssr[lane],
+                                        0.0, 0.0);
+                                    cg_breakdown = true;
+                                    break;
+                                }
+                                recent[lane] = 0.0;
+                                continue;
+                            }
+                            if (ssr[lane] == 0.0) {
+                                if (!component_exact_zero(
+                                        d_y_gx.data(), d_x_gx.data(), k)) {
+                                    report_cg_breakdown(
+                                        "false-zero-alpha", iter, k,
+                                        ssr[lane], 0.0, 0.0);
+                                    cg_breakdown = true;
+                                    break;
+                                }
+                                lane_solved[lane] = 1;
+                                recent[lane] = 0.0;
+                                continue;
+                            }
+                            if (!finite_double_bits(denom[lane]) ||
+                                denom[lane] <= 0.0) {
+                                report_cg_breakdown(
+                                    "denom", iter, k, denom[lane],
+                                    ssr[lane], improvement[lane]);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            alpha[lane] = ssr[lane] / denom[lane];
+                            recent[lane] = alpha[lane] * ssr[lane];
+                            next_improvement[lane] =
+                                improvement[lane] - recent[lane];
+                            if (!finite_double_bits(alpha[lane]) ||
+                                alpha[lane] <= 0.0 ||
+                                !finite_double_bits(recent[lane]) ||
+                                recent[lane] <= 0.0 ||
+                                !finite_double_bits(next_improvement[lane])) {
+                                report_cg_breakdown(
+                                    "alpha", iter, k, alpha[lane],
+                                    recent[lane],
+                                    next_improvement[lane]);
+                                cg_breakdown = true;
+                                break;
+                            }
                         }
+                        cg_iters = iter;
+                        if (cg_breakdown) {
+                            break;
+                        }
+                        improvement = next_improvement;
 
                         subtract_columns(d_y.data(), d_x.data(),
                                          d_y_ggx.data(), d_x_ggx.data(), alpha);
@@ -3735,32 +4089,122 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 
                         ssr_old = ssr;
                         compute_component_sumsq(d_y_gx.data(), d_x_gx.data(), ssr);
+                        std::fill(beta.begin(), beta.end(), 0.0);
                         for (int k = 0; k < cg_width; ++k) {
-                            beta[static_cast<std::size_t>(k)] =
-                                safe_ratio(ssr[static_cast<std::size_t>(k)],
-                                           ssr_old[static_cast<std::size_t>(k)]);
+                            const std::size_t lane = static_cast<std::size_t>(k);
+                            if (!finite_double_bits(ssr[lane]) || ssr[lane] < 0.0 ||
+                                !finite_double_bits(ssr_old[lane]) ||
+                                ssr_old[lane] < 0.0) {
+                                report_cg_breakdown(
+                                    "residual", iter, k, ssr[lane],
+                                    ssr_old[lane], 0.0);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            if (lane_solved[lane]) {
+                                if (ssr[lane] != 0.0) {
+                                    report_cg_breakdown(
+                                        "solved-beta", iter, k, ssr[lane],
+                                        0.0, 0.0);
+                                    cg_breakdown = true;
+                                    break;
+                                }
+                                beta[lane] = 0.0;
+                                continue;
+                            }
+                            if (ssr[lane] == 0.0) {
+                                if (!component_exact_zero(
+                                        d_y_gx.data(), d_x_gx.data(), k)) {
+                                    report_cg_breakdown(
+                                        "false-zero-beta", iter, k,
+                                        ssr[lane], 0.0, 0.0);
+                                    cg_breakdown = true;
+                                    break;
+                                }
+                                lane_solved[lane] = 1;
+                                beta[lane] = 0.0;
+                                continue;
+                            }
+                            if (ssr_old[lane] <= 0.0) {
+                                report_cg_breakdown(
+                                    "ssr-old", iter, k, ssr[lane],
+                                    ssr_old[lane], 0.0);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            beta[lane] = ssr[lane] / ssr_old[lane];
+                            if (!finite_double_bits(beta[lane]) ||
+                                beta[lane] <= 0.0) {
+                                report_cg_breakdown(
+                                    "beta", iter, k, beta[lane],
+                                    ssr[lane], ssr_old[lane]);
+                                cg_breakdown = true;
+                                break;
+                            }
+                        }
+                        if (cg_breakdown) {
+                            break;
                         }
                         update_direction(d_y_ggx.data(), d_x_ggx.data(),
                                          d_y_gx.data(), d_x_gx.data(), beta);
 
                         double update_error = 0.0;
                         for (int k = 0; k < cg_width; ++k) {
-                            constexpr double eps_floor = 1e-15;
-                            const double num =
-                                std::max(0.0, recent[static_cast<std::size_t>(k)]);
-                            const double den = std::max(
-                                std::abs(improvement[static_cast<std::size_t>(k)]),
-                                std::numeric_limits<double>::epsilon());
-                            const double err = std::sqrt(num < eps_floor ? 0.0 : num / den);
+                            const std::size_t lane = static_cast<std::size_t>(k);
+                            if (lane_solved[lane]) {
+                                continue;
+                            }
+                            const double den = std::abs(improvement[lane]);
+                            if (!finite_double_bits(recent[lane]) ||
+                                recent[lane] <= 0.0 ||
+                                !finite_double_bits(den) || den <= 0.0) {
+                                report_cg_breakdown(
+                                    "update", iter, k, recent[lane], den,
+                                    improvement[lane]);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            const double ratio = recent[lane] / den;
+                            if (!finite_double_bits(ratio) || ratio <= 0.0) {
+                                report_cg_breakdown(
+                                    "ratio", iter, k, ratio, recent[lane],
+                                    den);
+                                cg_breakdown = true;
+                                break;
+                            }
+                            const double err = std::sqrt(ratio);
+                            if (!finite_double_bits(err)) {
+                                report_cg_breakdown(
+                                    "error", iter, k, err, ratio, 0.0);
+                                cg_breakdown = true;
+                                break;
+                            }
                             update_error = std::max(update_error, err);
                         }
-                        cg_iters = iter;
+                        if (cg_breakdown) {
+                            break;
+                        }
                         if (update_error <= options.tol) {
                             converged = true;
                             break;
                         }
                     }
                     result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
+                    if (normalized_small_cg) {
+                        cuda_check(
+                            cudaMemcpy(
+                                d_cg_alpha.data(), restore_scale.data(),
+                                sizeof(double) *
+                                    static_cast<std::size_t>(cg_width),
+                                cudaMemcpyHostToDevice),
+                            "cudaMemcpy CG restore scale failed");
+                        scale_columns_kernel<<<blocks_values, kBlockSize>>>(
+                            d_y.data(), d_x.data(), d_cg_alpha.data(),
+                            total_values, n, ld);
+                        cuda_check(
+                            cudaGetLastError(),
+                            "CG restore-scale kernel launch failed");
+                    }
                     if (std::getenv("XHDFE_ACCEL_DEBUG") != nullptr) {
                         std::fprintf(stderr, "[ACCEL cuda CG iters=%d converged=%d]\n",
                                      result.iterations, converged ? 1 : 0);
@@ -4430,6 +4874,19 @@ bool absorb_fixed_effects_group_individual_cuda(
             }
         };
 
+        auto run_full_sweep = [&]() {
+            for (const std::size_t dim : order) {
+                run_standard_demean(fe_dev[dim]);
+            }
+            run_individual_sweep();
+            if (use_symmetric) {
+                run_individual_sweep();
+                for (std::size_t idx = order.size(); idx-- > 0;) {
+                    run_standard_demean(fe_dev[order[idx]]);
+                }
+            }
+        };
+
         double prev_norm = 0.0;
         compute_norm(prev_norm);
         const int check_interval = std::max(1, options.convergence_check_interval);
@@ -4437,17 +4894,7 @@ bool absorb_fixed_effects_group_individual_cuda(
         bool converged = false;
 
         for (int iter = 0; iter < options.max_iter; ++iter) {
-            for (const std::size_t dim : order) {
-                run_standard_demean(fe_dev[dim]);
-            }
-            run_individual_sweep();
-
-            if (use_symmetric) {
-                run_individual_sweep();
-                for (std::size_t idx = order.size(); idx-- > 0;) {
-                    run_standard_demean(fe_dev[order[idx]]);
-                }
-            }
+            run_full_sweep();
 
             const bool do_check =
                 (check_interval == 1 || iter < check_interval || iter % check_interval == 0);
@@ -4469,29 +4916,67 @@ bool absorb_fixed_effects_group_individual_cuda(
             }
         }
 
-        result.converged = converged;
-        if (!converged) {
-            result.iterations = options.max_iter;
-        } else if (result.iterations == 0) {
-            result.iterations = 1;
-        }
-
-        result.y_tilde.resize(n);
-        cuda_check(cudaMemcpy(result.y_tilde.data(), d_y.data(), sizeof(double) * n,
-                              cudaMemcpyDeviceToHost),
-                   "cudaMemcpy y_tilde failed");
-        result.X_tilde.resize(ld, cols);
-        if (cols > 0) {
-            cuda_check(cudaMemcpy(result.X_tilde.data(), d_x.data(),
-                                  sizeof(double) * ld * cols, cudaMemcpyDeviceToHost),
-                       "cudaMemcpy X_tilde failed");
-        }
+        result.iterations = converged ? std::max(1, result.iterations)
+                                      : options.max_iter;
 
         result.sweep_order_used.clear();
         result.sweep_order_used.reserve(order.size());
         for (const std::size_t dim : order) {
             result.sweep_order_used.push_back(static_cast<int>(dim));
         }
+
+        // Match the CPU warm start exactly and count every on-device sweep.
+        constexpr int kInitialPolishSweeps = 16;
+        if (converged && result.iterations < options.max_iter) {
+            const int initial_sweeps = std::min(
+                kInitialPolishSweeps, options.max_iter - result.iterations);
+            for (int sweep = 0; sweep < initial_sweeps; ++sweep) {
+                run_full_sweep();
+                ++result.iterations;
+            }
+        }
+
+        auto copy_candidate_to_host = [&]() {
+            result.y_tilde.resize(n);
+            cuda_check(cudaMemcpy(result.y_tilde.data(), d_y.data(),
+                                  sizeof(double) * n, cudaMemcpyDeviceToHost),
+                       "cudaMemcpy y_tilde failed");
+            result.X_tilde.resize(ld, cols);
+            if (cols > 0) {
+                cuda_check(cudaMemcpy(result.X_tilde.data(), d_x.data(),
+                                      sizeof(double) * ld * cols,
+                                      cudaMemcpyDeviceToHost),
+                           "cudaMemcpy X_tilde failed");
+            }
+        };
+
+        std::vector<Eigen::VectorXi> certificate_fes;
+        certificate_fes.reserve(standard_fe_inputs.size());
+        for (const auto& input : standard_fe_inputs) {
+            Eigen::VectorXi ids(n);
+            for (int row = 0; row < n; ++row) {
+                ids(row) = input.group_ids[row];
+            }
+            certificate_fes.push_back(std::move(ids));
+        }
+
+        copy_candidate_to_host();
+        bool certified = certify_group_individual_candidate(
+            y, X, certificate_fes, gi, weights, options, result);
+        constexpr int kCertificateBatchSweeps = 64;
+        while (!certified && result.iterations < options.max_iter) {
+            const int batch = std::min(
+                kCertificateBatchSweeps, options.max_iter - result.iterations);
+            for (int sweep = 0; sweep < batch; ++sweep) {
+                run_full_sweep();
+                ++result.iterations;
+            }
+            copy_candidate_to_host();
+            certified = certify_group_individual_candidate(
+                y, X, certificate_fes, gi, weights, options, result);
+        }
+        result.converged = certified;
+        result.precision_certified = certified;
         return true;
     } catch (...) {
         return false;
