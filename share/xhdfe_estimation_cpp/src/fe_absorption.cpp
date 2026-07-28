@@ -495,8 +495,15 @@ void certify_cuda_absorption_from_indexers(
             indexer.group_ptr.size() ==
                 static_cast<std::size_t>(indexer.num_groups) + 1U;
     }
+    // WP1: isolate the host certificate's cost in the phase balance. This
+    // wrapper is already noinline/noipa, so the timer cannot perturb solver
+    // codegen; the label closes the gap between "absorption" and the fit
+    // total on CUDA runs, and is the per-fit measurement the plan's <=0.5%
+    // certificate target is judged against.
+    const auto certificate_t0 = std::chrono::steady_clock::now();
     certify_cuda_absorption_result(
         y, X, fes, weights, options, slopes, views, result);
+    cpu_profile_log_elapsed("cuda_certificate", certificate_t0);
 }
 #endif
 

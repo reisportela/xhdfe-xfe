@@ -7556,6 +7556,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const HdfeOptions cache_key_options = tuned;
 
         detail::AbsorptionResult absorption;
+        // WP1 Gate-1 closure: everything between fit-inner entry and here —
+        // input marshalling, weight validation, option resolution, workspace
+        // setup — was unattributed (~12% of small CPU fits).
+        cpu_profile_log_elapsed("fit_prep", fit_t0);
         const auto absorption_t0 = std::chrono::steady_clock::now();
         bool absorption_ready = false;
         auto ensure_cache_key = [&](const Eigen::Ref<const Eigen::MatrixXd>& design) {

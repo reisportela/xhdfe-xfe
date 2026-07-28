@@ -4,6 +4,8 @@
 #include <cub/cub.cuh>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -188,11 +190,26 @@ private:
 constexpr std::size_t kStagedCopyMinBytes = 64ull << 20;
 constexpr std::size_t kStagedChunkBytes = 32ull << 20;
 
+// WP1 telemetry (XHDFE_PROFILE_CUDA=1): phase timings and transfer counts for
+// the absorption entry point. Counters are process-wide; the per-call report
+// diffs them so concurrent fits merely add noise to counts, never to timings.
+bool cuda_profile_enabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_CUDA");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
+std::atomic<long long> g_cuda_h2d_calls{0};
+std::atomic<long long> g_cuda_d2h_calls{0};
+
 void staged_memcpy_h2d(void* dst_dev,
                        const void* src_host,
                        std::size_t bytes,
                        PinnedStage& stage,
                        const char* msg) {
+    g_cuda_h2d_calls.fetch_add(1, std::memory_order_relaxed);
     if (bytes < kStagedCopyMinBytes || !stage.ensure(kStagedChunkBytes)) {
         cuda_check(cudaMemcpy(dst_dev, src_host, bytes, cudaMemcpyHostToDevice), msg);
         return;
@@ -233,6 +250,7 @@ void staged_memcpy_d2h(void* dst_host,
                        std::size_t bytes,
                        PinnedStage& stage,
                        const char* msg) {
+    g_cuda_d2h_calls.fetch_add(1, std::memory_order_relaxed);
     if (bytes < kStagedCopyMinBytes || !stage.ensure(kStagedChunkBytes)) {
         cuda_check(cudaMemcpy(dst_host, src_dev, bytes, cudaMemcpyDeviceToHost), msg);
         return;
@@ -2379,9 +2397,49 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         // healthy. This was the cause of the transient "CUDA absorption failed"
         // results observed when many estimations run back-to-back in one session.
         cudaGetLastError();
+        // WP1 phase telemetry. The reporter destructs on every exit of this
+        // try block (returns and exceptions alike), so a partial record is
+        // still emitted if the solve throws. Host steady_clock is accurate
+        // here because each phase boundary coincides with a synchronizing
+        // CUDA call (staged copies and the per-check D2H of sumsq); per-kernel
+        // CUDA events belong to the WP3 shadow kernels where genuinely async
+        // regions appear. setup_ms is the in-function remainder.
+        struct CudaProfileReport {
+            bool enabled = false;
+            std::chrono::steady_clock::time_point t0;
+            double h2d_ms = 0.0;
+            double solve_ms = 0.0;
+            double d2h_ms = 0.0;
+            long long sweeps = 0;
+            long long h2d_calls0 = 0;
+            long long d2h_calls0 = 0;
+            ~CudaProfileReport() {
+                if (!enabled) {
+                    return;
+                }
+                const double total_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+                std::fprintf(
+                    stderr,
+                    "cuda_profile total_ms=%.3f h2d_ms=%.3f solve_ms=%.3f "
+                    "d2h_ms=%.3f setup_ms=%.3f sweeps=%lld h2d_calls=%lld "
+                    "d2h_calls=%lld\n",
+                    total_ms, h2d_ms, solve_ms, d2h_ms,
+                    std::max(0.0, total_ms - h2d_ms - solve_ms - d2h_ms),
+                    sweeps, g_cuda_h2d_calls.load() - h2d_calls0,
+                    g_cuda_d2h_calls.load() - d2h_calls0);
+            }
+        } cuda_prof;
+        cuda_prof.enabled = cuda_profile_enabled();
+        cuda_prof.t0 = std::chrono::steady_clock::now();
+        cuda_prof.h2d_calls0 = g_cuda_h2d_calls.load();
+        cuda_prof.d2h_calls0 = g_cuda_d2h_calls.load();
         const bool unit_weights = (weights == nullptr);
         CudaWorkspace& workspace = cuda_workspace;
 
+        const auto cuda_prof_h2d_t0 = std::chrono::steady_clock::now();
         DeviceBuffer<double>& d_y = workspace.d_y;
         d_y.allocate(static_cast<std::size_t>(n));
         staged_memcpy_h2d(d_y.data(), y.data(), sizeof(double) * n, workspace.h_stage,
@@ -2634,6 +2692,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
+	        cuda_prof.h2d_ms = std::chrono::duration<double, std::milli>(
+	            std::chrono::steady_clock::now() - cuda_prof_h2d_t0).count();
+
 	        DeviceBuffer<double>& d_sumsq = workspace.d_sumsq;
 	        d_sumsq.allocate(1);
 	        const bool use_update_error =
@@ -2654,6 +2715,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	            d_update_sums.allocate(static_cast<std::size_t>(cols + 2));
 	        }
 
+	        const auto cuda_prof_solve_t0 = std::chrono::steady_clock::now();
 	        auto compute_sumsq = [&](const double* y_ptr, const double* x_ptr, double& out) {
             cuda_check(cudaMemset(d_sumsq.data(), 0, sizeof(double)), "cudaMemset sumsq failed");
             const int blocks = (n + kBlockSize - 1) / kBlockSize;
@@ -3260,6 +3322,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                  bool compute_check,
                                  double& sumsq_out,
                                  const AlphaStatePtrs* alpha_ptrs) {
+                ++cuda_prof.sweeps;
                 if (order.empty()) {
                     if (compute_check) {
                         sumsq_out = 0.0;
@@ -4416,6 +4479,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
+        cuda_prof.solve_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cuda_prof_solve_t0).count();
+        const auto cuda_prof_d2h_t0 = std::chrono::steady_clock::now();
         result.y_tilde.resize(n);
         staged_memcpy_d2h(result.y_tilde.data(), d_y.data(), sizeof(double) * n,
                           workspace.h_stage, "cudaMemcpy y_tilde failed");
@@ -4472,6 +4538,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
         }
+
+        cuda_prof.d2h_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cuda_prof_d2h_t0).count();
 
         result.sweep_order_used.clear();
         if (method == AbsorptionMethod::Jacobi || sweep_order.empty()) {

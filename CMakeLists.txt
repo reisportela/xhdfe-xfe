@@ -153,7 +153,32 @@ if(XHDFE_ENABLE_CUDA)
     list(APPEND XHDFE_SOURCES
         src/fe_absorption_cuda.cu
         src/akm_kss_cuda.cu
-        src/fe_absorption_cuda_certificate.cpp)
+        src/fe_absorption_cuda_certificate.cpp
+        src/fe_absorption_cuda_certificate.cu)
+    # WP3/P1 — verifier compile contract (plan §7.6): the certificate verifier
+    # TU is built with strict FP semantics, independently of whatever the
+    # solver TUs use: no fast-math, no contraction (device --fmad=false,
+    # host -ffp-contract=off), full-precision div/sqrt, no FTZ. The host-side
+    # pass also records its switches into .GCC.command.line so the §15.3 flag
+    # gate can prove the contract from the OBJECT, fail-closed.
+    # Source-level options append AFTER the target-level fast-math block, and
+    # for GCC the last flag wins — so every relaxed flag the target sets is
+    # explicitly negated here. The TU's own #error guard proves the negation
+    # took effect (it fired when these negations were missing).
+    # The host-side negations are passed BARE, not via -Xcompiler: nvcc groups
+    # -Xcompiler flags BEFORE the -forward-unknown-to-host-compiler group where
+    # the target's -ffast-math lands, which would put the negations first and
+    # lose the last-wins battle. Bare unknown flags join the same forwarded
+    # group, after the target's, so GCC sees them last. The TU's #error guard
+    # is the proof this ordering holds on every future toolchain.
+    set_source_files_properties(src/fe_absorption_cuda_certificate.cu
+        PROPERTIES COMPILE_OPTIONS
+        "--fmad=false;--prec-div=true;--prec-sqrt=true;--ftz=false;-fno-fast-math;-fno-unsafe-math-optimizations;-fno-associative-math;-fno-reciprocal-math;-fsigned-zeros;-ftrapping-math;-fno-finite-math-only;-ffp-contract=off;-frecord-gcc-switches")
+    # NOTE deliberately NOT applied to the existing host certificate
+    # (fe_absorption_cuda_certificate.cpp): its arithmetic feeds the public
+    # abs_residual/abs_residual_rel fields and must keep byte-identical
+    # codegen until the WP6 re-baseline under P2. The strict contract governs
+    # the NEW dedicated verifier TUs only.
 endif()
 if(XHDFE_ENABLE_METAL)
     list(APPEND XHDFE_SOURCES src/fe_absorption_metal.mm)
