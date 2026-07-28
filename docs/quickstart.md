@@ -41,9 +41,9 @@ net install xhdfe, from("/path/to/xhdfe/stata") replace
 net install xfe,   from("/path/to/xhdfe/stata") replace
 ```
 
-The online plugins and release ZIPs are **CPU-only**. Building from source is
-**required for NVIDIA GPU (CUDA)** — the online material ships no source. Clone
-the repo, then:
+The online net-install site provides CPU plugins. Certified releases may also
+publish separate Linux CUDA plugin assets. For a machine-specific CUDA build,
+run `xhdfegpu` after `net install`, or clone the repository and build directly:
 
 ```bash
 # CPU (OpenMP recommended)
@@ -52,6 +52,9 @@ bash stata/tools/build-plugin.sh --linux --openmp     # produces stata/xhdfe.plu
 # GPU (Linux + NVIDIA only): auto-detect the local GPU architecture
 bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
 ```
+
+`xhdfegpu` can use the self-contained `xhdfe-src.zip` published with the
+net-install site, so the package-side build does not need network access.
 
 **Python** (requires Python >= 3.9, CMake, a C++ compiler, and Python
 development headers), from the repository root:
@@ -74,6 +77,32 @@ remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 
 or, from a clone, `R CMD INSTALL r/xhdfe` (CUDA:
 `XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`).
+
+### Build the C++ core directly
+
+A portable CPU build requires CMake 3.16 or newer and a C++17 compiler:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DXHDFE_ENABLE_MARCH_NATIVE=OFF
+cmake --build build --parallel
+```
+
+Remove `-DXHDFE_ENABLE_MARCH_NATIVE=OFF` for local CPU tuning. On Windows with
+Visual Studio, add `-A x64`; on macOS/Rosetta, keep the portable setting so the
+compiler does not target the host Apple Silicon CPU for an x86-64 build.
+
+For CUDA, set the architecture to the target GPU:
+
+```bash
+cmake -S . -B build_cuda -DCMAKE_BUILD_TYPE=Release \
+  -DXHDFE_ENABLE_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=90
+cmake --build build_cuda --parallel
+```
+
+The minimum supported CUDA architecture is `75`. A shareable fat binary can
+use `-DCMAKE_CUDA_ARCHITECTURES="75;80;86;89;90"`. Experimental Metal builds
+on macOS use `-DXHDFE_ENABLE_METAL=ON`.
 
 ---
 

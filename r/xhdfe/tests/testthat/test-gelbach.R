@@ -1,6 +1,6 @@
 # Gelbach decomposition front-end: cross-front-end parity against reference
 # values produced by the validated Python run (backend validated against
-# Gelbach's b1x2 at machine precision; see VALIDATE_GELBACH.py and
+# Gelbach's b1x2 at machine precision; see tests/validation/VALIDATE_GELBACH.py and
 # New_Features/PROGRESS_AKM_KSS.md).
 
 sim_gelb <- function() {

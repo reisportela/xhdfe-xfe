@@ -33,17 +33,17 @@ matching the user's OS.
 
 ## Autonomous source and offline bundles
 
-The release workflow also publishes `xhdfe-src.zip` and
-`xhdfe-offline-bundle.zip`. These archives contain the shared C++ core, all
+The release workflow publishes `xhdfe-src.zip` and
+`xhdfe_xfe-offline-source-and-platform-binaries.zip`. The source-only archive
+is also copied to the Stata net-install site for `xhdfegpu`. The larger bundle
+is assembled from the exact tagged Git tree and adds release package artifacts
+and platform-specific Stata binaries. Both contain the shared C++ core, all
 three frontend sources, Stata plugin build inputs, Eigen, pybind11, and the
-unmodified official `Rcpp_1.1.2.tar.gz` CRAN source archive. The latter lets an
-R user install the package into a local library with networking disabled; its
-upstream URL, license, version, and certified SHA-256 are recorded in
+unmodified official `Rcpp_1.1.2.tar.gz` CRAN source archive. The Rcpp upstream
+URL, license, version, and certified SHA-256 are recorded in
 `third_party/RCPP_SOURCE_PROVENANCE.md`.
 
-`tools/make_source_dist_zip.sh` fails if the resulting archive is not closed.
-Its independent `tools/validate_source_dist_zip.sh` check verifies ZIP
-integrity, required dependency entries, the Rcpp SHA-256, and the package name
-and version inside the Rcpp tarball. The release workflow runs that validator
-again and confirms that both the archive and provenance survive nesting inside
-the autonomous offline bundle.
+`tools/make_source_dist_zip.sh` builds `xhdfe-src.zip` and invokes
+`tools/validate_source_dist_zip.sh`. The validator checks ZIP integrity,
+required dependency entries, the Rcpp SHA-256, and the package name and version
+inside the Rcpp tarball.

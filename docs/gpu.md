@@ -9,11 +9,11 @@ Key facts, true for all three versions:
 - The GPU is **optional and opt-in per call**. CPU is the reference backend and
   defines the numbers; the GPU produces the same results, only faster on large
   problems.
-- **A GPU build is never distributed as a prebuilt binary.** The online
-  net-install (Stata), PyPI-style wheels (Python), and any CPU package are
-  CPU-only. To use the GPU you **build/install the package from source with CUDA
-  enabled** — there is no way to "turn on" the GPU in an already-installed CPU
-  build.
+- The online Stata net-install and ordinary Python/R installations are
+  CPU-only. Certified releases may publish separate Linux CUDA fatbin plugins,
+  but a machine-specific CUDA build still requires the source and NVIDIA
+  toolkit. There is no way to turn an installed CPU binary into a CUDA binary
+  without replacing or rebuilding it.
 - The three steps are the same everywhere: **(1)** install/build with CUDA for
   your GPU, **(2)** request the GPU on a call, **(3)** verify it was actually
   used.

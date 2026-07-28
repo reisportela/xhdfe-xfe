@@ -63,7 +63,7 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
   explicitly declared absorbed targets. Version 1.5.0 adds retained-sample
   provenance, connectivity and regularity diagnostics, joint-covariance
   inference, full-refit pairs bootstrap, and table and plot helpers. See
-  [`RELEASE_NOTES_2.21.0.20260725.md`](RELEASE_NOTES_2.21.0.20260725.md).
+  [`docs/releases/RELEASE_NOTES_2.21.0.20260725.md`](docs/releases/RELEASE_NOTES_2.21.0.20260725.md).
 
 ---
 
@@ -414,7 +414,7 @@ decisions.
 | `python/`, `xhdfe/` | Python package (`import xhdfe`; the `HdfeRegressor` class). |
 | `r/` | R package (`r/xhdfe/`), examples, and helper tools. |
 | `stata/` | Stata package: `xhdfe.ado`, `xfe.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
-| `tests/` | `tests/stata/`: correctness-certification suite vs Stata oracles; `tests/benchmarks/`: public benchmark replication (datasets + Stata/Python/R runners). |
+| `tests/` | `tests/stata/`: Stata certification and smoke tests; `tests/validation/`: Python oracle and cross-frontend validators; `tests/benchmarks/`: public benchmark replication. |
 | `docs/` | Quickstart and overview. |
 | `CMakeLists.txt`, `pyproject.toml`, `setup.py` | Build configuration for the C++ core and Python bindings. |
 
@@ -430,6 +430,8 @@ decisions.
   `help xhdfegelbachcoefplot`,
   `python -m xhdfe gelbach`, and `?xhdfe_gelbach`.
 - **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
+- **Release history and certification:** [`docs/releases/`](docs/releases/),
+  [`docs/certification/`](docs/certification/).
 - **Stata:** `help xhdfe`, `help xfe`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.

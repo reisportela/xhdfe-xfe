@@ -3,7 +3,7 @@
 #
 # The canonical core lives in src/ + include/ (+ third_party/eigen-3.4.0) at
 # the repository root; r/xhdfe/src holds byte-for-byte copies, in the same
-# spirit as the stata/src and share/xhdfe_estimation_cpp mirrors. Run this
+# spirit as the maintained Stata source mirror. Run this
 # after accepting any C++ core change, then reinstall the R package.
 
 set -euo pipefail

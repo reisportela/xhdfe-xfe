@@ -47,3 +47,6 @@ tests/stata/output/
 tests/stata/*.log
 tests/stata/**/*.log
 *.smcl
+
+# Local root-level command and benchmark logs
+/*.log

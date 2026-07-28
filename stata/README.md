@@ -63,11 +63,12 @@ net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe
 ```
 
 That site uses Stata platform-specific `g` lines so Linux, macOS, and Windows
-users receive the matching plugin binary when it exists in the release. These
-online plugins are **CPU-only** — the GPU backend is not distributed and must be
-built from source with `XHDFE_ENABLE_CUDA=ON` as shown above. For a
-local development checkout or an unzipped release bundle, point `net install`
-at the folder containing `stata.toc` and the `.pkg` files:
+users receive the matching CPU plugin binary when it exists in the release.
+Linux CUDA fatbin plugins are distributed as separate release assets; install
+one of those bundles explicitly or build locally with `XHDFE_ENABLE_CUDA=ON`
+as shown above. For a local development checkout or an unzipped release
+bundle, point `net install` at the folder containing `stata.toc` and the
+`.pkg` files:
 
 ```stata
 net install xhdfe, from("/path/to/xhdfe/stata") replace

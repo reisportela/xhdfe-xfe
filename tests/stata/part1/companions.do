@@ -38,7 +38,7 @@ assert akm_cov_verbose == akm_cov_quiet
 
 * The two phases expose their effective teams separately.  The stronger
 * restoration assertion (forced four-thread KSS team) lives in
-* VALIDATE_AKM_KSS.py, where the process environment can be scoped safely.
+* tests/validation/VALIDATE_AKM_KSS.py, where the process environment can be scoped safely.
 xhdfeakm y, worker(worker) firm(firm) controls(x1) leverages(jla) draws(2) ///
     seed(42) threads(4)
 local akm_controls_converged = r(converged)
