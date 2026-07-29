@@ -504,6 +504,18 @@ void certify_cuda_absorption_from_indexers(
     certify_cuda_absorption_result(
         y, X, fes, weights, options, slopes, views, result);
     cpu_profile_log_elapsed("cuda_certificate", certificate_t0);
+    // WP3 shadow mode: emit the authoritative host decision on the same
+    // channel as the device shadow line, so the Gate-3 harness can adjudicate
+    // decision identity per fit from the paired log lines.
+    if (std::getenv("XHDFE_GPU_CERT_SHADOW") != nullptr &&
+        *std::getenv("XHDFE_GPU_CERT_SHADOW") != '0') {
+        std::fprintf(stderr,
+                     "cuda_cert_host certified=%d converged=%d rel=%.17e "
+                     "abs=%.17e\n",
+                     result.precision_certified ? 1 : 0,
+                     result.converged ? 1 : 0, result.abs_residual_rel,
+                     result.abs_residual);
+    }
 }
 #endif
 

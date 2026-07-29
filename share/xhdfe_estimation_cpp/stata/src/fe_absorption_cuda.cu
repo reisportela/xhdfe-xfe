@@ -204,6 +204,17 @@ bool cuda_profile_enabled() {
 std::atomic<long long> g_cuda_h2d_calls{0};
 std::atomic<long long> g_cuda_d2h_calls{0};
 
+// WP3 shadow-mode device certificate (default OFF). When on, the verifier TU
+// computes the certificate quantities on the device and the result is logged
+// for comparison against the host certificate, which stays authoritative.
+bool cuda_cert_shadow_enabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_GPU_CERT_SHADOW");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
 void staged_memcpy_h2d(void* dst_dev,
                        const void* src_host,
                        std::size_t bytes,
@@ -2695,6 +2706,37 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	        cuda_prof.h2d_ms = std::chrono::duration<double, std::milli>(
 	            std::chrono::steady_clock::now() - cuda_prof_h2d_t0).count();
 
+	        // WP3 shadow certificate: capture the solver-invariant quantities
+	        // (Orig_sq, Op_sq) from the freshly-uploaded originals, before the
+	        // solver overwrites d_y/d_x in place. Standard surface only in this
+	        // increment (heterogeneous slopes are WP4).
+	        struct CertShadowGuard {
+	            CudaCertShadowHandle* h = nullptr;
+	            ~CertShadowGuard() {
+	                if (h != nullptr) {
+	                    cuda_cert_shadow_abort(h);
+	                }
+	            }
+	        } cert_shadow;
+	        if (cuda_cert_shadow_enabled() && !any_slope) {
+	            std::vector<const int*> shadow_gids;
+	            std::vector<const double*> shadow_wsums;
+	            std::vector<int> shadow_groups;
+	            shadow_gids.reserve(fe_inputs.size());
+	            shadow_wsums.reserve(fe_inputs.size());
+	            shadow_groups.reserve(fe_inputs.size());
+	            for (std::size_t dim = 0; dim < fe_inputs.size(); ++dim) {
+	                shadow_gids.push_back(fe_dev[dim].gid.data());
+	                shadow_wsums.push_back(fe_dev[dim].weight_sums.data());
+	                shadow_groups.push_back(fe_inputs[dim].num_groups);
+	            }
+	            cert_shadow.h = cuda_cert_shadow_begin(
+	                d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld,
+	                unit_weights ? nullptr : d_weights.data(),
+	                shadow_gids.data(), shadow_wsums.data(),
+	                shadow_groups.data(), static_cast<int>(fe_inputs.size()));
+	        }
+
 	        DeviceBuffer<double>& d_sumsq = workspace.d_sumsq;
 	        d_sumsq.allocate(1);
 	        const bool use_update_error =
@@ -4481,6 +4523,37 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         cuda_prof.solve_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cuda_prof_solve_t0).count();
+
+        // WP3 shadow certificate: the residuals are still device-resident;
+        // run the device verifier before any D2H. The host certificate that
+        // runs later remains authoritative; this result is only logged for
+        // the Gate-3 decision-identity comparison.
+        if (cert_shadow.h != nullptr) {
+            CudaCertShadowResult shadow{};
+            const double shadow_eff = effective_absorption_tolerance(options);
+            const double shadow_limit =
+                std::max(8.0 * std::max(0.0, shadow_eff),
+                         64.0 * std::numeric_limits<double>::epsilon());
+            const bool shadow_ok = cuda_cert_shadow_finish(
+                cert_shadow.h, d_y.data(), cols > 0 ? d_x.data() : nullptr,
+                shadow_limit, &shadow);
+            cert_shadow.h = nullptr;  // finish always frees the handle
+            static const char* kVerdictNames[4] = {"PASS", "FAIL", "INDET",
+                                                   "ERROR"};
+            std::fprintf(
+                stderr,
+                "cuda_cert_shadow ok=%d verdict=%s host_like_pass=%d "
+                "rel=%.17e rel_perdim=%.17e r_lo=%.17e r_up=%.17e L=%.17e "
+                "wsum_maxdiff=%.3e empty_groups=%lld dims=%d rhs=%d "
+                "begin_ms=%.3f finish_ms=%.3f\n",
+                shadow_ok ? 1 : 0,
+                kVerdictNames[shadow.verdict & 3], shadow.host_like_pass,
+                shadow.rel_max, shadow.rel_max_perdim, shadow.r_lower,
+                shadow.r_upper, shadow_limit, shadow.wsum_maxdiff,
+                shadow.empty_groups, shadow.dims, shadow.rhs,
+                shadow.shadow_begin_ms, shadow.shadow_finish_ms);
+        }
+
         const auto cuda_prof_d2h_t0 = std::chrono::steady_clock::now();
         result.y_tilde.resize(n);
         staged_memcpy_d2h(result.y_tilde.data(), d_y.data(), sizeof(double) * n,

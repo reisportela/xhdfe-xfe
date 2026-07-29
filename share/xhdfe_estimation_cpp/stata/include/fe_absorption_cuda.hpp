@@ -43,6 +43,56 @@ void certify_cuda_absorption_result(
     const std::vector<HeterogeneousSlopeTerm>& slopes,
     const std::vector<GpuFeCertificateView>& fe_views,
     AbsorptionResult& result);
+
+// ---------------------------------------------------------------------------
+// WP3 shadow-mode device certificate (plan §10-WP3). Computed entirely on the
+// device by the dedicated verifier TU (fe_absorption_cuda_certificate.cu),
+// with its own kernels, scratch and reduction trees (§6.7). In shadow mode
+// the HOST certificate remains authoritative; the device result is logged and
+// compared, never used for any public field. Activated per-fit by the caller
+// only when XHDFE_GPU_CERT_SHADOW=1; entirely inert otherwise.
+// ---------------------------------------------------------------------------
+struct CudaCertShadowResult {
+    int verdict = 3;              // 0 PASS, 1 FAIL, 2 INDETERMINATE, 3 ERROR
+    int host_like_pass = -1;      // to-nearest rel_max <= L (host semantics)
+    double rel_max = 0.0;         // to-nearest aggregate rel, max over columns
+    double rel_max_perdim = 0.0;  // per-dimension max (§6.4 / P3 diagnostic)
+    double r_lower = 0.0;         // Res_sq bracket of the deciding column
+    double r_upper = 0.0;
+    double wsum_maxdiff = 0.0;    // §6.7 gid/weight_sums cross-check
+    long long empty_groups = 0;   // counted, never silently omitted (§6.5)
+    double shadow_begin_ms = 0.0;
+    double shadow_finish_ms = 0.0;
+    int dims = 0;
+    int rhs = 0;
+};
+
+struct CudaCertShadowHandle;  // opaque; owned by the verifier TU
+
+CudaCertShadowHandle* cuda_cert_shadow_begin(
+    const double* d_y_original,
+    const double* d_x_original,
+    int n,
+    int cols,
+    int ld,
+    const double* d_weights_or_null,
+    const int* const* d_group_ids,      // per-dim device pointers
+    const double* const* d_weight_sums, // per-dim device pointers
+    const int* num_groups,              // per-dim host values
+    int num_dims);
+
+// Runs the accumulation over the post-solve residuals still resident on the
+// device, brackets Res_sq per §6.6, decides per §6.5, copies ONLY scalars
+// back, frees all device scratch and destroys the handle. Returns false (with
+// out->verdict=ERROR) on any CUDA failure — fail-closed.
+bool cuda_cert_shadow_finish(CudaCertShadowHandle* handle,
+                             const double* d_y_residual,
+                             const double* d_x_residual,
+                             double certificate_limit,
+                             CudaCertShadowResult* out);
+
+// Exception-path cleanup: frees device scratch and the handle, computes nothing.
+void cuda_cert_shadow_abort(CudaCertShadowHandle* handle);
 #endif
 
 enum class GpuBackend { Cpu, Cuda, Metal };
