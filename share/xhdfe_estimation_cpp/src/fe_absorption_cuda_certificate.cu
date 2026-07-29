@@ -479,6 +479,7 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
                                       double op_k,
                                       double n_rows,
                                       double L,
+                                      int exact_zero_ok,
                                       ShadowDeviceOut* out) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
@@ -563,13 +564,19 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
         err_up = __dadd_ru(err_up, __dmul_ru(g2, ss_up));
         err_up = __dadd_ru(err_up,
                            __dmul_ru(kEta, static_cast<double>(total_groups)));
-        // Exact-zero channel: when every accumulated |term| is exactly zero
-        // (a1_tot == 0) and the sums of squares are exactly zero, every
-        // floating addition performed was 0+0 — exact — so the true residual
-        // is exactly zero and no additive error floor applies. Without this,
-        // the §6.6 η floor (correct for rounded nonzero accumulation) forces
-        // INDET on the all-zeros corpus case that PASSes trivially.
-        if (a1_tot == 0.0 && ss_up == 0.0) {
+        // Exact-zero channel (re-audit R-01): sound ONLY when every group
+        // multiplier is identically 1.0 — no weights and no slope dims
+        // (exact_zero_ok, host-computed). Then t = fl(1·v) = v bit-exact, so
+        // a1_tot == 0 means every accumulated v was ±0, every addition was
+        // 0+0 — exact — and the true residual is exactly zero: no additive
+        // error floor applies. With weights or slopes, t = fl(w·v) (or
+        // fl(w·z·v)) can underflow to zero for nonzero w·v, so a1_tot == 0
+        // does NOT imply a zero true residual and the §6.6 η floor must
+        // stand (all-zeros inputs then yield INDET: fail-safe, accepted).
+        // Do not "simplify" this gate to a moments count: a slope dim
+        // without intercept has moments == 1 (its only moment IS the slope
+        // moment, mult = w·z) and would re-open the underflow false PASS.
+        if (exact_zero_ok && a1_tot == 0.0 && ss_up == 0.0) {
             err_up = 0.0;
         }
         const double r_up = __dadd_ru(ss_up, err_up);
@@ -923,10 +930,19 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
             static_cast<double>((n + hdfe_cert::kColBlock - 1) /
                                 hdfe_cert::kColBlock) +
             11.0 + ((h->max_moments > 1) ? 1.0 : 0.0);
+        // R-01 predicate: the exact-zero channel is sound only under
+        // mult ≡ 1.0 — no weights AND no slope dim anywhere (a slope-only
+        // dim has moments==1, so max_moments cannot substitute for this).
+        int exact_zero_ok = (h->d_weights == nullptr) ? 1 : 0;
+        for (int d = 0; d < dims && exact_zero_ok; ++d) {
+            if (h->dims[static_cast<std::size_t>(d)].d_slope_z != nullptr) {
+                exact_zero_ok = 0;
+            }
+        }
         hdfe_cert::bracket_decide_kernel<<<1, 1>>>(
             h->d_acc, h->d_k1, h->d_groups, h->d_moments, h->d_op, dims,
             cols, h->d_orig_sq, col_k, col_k, static_cast<double>(n),
-            certificate_limit, h->d_out);
+            certificate_limit, exact_zero_ok, h->d_out);
         ok = sh_ok(cudaGetLastError());
     }
     hdfe_cert::ShadowDeviceOut dev{};
@@ -964,6 +980,15 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
     if (ok && bad_gid != 0) {
         // A-05: at least one out-of-range gid — the accumulation is
         // incomplete by design. ERROR, never a verdict.
+        dev.verdict = 3;
+        dev.host_like_pass = -1;
+    }
+    if (ok && !(wdiff <= wsum_tol)) {
+        // R-05: the weight-sums cross-check is the shadow's own integrity
+        // probe (device group sums vs an independent device recount). If it
+        // fails, the certificate inputs cannot be trusted, so no PASS/FAIL
+        // verdict may stand — degrade to ERROR (fail-closed), same policy
+        // as bad_gid. NaN wdiff also lands here (!(NaN <= tol)).
         dev.verdict = 3;
         dev.host_like_pass = -1;
     }

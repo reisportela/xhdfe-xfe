@@ -5312,6 +5312,21 @@ GroupCollapsedData collapse_group_long_format(const Eigen::VectorXd& y,
         // an otherwise valid group-level frequency total overflow.
         validate_frequency_weight_values(*weights);
     }
+    if (weights && !weights_are_frequencies) {
+        // Analytic weights must be IEEE-finite and non-negative (re-audit
+        // R-03): one negative or NaN value among many silently corrupts
+        // every weighted moment while the only prior guard — a positive
+        // total — still passes. Zero remains allowed (a zero-weight row
+        // contributes nothing). ieee_finite is bit-level, immune to
+        // -ffast-math folding std::isfinite into a constant.
+        const double* w_chk = weights->data();
+        for (int i = 0; i < n; ++i) {
+            if (!ieee_finite(w_chk[i]) || w_chk[i] < 0.0) {
+                throw std::runtime_error(
+                    "weights must be finite and non-negative");
+            }
+        }
+    }
     if (clusters) {
         for (const auto& c : *clusters) {
             if (c.size() != n) {
@@ -7201,6 +7216,23 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     if (weights && weights->size() != y.size()) {
         throw std::runtime_error("Weights must have the same length as y");
+    }
+    if (weights && !options_.weights_are_frequencies) {
+        // Analytic weights must be IEEE-finite and non-negative (re-audit
+        // R-03): one negative or NaN value among many silently corrupts
+        // every weighted moment while the only prior guard â a positive
+        // total â still passes. Zero remains allowed (a zero-weight row
+        // contributes nothing). ieee_finite is bit-level, immune to
+        // -ffast-math folding std::isfinite into a constant. Frequency
+        // weights keep their stricter positive-integer validation.
+        const double* w_chk = weights->data();
+        const Eigen::Index n_w = weights->size();
+        for (Eigen::Index i = 0; i < n_w; ++i) {
+            if (!ieee_finite(w_chk[i]) || w_chk[i] < 0.0) {
+                throw std::runtime_error(
+                    "weights must be finite and non-negative");
+            }
+        }
     }
     gpu_used_ = false;
     gpu_status_code_ = 0;
@@ -9560,6 +9592,23 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     }
     if (weights && weights->size() != y.size()) {
         throw std::runtime_error("Weights must have the same length as y");
+    }
+    if (weights && !options_.weights_are_frequencies) {
+        // Analytic weights must be IEEE-finite and non-negative (re-audit
+        // R-03): one negative or NaN value among many silently corrupts
+        // every weighted moment while the only prior guard â a positive
+        // total â still passes. Zero remains allowed (a zero-weight row
+        // contributes nothing). ieee_finite is bit-level, immune to
+        // -ffast-math folding std::isfinite into a constant. Frequency
+        // weights keep their stricter positive-integer validation.
+        const double* w_chk = weights->data();
+        const Eigen::Index n_w = weights->size();
+        for (Eigen::Index i = 0; i < n_w; ++i) {
+            if (!ieee_finite(w_chk[i]) || w_chk[i] < 0.0) {
+                throw std::runtime_error(
+                    "weights must be finite and non-negative");
+            }
+        }
     }
     gpu_used_ = false;
     gpu_status_code_ = 0;
