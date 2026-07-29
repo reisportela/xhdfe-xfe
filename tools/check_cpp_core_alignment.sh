@@ -114,7 +114,10 @@ for pair in "${pairs[@]}"; do
   fi
   if ! cmp -s "${left}" "${right}"; then
     echo "DIFF ${left} ${right}" >&2
-    diff -u "${left}" "${right}" | sed -n '1,40p' >&2
+    # `|| true`: under set -e -o pipefail the diff exit status (1 on
+    # divergence) would kill the loop at the FIRST divergent pair,
+    # silently re-introducing the exit-on-first behaviour F-09 removed.
+    diff -u "${left}" "${right}" | sed -n '1,40p' >&2 || true
     status=1
   fi
 done
