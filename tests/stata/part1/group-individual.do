@@ -34,6 +34,10 @@ xhdfe citations funding, absorb(year inventor) group(patent) individual(inventor
     aggregation(mean) tolerancemode(reghdfe-comparable) tolerance(1e-12) ///
     noheader notable nofootnote
 xcert_store_estimates, prefix(ref_ind) scalars("N df_r df_m")
+if (e(converged) != 1 | e(precision_certified) != 1 | e(abs_residual_rel) > 8e-12) {
+    di as error "group/individual mean absorption was not precision-certified"
+    exit 9
+}
 if (`"`e(group)'"' != "patent" | `"`e(individual)'"' != "inventor" | `"`e(aggregation)'"' != "mean") {
     di as error "group/individual metadata mismatch under aggregation(mean)"
     exit 9
@@ -43,6 +47,10 @@ xhdfe citations funding, absorb(year inventor) group(patent) i(inventor) ///
     aggregation(avg) tolerancemode(reghdfe-comparable) tolerance(1e-12) ///
     noheader notable nofootnote
 xcert_store_estimates, prefix(xhd_ind_alias) scalars("N df_r df_m")
+if (e(converged) != 1 | e(precision_certified) != 1 | e(abs_residual_rel) > 8e-12) {
+    di as error "group/individual avg absorption was not precision-certified"
+    exit 9
+}
 
 xcert_compare_estimates, refprefix(ref_ind) testprefix(xhd_ind_alias) scalars("N df_r df_m") ///
     btol(1e-8) vtol(1e-6) scaltol(1e-8)
@@ -54,6 +62,10 @@ if (`"`e(group)'"' != "patent" | `"`e(individual)'"' != "inventor" | `"`e(aggreg
 xhdfe citations funding, absorb(year inventor) group(patent) individual(inventor) ///
     aggregation(sum) tolerancemode(reghdfe-comparable) tolerance(1e-12) ///
     noheader notable nofootnote
+if (e(converged) != 1 | e(precision_certified) != 1 | e(abs_residual_rel) > 8e-12) {
+    di as error "group/individual sum absorption was not precision-certified"
+    exit 9
+}
 if (`"`e(aggregation)'"' != "sum" | e(N) != 100) {
     di as error "group/individual aggregation(sum) metadata mismatch"
     exit 9

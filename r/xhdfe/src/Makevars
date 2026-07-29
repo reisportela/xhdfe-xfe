@@ -78,8 +78,10 @@ ifneq ($(XHDFE_CUDA_ARCH_VALID),yes)
 $(error CUDA architecture $(XHDFE_CUDA_ARCH_SELECTED) is invalid or below the minimum supported sm_75)
 endif
 XHDFE_NVCC_HOST_FLAGS = -fPIC,-fopenmp,-O3,-ffast-math
+XHDFE_NVCC_VERIFIER_HOST_FLAGS = -fPIC,-fopenmp,-O3
 ifneq ($(strip $(XHDFE_MARCH)),)
 XHDFE_NVCC_HOST_FLAGS = -fPIC,-fopenmp,-O3,$(XHDFE_MARCH_FLAG),-ffast-math
+XHDFE_NVCC_VERIFIER_HOST_FLAGS = -fPIC,-fopenmp,-O3,$(XHDFE_MARCH_FLAG)
 endif
 # Default to the nvcc found on PATH (works for both /usr/local/cuda and the
 # NVIDIA HPC SDK layouts); set CUDA_HOME/XHDFE_CUDA_LIB to override.
@@ -87,8 +89,24 @@ NVCC ?= $(if $(CUDA_HOME),$(CUDA_HOME)/bin/nvcc,nvcc)
 XHDFE_CUDA_LIB ?= $(if $(CUDA_HOME),$(CUDA_HOME)/lib64,$(dir $(shell $(NVCC) --version > /dev/null 2>&1 && command -v $(NVCC)))../../cuda/lib64)
 PKG_CPPFLAGS += -DHDFE_USE_CUDA
 PKG_LIBS += -L$(XHDFE_CUDA_LIB) -Wl,-rpath,$(XHDFE_CUDA_LIB) -lcudart
-CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o
+CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o fe_absorption_cuda_verifier.o
 CUDA_HOST_OBJECTS = fe_absorption_cuda_certificate.o
+
+# WP3 verifier TU (plan P1/§7.6): strict FP flags regardless of the package
+# flags — no fast-math, no contraction, full-precision div/sqrt, no FTZ —
+# with the host switches recorded in the object for the §15.3 gate. Uses
+# XHDFE_NVCC_VERIFIER_HOST_FLAGS (no -ffast-math: nvcc here has no
+# -forward-unknown-to-host-compiler, so a -fno-* negation cannot be ordered
+# after it; the TU's #error guard proves the host pass is clean).
+fe_absorption_cuda_verifier.o: fe_absorption_cuda_certificate.cu
+	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
+	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
+	    --expt-relaxed-constexpr \
+	    --fmad=false --prec-div=true --prec-sqrt=true --ftz=false \
+	    -Xcompiler $(XHDFE_NVCC_VERIFIER_HOST_FLAGS) \
+	    -Xcompiler -ffp-contract=off -Xcompiler -frecord-gcc-switches \
+	    -I. -Iinclude -Ieigen -c $< -o $@
 
 akm_kss_cuda.o: akm_kss_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \

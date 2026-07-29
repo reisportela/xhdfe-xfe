@@ -29,7 +29,24 @@ foreach method of local methods {
         di as error "absorptionmethod(`method') expected code `code'; got " e(absorption_method_used)
         exit 9
     }
+    capture scalar __abs_residual = e(abs_residual)
+    if (_rc | missing(__abs_residual) | __abs_residual < 0) {
+        di as error "absorptionmethod(`method') did not expose a valid e(abs_residual)"
+        exit 9
+    }
+    capture scalar __abs_residual_rel = e(abs_residual_rel)
+    if (_rc | missing(__abs_residual_rel) | __abs_residual_rel < 0) {
+        di as error "absorptionmethod(`method') did not expose a valid e(abs_residual_rel)"
+        exit 9
+    }
+    capture scalar __precision_certified = e(precision_certified)
+    if (_rc | !inlist(__precision_certified, 0, 1)) {
+        di as error "absorptionmethod(`method') did not expose a Boolean e(precision_certified)"
+        exit 9
+    }
     di as text "  scalar absorption_method_`method': " e(absorption_method_used)
+    di as text "  certificate `method': abs=" %21.14e __abs_residual ///
+        " rel=" %21.14e __abs_residual_rel " certified=" __precision_certified
 }
 
 exit

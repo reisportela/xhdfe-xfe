@@ -291,7 +291,11 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         ``||M_D x||^2 / ||x||^2 <= 1e-9`` (relative norm about 3.16e-5),
         returned as metadata.
     num_threads : nonnegative OpenMP thread request; zero uses the library
-        default.
+        automatic policy. A positive request bypasses automatic workload
+        heuristics and is limited only by the processor/OpenMP capacity
+        visible to the running process. The returned ``threads_*`` fields
+        distinguish the request, the effective capacity-limited budget, and
+        workers actually observed doing useful work.
     gpu : bool — request CUDA for the full-model absorption phase. This is
         opt-in; CPU remains the reference and any fallback is reported in the
         returned GPU diagnostics.
@@ -875,8 +879,33 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "gamma0": bool(gamma0),
         "cov0": bool(cov0),
         "tol": float(tol),
-        "threads_requested": int(num_threads),
+        "threads_requested": int(r["threads_requested"]),
+        "threads_effective": int(r["threads_effective"]),
+        "recovery_threads_effective": int(
+            r["recovery_threads_effective"]
+        ),
+        "fullfit_threads_used": int(r["fullfit_threads_used"]),
+        "fullfit_parallel_workers_active": int(
+            r["fullfit_parallel_workers_active"]
+        ),
+        "recovery_threads_used": int(r["recovery_threads_used"]),
+        "recovery_parallel_workers_active": int(
+            r["recovery_parallel_workers_active"]
+        ),
+        "covariance_threads_used": int(
+            r["covariance_threads_used"]
+        ),
+        "covariance_parallel_workers_active": int(
+            r["covariance_parallel_workers_active"]
+        ),
         "threads_used": int(r["threads_used"]),
+        "parallel_workers_active": int(
+            r["parallel_workers_active"]
+        ),
+        "thread_capacity": int(r["thread_capacity"]),
+        "openmp_enabled": bool(r["openmp_enabled"]),
+        "thread_limit_code": int(r["thread_limit_code"]),
+        "thread_limit_reason": str(r["thread_limit_reason"]),
         "gpu_requested": bool(r["gpu_requested"]),
         "gpu_used": bool(r["gpu_used"]),
         "gpu_status_code": int(r["gpu_status_code"]),

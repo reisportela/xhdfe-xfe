@@ -489,16 +489,27 @@ void certify_cuda_absorption_result(
         }
 
         CertificateMatrix sums(input.num_groups, values_per_group);
-        const std::int64_t task_count =
-            static_cast<std::int64_t>(input.num_groups) *
-            static_cast<std::int64_t>(values_per_group);
+        // §10.8 minimal correction, applied because the regression was
+        // measured before WP6 replaces this path: the previous task layout
+        // (group × value_index) walked every group's rows once PER VALUE —
+        // values_per_group full passes over the observations per dimension,
+        // which the ab12 §12 cells measured as the dominant candidate-vs-
+        // public slowdown (ready +1.1 s, simulated_panel +4.6 s). Hoisting
+        // the (moment, rhs) loop inside the per-group task makes it ONE pass.
+        // Bit-preservation: for each (group, value_index) the additions into
+        // its accumulator happen for the same rows, in the same row order,
+        // with the same chunk-sequential merge (chunk==0 assigns, later
+        // chunks add) — only the interleaving BETWEEN independent
+        // accumulators changes, which no sum observes.
+        const std::int64_t group_task_count =
+            static_cast<std::int64_t>(input.num_groups);
         const int certificate_threads = std::max(
             1, static_cast<int>(
-                   std::min<std::int64_t>(threads, task_count)));
+                   std::min<std::int64_t>(threads, group_task_count)));
         ParallelWorkObserver* region_observer = observer_if_needed(
             options.parallel_observer, certificate_threads,
             static_cast<int>(std::min<std::int64_t>(
-                task_count, std::numeric_limits<int>::max())));
+                group_task_count, std::numeric_limits<int>::max())));
         if (region_observer) {
             region_observer->begin_region(certificate_threads);
         }
@@ -508,58 +519,81 @@ void certify_cuda_absorption_result(
             if (region_observer) {
                 region_observer->observe_work();
             }
+            std::vector<double> task_totals(
+                static_cast<std::size_t>(values_per_group));
+            std::vector<double> task_locals(
+                static_cast<std::size_t>(values_per_group));
 #pragma omp for schedule(static)
-            for (std::int64_t task = 0; task < task_count; ++task) {
+            for (std::int64_t task = 0; task < group_task_count; ++task) {
 #else
         if (region_observer) {
             region_observer->observe_work();
         }
-        for (std::int64_t task = 0; task < task_count; ++task) {
+        {
+            std::vector<double> task_totals(
+                static_cast<std::size_t>(values_per_group));
+            std::vector<double> task_locals(
+                static_cast<std::size_t>(values_per_group));
+        for (std::int64_t task = 0; task < group_task_count; ++task) {
 #endif
-                const int group =
-                    static_cast<int>(task / values_per_group);
-                const int value_index =
-                    static_cast<int>(task % values_per_group);
-                const int moment = value_index / rhs_count;
-                const int rhs = value_index % rhs_count;
+                const int group = static_cast<int>(task);
                 int position = group_ptr[group];
                 const int group_end = group_ptr[group + 1];
-                double total = 0.0;
                 for (int chunk = 0; chunk < chunk_count; ++chunk) {
                     const int chunk_end =
                         deterministic_chunk_end(n, chunk, chunk_count);
-                    double local = 0.0;
+                    for (int vi = 0; vi < values_per_group; ++vi) {
+                        task_locals[static_cast<std::size_t>(vi)] = 0.0;
+                    }
                     while (position < group_end) {
                         const int row =
                             obs_index ? obs_index[position] : position;
                         if (row >= chunk_end) {
                             break;
                         }
-                        double multiplier =
+                        const double base_weight =
                             unit_weights ? 1.0 : weight_ptr[row];
-                        if (slope) {
-                            const bool intercept_moment =
-                                slope->include_intercept && moment == 0;
-                            if (!intercept_moment) {
-                                multiplier *= slope_values[row];
+                        for (int moment = 0; moment < moment_count; ++moment) {
+                            double multiplier = base_weight;
+                            if (slope) {
+                                const bool intercept_moment =
+                                    slope->include_intercept && moment == 0;
+                                if (!intercept_moment) {
+                                    multiplier *= slope_values[row];
+                                }
+                            }
+                            const int base_vi = moment * rhs_count;
+                            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                                const double value =
+                                    rhs == 0
+                                        ? result.y_tilde[row]
+                                        : result.X_tilde(row, rhs - 1);
+                                task_locals[static_cast<std::size_t>(
+                                    base_vi + rhs)] += multiplier * value;
                             }
                         }
-                        const double value =
-                            rhs == 0
-                                ? result.y_tilde[row]
-                                : result.X_tilde(row, rhs - 1);
-                        local += multiplier * value;
                         ++position;
                     }
                     if (chunk == 0) {
-                        total = local;
+                        for (int vi = 0; vi < values_per_group; ++vi) {
+                            task_totals[static_cast<std::size_t>(vi)] =
+                                task_locals[static_cast<std::size_t>(vi)];
+                        }
                     } else {
-                        total += local;
+                        for (int vi = 0; vi < values_per_group; ++vi) {
+                            task_totals[static_cast<std::size_t>(vi)] +=
+                                task_locals[static_cast<std::size_t>(vi)];
+                        }
                     }
                 }
-                sums(group, value_index) = total;
+                for (int vi = 0; vi < values_per_group; ++vi) {
+                    sums(group, vi) =
+                        task_totals[static_cast<std::size_t>(vi)];
+                }
             }
 #ifdef HDFE_USE_OPENMP
+        }
+#else
         }
 #endif
         if (region_observer) {

@@ -60,6 +60,8 @@ struct CudaCertShadowResult {
     double r_lower = 0.0;         // Res_sq bracket of the deciding column
     double r_upper = 0.0;
     double wsum_maxdiff = 0.0;    // §6.7 gid/weight_sums cross-check
+    double wsum_tol = 0.0;        // γ-scaled tolerance for that check (A-04)
+    int wsum_ok = 1;              // 1 iff wsum_maxdiff <= wsum_tol
     long long empty_groups = 0;   // counted, never silently omitted (§6.5)
     double shadow_begin_ms = 0.0;
     double shadow_finish_ms = 0.0;
@@ -79,7 +81,9 @@ CudaCertShadowHandle* cuda_cert_shadow_begin(
     const int* const* d_group_ids,      // per-dim device pointers
     const double* const* d_weight_sums, // per-dim device pointers
     const int* num_groups,              // per-dim host values
-    int num_dims);
+    int num_dims,
+    const double* const* d_slope_values = nullptr,  // per-dim device z, or null
+    const unsigned char* slope_has_intercept = nullptr);
 
 // Runs the accumulation over the post-solve residuals still resident on the
 // device, brackets Res_sq per §6.6, decides per §6.5, copies ONLY scalars

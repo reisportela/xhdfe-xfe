@@ -146,9 +146,12 @@ Arguments:
 - `tol`: positive FE-absorption tolerance. It does not control the separate
   FE-collinearity classifier.
 - `num_threads`: OpenMP team-size request for each computational phase; zero
-  uses the library default. Phases execute sequentially: this is the team cap
-  for an active phase, not a sum of simultaneously reserved teams.
-  `threads_used` reports the largest team actually used by a phase.
+  uses the automatic policy. A positive request bypasses automatic
+  workload-size caps and is limited only by the processor/OpenMP capacity
+  visible to the process. Phases execute sequentially: this is the team
+  budget for an active phase, not a sum of simultaneously reserved teams.
+  The returned diagnostics distinguish the request, effective budget, team
+  size, and workers observed doing useful work.
 - `weights`: finite, strictly positive analytic weights by default.
 - `fweights`: interpret `weights` as positive integer frequency weights.
 - `absorbed_targets`: X1 names, zero-based indices, or a length-p Boolean
@@ -305,7 +308,14 @@ Inference and diagnostics:
   `connectivity_fe_indices`, `connectivity_fe_names`,
   `connectivity_pair_explicit`, `connectivity_pair_status`, and
   `connected_mode`;
-- `threads_requested` and `threads_used`;
+- `threads_requested`, `threads_effective`,
+  `recovery_threads_effective`, `threads_used`,
+  `parallel_workers_active`, `thread_capacity`, `openmp_enabled`,
+  `thread_limit_code`, and `thread_limit_reason`;
+- phase diagnostics `fullfit_threads_used`,
+  `fullfit_parallel_workers_active`, `recovery_threads_used`,
+  `recovery_parallel_workers_active`, `covariance_threads_used`, and
+  `covariance_parallel_workers_active`;
 - `gpu_requested`, `gpu_attempted`, `gpu_used`, `gpu_backend`, `gpu_status`,
   `gpu_status_code`, `gpu_absorption_converged`, and
   `gpu_absorption_iterations`;

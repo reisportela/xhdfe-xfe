@@ -27,4 +27,22 @@ xcert_subset_estimates, inprefix(xhd) outprefix(xhd_common) cols("x1 endo") scal
 xcert_compare_estimates, refprefix(ref_common) testprefix(xhd_common) scalars("`scalars'") ///
     btol(1e-8) vtol(1e-6) scaltol(1e-8)
 
+quietly summarize y if e(sample), meanonly
+scalar __xcert_iv_ybar = r(mean)
+quietly summarize x1 if e(sample), meanonly
+scalar __xcert_iv_x1bar = r(mean)
+quietly summarize endo if e(sample), meanonly
+scalar __xcert_iv_endobar = r(mean)
+scalar __xcert_iv_alpha = __xcert_iv_ybar - ///
+    __xcert_iv_x1bar * _b[x1] - __xcert_iv_endobar * _b[endo]
+assert abs(_b[_cons] - __xcert_iv_alpha) < 1e-10
+assert _se[_cons] < .
+
+predict double xhd_iv_xb if e(sample), xb
+assert xhd_iv_xb < . if e(sample)
+quietly summarize y if e(sample), meanonly
+scalar __xcert_iv_ymax = max(1, max(abs(r(min)), abs(r(max))))
+quietly summarize xhd_iv_xb if e(sample), meanonly
+assert max(abs(r(min)), abs(r(max))) < 100 * __xcert_iv_ymax
+
 exit

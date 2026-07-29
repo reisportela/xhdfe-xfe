@@ -83,10 +83,10 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     Advanced performance environment variables (defaults are tuned; none
     changes the default numeric output):
 
-    - ``XHDFE_AKM_TEAM`` caps the OpenMP team size of the per-iteration solver
-      regions. The default caps it by the edge work so a large thread pool does
-      not oversubscribe small/medium graphs (the dominant speed lever below
-      ~10M rows); ``0`` restores the uncapped team, ``k`` forces ``k`` threads.
+    - ``XHDFE_AKM_TEAM`` tunes the automatic (``num_threads=0``)
+      per-iteration solver team. Explicit positive requests bypass this
+      environment heuristic and are limited only by runtime-visible processor
+      capacity.
     - ``XHDFE_AKM_JLA_BLOCK`` overrides the JLA multi-RHS block size (default 8;
       ``0`` selects the pre-2.14 sequential solver, last-ulp different).
     - ``XHDFE_AKM_SE_BLOCK`` does the same for the component-SE / eigen-
@@ -100,6 +100,14 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     does not converge (check ``res['converged']``) or if ``notes`` contains an
     inferential warning (collinear control omission, a truncated negative
     simulated variance, or an undefined AM interval).
+
+    ``gpu_requested`` / ``gpu_used`` / ``gpu_status`` describe the two-way
+    solver. With controls, ``fwl_gpu_*`` separately describes the absorber.
+    That nested FWL phase deliberately uses the strict-residual MLSMR CPU
+    reference path (``fwl_gpu_status='cpu_reference'``), because an
+    ill-conditioned worker-firm graph can satisfy an update-norm trigger
+    without adequate forward parity. The two-way solver remains independently
+    eligible for real CUDA execution.
 
     Under the canonical ``leave_out_COMPLETE`` rule, match-level component
     inference reports only ``var_psi`` and ``cov_alpha_psi``. Therefore
@@ -149,11 +157,32 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     return res
 
 
-def leave_out_set(worker, firm):
-    """Largest leave-one-out connected set (KSS / LeaveOutTwoWay semantics)."""
+def leave_out_set(
+    worker,
+    firm,
+    fweights=None,
+    *,
+    num_threads=0,
+    gpu=False,
+    verbose=0,
+):
+    """Largest leave-one-out connected set (KSS / LeaveOutTwoWay semantics).
+
+    A positive ``num_threads`` request is limited only by the processor/OpenMP
+    capacity visible to the process. The result reports the request,
+    capacity-limited budget, observed OpenMP team, and workers that actually
+    processed useful work.
+    """
     wc, _ = _id_codes(worker)
     fc, _ = _id_codes(firm)
-    return _core().akm_leave_out_set(wc, fc)
+    return _core().akm_leave_out_set(
+        wc,
+        fc,
+        fweights=fweights,
+        num_threads=num_threads,
+        gpu=gpu,
+        verbose=verbose,
+    )
 
 
 def subsampling_diagnostic(y, worker, firm, X=None, fractions=(0.0, 0.1, 0.2,
@@ -167,11 +196,20 @@ def subsampling_diagnostic(y, worker, firm, X=None, fractions=(0.0, 0.1, 0.2,
     ``{fraction, rep, n_obs, n_movers, plugin, agsu, kss, converged}`` whose
     trajectory as f grows reveals limited-mobility bias in the plug-in
     components (the corrected ones should stay ~flat).
+
+    The AKM execution controls ``num_threads``, ``gpu`` and ``verbose`` are
+    also forwarded to the initial leave-out-set construction. Other AKM-only
+    keyword arguments remain confined to the decomposition calls.
     """
     y = np.ascontiguousarray(y, dtype=np.float64)
     worker = np.asarray(worker)
     firm = np.asarray(firm)
-    base = leave_out_set(worker, firm)
+    leave_out_kwargs = {
+        key: akm_kwargs[key]
+        for key in ("num_threads", "gpu", "verbose")
+        if key in akm_kwargs
+    }
+    base = leave_out_set(worker, firm, **leave_out_kwargs)
     keep0 = base["keep"]
     # movers of the leave-out sample
     kw = worker[keep0]

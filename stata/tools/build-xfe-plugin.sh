@@ -454,6 +454,25 @@ compile_plugin() {
         fi
         if [[ $rc -eq 0 ]]; then
           objs+=( "${cuda_certificate_obj}" )
+          # WP3 verifier TU (plan P1/§7.6): strict FP flags, switches recorded
+          # in the object; bare host negations must follow any forwarded
+          # fast-math flags (nvcc groups -Xcompiler flags first).
+          cuda_verifier_obj="${OBJ_DIR}/fe_absorption_cuda_certificate_cu.o"
+          # Unlike the CMake path, this nvcc invocation has no
+          # -forward-unknown-to-host-compiler and its nvcc_flags carry no
+          # fast-math for the .cu TUs, so the host flags go via -Xcompiler
+          # (no ordering battle to win here) and the negations are not
+          # needed; the TU's #error guard still proves the state.
+          "${NVCC}" "${nvcc_flags[@]}" \
+            --fmad=false --prec-div=true --prec-sqrt=true --ftz=false \
+            -Xcompiler "-ffp-contract=off" \
+            -Xcompiler "-frecord-gcc-switches" \
+            -c "${STATA_DIR}/src/fe_absorption_cuda_certificate.cu" \
+            -o "${cuda_verifier_obj}"
+          rc=$?
+        fi
+        if [[ $rc -eq 0 ]]; then
+          objs+=( "${cuda_verifier_obj}" )
           set -e
           break
         fi

@@ -137,9 +137,22 @@ constexpr int kColBlock = 1024;
 constexpr int kSegBlock = 256;
 
 __host__ __device__ inline double gamma_of(double k_depth) {
-    // γ_K = K·u/(1−K·u), monotone; caller guarantees K·u < 1.
+    // γ_K = K·u/(1−K·u), monotone; caller guarantees K·u < 1. On the device
+    // this is written with directed intrinsics for two reasons: (1) the FMA
+    // gate caught nvcc contracting the plain `1.0 - k*u` into fma even under
+    // --fmad=false (audit A-02, second occurrence), and intrinsics are never
+    // contracted; (2) rounding ku UP, the denominator DOWN and the quotient
+    // UP deliberately OVER-estimates γ, which is conservative for every use:
+    // it widens the error terms (upper side) and deflates the (1−γ) lower
+    // brackets further.
+#ifdef __CUDA_ARCH__
+    const double ku = __dmul_ru(k_depth, kU);
+    const double den = __dadd_rd(1.0, -ku);
+    return __ddiv_ru(ku, den);
+#else
     const double ku = k_depth * kU;
     return ku / (1.0 - ku);
+#endif
 }
 
 // Fixed-shape sum of squares per column (c = 0 → y, c ≥ 1 → X col c-1),
@@ -156,13 +169,17 @@ __global__ void colwise_sumsq_kernel(const double* y,
         double acc = 0.0;
         for (int i = threadIdx.x; i < n; i += kColBlock) {
             const double t = v[i];
-            acc += t * t;
+            // Explicit __dmul_rn/__dadd_rn: NVHPC 25.3 nvcc contracts a*b+c
+            // into DFMA even under --fmad=false (audit A-02); intrinsics are
+            // never contracted, so the §6.6 one-rounding-per-op model holds
+            // in the object, not just on the command line.
+            acc = __dadd_rn(acc, __dmul_rn(t, t));
         }
         sh[threadIdx.x] = acc;
         __syncthreads();
         for (int s = kColBlock / 2; s > 0; s >>= 1) {
             if (threadIdx.x < s) {
-                sh[threadIdx.x] += sh[threadIdx.x + s];
+                sh[threadIdx.x] = __dadd_rn(sh[threadIdx.x], sh[threadIdx.x + s]);
             }
             __syncthreads();
         }
@@ -173,18 +190,26 @@ __global__ void colwise_sumsq_kernel(const double* y,
     }
 }
 
-__global__ void weights_sumsq_kernel(const double* w, int n, double* out) {
+// Op_sq for one (dim, moment): Σ mult², mult = w (intercept/standard moment)
+// or w·z (slope moment). Same fixed single-block tree as the column kernel.
+__global__ void weights_sumsq_kernel(const double* w,
+                                     const double* z,
+                                     int n,
+                                     double* out) {
     __shared__ double sh[kColBlock];
     double acc = 0.0;
     for (int i = threadIdx.x; i < n; i += kColBlock) {
-        const double t = (w != nullptr) ? w[i] : 1.0;
-        acc += t * t;
+        double t = (w != nullptr) ? w[i] : 1.0;
+        if (z != nullptr) {
+            t = __dmul_rn(t, z[i]);
+        }
+        acc = __dadd_rn(acc, __dmul_rn(t, t));
     }
     sh[threadIdx.x] = acc;
     __syncthreads();
     for (int s = kColBlock / 2; s > 0; s >>= 1) {
         if (threadIdx.x < s) {
-            sh[threadIdx.x] += sh[threadIdx.x + s];
+            sh[threadIdx.x] = __dadd_rn(sh[threadIdx.x], sh[threadIdx.x + s]);
         }
         __syncthreads();
     }
@@ -226,48 +251,71 @@ __global__ void group_ptr_kernel(const int* gid, int n, int groups, int* ptr) {
 
 // Contiguous accumulation: one block per group (grid-stride), shared tree per
 // column; S and A (Σ|termo|) written directly — no atomics, deterministic.
+// mult(i, moment): moment 0 is the intercept/standard weight; slope moments
+// multiply by z (two roundings before the add — the caller accounts 2u in K).
+__device__ inline double cert_mult(const double* w,
+                                   const double* z,
+                                   int moment,
+                                   bool slope_intercept,
+                                   int i) {
+    double m = (w != nullptr) ? w[i] : 1.0;
+    if (z != nullptr && !(slope_intercept && moment == 0)) {
+        m = __dmul_rn(m, z[i]);
+    }
+    return m;
+}
+
 __global__ void seg_accum_kernel(const double* resid_y,
                                  const double* resid_x,
                                  const double* w,
+                                 const double* slope_z,
+                                 bool slope_intercept,
+                                 int moments,
                                  const int* ptr,
                                  int groups,
                                  int cols,
                                  int ld,
-                                 double* S,   // groups x (cols+1)
-                                 double* A,   // groups x (cols+1)
+                                 double* S,   // groups x (moments x (cols+1))
+                                 double* A,
                                  double* W,   // groups
                                  int* CNT) {  // groups
     __shared__ double sh_s[kSegBlock];
     __shared__ double sh_a[kSegBlock];
-    const int vpg = cols + 1;
+    const int rhsc = cols + 1;
+    const int vpg = moments * rhsc;
     for (int g = blockIdx.x; g < groups; g += gridDim.x) {
         const int beg = ptr[g];
         const int end = ptr[g + 1];
-        for (int c = 0; c <= cols; ++c) {
+        for (int vi = 0; vi < vpg; ++vi) {
+            const int moment = vi / rhsc;
+            const int c = vi % rhsc;
             const double* v =
                 (c == 0) ? resid_y
                          : (resid_x + static_cast<std::size_t>(c - 1) * ld);
             double s = 0.0;
             double a = 0.0;
             for (int i = beg + threadIdx.x; i < end; i += kSegBlock) {
-                const double wi = (w != nullptr) ? w[i] : 1.0;
-                const double t = wi * v[i];
-                s += t;
-                a += fabs(t);
+                const double wi =
+                    cert_mult(w, slope_z, moment, slope_intercept, i);
+                const double t = __dmul_rn(wi, v[i]);
+                s = __dadd_rn(s, t);
+                a = __dadd_rn(a, fabs(t));
             }
             sh_s[threadIdx.x] = s;
             sh_a[threadIdx.x] = a;
             __syncthreads();
             for (int st = kSegBlock / 2; st > 0; st >>= 1) {
                 if (threadIdx.x < st) {
-                    sh_s[threadIdx.x] += sh_s[threadIdx.x + st];
-                    sh_a[threadIdx.x] += sh_a[threadIdx.x + st];
+                    sh_s[threadIdx.x] =
+                        __dadd_rn(sh_s[threadIdx.x], sh_s[threadIdx.x + st]);
+                    sh_a[threadIdx.x] =
+                        __dadd_rn(sh_a[threadIdx.x], sh_a[threadIdx.x + st]);
                 }
                 __syncthreads();
             }
             if (threadIdx.x == 0) {
-                S[static_cast<std::size_t>(g) * vpg + c] = sh_s[0];
-                A[static_cast<std::size_t>(g) * vpg + c] = sh_a[0];
+                S[static_cast<std::size_t>(g) * vpg + vi] = sh_s[0];
+                A[static_cast<std::size_t>(g) * vpg + vi] = sh_a[0];
             }
             __syncthreads();
         }
@@ -297,30 +345,46 @@ __global__ void seg_accum_kernel(const double* resid_y,
 __global__ void atomic_accum_kernel(const double* resid_y,
                                     const double* resid_x,
                                     const double* w,
+                                    const double* slope_z,
+                                    bool slope_intercept,
+                                    int moments,
                                     const int* gid,
                                     int n,
+                                    int groups,
                                     int cols,
                                     int ld,
                                     double* S,
                                     double* A,
                                     double* W,
-                                    int* CNT) {
+                                    int* CNT,
+                                    int* bad_gid) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) {
         return;
     }
     const int g = gid[i];
-    const int vpg = cols + 1;
-    const double wi = (w != nullptr) ? w[i] : 1.0;
-    for (int c = 0; c <= cols; ++c) {
+    if (g < 0 || g >= groups) {
+        // Corrupt gid: record and bail — the finish path turns this into
+        // ERROR (fail-closed). Writing through it would corrupt device
+        // memory, which is exactly what the §6.7 cross-check exists to
+        // detect (audit A-05).
+        atomicExch(bad_gid, 1);
+        return;
+    }
+    const int rhsc = cols + 1;
+    const int vpg = moments * rhsc;
+    for (int vi = 0; vi < vpg; ++vi) {
+        const int moment = vi / rhsc;
+        const int c = vi % rhsc;
+        const double wi = cert_mult(w, slope_z, moment, slope_intercept, i);
         const double v =
             (c == 0) ? resid_y[i]
                      : resid_x[static_cast<std::size_t>(c - 1) * ld + i];
-        const double t = wi * v;
-        atomicAdd(&S[static_cast<std::size_t>(g) * vpg + c], t);
-        atomicAdd(&A[static_cast<std::size_t>(g) * vpg + c], fabs(t));
+        const double t = __dmul_rn(wi, v);
+        atomicAdd(&S[static_cast<std::size_t>(g) * vpg + vi], t);
+        atomicAdd(&A[static_cast<std::size_t>(g) * vpg + vi], fabs(t));
     }
-    atomicAdd(&W[g], wi);
+    atomicAdd(&W[g], (w != nullptr) ? w[i] : 1.0);
     atomicAdd(&CNT[g], 1);
 }
 
@@ -354,15 +418,18 @@ __global__ void group_finalize_kernel(const double* S,
                                       const double* solver_weight_sums,
                                       int groups,
                                       int cols,
-                                      DimColAccum* acc /* cols+1 */,
+                                      int moments,
+                                      DimColAccum* acc /* cols+1; moments folded */,
                                       double* wsum_maxdiff,
+                                      double* wsum_max,
                                       int* nmax,
                                       unsigned long long* empty) {
     const int g = blockIdx.x * blockDim.x + threadIdx.x;
     if (g >= groups) {
         return;
     }
-    const int vpg = cols + 1;
+    const int rhsc = cols + 1;
+    const int vpg = moments * rhsc;
     const int cnt = CNT[g];
     if (cnt == 0) {
         atomicAdd(empty, 1ULL);
@@ -371,12 +438,17 @@ __global__ void group_finalize_kernel(const double* S,
     if (solver_weight_sums != nullptr) {
         atomic_max_double_nonneg(wsum_maxdiff,
                                  fabs(W[g] - solver_weight_sums[g]));
+        atomic_max_double_nonneg(wsum_max, fabs(W[g]));
     }
-    for (int c = 0; c <= cols; ++c) {
-        const double s = S[static_cast<std::size_t>(g) * vpg + c];
-        const double a = A[static_cast<std::size_t>(g) * vpg + c];
-        const double as = fabs(s);
-        atomicAdd(&acc[c].ss, s * s);
+    // The host contract folds moments into the per-column aggregates
+    // (residual_norm_sq[c] and operator_norm_sq sum over dims AND moments),
+    // so the accumulators do the same.
+    for (int vi = 0; vi < vpg; ++vi) {
+        const int c = vi % rhsc;
+        const double sv = S[static_cast<std::size_t>(g) * vpg + vi];
+        const double a = A[static_cast<std::size_t>(g) * vpg + vi];
+        const double as = fabs(sv);
+        atomicAdd(&acc[c].ss, sv * sv);
         atomicAdd(&acc[c].sa, as * a);
         atomicAdd(&acc[c].aa, a * a);
         atomicAdd(&acc[c].a1, a);
@@ -398,12 +470,14 @@ struct ShadowDeviceOut {
 __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1)
                                       const double* k1_per_dim,  // host-computed depths
                                       const int* groups_per_dim,
+                                      const int* moments_per_dim,
+                                      const double* op_per_dim,  // dims x 2
                                       int dims,
                                       int cols,
                                       const double* orig_sq,   // cols+1
                                       double orig_k,
-                                      double op_one,           // Σ w² (one dim)
                                       double op_k,
+                                      double n_rows,
                                       double L,
                                       ShadowDeviceOut* out) {
     if (blockIdx.x != 0 || threadIdx.x != 0) {
@@ -415,11 +489,29 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
     double rel_max = 0.0;
     double rel_max_perdim = 0.0;
 
-    // Op_sq aggregate = dims × op_one (exact integer scale) with its bracket.
+    // Op_sq aggregate = Σ_dims Σ_moments op[d][m], each with the column-tree
+    // bound, combined with directed rounding.
     const double g_op = gamma_of(op_k);
-    const double op_agg = static_cast<double>(dims) * op_one;
-    const double a_up = __dmul_ru(op_agg, __dadd_ru(1.0, g_op));
-    double a_dn = __dmul_rd(op_agg, __dadd_rd(1.0, -g_op));
+    // §6.6 (audit A-01): each accumulated fl(t·t) carries u·t² relative AND an
+    // additive η floor — a purely relative bracket under-covers exactly in the
+    // subnormal regime, where a false PASS becomes constructible. Widen both
+    // Orig and Op brackets by n·η per accumulated term (outward-rounded).
+    const double eta_n = __dmul_ru(kEta, n_rows);
+    double op_agg = 0.0;    // to-nearest, for the host-semantics diagnostic
+    double a_up = 0.0;
+    double a_dn = 0.0;
+    for (int d = 0; d < dims; ++d) {
+        for (int m = 0; m < moments_per_dim[d]; ++m) {
+            const double op = op_per_dim[d * 2 + m];
+            op_agg += op;
+            a_up = __dadd_ru(
+                a_up,
+                __dadd_ru(__dmul_ru(op, __dadd_ru(1.0, g_op)), eta_n));
+            a_dn = __dadd_rd(
+                a_dn,
+                __dadd_rd(__dmul_rd(op, __dadd_rd(1.0, -g_op)), -eta_n));
+        }
+    }
     if (!(a_dn > 0.0)) {
         a_dn = 0.0;
     }
@@ -435,6 +527,7 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
     for (int c = 0; c <= cols; ++c) {
         // Aggregate the per-dim scalars with outward rounding.
         double ss_up = 0.0, ss_dn = 0.0, err_up = 0.0;
+        double a1_tot = 0.0;  // exact-zero channel detector
         double perdim_ss[1];  // silence unused warning pattern
         (void)perdim_ss;
         for (int d = 0; d < dims; ++d) {
@@ -449,9 +542,14 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
             err_up = __dadd_ru(err_up, e);
             ss_up = __dadd_ru(ss_up, a.ss);
             ss_dn = __dadd_rd(ss_dn, a.ss);
+            a1_tot += a.a1;
 
-            // Per-dimension diagnostic (P3): rel_d = sqrt(ss_d/(op_one·orig)).
-            const double denom_d = op_one * orig_sq[c];
+            // Per-dimension diagnostic (P3): rel_d over the dim's own Op.
+            double op_d = 0.0;
+            for (int m = 0; m < moments_per_dim[d]; ++m) {
+                op_d += op_per_dim[d * 2 + m];
+            }
+            const double denom_d = op_d * orig_sq[c];
             if (denom_d > 0.0) {
                 const double rel_d = sqrt(a.ss / denom_d);
                 if (rel_d > rel_max_perdim) {
@@ -465,6 +563,15 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
         err_up = __dadd_ru(err_up, __dmul_ru(g2, ss_up));
         err_up = __dadd_ru(err_up,
                            __dmul_ru(kEta, static_cast<double>(total_groups)));
+        // Exact-zero channel: when every accumulated |term| is exactly zero
+        // (a1_tot == 0) and the sums of squares are exactly zero, every
+        // floating addition performed was 0+0 — exact — so the true residual
+        // is exactly zero and no additive error floor applies. Without this,
+        // the §6.6 η floor (correct for rounded nonzero accumulation) forces
+        // INDET on the all-zeros corpus case that PASSes trivially.
+        if (a1_tot == 0.0 && ss_up == 0.0) {
+            err_up = 0.0;
+        }
         const double r_up = __dadd_ru(ss_up, err_up);
         double r_dn = __dadd_rd(ss_dn, -err_up);
         if (!(r_dn > 0.0)) {
@@ -472,8 +579,10 @@ __global__ void bracket_decide_kernel(const DimColAccum* acc,  // dims x (cols+1
         }
 
         const double b = orig_sq[c];
-        const double b_up = __dmul_ru(b, __dadd_ru(1.0, g_orig));
-        double b_dn = __dmul_rd(b, __dadd_rd(1.0, -g_orig));
+        const double b_up =
+            __dadd_ru(__dmul_ru(b, __dadd_ru(1.0, g_orig)), eta_n);
+        double b_dn =
+            __dadd_rd(__dmul_rd(b, __dadd_rd(1.0, -g_orig)), -eta_n);
         if (!(b_dn > 0.0)) {
             b_dn = 0.0;
         }
@@ -530,6 +639,9 @@ namespace detail {
 struct ShadowDim {
     const int* d_gid = nullptr;
     const double* d_weight_sums = nullptr;
+    const double* d_slope_z = nullptr;  // device slope values, slope dims only
+    bool slope_intercept = false;
+    int moments = 1;                    // 1 standard; 1-2 for slope dims
     int groups = 0;
     bool contiguous = false;
     int* d_group_ptr = nullptr;   // groups+1, contiguous dims only
@@ -546,15 +658,19 @@ struct CudaCertShadowHandle {
     const double* d_weights = nullptr;
     std::vector<ShadowDim> dims;
     double* d_orig_sq = nullptr;      // cols+1
-    double* d_op_one = nullptr;       // 1
+    double* d_op = nullptr;           // dims x 2 (per moment; unused slot 0)
+    int max_moments = 1;
     double* d_scalars = nullptr;      // dims*(cols+1) DimColAccum + tails
     hdfe_cert::DimColAccum* d_acc = nullptr;
     double* d_wsum_maxdiff = nullptr;
+    double* d_wsum_max = nullptr;
     int* d_nmax = nullptr;            // per dim
     unsigned long long* d_empty = nullptr;
     hdfe_cert::ShadowDeviceOut* d_out = nullptr;
     double* d_k1 = nullptr;           // per dim depths
     int* d_groups = nullptr;          // per dim group counts
+    int* d_moments = nullptr;         // per dim moment counts
+    int* d_bad_gid = nullptr;         // A-05: corrupt-gid flag (fail-closed)
     double begin_ms = 0.0;
     bool begin_ok = false;
 };
@@ -587,7 +703,9 @@ CudaCertShadowHandle* cuda_cert_shadow_begin(
     const int* const* d_group_ids,
     const double* const* d_weight_sums,
     const int* num_groups,
-    int num_dims) {
+    int num_dims,
+    const double* const* d_slope_values,
+    const unsigned char* slope_has_intercept) {
     if (n <= 0 || cols < 0 || num_dims <= 0) {
         return nullptr;
     }
@@ -604,15 +722,38 @@ CudaCertShadowHandle* cuda_cert_shadow_begin(
     const int vpg = cols + 1;
 
     bool ok = sh_alloc(&h->d_orig_sq, static_cast<std::size_t>(vpg)) &&
-              sh_alloc(&h->d_op_one, 1);
+              sh_alloc(&h->d_op, static_cast<std::size_t>(num_dims) * 2);
     // Solver-invariant quantities, captured from the freshly-uploaded
-    // originals with this TU's own fixed-tree kernels (§6.7, §7.2).
+    // originals with this TU's own fixed-tree kernels (§6.7, §7.2). Op_sq is
+    // per (dim, moment): standard dims use Σw²; slope dims add Σ(w·z)² for
+    // the slope moment (and Σw² for the intercept moment when present).
     if (ok) {
         hdfe_cert::colwise_sumsq_kernel<<<1, hdfe_cert::kColBlock>>>(
             d_y_original, d_x_original, n, cols, ld, h->d_orig_sq);
-        hdfe_cert::weights_sumsq_kernel<<<1, hdfe_cert::kColBlock>>>(
-            d_weights_or_null, n, h->d_op_one);
         ok = sh_ok(cudaGetLastError());
+    }
+    for (int d = 0; ok && d < num_dims; ++d) {
+        const double* z =
+            (d_slope_values != nullptr) ? d_slope_values[d] : nullptr;
+        const bool has_int =
+            (slope_has_intercept != nullptr) && slope_has_intercept[d] != 0;
+        const int moments = (z != nullptr) ? (has_int ? 2 : 1) : 1;
+        ShadowDim& sd = h->dims[static_cast<std::size_t>(d)];
+        sd.d_slope_z = z;
+        sd.slope_intercept = (z != nullptr) && has_int;
+        sd.moments = moments;
+        if (moments > h->max_moments) {
+            h->max_moments = moments;
+        }
+        for (int m = 0; ok && m < moments; ++m) {
+            // moment 0 with an intercept (or a standard dim) uses mult = w;
+            // the slope moment uses mult = w·z.
+            const bool slope_moment = (z != nullptr) && !(sd.slope_intercept && m == 0);
+            hdfe_cert::weights_sumsq_kernel<<<1, hdfe_cert::kColBlock>>>(
+                d_weights_or_null, slope_moment ? z : nullptr, n,
+                h->d_op + static_cast<std::size_t>(d) * 2 + m);
+            ok = sh_ok(cudaGetLastError());
+        }
     }
     int* d_flag = nullptr;
     if (ok) {
@@ -653,8 +794,9 @@ CudaCertShadowHandle* cuda_cert_shadow_begin(
             }
         }
         if (ok) {
-            const std::size_t cells =
-                static_cast<std::size_t>(sd.groups) * vpg;
+            const std::size_t cells = static_cast<std::size_t>(sd.groups) *
+                                      static_cast<std::size_t>(sd.moments) *
+                                      vpg;
             ok = sh_alloc(&sd.d_S, cells) && sh_alloc(&sd.d_A, cells) &&
                  sh_alloc(&sd.d_W, static_cast<std::size_t>(sd.groups)) &&
                  sh_alloc(&sd.d_CNT, static_cast<std::size_t>(sd.groups));
@@ -667,11 +809,14 @@ CudaCertShadowHandle* cuda_cert_shadow_begin(
         ok = sh_alloc(&h->d_acc,
                       static_cast<std::size_t>(num_dims) * vpg) &&
              sh_alloc(&h->d_wsum_maxdiff, 1) &&
+             sh_alloc(&h->d_wsum_max, 1) &&
              sh_alloc(&h->d_nmax, static_cast<std::size_t>(num_dims)) &&
              sh_alloc(&h->d_empty, 1) &&
              sh_alloc(&h->d_out, 1) &&
              sh_alloc(&h->d_k1, static_cast<std::size_t>(num_dims)) &&
-             sh_alloc(&h->d_groups, static_cast<std::size_t>(num_dims));
+             sh_alloc(&h->d_groups, static_cast<std::size_t>(num_dims)) &&
+             sh_alloc(&h->d_moments, static_cast<std::size_t>(num_dims)) &&
+             sh_alloc(&h->d_bad_gid, 1);
     }
     if (ok) {
         ok = sh_ok(cudaDeviceSynchronize());
@@ -712,21 +857,24 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
             const int gblocks =
                 sd.groups < 4096 ? sd.groups : 4096;
             hdfe_cert::seg_accum_kernel<<<gblocks, hdfe_cert::kSegBlock>>>(
-                d_y_residual, d_x_residual, h->d_weights, sd.d_group_ptr,
+                d_y_residual, d_x_residual, h->d_weights, sd.d_slope_z,
+                sd.slope_intercept, sd.moments, sd.d_group_ptr,
                 sd.groups, cols, h->ld, sd.d_S, sd.d_A, sd.d_W, sd.d_CNT);
         } else {
             const int blocks = (n + 255) / 256;
             hdfe_cert::atomic_accum_kernel<<<blocks, 256>>>(
-                d_y_residual, d_x_residual, h->d_weights, sd.d_gid, n, cols,
-                h->ld, sd.d_S, sd.d_A, sd.d_W, sd.d_CNT);
+                d_y_residual, d_x_residual, h->d_weights, sd.d_slope_z,
+                sd.slope_intercept, sd.moments, sd.d_gid, n, sd.groups, cols,
+                h->ld, sd.d_S, sd.d_A, sd.d_W, sd.d_CNT, h->d_bad_gid);
         }
         ok = sh_ok(cudaGetLastError());
         if (ok) {
             const int gblocks = (sd.groups + 255) / 256;
             hdfe_cert::group_finalize_kernel<<<gblocks, 256>>>(
                 sd.d_S, sd.d_A, sd.d_W, sd.d_CNT, sd.d_weight_sums,
-                sd.groups, cols, h->d_acc + static_cast<std::size_t>(d) * vpg,
-                h->d_wsum_maxdiff, h->d_nmax + d, h->d_empty);
+                sd.groups, cols, sd.moments,
+                h->d_acc + static_cast<std::size_t>(d) * vpg,
+                h->d_wsum_maxdiff, h->d_wsum_max, h->d_nmax + d, h->d_empty);
             ok = sh_ok(cudaGetLastError());
         }
     }
@@ -734,6 +882,7 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
     // Depths for γ_K, from the observed n_gmax per dim (D2H of dims ints).
     std::vector<int> nmax(static_cast<std::size_t>(dims), 0);
     std::vector<int> groups(static_cast<std::size_t>(dims), 0);
+    std::vector<int> moments(static_cast<std::size_t>(dims), 1);
     if (ok) {
         ok = sh_ok(cudaMemcpy(nmax.data(), h->d_nmax, sizeof(int) * dims,
                               cudaMemcpyDeviceToHost));
@@ -744,6 +893,7 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
             const ShadowDim& sd =
                 h->dims[static_cast<std::size_t>(d)];
             groups[static_cast<std::size_t>(d)] = sd.groups;
+            moments[static_cast<std::size_t>(d)] = sd.moments;
             const double depth =
                 sd.contiguous
                     ? (static_cast<double>(
@@ -752,37 +902,37 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
                            hdfe_cert::kSegBlock) +
                        8.0)
                     : static_cast<double>(nmax[static_cast<std::size_t>(d)]);
-            // +1 for the w·v product rounding of each term (§6.6).
-            k1[static_cast<std::size_t>(d)] = depth + 1.0;
+            // +1 for the w·v product rounding; slope moments carry one more
+            // (mult = w·z is two roundings before the add, §6.6) — count 2
+            // for the whole dim, conservative for its intercept moment too.
+            k1[static_cast<std::size_t>(d)] =
+                depth + ((sd.d_slope_z != nullptr) ? 2.0 : 1.0);
         }
         ok = sh_ok(cudaMemcpy(h->d_k1, k1.data(), sizeof(double) * dims,
                               cudaMemcpyHostToDevice)) &&
              sh_ok(cudaMemcpy(h->d_groups, groups.data(), sizeof(int) * dims,
-                              cudaMemcpyHostToDevice));
+                              cudaMemcpyHostToDevice)) &&
+             sh_ok(cudaMemcpy(h->d_moments, moments.data(),
+                              sizeof(int) * dims, cudaMemcpyHostToDevice));
     }
     if (ok) {
-        // Column-tree depth for Orig/Op: ceil(n/1024)+10, +1 squaring.
+        // Column-tree depth for Orig/Op: ceil(n/1024)+10, +1 squaring; slope
+        // moments carry the extra w·z rounding, +1 more (conservative for
+        // every moment when any slope dim is present).
         const double col_k =
             static_cast<double>((n + hdfe_cert::kColBlock - 1) /
                                 hdfe_cert::kColBlock) +
-            11.0;
-        std::vector<double> orig(static_cast<std::size_t>(vpg), 0.0);
-        double op_one = 0.0;
-        ok = sh_ok(cudaMemcpy(orig.data(), h->d_orig_sq,
-                              sizeof(double) * vpg,
-                              cudaMemcpyDeviceToHost)) &&
-             sh_ok(cudaMemcpy(&op_one, h->d_op_one, sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        if (ok) {
-            hdfe_cert::bracket_decide_kernel<<<1, 1>>>(
-                h->d_acc, h->d_k1, h->d_groups, dims, cols, h->d_orig_sq,
-                col_k, op_one, col_k, certificate_limit, h->d_out);
-            ok = sh_ok(cudaGetLastError());
-        }
+            11.0 + ((h->max_moments > 1) ? 1.0 : 0.0);
+        hdfe_cert::bracket_decide_kernel<<<1, 1>>>(
+            h->d_acc, h->d_k1, h->d_groups, h->d_moments, h->d_op, dims,
+            cols, h->d_orig_sq, col_k, col_k, static_cast<double>(n),
+            certificate_limit, h->d_out);
+        ok = sh_ok(cudaGetLastError());
     }
     hdfe_cert::ShadowDeviceOut dev{};
     unsigned long long empty = 0;
     double wdiff = 0.0;
+    int bad_gid = 0;
     if (ok) {
         ok = sh_ok(cudaMemcpy(&dev, h->d_out, sizeof(dev),
                               cudaMemcpyDeviceToHost)) &&
@@ -790,7 +940,32 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
                               cudaMemcpyDeviceToHost)) &&
              sh_ok(cudaMemcpy(&wdiff, h->d_wsum_maxdiff, sizeof(wdiff),
                               cudaMemcpyDeviceToHost)) &&
+             sh_ok(cudaMemcpy(&bad_gid, h->d_bad_gid, sizeof(bad_gid),
+                              cudaMemcpyDeviceToHost)) &&
              sh_ok(cudaDeviceSynchronize());
+    }
+    double wsum_max = 0.0;
+    if (ok) {
+        ok = sh_ok(cudaMemcpy(&wsum_max, h->d_wsum_max, sizeof(wsum_max),
+                              cudaMemcpyDeviceToHost));
+    }
+    int nmax_all = 0;
+    for (int d = 0; d < dims; ++d) {
+        if (nmax[static_cast<std::size_t>(d)] > nmax_all) {
+            nmax_all = nmax[static_cast<std::size_t>(d)];
+        }
+    }
+    const double wsum_gamma =
+        (2.0 * static_cast<double>(nmax_all) * 1.1102230246251565404e-16);
+    // Conservative host-side inflation in lieu of directed rounding.
+    const double wsum_tol =
+        wsum_gamma * wsum_max * (1.0 + 1e-12) +
+        static_cast<double>(n) * 4.9406564584124654e-324;
+    if (ok && bad_gid != 0) {
+        // A-05: at least one out-of-range gid — the accumulation is
+        // incomplete by design. ERROR, never a verdict.
+        dev.verdict = 3;
+        dev.host_like_pass = -1;
     }
     if (ok) {
         out->verdict = dev.verdict;
@@ -800,6 +975,8 @@ bool cuda_cert_shadow_finish(CudaCertShadowHandle* h,
         out->r_lower = dev.r_lower;
         out->r_upper = dev.r_upper;
         out->wsum_maxdiff = wdiff;
+        out->wsum_tol = wsum_tol;
+        out->wsum_ok = (wdiff <= wsum_tol) ? 1 : 0;
         out->empty_groups = static_cast<long long>(empty);
         out->dims = dims;
         out->rhs = vpg;
@@ -822,14 +999,17 @@ void cuda_cert_shadow_abort(CudaCertShadowHandle* h) {
         if (sd.d_CNT) cudaFree(sd.d_CNT);
     }
     if (h->d_orig_sq) cudaFree(h->d_orig_sq);
-    if (h->d_op_one) cudaFree(h->d_op_one);
+    if (h->d_op) cudaFree(h->d_op);
     if (h->d_acc) cudaFree(h->d_acc);
     if (h->d_wsum_maxdiff) cudaFree(h->d_wsum_maxdiff);
+    if (h->d_wsum_max) cudaFree(h->d_wsum_max);
     if (h->d_nmax) cudaFree(h->d_nmax);
     if (h->d_empty) cudaFree(h->d_empty);
     if (h->d_out) cudaFree(h->d_out);
     if (h->d_k1) cudaFree(h->d_k1);
     if (h->d_groups) cudaFree(h->d_groups);
+    if (h->d_moments) cudaFree(h->d_moments);
+    if (h->d_bad_gid) cudaFree(h->d_bad_gid);
     delete h;
 }
 

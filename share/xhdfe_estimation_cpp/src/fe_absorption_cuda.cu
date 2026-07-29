@@ -1973,6 +1973,7 @@ bool absorb_tree_duplicate_edges_cuda(const Eigen::Ref<const Eigen::VectorXd>& y
                                       const Eigen::Ref<const Eigen::MatrixXd>& X,
                                       const TreeDuplicateEdgeGroups& edge_groups,
                                       const std::vector<GpuFeInput>& fe_inputs,
+                                      const HdfeOptions& options,
                                       AbsorptionResult& result) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
@@ -2028,11 +2029,90 @@ bool absorb_tree_duplicate_edges_cuda(const Eigen::Ref<const Eigen::VectorXd>& y
             d_edge_group.data(), d_sum_y.data(), cols > 0 ? d_sum_x.data() : nullptr);
         cuda_check(cudaGetLastError(), "exact tree edge-sum kernel launch failed");
 
+        // WP3 shadow certificate on the exact-tree early path. This path
+        // never uploads per-dimension group ids (it works on fused edge ids),
+        // so in shadow mode — and only then — the dims' gids and weight_sums
+        // are uploaded here just for the verifier. Orig/Op capture must
+        // happen BEFORE the residual kernel mutates d_y/d_x in place.
+        struct CertShadowGuard {
+            CudaCertShadowHandle* h = nullptr;
+            ~CertShadowGuard() {
+                if (h != nullptr) {
+                    cuda_cert_shadow_abort(h);
+                }
+            }
+        } cert_shadow;
+        std::vector<DeviceBuffer<int>> shadow_gid_bufs;
+        std::vector<DeviceBuffer<double>> shadow_wsum_bufs;
+        if (cuda_cert_shadow_enabled()) {
+            bool shadow_ok = true;
+            std::vector<const int*> gids;
+            std::vector<const double*> wsums;
+            std::vector<int> groups;
+            shadow_gid_bufs.resize(fe_inputs.size());
+            shadow_wsum_bufs.resize(fe_inputs.size());
+            for (std::size_t dim = 0; shadow_ok && dim < fe_inputs.size(); ++dim) {
+                const auto& fe = fe_inputs[dim];
+                if (fe.group_ids == nullptr || fe.num_groups <= 0) {
+                    shadow_ok = false;
+                    break;
+                }
+                shadow_gid_bufs[dim].allocate(static_cast<std::size_t>(n));
+                cuda_check(cudaMemcpy(shadow_gid_bufs[dim].data(), fe.group_ids,
+                                      sizeof(int) * n, cudaMemcpyHostToDevice),
+                           "cudaMemcpy shadow gid failed");
+                shadow_wsum_bufs[dim].allocate(
+                    static_cast<std::size_t>(fe.num_groups));
+                cuda_check(cudaMemcpy(shadow_wsum_bufs[dim].data(),
+                                      fe.weight_sums,
+                                      sizeof(double) * fe.num_groups,
+                                      cudaMemcpyHostToDevice),
+                           "cudaMemcpy shadow weight_sums failed");
+                gids.push_back(shadow_gid_bufs[dim].data());
+                wsums.push_back(shadow_wsum_bufs[dim].data());
+                groups.push_back(fe.num_groups);
+            }
+            if (shadow_ok) {
+                cert_shadow.h = cuda_cert_shadow_begin(
+                    d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld,
+                    nullptr, gids.data(), wsums.data(), groups.data(),
+                    static_cast<int>(fe_inputs.size()));
+            }
+        }
+
         apply_edge_residuals_kernel<<<blocks, kBlockSize>>>(
             d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld, unique_edges,
             d_edge_group.data(), d_edge_counts.data(), d_sum_y.data(),
             cols > 0 ? d_sum_x.data() : nullptr);
         cuda_check(cudaGetLastError(), "exact tree residual kernel launch failed");
+
+        if (cert_shadow.h != nullptr) {
+            CudaCertShadowResult shadow{};
+            const double shadow_eff = effective_absorption_tolerance(options);
+            const double shadow_limit =
+                std::max(8.0 * std::max(0.0, shadow_eff),
+                         64.0 * std::numeric_limits<double>::epsilon());
+            const bool shadow_ok = cuda_cert_shadow_finish(
+                cert_shadow.h, d_y.data(), cols > 0 ? d_x.data() : nullptr,
+                shadow_limit, &shadow);
+            cert_shadow.h = nullptr;
+            static const char* kVerdictNames[4] = {"PASS", "FAIL", "INDET",
+                                                   "ERROR"};
+            std::fprintf(
+                stderr,
+                "cuda_cert_shadow ok=%d verdict=%s host_like_pass=%d "
+                "rel=%.17e rel_perdim=%.17e r_lo=%.17e r_up=%.17e L=%.17e "
+                "wsum_maxdiff=%.3e wsum_tol=%.3e wsum_ok=%d "
+                "empty_groups=%lld dims=%d rhs=%d "
+                "begin_ms=%.3f finish_ms=%.3f\n",
+                shadow_ok ? 1 : 0,
+                kVerdictNames[shadow.verdict & 3], shadow.host_like_pass,
+                shadow.rel_max, shadow.rel_max_perdim, shadow.r_lower,
+                shadow.r_upper, shadow_limit, shadow.wsum_maxdiff,
+                shadow.wsum_tol, shadow.wsum_ok,
+                shadow.empty_groups, shadow.dims, shadow.rhs,
+                shadow.shadow_begin_ms, shadow.shadow_finish_ms);
+        }
 
         result.y_tilde.resize(n);
         cuda_check(cudaMemcpy(result.y_tilde.data(), d_y.data(), sizeof(double) * n,
@@ -2257,7 +2337,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         !options.retain_fixed_effects) {
         TreeDuplicateEdgeGroups edge_groups;
         if (build_tree_duplicate_edge_groups(fe_inputs, n, edge_groups)) {
-            return absorb_tree_duplicate_edges_cuda(y, X, edge_groups, fe_inputs, result);
+            return absorb_tree_duplicate_edges_cuda(y, X, edge_groups, fe_inputs,
+                                                    options, result);
         }
     }
 
@@ -2718,23 +2799,33 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	                }
 	            }
 	        } cert_shadow;
-	        if (cuda_cert_shadow_enabled() && !any_slope) {
+	        if (cuda_cert_shadow_enabled()) {
 	            std::vector<const int*> shadow_gids;
 	            std::vector<const double*> shadow_wsums;
 	            std::vector<int> shadow_groups;
+	            std::vector<const double*> shadow_slopes;
+	            std::vector<unsigned char> shadow_slope_int;
 	            shadow_gids.reserve(fe_inputs.size());
 	            shadow_wsums.reserve(fe_inputs.size());
 	            shadow_groups.reserve(fe_inputs.size());
+	            shadow_slopes.reserve(fe_inputs.size());
+	            shadow_slope_int.reserve(fe_inputs.size());
 	            for (std::size_t dim = 0; dim < fe_inputs.size(); ++dim) {
 	                shadow_gids.push_back(fe_dev[dim].gid.data());
 	                shadow_wsums.push_back(fe_dev[dim].weight_sums.data());
 	                shadow_groups.push_back(fe_inputs[dim].num_groups);
+	                shadow_slopes.push_back(
+	                    fe_inputs[dim].is_slope ? fe_dev[dim].slope_z.data()
+	                                            : nullptr);
+	                shadow_slope_int.push_back(
+	                    fe_inputs[dim].slope_has_intercept ? 1 : 0);
 	            }
 	            cert_shadow.h = cuda_cert_shadow_begin(
 	                d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld,
 	                unit_weights ? nullptr : d_weights.data(),
 	                shadow_gids.data(), shadow_wsums.data(),
-	                shadow_groups.data(), static_cast<int>(fe_inputs.size()));
+	                shadow_groups.data(), static_cast<int>(fe_inputs.size()),
+	                shadow_slopes.data(), shadow_slope_int.data());
 	        }
 
 	        DeviceBuffer<double>& d_sumsq = workspace.d_sumsq;
@@ -4544,12 +4635,14 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 stderr,
                 "cuda_cert_shadow ok=%d verdict=%s host_like_pass=%d "
                 "rel=%.17e rel_perdim=%.17e r_lo=%.17e r_up=%.17e L=%.17e "
-                "wsum_maxdiff=%.3e empty_groups=%lld dims=%d rhs=%d "
+                "wsum_maxdiff=%.3e wsum_tol=%.3e wsum_ok=%d "
+                "empty_groups=%lld dims=%d rhs=%d "
                 "begin_ms=%.3f finish_ms=%.3f\n",
                 shadow_ok ? 1 : 0,
                 kVerdictNames[shadow.verdict & 3], shadow.host_like_pass,
                 shadow.rel_max, shadow.rel_max_perdim, shadow.r_lower,
                 shadow.r_upper, shadow_limit, shadow.wsum_maxdiff,
+                shadow.wsum_tol, shadow.wsum_ok,
                 shadow.empty_groups, shadow.dims, shadow.rhs,
                 shadow.shadow_begin_ms, shadow.shadow_finish_ms);
         }

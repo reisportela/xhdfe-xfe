@@ -150,7 +150,11 @@ Main options:
 - `max_iter`: maximum absorber iterations.
 - `convergence`: `auto`, `normchange`, `reghdfe`, or `both`.
 - `fit_intercept`: append an intercept to the slope regression.
-- `num_threads`: force a thread count when positive; zero uses auto-threading.
+- `num_threads`: authoritative OpenMP request when positive; zero uses
+  auto-threading. Positive requests bypass automatic row-count, FE-shape, and
+  `max_threads` heuristics and are clamped only to the logical processors and
+  OpenMP runtime limit visible to the process. A serial build fails loudly for
+  requests above one.
 - `drop_singletons`: drop singleton observations before estimation.
 - `keepsingletons`: reghdfe-compatible override for `drop_singletons`.
 - `retain_fes`: recover per-observation fixed-effect contributions.
@@ -191,6 +195,11 @@ Arguments:
   arrays.
 - `instruments` and `endogenous_idx`: 2SLS inputs. `endogenous_idx` uses
   zero-based column positions in `X`.
+
+  With absorbed fixed effects, the reported intercept is the finite
+  normalization `mean(y) - mean(X) @ beta`, under zero-mean absorbed
+  contributions. It is normalization-dependent, not a structural IV
+  parameter.
 - `group`: group-level outcome identifier.
 - `individual`: individual identifier for group/individual fixed effects.
 - `aggregation`: `mean`, `avg`, `average`, or `sum`.
@@ -249,10 +258,24 @@ After `fit`, the regressor exposes:
   `df_a_levels_`, `df_a_exact_`, `df_a_nested_`.
 - Fit stats: `r2_`, `r2_within_`, `rss_`, `tss_`, `tss_within_`,
   `saturated_`, `num_iterations_`, `converged_`.
+- Absorption certificate: `abs_residual_` is the maximum absolute
+  `||D' W v_tilde||_2`, `abs_residual_rel_` is the corresponding maximum
+  scale-normalized normal-equation residual
+  `||D' W v_tilde||_2 / (||D' W||_F ||v||_2)`, where `v` is the original
+  pre-absorption right-hand side, and
+  `precision_certified_` reports whether the explicit post-solve check meets
+  its numerical limit. For combined `group`/`individual` absorption this
+  certificate is authoritative: any continuation sweeps are counted in
+  `num_iterations_`, and `converged_` is true only when
+  `precision_certified_` is also true.
 - Fixed-effect stats: `fe_num_levels_`, `groupvar_`, `fe_effects_`.
 - Cluster stats: `num_clusters_`, `cluster_counts_`,
   `cluster_combo_counts_`, `cluster_scale_`.
-- Runtime diagnostics: `threads_used_`, `absorption_method_used`,
+- Runtime diagnostics: `threads_requested_`, `threads_effective_`,
+  `threads_used_` (largest team observed doing real work),
+  `parallel_workers_active_` (largest useful-worker count in one region),
+  `thread_capacity_`, `openmp_enabled_`, `thread_limit_code_`,
+  `thread_limit_reason_`, `absorption_method_used`,
   `gpu_attempted_`, `gpu_used_`, `gpu_status_code_`,
   `gpu_absorption_converged_`, `gpu_absorption_iterations_`.
 
