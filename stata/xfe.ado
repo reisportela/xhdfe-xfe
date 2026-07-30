@@ -1,4 +1,4 @@
-*! version 1.10.1 25jul2026
+*! version 1.10.3 30jul2026
 program define xfe, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfe, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.10.1 25jul2026"
+        local version "1.10.3 30jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -737,7 +737,9 @@ program define xfe, eclass sortpreserve
     quietly gen byte `esample' = `touse'
 
     // Prepare scalars to receive plugin outputs.
-    tempname sN sNfull sNs sDfa sDfaL sDfaE sDfaN sIt sConv sThr sGpuUsed sGpuStatus sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth
+    tempname sN sNfull sNs sDfa sDfaL sDfaE sDfaN sIt sConv ///
+        sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
+        sGpuUsed sGpuStatus sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth
     scalar `sN' = .
     scalar `sNfull' = .
     scalar `sNs' = .
@@ -811,6 +813,9 @@ program define xfe, eclass sortpreserve
     local cfg "`cfg's_iterations=`sIt';"
     local cfg "`cfg's_converged=`sConv';"
     local cfg "`cfg's_threads_used=`sThr';"
+    local cfg "`cfg's_threads_requested=`sThrReq';s_threads_effective=`sThrEff';"
+    local cfg "`cfg's_parallel_workers_active=`sThrActive';s_thread_capacity=`sThrCap';"
+    local cfg "`cfg's_openmp_enabled=`sOmpEnabled';s_thread_limit_code=`sThrLimitCode';"
     local cfg "`cfg's_gpu_used=`sGpuUsed';"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
@@ -996,6 +1001,18 @@ program define xfe, eclass sortpreserve
     ereturn scalar iterations = scalar(`sIt')
     ereturn scalar converged = scalar(`sConv')
     ereturn scalar threads_used = scalar(`sThr')
+    ereturn scalar threads_requested = scalar(`sThrReq')
+    ereturn scalar threads_effective = scalar(`sThrEff')
+    ereturn scalar parallel_workers_active = scalar(`sThrActive')
+    ereturn scalar thread_capacity = scalar(`sThrCap')
+    ereturn scalar openmp_enabled = scalar(`sOmpEnabled')
+    ereturn scalar thread_limit_code = scalar(`sThrLimitCode')
+    local thread_limit_reason "none"
+    if (scalar(`sThrLimitCode') == 1) local thread_limit_reason "runtime_capacity"
+    else if (scalar(`sThrLimitCode') == 2) local thread_limit_reason "auto_policy"
+    else if (scalar(`sThrLimitCode') == 3) local thread_limit_reason "auto_max_threads"
+    else if (scalar(`sThrLimitCode') == 4) local thread_limit_reason "openmp_unavailable"
+    ereturn local thread_limit_reason "`thread_limit_reason'"
     ereturn scalar gpu_used = scalar(`sGpuUsed')
     ereturn scalar gpu_status_code = scalar(`sGpuStatus')
     ereturn scalar gpu_attempted = scalar(`sGpuAttempted')
@@ -1018,7 +1035,7 @@ program define xfe, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.10.1 25jul2026"
+    ereturn local version "1.10.3 30jul2026"
     ereturn local cmd "xfe"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {

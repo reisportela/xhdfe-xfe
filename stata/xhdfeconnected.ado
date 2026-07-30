@@ -1,4 +1,4 @@
-*! version 1.2.1  25jul2026
+*! version 1.2.1  30jul2026
 *! Leave-one-out connected set (KSS / LeaveOutTwoWay semantics) as a
 *! standalone sample-preparation utility on the xhdfe backend: largest
 *! connected component (firm count), iterative removal of articulation
@@ -116,11 +116,15 @@ program define xhdfeconnected, rclass sortpreserve
     }
 
     foreach name in n_obs n_obs_input n_obs_connected n_workers n_firms ///
-        n_matches n_movers n_stayers prune_iterations threads_used gpu_used ///
-        gpu_status_code {
+        n_matches n_movers n_stayers prune_iterations threads_requested ///
+        threads_effective threads_used thread_capacity openmp_enabled ///
+        thread_limit_code gpu_used gpu_status_code {
         return scalar `name' = scalar(__xakm_`name')
         capture scalar drop __xakm_`name'
     }
+    return scalar parallel_workers_active = scalar(__xakm_workers_active)
+    capture scalar drop __xakm_workers_active
+    return local thread_limit_reason "`xakm_thread_limit_reason'"
     return scalar gpu_requested = ("`gpu'" != "")
     local gpu_status "not_requested"
     if (return(gpu_status_code) == 1) local gpu_status "used"

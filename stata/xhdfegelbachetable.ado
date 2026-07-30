@@ -1,4 +1,4 @@
-*! version 1.0.0  25jul2026
+*! version 1.0.0  30jul2026
 *! Multi-format reporting for the most recent xhdfegelbach result.
 
 program define xhdfegelbachetable
@@ -275,7 +275,7 @@ program define xhdfegelbachetable
                     local high 1
                     local method_label "identity"
                 }
-                __xgel_etable_emit_20260725 `"`format'"' `"`output'"' ///
+                __xgel_etable_emit_20260728 `"`format'"' `"`output'"' ///
                     `"`panel'"' `"`coef'"' `"base_model"' ///
                     `estimate' `se' `low' `high' `"`method_label'"' ///
                     `digits' `write_file'
@@ -387,7 +387,7 @@ program define xhdfegelbachetable
                     }
                 }
                 local display_label `"`xgel_label_`group''"'
-                __xgel_etable_emit_20260725 `"`format'"' `"`output'"' ///
+                __xgel_etable_emit_20260728 `"`format'"' `"`output'"' ///
                     `"`panel'"' `"`coef'"' `"`display_label'"' ///
                     `estimate' `se' `low' `high' `"`method_label'"' ///
                     `digits' `write_file'
@@ -544,7 +544,7 @@ program define xhdfegelbachetable
                     local low = `estimate' - `zcrit' * `se'
                     local high = `estimate' + `zcrit' * `se'
                 }
-                __xgel_etable_emit_20260725 `"`format'"' `"`output'"' ///
+                __xgel_etable_emit_20260728 `"`format'"' `"`output'"' ///
                     `"`panel'"' `"`coef'"' `"Other (filtered)"' ///
                     `estimate' `se' `low' `high' `"`method_label'"' ///
                     `digits' `write_file'
@@ -607,7 +607,7 @@ program define xhdfegelbachetable
                 local high = `BTCI'[2, `r']
                 local method_label "bootstrap_`bootstrap_ci'"
             }
-            __xgel_etable_emit_20260725 `"`format'"' `"`output'"' ///
+            __xgel_etable_emit_20260728 `"`format'"' `"`output'"' ///
                 `"`panel'"' `"`coef'"' `"total_movement"' ///
                 `estimate' `se' `low' `high' `"`method_label'"' ///
                 `digits' `write_file'
@@ -638,7 +638,7 @@ program define xhdfegelbachetable
                     local high = `BFCI'[2, `r']
                     local method_label "bootstrap_`bootstrap_ci'"
                 }
-                __xgel_etable_emit_20260725 `"`format'"' `"`output'"' ///
+                __xgel_etable_emit_20260728 `"`format'"' `"`output'"' ///
                     `"`panel'"' `"`coef'"' `"full_model"' ///
                     `estimate' `se' `low' `high' `"`method_label'"' ///
                     `digits' `write_file'
@@ -696,8 +696,8 @@ program define xhdfegelbachetable
     }
 end
 
-capture program drop __xgel_etable_emit_20260725
-program define __xgel_etable_emit_20260725
+capture program drop __xgel_etable_emit_20260728
+program define __xgel_etable_emit_20260728
     version 14.0
     args format handle panel coefficient component estimate se low high method digits write_file
     local display_width = max(12, `digits' + 4)

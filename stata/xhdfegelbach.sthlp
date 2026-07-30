@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.5.0  25jul2026}{...}
+{* *! version 1.5.0  30jul2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
@@ -12,8 +12,8 @@
 {p2colreset}{...}
 
 {pstd}
-{bf:Version 1.5.0 (25jul2026), distributed with shared package
-2.21.0.20260725.} This release adds common HDFE, selectable connectivity
+{bf:Version 1.5.0 (30jul2026), distributed with shared package
+2.22.1.20260730.} This release adds common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 
@@ -46,7 +46,7 @@ bootstrap/table/waterfall companion commands.{p_end}
 {synopt :{opt gamma0}}reproduce b1x2's {cmd:gamma0} variant{p_end}
 {synopt :{opt cov0}}reproduce b1x2's {cmd:cov0} variant{p_end}
 {synopt :{opt tol(#)}}FE absorption tolerance; default {cmd:1e-8}{p_end}
-{synopt :{opt threads(#)}}OpenMP threads (0 = library default){p_end}
+{synopt :{opt threads(#)}}explicit OpenMP request (0 = automatic policy){p_end}
 {synopt :{opt gpu}}request CUDA for the full HDFE absorption{p_end}
 {synopt :{opt verbose}}stream deterministic phase progress and elapsed time live{p_end}
 {synopt :{opt sampleaudit}}compute and return a stable retained-sample identifier{p_end}
@@ -407,10 +407,12 @@ any estimate. {cmd:XHDFE_GELBACH_NEAR_COLLINEAR_WARN=0} suppresses only that
 warning for controlled A/B runs; the matrices remain available.{p_end}
 
 {phang}{opt threads(#)} requests the OpenMP team used by the CPU absorption,
-FE-recovery and covariance phases; 0 delegates selection to the library.
-Some small phases remain serial and CUDA kernel scheduling is separate.
-{cmd:r(threads_used)} reports the effective maximum CPU team, which can be
-smaller than the request when the retained problem is too small to benefit.
+FE-recovery and covariance phases; 0 selects the automatic policy. A positive
+request bypasses workload/environment heuristics and is limited only by the
+logical-processor/OpenMP capacity visible to the process. Some phases that do
+not execute report zero, and CUDA kernel scheduling is separate. The returned
+phase diagnostics distinguish configured budgets, observed teams, and workers
+that actually processed useful work.
 
 {phang}{opt gpu} requests the CUDA backend for the full HDFE specification.
 The exact MLSMR fixed-effect recovery and the Gelbach covariance algebra stay
@@ -699,7 +701,14 @@ layer emits a note or warning.{p_end}
 {synopt:{cmd:r(absorbing_fe_index)}}zero-based matching FE dimension, or -1{p_end}
 {synopt:{cmd:r(regular_inference_all_valid)}}1 iff every observed-X2 contribution row passes the conservative gate{p_end}
 {synopt:{cmd:r(regularity_test_alpha)}}product-regularity test threshold (0.05){p_end}
-{synopt:{cmd:r(threads_used)}}effective thread count reported by the backend{p_end}
+{synopt:{cmd:r(threads_requested)} {cmd:r(threads_effective)}}raw request and capacity-limited command budget{p_end}
+{synopt:{cmd:r(recovery_threads_effective)}}FE-recovery/covariance CPU phase budget{p_end}
+{synopt:{cmd:r(threads_used)} {cmd:r(parallel_workers_active)}}largest observed team and useful-worker count over all phases{p_end}
+{synopt:{cmd:r(thread_capacity)} {cmd:r(openmp_enabled)}}runtime-visible capacity and OpenMP availability{p_end}
+{synopt:{cmd:r(thread_limit_code)} {cmd:r(thread_limit_reason)}}capacity/availability limit diagnostics{p_end}
+{synopt:{cmd:r(fullfit_threads_used)} {cmd:r(fullfit_parallel_workers_active)}}observed full-fit team/workers{p_end}
+{synopt:{cmd:r(recovery_threads_used)} {cmd:r(recovery_parallel_workers_active)}}observed recovery team/workers (0 when absent){p_end}
+{synopt:{cmd:r(covariance_threads_used)} {cmd:r(cov_parallel_workers_active)}}observed base/auxiliary/covariance team/workers; the worker-field name is shortened for Stata's identifier limit{p_end}
 {synopt:{cmd:r(gpu_requested)}}1 when CUDA was requested by {opt gpu} or the active backend selector{p_end}
 {synopt:{cmd:r(gpu_used)}}1 only if CUDA was actually used{p_end}
 {synopt:{cmd:r(gpu_status_code)}}0 not requested; 1 used; 2 unavailable; 3 not converged; 4 failed; 5 CPU cache; 6 not applicable{p_end}

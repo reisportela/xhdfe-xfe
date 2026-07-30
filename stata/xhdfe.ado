@@ -1,10 +1,10 @@
-*! version 2.21.0 25jul2026
+*! version 2.22.1 30jul2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.21.0 25jul2026"
+        local version "2.22.1 30jul2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1324,6 +1324,26 @@ program define xhdfe, eclass sortpreserve
     // Some Stata versions leave long option defaults empty; enforce defaults here.
     if ("`minparrows'" == "") local minparrows 20000
     if ("`targetrpt'" == "") local targetrpt 500000
+    if (`numthreads' < 0) {
+        di as err "numthreads() must be >= 0"
+        exit 198
+    }
+    if (`defaultthreads' < 0) {
+        di as err "defaultthreads() must be >= 0"
+        exit 198
+    }
+    if (`maxthreads' < 0) {
+        di as err "maxthreads() must be >= 0"
+        exit 198
+    }
+    if (`minparrows' <= 0) {
+        di as err "minparallelrows() must be positive"
+        exit 198
+    }
+    if (`targetrpt' <= 0) {
+        di as err "targetrowsperthread() must be positive"
+        exit 198
+    }
 
     // symmetric sweep flag
     local symmetric_sweep 0
@@ -1643,7 +1663,9 @@ program define xhdfe, eclass sortpreserve
     }
 
     tempname sN sNfull sNsng sDFr sDFRUnadj sDFm sDFa sDFaLevels sDFaExact sDFaNested ///
-        sR2 sR2w sSig2 sRss sTss sTssw sSat sIter sConv sThr sGpuUsed sGpuStatus ///
+        sR2 sR2w sSig2 sRss sTss sTssw sSat sIter sConv sAbsRes sAbsResRel sPrecCert ///
+        sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
+        sGpuUsed sGpuStatus ///
         sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth sNclust sClustScale sVcvFix ///
         sFeRecConv sFeRecIter sFeRecMaxDelta
     scalar `sGpuUsed' = 0
@@ -1689,8 +1711,12 @@ program define xhdfe, eclass sortpreserve
     local cfg "`cfg's_r2=`sR2';s_r2_within=`sR2w';s_sigma2=`sSig2';s_rss=`sRss';"
     local cfg "`cfg's_tss=`sTss';s_tss_within=`sTssw';s_saturated=`sSat';"
     local cfg "`cfg's_iterations=`sIter';s_converged=`sConv';"
+    local cfg "`cfg's_abs_residual=`sAbsRes';s_abs_residual_rel=`sAbsResRel';s_precision_certified=`sPrecCert';"
     local cfg "`cfg's_fe_recovery_converged=`sFeRecConv';s_fe_recovery_iterations=`sFeRecIter';s_fe_recovery_max_delta=`sFeRecMaxDelta';"
-    local cfg "`cfg's_threads_used=`sThr';s_gpu_used=`sGpuUsed';s_method_used=`sMeth';"
+    local cfg "`cfg's_threads_used=`sThr';s_threads_requested=`sThrReq';s_threads_effective=`sThrEff';"
+    local cfg "`cfg's_parallel_workers_active=`sThrActive';s_thread_capacity=`sThrCap';"
+    local cfg "`cfg's_openmp_enabled=`sOmpEnabled';s_thread_limit_code=`sThrLimitCode';"
+    local cfg "`cfg's_gpu_used=`sGpuUsed';s_method_used=`sMeth';"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
     local cfg "`cfg's_num_clusters=`sNclust';s_cluster_scale=`sClustScale';"
@@ -1839,6 +1865,12 @@ program define xhdfe, eclass sortpreserve
     else if (`gpu_status_code' == 3) local gpu_status "gpu_absorption_not_converged"
     else if (`gpu_status_code' == 4) local gpu_status "gpu_backend_failed"
     else if (`gpu_status_code' == 5) local gpu_status "cpu_cache_or_profile_result"
+
+    local thread_limit_reason "none"
+    if (scalar(`sThrLimitCode') == 1) local thread_limit_reason "runtime_capacity"
+    else if (scalar(`sThrLimitCode') == 2) local thread_limit_reason "auto_policy"
+    else if (scalar(`sThrLimitCode') == 3) local thread_limit_reason "auto_max_threads"
+    else if (scalar(`sThrLimitCode') == 4) local thread_limit_reason "openmp_unavailable"
 
     // When the user explicitly requests a GPU backend, do not accept CPU
     // fallback results. GPU failures and non-convergence must be surfaced as
@@ -2214,7 +2246,7 @@ program define xhdfe, eclass sortpreserve
     ereturn local footnote "xhdfe__footnote"
     ereturn local estat_cmd "xhdfe_estat"
     ereturn local model "ols"
-    ereturn local version "2.21.0 25jul2026"
+    ereturn local version "2.22.1 30jul2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2287,6 +2319,9 @@ program define xhdfe, eclass sortpreserve
     ereturn scalar iterations = scalar(`sIter')
     ereturn scalar ic = scalar(`sIter')
     ereturn scalar converged = scalar(`sConv')
+    ereturn scalar abs_residual = scalar(`sAbsRes')
+    ereturn scalar abs_residual_rel = scalar(`sAbsResRel')
+    ereturn scalar precision_certified = scalar(`sPrecCert')
     if (`store_fes') {
         ereturn scalar fe_recovery_converged = scalar(`sFeRecConv')
         ereturn scalar fe_recovery_iterations = scalar(`sFeRecIter')
@@ -2294,6 +2329,13 @@ program define xhdfe, eclass sortpreserve
     }
     ereturn scalar report_constant = `report_cons'
     ereturn scalar threads_used = scalar(`sThr')
+    ereturn scalar threads_requested = scalar(`sThrReq')
+    ereturn scalar threads_effective = scalar(`sThrEff')
+    ereturn scalar parallel_workers_active = scalar(`sThrActive')
+    ereturn scalar thread_capacity = scalar(`sThrCap')
+    ereturn scalar openmp_enabled = scalar(`sOmpEnabled')
+    ereturn scalar thread_limit_code = scalar(`sThrLimitCode')
+    ereturn local thread_limit_reason "`thread_limit_reason'"
     ereturn scalar gpu_used = scalar(`sGpuUsed')
     ereturn scalar gpu_status_code = scalar(`sGpuStatus')
     ereturn scalar gpu_attempted = scalar(`sGpuAttempted')

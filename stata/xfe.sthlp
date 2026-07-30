@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.10.1 25jul2026}{...}
+{* *! version 1.10.3 30jul2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -136,7 +136,9 @@ applies to standard categorical fixed effects; {cmd:xfe} rejects heterogeneous-s
 {phang}{opt keepsingletons} do not drop singleton observations.{p_end}
 
 {dlgtab:Threading}
-{phang}{opt numthreads(#)} direct absorber thread count (0=auto).{p_end}
+{phang}{opt numthreads(#)} direct OpenMP thread request (0=auto). A positive
+request bypasses auto-only workload and {opt maxthreads()} heuristics and is
+limited only by the logical processors/OpenMP limit visible to the process.{p_end}
 {phang}{opt defaultthreads(#)} default auto-thread count when {opt numthreads(0)}.{p_end}
 {phang}{opt maxthreads(#)} cap for auto-thread selection (0=no cap).{p_end}
 {phang}{opt minparallelrows(#)} minimum rows before parallelization is considered.{p_end}
@@ -219,7 +221,14 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(num_singletons)}}number of dropped singleton observations{p_end}
 {synopt:{cmd:e(iterations)}}absorption iterations used by the backend{p_end}
 {synopt:{cmd:e(converged)}}1 if converged, 0 otherwise{p_end}
-{synopt:{cmd:e(threads_used)}}threads used by the backend{p_end}
+{synopt:{cmd:e(threads_requested)}}raw request; 0 denotes automatic selection{p_end}
+{synopt:{cmd:e(threads_effective)}}request after runtime/automatic limits{p_end}
+{synopt:{cmd:e(threads_used)}}largest OpenMP team observed executing real work{p_end}
+{synopt:{cmd:e(parallel_workers_active)}}largest number of workers doing useful work in one observed region{p_end}
+{synopt:{cmd:e(thread_capacity)}}runtime-visible logical processor capacity{p_end}
+{synopt:{cmd:e(openmp_enabled)}}1 when the plugin has OpenMP support{p_end}
+{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable{p_end}
+{synopt:{cmd:e(thread_limit_reason)}}label corresponding to the limit code{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
 {synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
