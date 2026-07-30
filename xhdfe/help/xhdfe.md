@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Published package version: 2.21.0.20260725. Use `python -m xhdfe --version`
+Published package version: 2.22.1.20260730. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
