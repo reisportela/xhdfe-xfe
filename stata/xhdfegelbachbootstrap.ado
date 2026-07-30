@@ -1,4 +1,4 @@
-*! version 1.0.0  28jul2026
+*! version 1.0.0  30jul2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve
@@ -413,7 +413,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return local ci_method "`bootci'"
     return local interval_status ///
         "resampling_based_not_a_nonregularity_cure"
-    return local version "1.0.0 28jul2026"
+    return local version "1.0.0 30jul2026"
     return local rng "Stata_rng_reproducible_seed"
     return local point_vce "`point_vce'"
     return local point_gpu_backend "`point_gpu_backend'"
