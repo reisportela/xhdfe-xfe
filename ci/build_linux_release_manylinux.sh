@@ -38,7 +38,11 @@ dnf -y config-manager --add-repo \
 # build-plugin.sh runs on the verifier object (§7.6/R-04); nvcc alone does
 # not ship it and the gate refuses to certify what it cannot see.
 dnf -y install "cuda-nvcc-${CUDA_MM}" "cuda-cudart-devel-${CUDA_MM}" \
-  "cuda-cuobjdump-${CUDA_MM}" "libcurand-devel-${CUDA_MM}" >/dev/null
+  "cuda-cuobjdump-${CUDA_MM}" "cuda-nvdisasm-${CUDA_MM}" \
+  "libcurand-devel-${CUDA_MM}" >/dev/null
+# cuda-nvdisasm: cuobjdump --dump-sass DELEGATES disassembly to nvdisasm;
+# without it the dump emits fatbin headers but zero "Function :" lines and
+# the FMA gate fail-closes on "no hdfe_cert functions found in SASS".
 export PATH="/usr/local/cuda/bin:${PATH}"
 nvcc --version | tail -2
 

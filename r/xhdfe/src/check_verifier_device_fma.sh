@@ -88,6 +88,11 @@ if [[ -z "$sass_all" ]]; then
   echo "FAIL: no SASS extractable from $OBJ (gate is fail-closed; PTX alone is not proof of what the GPU executes)" >&2
   exit 1
 fi
+if ! grep -q "Function[[:space:]]*:" <<<"$sass_all"; then
+  echo "FAIL: SASS dump of $OBJ contains no disassembly at all — cuobjdump" >&2
+  echo "      delegates to nvdisasm; install it (e.g. cuda-nvdisasm) — gate is fail-closed" >&2
+  exit 1
+fi
 sass="$(filter_sass <<<"$sass_all")"
 if [[ -z "$sass" ]]; then
   echo "FAIL: no hdfe_cert functions found in SASS of $OBJ (gate is fail-closed)" >&2
