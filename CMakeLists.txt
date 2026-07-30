@@ -229,6 +229,17 @@ if(XHDFE_BUILD_PYTHON)
     add_library(py_hdfe_v11 MODULE python/py_hdfe_v11.cpp)
     target_link_libraries(py_hdfe_v11 PRIVATE xhdfe pybind11::module)
     pybind11_extension(py_hdfe_v11)
+    if(XHDFE_ENABLE_CUDA)
+        # §7.6/R-04 device FMA gate on the linked module (the gate filters to
+        # hdfe_cert functions, so the solver kernels' legitimate FMA use is
+        # out of scope). Fail-closed: a contraction regression in the
+        # verifier breaks the build, not the certification.
+        add_custom_command(TARGET py_hdfe_v11 POST_BUILD
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_verifier_device_fma.sh
+                    $<TARGET_FILE:py_hdfe_v11>
+            COMMENT "verifier device FMA gate (§7.6)"
+            VERBATIM)
+    endif()
     if(MSVC)
         target_compile_options(py_hdfe_v11 PRIVATE /bigobj)
     elseif(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

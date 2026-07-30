@@ -98,6 +98,7 @@ pairs=(
   "include/hdfe/akm_kss.hpp:r/xhdfe/src/include/hdfe/akm_kss.hpp"
   "include/hdfe/akm_kss_cuda.hpp:r/xhdfe/src/include/hdfe/akm_kss_cuda.hpp"
   "include/hdfe/akm_kss_am_tabulation.hpp:r/xhdfe/src/include/hdfe/akm_kss_am_tabulation.hpp"
+  "tools/check_verifier_device_fma.sh:r/xhdfe/src/check_verifier_device_fma.sh"
 )
 
 # Report EVERY divergent pair before exiting. The previous exit-on-first

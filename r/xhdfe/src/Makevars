@@ -107,6 +107,7 @@ fe_absorption_cuda_verifier.o: fe_absorption_cuda_certificate.cu
 	    -Xcompiler $(XHDFE_NVCC_VERIFIER_HOST_FLAGS) \
 	    -Xcompiler -ffp-contract=off -Xcompiler -frecord-gcc-switches \
 	    -I. -Iinclude -Ieigen -c $< -o $@
+	bash check_verifier_device_fma.sh $@
 
 akm_kss_cuda.o: akm_kss_cuda.cu
 	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \

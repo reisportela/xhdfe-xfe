@@ -486,6 +486,14 @@ compile_plugin() {
           rc=$?
         fi
         if [[ $rc -eq 0 ]]; then
+          # §7.6/R-04 device FMA gate, fail-closed: the object must contain
+          # zero fma in the verifier functions (PTX + SASS; div/sqrt
+          # expansion allow-list inside the gate). cuobjdump ships with the
+          # CUDA toolkit this build already requires.
+          if ! bash "${STATA_DIR}/../tools/check_verifier_device_fma.sh" "${cuda_verifier_obj}"; then
+            echo "Error: verifier device FMA gate failed (§7.6)" >&2
+            exit 1
+          fi
           objs+=( "${cuda_verifier_obj}" )
           set -e
           break
