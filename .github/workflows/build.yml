@@ -28,6 +28,9 @@ jobs:
             -DXHDFE_ENABLE_CUDA=OFF -DXHDFE_ENABLE_MARCH_NATIVE=OFF
           cmake --build build -j
 
+      - name: Verify maintained source mirrors
+        run: bash tools/check_cpp_core_alignment.sh
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -39,6 +42,12 @@ jobs:
           python -m pip install --upgrade pip numpy
           python -m pip install .
           python -c "import xhdfe; print('python import OK', xhdfe.__version__)"
+
+      - name: Run fast Python contract validation
+        run: |
+          module="$(find build -name 'py_hdfe_v11*.so' -print -quit)"
+          test -n "$module"
+          XHDFE_PY_MODULE="$module" bash tests/validation/run_fast.sh
 
       - name: Build the Stata plugin (Linux, OpenMP, CPU)
         run: bash stata/tools/build-plugin.sh --linux --openmp

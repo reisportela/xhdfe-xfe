@@ -33,7 +33,7 @@ FE-collinear; its full-model coefficient is imposed at zero and labelled
 omissions and generic rank dependencies still raise an error.
 
 Inference reproduces b1x2 (validated to machine precision in
-VALIDATE_GELBACH.py):
+tests/validation/VALIDATE_GELBACH.py):
 
 The reported covariance is the random-design/stacked-moment variance used by
 ``b1x2``: it includes sampling variation in the auxiliary projections. It is

@@ -741,13 +741,13 @@ condition both specifications on a categorical effect.
 
 - `examples/gelbach_example.py`: standard focal/common-control/HDFE workflow;
 - `examples/gelbach_absorbed_target.py`: imposed-zero target workflow;
-- `VALIDATE_GELBACH.py`: b1x2, LSDV and absorbed-target oracles;
-- `VALIDATE_GELBACH_FRONTENDS.py`: Python/Stata/R parity and gates executing
+- `tests/validation/VALIDATE_GELBACH.py`: b1x2, LSDV and absorbed-target oracles;
+- `tests/validation/VALIDATE_GELBACH_FRONTENDS.py`: Python/Stata/R parity and gates executing
   the standard and absorbed-target examples in each of the three frontends;
-- `VALIDATE_GELBACH_PYFIXEST_FEATURES.py`: iid/cluster resampling oracles,
+- `tests/validation/VALIDATE_GELBACH_PYFIXEST_FEATURES.py`: iid/cluster resampling oracles,
   seed/ledger/fail-closed gates, interval arithmetic, tables and waterfall
   identity;
-- `XHDFEGELBACH_EMPIRICAL_APPLICATION_COVERAGE_20260720.md`: paper-by-paper
+- `docs/certification/gelbach-empirical-coverage-20260720.md`: paper-by-paper
   coverage and scientific boundaries.
 
 Reference: Gelbach, J. B. (2016), “When Do Covariates Matter? And Which Ones,

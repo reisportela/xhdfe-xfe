@@ -448,6 +448,11 @@ jobs:
           cp dl/xfe.plugin.linux-cuda   release_assets/xfe-linux-cuda.plugin
           cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz dl/xhdfe_*.tar.gz release_assets/
 
+          # Source-only archive used by xhdfegpu and offline local builds.
+          # The builder performs its own closure and pinned-Rcpp validation.
+          bash tools/make_source_dist_zip.sh \
+            "$GITHUB_WORKSPACE/release_assets/xhdfe-src.zip"
+
           # ---- Autonomous offline source + multi-platform runtime bundle ----
           # Build from the exact tagged tree; never select a historical dist/*.zip.
           # The archive contains every tracked source/build input (including vendored
@@ -530,6 +535,7 @@ jobs:
             --windows-xfe   dl/xfe.plugin.windows \
             --windows-libgomp dl/libgomp-1.dll \
             --windows-libwinpthread dl/libwinpthread-1.dll
+          cp release_assets/xhdfe-src.zip netinstall_site/stata/xhdfe-src.zip
           ( cd "$GITHUB_WORKSPACE/netinstall_site" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/xhdfe_xfe-stata-netinstall-site.zip" . )
           echo "built release_assets/xhdfe_xfe-stata-netinstall-site.zip"
 
