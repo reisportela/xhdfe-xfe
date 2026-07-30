@@ -34,8 +34,11 @@ g++ --version | head -1
 echo "== CUDA toolkit (nvcc + static cudart; no driver needed to compile) =="
 dnf -y config-manager --add-repo \
   https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo >/dev/null
+# cuda-cuobjdump: required by the fail-closed verifier FMA gate that
+# build-plugin.sh runs on the verifier object (§7.6/R-04); nvcc alone does
+# not ship it and the gate refuses to certify what it cannot see.
 dnf -y install "cuda-nvcc-${CUDA_MM}" "cuda-cudart-devel-${CUDA_MM}" \
-  "libcurand-devel-${CUDA_MM}" >/dev/null
+  "cuda-cuobjdump-${CUDA_MM}" "libcurand-devel-${CUDA_MM}" >/dev/null
 export PATH="/usr/local/cuda/bin:${PATH}"
 nvcc --version | tail -2
 

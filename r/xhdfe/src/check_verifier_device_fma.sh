@@ -24,9 +24,22 @@
 set -euo pipefail
 
 OBJ="${1:?usage: check_verifier_device_fma.sh <object>}"
-CUOBJDUMP="${CUOBJDUMP:-$(command -v cuobjdump || echo /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/cuda/bin/cuobjdump)}"
-
-if [[ ! -x "$CUOBJDUMP" && ! -x "$(command -v "$CUOBJDUMP" 2>/dev/null || true)" ]]; then
+# cuobjdump lookup: env override, PATH, next to nvcc (network/minimal CUDA
+# installs put both in the same bindir when the cuobjdump package is
+# present), then the local HPC-SDK path. Still fail-closed when absent.
+CUOBJDUMP="${CUOBJDUMP:-$(command -v cuobjdump || true)}"
+if [[ -z "$CUOBJDUMP" || ! -x "$CUOBJDUMP" ]]; then
+  _nvcc="$(command -v nvcc || true)"
+  if [[ -n "$_nvcc" && -x "$(dirname "$_nvcc")/cuobjdump" ]]; then
+    CUOBJDUMP="$(dirname "$_nvcc")/cuobjdump"
+  fi
+fi
+if [[ -z "$CUOBJDUMP" || ! -x "$CUOBJDUMP" ]]; then
+  for _cand in /usr/local/cuda/bin/cuobjdump                /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/cuda/bin/cuobjdump; do
+    [[ -x "$_cand" ]] && { CUOBJDUMP="$_cand"; break; }
+  done
+fi
+if [[ -z "$CUOBJDUMP" || ! -x "$CUOBJDUMP" ]]; then
   echo "FAIL: cuobjdump not found — the gate cannot certify what it cannot see" >&2
   exit 1
 fi
