@@ -1,4 +1,4 @@
-*! version 1.2.1  30jul2026
+*! version 1.3.0  06aug2026
 *! Leave-one-out connected set (KSS / LeaveOutTwoWay semantics) as a
 *! standalone sample-preparation utility on the xhdfe backend: largest
 *! connected component (firm count), iterative removal of articulation

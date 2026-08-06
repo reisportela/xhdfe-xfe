@@ -1,10 +1,10 @@
-*! version 2.22.1 30jul2026
+*! version 2.23.0 06aug2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.22.1 30jul2026"
+        local version "2.23.0 06aug2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -214,16 +214,16 @@ program define xhdfe, eclass sortpreserve
     local compat_ignored
     if ("`timeit'" != "") local compat_ignored "`compat_ignored' timeit"
     if (`verbose' >= 0) local compat_ignored "`compat_ignored' verbose(`verbose')"
-    if ("`technique'" != "") local compat_ignored `"`compat_ignored' technique(`technique')"' 
-    if ("`acceleration'" != "") local compat_ignored `"`compat_ignored' acceleration(`acceleration')"' 
-    if ("`transform'" != "") local compat_ignored `"`compat_ignored' transform(`transform')"' 
-    if ("`preconditioner'" != "") local compat_ignored `"`compat_ignored' preconditioner(`preconditioner')"' 
+    if ("`technique'" != "") local compat_ignored `"`compat_ignored' technique(`technique')"'
+    if ("`acceleration'" != "") local compat_ignored `"`compat_ignored' acceleration(`acceleration')"'
+    if ("`transform'" != "") local compat_ignored `"`compat_ignored' transform(`transform')"'
+    if ("`preconditioner'" != "") local compat_ignored `"`compat_ignored' preconditioner(`preconditioner')"'
     if ("`prune'" != "") local compat_ignored "`compat_ignored' prune"
     if ("`fastregress'" != "") local compat_ignored "`compat_ignored' fastregress"
     if (`poolsize' > 0) local compat_ignored "`compat_ignored' poolsize(`poolsize')"
     if ("`compact'" != "") local compat_ignored "`compat_ignored' compact"
     if (`version' > 0) local compat_ignored "`compat_ignored' version(`version')"
-    if ("`parallel'" != "") local compat_ignored `"`compat_ignored' parallel(`parallel')"' 
+    if ("`parallel'" != "") local compat_ignored `"`compat_ignored' parallel(`parallel')"'
 
     // i() is an alias of individual() (reghdfe-style shorthand).
     if ("`i'" != "") {
@@ -264,6 +264,33 @@ program define xhdfe, eclass sortpreserve
             local absorb_opts = strtrim("`absorb_opts'")
         }
         if ("`absorb_vars'" != "") {
+            // Bind parenthesized varlists before the ordinary token parser,
+            // then expand reghdfe's fe##c.(x z) shorthand.  Only the first
+            // expanded slope carries the absorbed intercept.
+            local absorb_pending `"`absorb_vars'"'
+            local absorb_expanded
+            while (`"`absorb_pending'"' != "") {
+                gettoken grouped_tok absorb_pending : absorb_pending, bind
+                if (regexm(`"`grouped_tok'"', "^([^#= ]+)(##|#)c[.]\(([^()]*)\)$")) {
+                    local grouped_carrier = regexs(1)
+                    local grouped_operator = regexs(2)
+                    local grouped_vars = regexs(3)
+                    unab grouped_varlist : `grouped_vars'
+                    local grouped_first 1
+                    foreach grouped_var of local grouped_varlist {
+                        local expanded_operator "#"
+                        if (`grouped_first' & "`grouped_operator'" == "##") {
+                            local expanded_operator "##"
+                        }
+                        local absorb_expanded `"`absorb_expanded' `grouped_carrier'`expanded_operator'c.`grouped_var'"'
+                        local grouped_first 0
+                    }
+                }
+                else {
+                    local absorb_expanded `"`absorb_expanded' `grouped_tok'"'
+                }
+            }
+            local absorb_vars = strtrim(`"`absorb_expanded'"')
             foreach tok of local absorb_vars {
                 local tok = strtrim("`tok'")
                 if ("`tok'" == "") continue
@@ -806,6 +833,10 @@ program define xhdfe, eclass sortpreserve
         if ("`weight'" == "pweight" & "`cluster_raw'" == "" & `vce_given' == 0) {
             local se_type "robust"
         }
+        if ("`weight'" == "pweight" & `vce_given' & "`se_type'" == "unadjusted") {
+            di as err "pweights are not allowed with vce(unadjusted)"
+            exit 198
+        }
     }
 
     // Sample restriction and missing values.
@@ -820,6 +851,12 @@ program define xhdfe, eclass sortpreserve
     markout `touse' `markvars', strok
     if (`has_weight') {
         quietly replace `touse' = 0 if `wvar' <= 0 | missing(`wvar')
+    }
+    tempname iw_sum_full
+    scalar `iw_sum_full' = .
+    if ("`weight'" == "iweight") {
+        quietly summarize `wvar' if `touse', meanonly
+        scalar `iw_sum_full' = r(sum)
     }
     if (`__xhdfe_profile') {
         timer off 99
@@ -1108,19 +1145,19 @@ program define xhdfe, eclass sortpreserve
                 local slope_vname "`vname'Slope1"
                 confirm new variable `slope_vname'
                 gen double `slope_vname' = .
-                label variable `slope_vname' "[FE] `k'.`fe_slope_label'"
+                label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                 local fe_out_vars "`fe_out_vars' `slope_vname'"
             }
             else {
                 confirm new variable `vname'
                 gen double `vname' = .
-                label variable `vname' "[FE] `k'.`fe'"
+                label variable `vname' "[FE] 1.`fe'"
                 local fe_out_vars "`fe_out_vars' `vname'"
                 if ("`kind'" == "slope" & "`slopeintercept'" == "1") {
                     local slope_vname "`vname'Slope1"
                     confirm new variable `slope_vname'
                     gen double `slope_vname' = .
-                    label variable `slope_vname' "[FE] `k'.`fe_slope_label'"
+                    label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                     local fe_out_vars "`fe_out_vars' `slope_vname'"
                 }
             }
@@ -1171,18 +1208,18 @@ program define xhdfe, eclass sortpreserve
                 local slope_vname "`vname'Slope1"
                 confirm new variable `slope_vname'
                 gen double `slope_vname' = .
-                label variable `slope_vname' "[FE] `k'.`fe_slope_label'"
+                label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                 local fe_out_vars "`fe_out_vars' `slope_vname'"
             }
             else {
                 gen double `vname' = .
-                label variable `vname' "[FE] `k'.`fe'"
+                label variable `vname' "[FE] 1.`fe'"
                 local fe_out_vars "`fe_out_vars' `vname'"
                 if ("`kind'" == "slope" & "`slopeintercept'" == "1") {
                     local slope_vname "`vname'Slope1"
                     confirm new variable `slope_vname'
                     gen double `slope_vname' = .
-                    label variable `slope_vname' "[FE] `k'.`fe_slope_label'"
+                    label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                     local fe_out_vars "`fe_out_vars' `slope_vname'"
                 }
             }
@@ -1228,13 +1265,13 @@ program define xhdfe, eclass sortpreserve
                 }
                 confirm new variable `slope_vname'
                 gen double `slope_vname' = .
-                label variable `slope_vname' "[FE] `k'.`entry_slope_label'"
+                label variable `slope_vname' "[FE] 1.`entry_slope_label'"
                 local fe_out_vars "`fe_out_vars' `slope_vname'"
             }
             else {
                 confirm new variable `vname'
                 gen double `vname' = .
-                label variable `vname' "[FE] `k'.`entry'"
+                label variable `vname' "[FE] 1.`entry'"
                 local fe_out_vars "`fe_out_vars' `vname'"
                 if ("`kind'" == "slope" & "`slopeintercept'" == "1") {
                     local slope_vname "`vname'Slope1"
@@ -1244,7 +1281,7 @@ program define xhdfe, eclass sortpreserve
                     }
                     confirm new variable `slope_vname'
                     gen double `slope_vname' = .
-                    label variable `slope_vname' "[FE] `k'.`entry_slope_label'"
+                    label variable `slope_vname' "[FE] 1.`entry_slope_label'"
                     local fe_out_vars "`fe_out_vars' `slope_vname'"
                 }
             }
@@ -1290,18 +1327,17 @@ program define xhdfe, eclass sortpreserve
     // (no absorb), or absorbed through at least one FE level dimension.
     // Slope-only absorption (absorb(fe#c.z)) has no intercept: reghdfe reports
     // no _cons there and uses noconstant-style fit statistics.
-    local model_has_cons = `fit_intercept'
     local nkinds : word count `absorb_kinds'
-    if (`fit_intercept' & `nkinds' > 0 & `nendog' == 0) {
-        local any_level 0
+    local any_level 0
+    if (`nkinds' > 0) {
         forvalues d = 1/`nkinds' {
             local kind : word `d' of `absorb_kinds'
             local sint : word `d' of `absorb_slopeintercepts'
             if ("`kind'" != "slope") local any_level 1
             else if ("`sint'" == "1") local any_level 1
         }
-        if (!`any_level') local model_has_cons 0
     }
+    local model_has_cons = cond(`nkinds' > 0, `any_level', `fit_intercept')
 
     // absorption method default
     if ("`absorptionmethod'" == "") {
@@ -1548,22 +1584,42 @@ program define xhdfe, eclass sortpreserve
     local omit_priority_list
     local fv_stub "__xhdfe_"
     local fv_created 0
+    local fv_terms
     if ("`indepvars'" != "") {
         local has_fv = (strpos("`indepvars'", ".") > 0) | (strpos("`indepvars'", "#") > 0)
         local raw_x "`indepvars'"
         if (`has_fv') {
+            quietly fvexpand `indepvars' if `touse'
+            local fv_terms "`r(varlist)'"
             quietly fvrevar `indepvars' if `touse', stub(`fv_stub')
             local raw_x "`r(varlist)'"
             local fv_created 1
         }
 
+        local fv_i 0
         foreach v of local raw_x {
+            local ++fv_i
             local term : char `v'[fvrevar]
+            if (`has_fv') {
+                local canonical : word `fv_i' of `fv_terms'
+                if ("`canonical'" != "") local term "`canonical'"
+            }
             if ("`term'" == "") local term "`v'"
 
-            // Drop explicitly omitted terms and base categories.
-            if (substr("`term'", 1, 2) == "o.") continue
-            if (regexm("`term'", "([0-9]+b\.)")) continue
+            // fvexpand, not a marker substring, decides identification. A
+            // base-bearing cell in a single-# interaction is identified unless
+            // every categorical component is the joint base. In ## expansions
+            // Stata marks the structurally redundant cells with an o marker.
+            if (regexm("`term'", "(^|#)[^#.]*o\.")) continue
+            if (strpos("`term'", "#") == 0 & regexm("`term'", "^[0-9]+b\.")) continue
+            if (strpos("`term'", "#") > 0) {
+                local fv_parts : subinstr local term "#" " ", all
+                local all_base 1
+                foreach part of local fv_parts {
+                    if (!regexm("`part'", "^[0-9]+b\.")) local all_base 0
+                }
+                if (`all_base') continue
+            }
 
             // Match Stata naming conventions for continuous main effects.
             if (substr("`term'", 1, 2) == "c." & strpos("`term'", "#") == 0) {
@@ -1682,10 +1738,9 @@ program define xhdfe, eclass sortpreserve
     local have_dof_table 0
     tempname dof_table
     if (`nfe' > 0) {
-        // Column 6 receives the per-dimension count of distinct FE levels in
-        // e(sample) from the plugin (used by the slope DoF display, saving an
-        // O(N log N) egen-tag recount on huge datasets).
-        matrix `dof_table' = J(`nfe', 6, .)
+        // Columns 6-7 receive base-level counts and base-intercept
+        // redundancies for the heterogeneous-slope display.
+        matrix `dof_table' = J(`nfe', 7, .)
         local have_dof_table 1
     }
 
@@ -1957,7 +2012,14 @@ program define xhdfe, eclass sortpreserve
     mata: _xhdfe_fix_v("`V'")
 
     local dof_labels ""
-    if (`have_dof_table') {
+    if (!`have_dof_table' & `nfe' == 0 & `fit_intercept' & "`statstyle'" == "reghdfe") {
+        matrix `dof_table' = (1, 0, 1, 0, 0)
+        matrix rownames `dof_table' = _cons
+        matrix colnames `dof_table' = Categories Redundant "Num Coefs" "Inexact?" "Nested?"
+        local dof_labels "_cons"
+        local have_dof_table 1
+    }
+    else if (`have_dof_table') {
         local dof_display_rows 0
         forvalues i = 1/`nfe' {
             local kind : word `i' of `absorb_kinds'
@@ -2009,11 +2071,10 @@ program define xhdfe, eclass sortpreserve
                 local nested = `dof_table'[`dof_i',5]
 
                 if ("`slopeintercept'" == "1") {
-                    local extra_levels = `total_levels' - `base_levels'
-                    if (missing(`extra_levels') | `extra_levels' < 0) local extra_levels = `base_levels'
-                    local slope_redundant = max(`base_levels' - `extra_levels', 0)
-                    if (`slope_redundant' > `total_redundant') local slope_redundant = `total_redundant'
-                    local base_redundant = `total_redundant' - `slope_redundant'
+                    local base_redundant = `dof_table'[`dof_i',7]
+                    if (missing(`base_redundant')) local base_redundant 0
+                    local base_redundant = min(max(`base_redundant', 0), `base_levels')
+                    local slope_redundant = min(max(`total_redundant' - `base_redundant', 0), `base_levels')
                     local base_coefs = `base_levels' - `base_redundant'
                     local slope_coefs = `base_levels' - `slope_redundant'
 
@@ -2037,8 +2098,8 @@ program define xhdfe, eclass sortpreserve
                     matrix `dof_display_table'[`dof_new_i',1] = `base_levels'
                     matrix `dof_display_table'[`dof_new_i',2] = `slope_redundant'
                     matrix `dof_display_table'[`dof_new_i',3] = `slope_coefs'
-                    matrix `dof_display_table'[`dof_new_i',4] = `inexact'
-                    matrix `dof_display_table'[`dof_new_i',5] = `nested'
+                    matrix `dof_display_table'[`dof_new_i',4] = 1
+                    matrix `dof_display_table'[`dof_new_i',5] = 0
                     local dof_labels "`dof_labels' `slope_label'"
                     local rn "`slope_label'"
                     local rn : subinstr local rn "##" "_X_" , all
@@ -2057,8 +2118,8 @@ program define xhdfe, eclass sortpreserve
                     matrix `dof_display_table'[`dof_new_i',1] = `base_levels'
                     matrix `dof_display_table'[`dof_new_i',2] = `slope_redundant'
                     matrix `dof_display_table'[`dof_new_i',3] = `slope_coefs'
-                    matrix `dof_display_table'[`dof_new_i',4] = `inexact'
-                    matrix `dof_display_table'[`dof_new_i',5] = `nested'
+                    matrix `dof_display_table'[`dof_new_i',4] = 1
+                    matrix `dof_display_table'[`dof_new_i',5] = 0
                     local dof_labels "`dof_labels' `slope_label'"
                     local rn "`slope_label'"
                     local rn : subinstr local rn "##" "_X_" , all
@@ -2103,6 +2164,29 @@ program define xhdfe, eclass sortpreserve
         scalar `sumweights' = scalar(`sN')
     }
 
+    // Stata's iweight convention posts sum(w) as N and uses it for the
+    // homoskedastic residual denominator.  Robust/cluster sandwiches already
+    // match regress under the row-based HC/score convention, so only the
+    // posted counts (and the classical VCE) change.
+    tempname iw_N iw_df_old iw_df_new iw_vscale iw_stat_scale
+    scalar `iw_N' = .
+    if ("`weight'" == "iweight") {
+        scalar `iw_N' = scalar(`sumweights')
+        scalar `iw_df_old' = scalar(`sDFRUnadj')
+        scalar `iw_df_new' = scalar(`iw_df_old') + scalar(`iw_N') - scalar(`sN')
+        if ("`se_type'" == "unadjusted" & scalar(`iw_df_old') > 0 & scalar(`iw_df_new') > 0) {
+            scalar `iw_vscale' = scalar(`iw_df_old') / scalar(`iw_df_new')
+            matrix `V' = `V' * scalar(`iw_vscale')
+        }
+        scalar `iw_stat_scale' = scalar(`iw_N') / scalar(`sN')
+        scalar `sRss' = scalar(`sRss') * scalar(`iw_stat_scale')
+        scalar `sTss' = scalar(`sTss') * scalar(`iw_stat_scale')
+        scalar `sTssw' = scalar(`sTssw') * scalar(`iw_stat_scale')
+        scalar `sSig2' = scalar(`sRss') / scalar(`iw_df_new')
+        scalar `sDFRUnadj' = scalar(`iw_df_new')
+        if ("`se_type'" != "cluster") scalar `sDFr' = scalar(`iw_df_new')
+    }
+
     // Force-omit regressors that are main effects of absorbed FE variables (reghdfe-style).
     local forced_omit 0
     if (`k' > 0 & "`absorb_markvars'" != "") {
@@ -2133,8 +2217,9 @@ program define xhdfe, eclass sortpreserve
     // Mark collinear regressors as omitted (Stata-style).
     _ms_findomitted `b' `V'
 
-    // Recompute _cons after forced omissions so it matches reported coefficients.
-    if (`forced_omit' & `fit_intercept') {
+    // Recompute _cons after forced omissions and IV projection so it matches
+    // the reported coefficients on the original (not first-stage fitted) X.
+    if ((`forced_omit' | `nendog' > 0) & `fit_intercept') {
         local wgt ""
         if (`has_weight') local wgt " [`weight'=`wvar']"
         tempname xbarb
@@ -2192,11 +2277,6 @@ program define xhdfe, eclass sortpreserve
         if ("`name'" == "_cons") continue
         // Prefer explicit omission tracking from C++/forced omission pass.
         if (`omit_reason'[`j',1] > 0) continue
-        // Guard against base/omitted FV terms that may still appear in colnames.
-        if (regexm("`name'", "([0-9]+b\.)")) continue
-        if (regexm("`name'", "([0-9]+bn\.)")) continue
-        if (regexm("`name'", "^o\.")) continue
-        if (regexm("`name'", "([0-9]+o\.)")) continue
         local ++df_m_eff
     }
 
@@ -2233,9 +2313,32 @@ program define xhdfe, eclass sortpreserve
     }
     local dofmethod "pairwise clusters continuous"
     if ("`dofadjustments'" != "") {
-        local dofmethod "`dofadjustments'"
+        local dof_requested = lower(strtrim("`dofadjustments'"))
+        local dof_requested : subinstr local dof_requested "," " ", all
+        local dof_requested : list retokenize dof_requested
+        local dof_all 0
+        local dof_none 0
+        local dof_firstpair 0
+        local dof_pairwise 0
+        local dof_clusters 0
+        local dof_continuous 0
+        foreach tok of local dof_requested {
+            if ("`tok'" == "all") local dof_all 1
+            else if ("`tok'" == "none") local dof_none 1
+            else if (inlist("`tok'", "first", "firstpair")) local dof_firstpair 1
+            else if (inlist("`tok'", "pair", "pairwise")) local dof_pairwise 1
+            else if (inlist("`tok'", "cluster", "clusters")) local dof_clusters 1
+            else if (inlist("`tok'", "cont", "continuous")) local dof_continuous 1
+        }
+        local dofmethod ""
+        if (`dof_all') local dofmethod "pairwise clusters continuous"
+        else if (!`dof_none') {
+            if (`dof_firstpair') local dofmethod "firstpair"
+            else if (`dof_pairwise') local dofmethod "pairwise"
+            if (`dof_clusters') local dofmethod "`dofmethod' clusters"
+            if (`dof_continuous') local dofmethod "`dofmethod' continuous"
+        }
     }
-    local dofmethod : subinstr local dofmethod "," " ", all
     local dofmethod : list retokenize dofmethod
     ereturn local dofmethod "`dofmethod'"
     if ("`dof_labels'" != "") {
@@ -2246,7 +2349,11 @@ program define xhdfe, eclass sortpreserve
     ereturn local footnote "xhdfe__footnote"
     ereturn local estat_cmd "xhdfe_estat"
     ereturn local model "ols"
-    ereturn local version "2.22.1 30jul2026"
+    if (`has_weight') {
+        ereturn local wtype "`weight'"
+        ereturn local wexp "`exp'"
+    }
+    ereturn local version "2.23.0 06aug2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2284,6 +2391,10 @@ program define xhdfe, eclass sortpreserve
         ereturn local vce "ols"
     }
     ereturn scalar N_full = scalar(`sNfull')
+    if ("`weight'" == "iweight") {
+        ereturn scalar N = scalar(`iw_N')
+        ereturn scalar N_full = scalar(`iw_sum_full')
+    }
     ereturn scalar num_singletons = scalar(`sNsng')
     ereturn scalar sumweights = scalar(`sumweights')
     ereturn scalar drop_singletons = `drop_singletons'
@@ -2296,8 +2407,11 @@ program define xhdfe, eclass sortpreserve
     ereturn scalar df_a_initial = e(df_a_levels)
     ereturn scalar df_a_redundant = e(df_a_initial) - e(df_a)
     if (e(df_a_redundant) < 0) ereturn scalar df_a_redundant = 0
-    ereturn scalar N_hdfe = `nfe'
-    ereturn scalar N_hdfe_extended = `nfe'
+    local n_hdfe_report = `nfe'
+    if (`nfe' == 0 & `have_dof_table') local n_hdfe_report 1
+    ereturn scalar N_hdfe = `n_hdfe_report'
+    if (`have_dof_table') ereturn scalar N_hdfe_extended = rowsof(`dof_table')
+    else ereturn scalar N_hdfe_extended = `n_hdfe_report'
     if (`have_dof_table') {
         ereturn matrix dof_table = `dof_table'
     }
@@ -2363,70 +2477,17 @@ program define xhdfe, eclass sortpreserve
         }
     }
     ereturn scalar absorption_method_used = scalar(`sMeth')
-    if (scalar(`sNclust') < .) ereturn scalar N_clust = scalar(`sNclust')
+    // Only a clustered fit posts e(N_clust). The plugin reports zero when no
+    // cluster variable was given, and posting that made `!missing(e(N_clust))`
+    // — the usual way to detect clustering — answer yes for every fit.
+    // regress and reghdfe leave the scalar unset instead.
+    if (scalar(`sNclust') < . & "`cluster_list'" != "") {
+        ereturn scalar N_clust = scalar(`sNclust')
+    }
     if (scalar(`sClustScale') < .) ereturn scalar cluster_scale = scalar(`sClustScale')
     ereturn scalar vcv_psd_fixed = cond(scalar(`sVcvFix') < ., scalar(`sVcvFix'), 0)
     if ("`cluster_diag_mat'" != "") {
         ereturn matrix cluster_diag = `cluster_diag_mat'
-    }
-
-    // Reghdfe-compat metadata fixes that do not alter the estimator:
-    // - dofadjustments(none) still removes trivial intercept redundancies;
-    // - clustered degenerate fits derive N_clust/df_r from the realized sample.
-    if ("`dofmethod'" == "none" & `fit_intercept' & `nfe' > 0) {
-        capture confirm matrix e(dof_table)
-        if (!_rc) {
-            tempname dof_fix V_fix
-            matrix `dof_fix' = e(dof_table)
-            local rows = rowsof(`dof_fix')
-            local nonnested 0
-            local current_redundant 0
-            forvalues i = 1/`rows' {
-                if (`dof_fix'[`i',5] == 1) continue
-                local ++nonnested
-                local current_redundant = `current_redundant' + `dof_fix'[`i',2]
-            }
-            local target_redundant = max(`nonnested' - 1, 0)
-            local add_redundant = max(`target_redundant' - `current_redundant', 0)
-            if (`add_redundant' > 0) {
-                local skipped_first 0
-                forvalues i = 1/`rows' {
-                    if (`dof_fix'[`i',5] == 1) continue
-                    if (`skipped_first' == 0) {
-                        local skipped_first 1
-                        continue
-                    }
-                    if (`add_redundant' <= 0) continue, break
-                    if (`dof_fix'[`i',2] < 1) {
-                        matrix `dof_fix'[`i',2] = 1
-                        matrix `dof_fix'[`i',3] = `dof_fix'[`i',1] - `dof_fix'[`i',2]
-                        local --add_redundant
-                    }
-                }
-
-                local old_df_a = e(df_a)
-                local old_df_r_unadj = e(df_r_unadj)
-                local new_df_a 0
-                forvalues i = 1/`rows' {
-                    local new_df_a = `new_df_a' + `dof_fix'[`i',3]
-                }
-                ereturn matrix dof_table = `dof_fix'
-                ereturn scalar df_a = `new_df_a'
-                ereturn scalar df_a_exact = `new_df_a'
-                ereturn scalar df_a_redundant = max(e(df_a_initial) - e(df_a), 0)
-
-                if (!missing(`old_df_r_unadj')) {
-                    local new_df_r_unadj = `old_df_r_unadj' + (`old_df_a' - `new_df_a')
-                    ereturn scalar df_r_unadj = `new_df_r_unadj'
-                    ereturn scalar df_r = `new_df_r_unadj'
-                    if ("`e(vce)'" == "ols" & `old_df_r_unadj' > 0 & `new_df_r_unadj' > 0) {
-                        matrix `V_fix' = e(V) * (`old_df_r_unadj' / `new_df_r_unadj')
-                        mata: _xhdfe_fix_v("`V_fix'")
-                        ereturn repost V = `V_fix'
-                    }
-                }
-            }
-        }
     }
 
     if ("`cluster_list'" != "" & (missing(e(N_clust)) | e(N_clust) <= 0)) {
@@ -2459,7 +2520,7 @@ program define xhdfe, eclass sortpreserve
     }
 
     ereturn scalar df_m = `df_m_eff'
-    ereturn scalar rank = `df_m_eff'
+    ereturn scalar rank = cond(!missing(e(tss)) & e(tss) == 0, 0, `df_m_eff')
     // Guard: treat missing e(df_r) as invalid (Stata orders missing as +infinity,
     // so the raw comparison e(df_r) > 0 would be true for missing).
     if (`df_m_eff' > 0 & !missing(e(df_r)) & e(df_r) > 0) {
@@ -2469,10 +2530,6 @@ program define xhdfe, eclass sortpreserve
             local ++idx
             if ("`name'" == "_cons") continue
             if (e(omit_reason)[`idx',1] > 0) continue
-            if (regexm("`name'", "([0-9]+b\.)")) continue
-            if (regexm("`name'", "([0-9]+bn\.)")) continue
-            if (regexm("`name'", "^o\.")) continue
-            if (regexm("`name'", "([0-9]+o\.)")) continue
             local keep_cols "`keep_cols' `idx'"
         }
 
@@ -2562,9 +2619,9 @@ program define xhdfe, eclass sortpreserve
         baselevels allbaselevels vsquish nolstretch nofvlabel {
         if ("``opt''" != "") local display_opts "`display_opts' `opt'"
     }
-    if ("`cformat'" != "") local display_opts `"`display_opts' cformat(`cformat')"' 
-    if ("`pformat'" != "") local display_opts `"`display_opts' pformat(`pformat')"' 
-    if ("`sformat'" != "") local display_opts `"`display_opts' sformat(`sformat')"' 
+    if ("`cformat'" != "") local display_opts `"`display_opts' cformat(`cformat')"'
+    if ("`pformat'" != "") local display_opts `"`display_opts' pformat(`pformat')"'
+    if ("`sformat'" != "") local display_opts `"`display_opts' sformat(`sformat')"'
     if (`fvwrap' > 0) local display_opts "`display_opts' fvwrap(`fvwrap')"
     // ereturn display in supported Stata versions accepts fvwrap() but not
     // fvwrapon(); parse fvwrapon() for compatibility and leave display stable.
@@ -2623,6 +2680,10 @@ program define xhdfe_display
     }
     if (!missing(e(vcv_psd_fixed)) & e(vcv_psd_fixed) == 1) {
         di as txt "Warning: VCV matrix was non-positive semi-definite; adjustment from Cameron, Gelbach & Miller applied."
+        local printed_preamble 1
+    }
+    if (!missing(e(precision_certified)) & e(precision_certified) == 0 & "`e(nowarn)'" == "") {
+        di as err "WARNING: convergence did not pass the independent precision certificate; inspect e(abs_residual_rel) and consider tolerancemode(strict-residual)."
         local printed_preamble 1
     }
     // Saturated / perfect-fit design: when the absorbed FEs plus the regressors
@@ -2747,9 +2808,9 @@ program define xhdfe_display
         vsquish nolstretch nofvlabel {
         if ("``opt''" != "") local display_opts "`display_opts' `opt'"
     }
-    if ("`cformat'" != "") local display_opts `"`display_opts' cformat(`cformat')"' 
-    if ("`pformat'" != "") local display_opts `"`display_opts' pformat(`pformat')"' 
-    if ("`sformat'" != "") local display_opts `"`display_opts' sformat(`sformat')"' 
+    if ("`cformat'" != "") local display_opts `"`display_opts' cformat(`cformat')"'
+    if ("`pformat'" != "") local display_opts `"`display_opts' pformat(`pformat')"'
+    if ("`sformat'" != "") local display_opts `"`display_opts' sformat(`sformat')"'
     if (`fvwrap' > 0) local display_opts "`display_opts' fvwrap(`fvwrap')"
     // ereturn display in supported Stata versions rejects fvwrapon().
 
@@ -3014,7 +3075,8 @@ void _xhdfe_expand_fv_base(string scalar bname, string scalar Vname,
             // markers (2.cat -> 2bn.cat); strip them now that the true base
             // column is being re-inserted. Omit markers survive (2bno.cat ->
             // 2o.cat), matching the reghdfe stripe.
-            target = target \ _xhdfe_fv_cleanname(names[pos])
+            target = target \ (om[pos, 1] == 1 ?
+                               _xhdfe_fv_cleanname(names[pos]) : t)
             src = src \ pos
         }
         else {
@@ -3069,6 +3131,10 @@ void _xhdfe_expand_fv_base(string scalar bname, string scalar Vname,
                     Vn[i, j] = V[src[i], src[j]]
                 }
             }
+        }
+        else {
+            // Structural base/user-omitted term inserted only for the stripe.
+            omn[i, 1] = 2
         }
     }
 

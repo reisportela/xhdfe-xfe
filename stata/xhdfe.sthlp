@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.22.1 30jul2026}{...}
+{* *! version 2.23.0 06aug2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -196,7 +196,10 @@ Factor-variable prefixes are supported in slopes. In {cmd:absorb()}, categorical
 In {cmd:cluster()}, categorical interactions with {cmd:#}/{cmd:##} are supported but continuous-factor
 terms such as {cmd:c.x} are rejected. When using {cmd:endogenous()/instruments()},
 factor-variable operators in the slope list are not supported.{p_end}
-{p 4 6 2}Supported weights are {cmd:aweight}, {cmd:fweight}, {cmd:pweight}, and {cmd:iweight}. With {cmd:pweight} and no {cmd:vce()}, xhdfe defaults to robust SEs.{p_end}
+{p 4 6 2}Supported weights are {cmd:aweight}, {cmd:fweight}, {cmd:pweight}, and {cmd:iweight}.
+With {cmd:pweight} and no {cmd:vce()}, xhdfe defaults to robust SEs; probability weights cannot
+be combined with {cmd:vce(unadjusted)}. Importance weights follow official {cmd:regress}:
+{cmd:e(N)}, residual degrees of freedom, sums of squares, and Root MSE use the sum of weights.{p_end}
 
 {marker opt_gpu}{...}
 {title:GPU option}
@@ -511,8 +514,8 @@ Valid tokens (case-insensitive) are {cmd:all}, {cmd:none}, {cmd:firstpair} ({cmd
 {cmd:pairwise} ({cmd:pair}), {cmd:clusters} ({cmd:cluster}), and {cmd:continuous} ({cmd:cont}).
 {cmd:all} enables the full reghdfe logic. {cmd:none} disables FE DoF correction. {cmd:firstpair}
 and {cmd:pairwise} select the FE DoF method. {cmd:clusters} enables adjustments for clusters
-nested within absorbed FEs. {cmd:continuous} reserves reghdfe continuous-interaction checks
-(currently a no-op).
+nested within absorbed FEs. {cmd:continuous} enables reghdfe-compatible checks for redundant
+continuous-interaction slopes.
 
 {phang}
 {opt ssc(str)} fixest-style small-sample corrections. Tokens are case-insensitive; separators may
@@ -577,6 +580,15 @@ cache-backed absorption. In the combined {cmd:group()}/{cmd:individual()} path t
 certificate is authoritative: additional full sweeps are counted in {cmd:e(iterations)}, and
 {cmd:e(converged)} is one only when {cmd:e(precision_certified)} is also one. Other absorption
 paths retain separate convergence and certificate diagnostics.
+
+{phang}
+When a fit stops with {cmd:e(precision_certified)} equal to zero, xhdfe now says so in the output
+instead of leaving the diagnostic to be looked up. On badly conditioned absorption graphs the
+stopping rule can be satisfied while the coefficients are still materially further from the exact
+within solution than the nominal tolerance suggests, so treat the warning as a prompt to inspect
+{cmd:e(abs_residual_rel)} and, if needed, rerun with {cmd:tolerancemode(strict-residual)} or a
+tighter {cmd:tolerance()}. The warning changes no estimate: the stopping rule, the tolerances and
+the certificate itself are unchanged.
 
 {phang}
 New in version 2.11.0: in {cmd:tolerancemode(reghdfe-comparable)} (the default), absorbers on
@@ -988,6 +1000,23 @@ model has no intercept: no {cmd:_cons} row is reported and {cmd:e(tss)}/{cmd:e(r
 uncentered total sum of squares, matching {helpb reghdfe} and {helpb regress}{cmd:, noconstant}.{p_end}
 {phang} Factor-variable regressors post the full Stata stripe in {cmd:e(b)}/{cmd:e(V)}, including
 base levels (e.g. {cmd:1b.cat}) and omitted terms, matching {helpb reghdfe}.{p_end}
+{phang} When the total sum of squares is zero (a constant dependent variable), {cmd:e(r2)} and
+{cmd:e(r2_within)} are missing rather than one, matching {helpb regress} and {helpb reghdfe}.
+{cmd:e(tss)} and {cmd:e(rss)} are still reported as zero.{p_end}
+{phang} With {cmd:vce(cluster ...)} and fewer than two clusters, point estimates are still posted
+but the standard errors, {it:t} statistics, {it:p}-values, confidence intervals and the model
+{it:F} are missing, again matching {helpb regress} and {helpb reghdfe}. This is the same
+convention already used for a saturated design. The displayed table therefore matches
+{helpb reghdfe}, but the posted {cmd:e(V)} does not: xhdfe writes a small negative sentinel on the
+diagonal so that Stata's {cmd:sqrt(V[j,j])} evaluates to missing, whereas {helpb reghdfe} posts
+zero. Code reading {cmd:e(V)} directly in this situation will therefore see a negative variance;
+read {cmd:_se[]} or check {cmd:e(N_clust)} instead.{p_end}
+{phang} A converged fit never posts a non-finite coefficient, and never posts a non-finite
+standard error for a coefficient whose inference is identified; such a result is rejected with an
+error instead of being reported.{p_end}
+{phang} Finite inputs can nevertheless overflow FP64 cross-products at extreme scales (roughly
+{cmd:abs(X) >= 1e153}). {cmd:xhdfe} then exits with an explicit error instead of treating every
+slope as collinear; rescale the dependent variable and/or regressors before fitting again.{p_end}
 
 {synoptset 24 tabbed}{...}
 {syntab:Macros}
@@ -1095,7 +1124,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.22.1.
+regression via a C++ backend." Version 2.23.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
