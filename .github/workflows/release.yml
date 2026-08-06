@@ -553,6 +553,7 @@ jobs:
       - name: Write release notes body
         run: |
           set -euo pipefail
+          EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
           cat > release_body.md <<EOF
           # xhdfe / xfe — ${{ github.ref_name }}
 
@@ -592,11 +593,11 @@ jobs:
           - \`xhdfe-linux-cuda.plugin\`, \`xfe-linux-cuda.plugin\` — the same Linux CUDA binaries as in the CUDA bundle, attached standalone.
 
           ### Python and R packages
-          - \`xhdfe-2.21.0.20260725-*.whl\` — Linux x86_64 CPU wheel, installed
+          - \`xhdfe-${EXPECTED_VERSION}-*.whl\` — Linux x86_64 CPU wheel, installed
             and exercised from an isolated environment in CI; use the source
             distribution on systems with an incompatible glibc/Python ABI.
-          - \`xhdfe-2.21.0.20260725.tar.gz\` — Python source distribution.
-          - \`xhdfe_2.21.0.20260725.tar.gz\` — R source package.
+          - \`xhdfe-${EXPECTED_VERSION}.tar.gz\` — Python source distribution.
+          - \`xhdfe_${EXPECTED_VERSION}.tar.gz\` — R source package.
 
           ### Offline source bundle
           - \`xhdfe_xfe-offline-source-and-platform-binaries.zip\` — exact tagged

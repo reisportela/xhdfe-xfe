@@ -7,8 +7,8 @@ gen double x = rnormal()
 gen int id = _n
 capture noisily xhdfe y x, absorb(id) noheader notable nofootnote
 local rc = _rc
-if (`rc' != 198) {
-    di as error "expected all-singleton design to fail with rc=198; got rc=`rc'"
+if (`rc' != 2001) {
+    di as error "expected all-singleton design to fail with rc=2001; got rc=`rc'"
     exit 9
 }
 di as text "  expected rc all-singleton: `rc'"

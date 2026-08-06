@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.23.0 | 6 August 2026 | [Functional contracts and scientific precision repair](RELEASE_NOTES_2.23.0.20260806.md) |
 | 2.22.1 | 30 July 2026 | [Weight validation, e(version) fix, GPU-certificate machinery](RELEASE_NOTES_2.22.1.20260730.md) |
 | 2.22.0 | 28 July 2026 | [Fast-mode safeguard, GPU CG bail, manylinux floor (staged; superseded by 2.22.1)](RELEASE_NOTES_2.22.0.20260728.md) |
 | 2.21.0 | 25 July 2026 | [Flexible HDFE Gelbach decomposition](RELEASE_NOTES_2.21.0.20260725.md) |

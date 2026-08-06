@@ -81,8 +81,9 @@ struct HdfeOptions {
     bool use_sparse_solver = false;                        //!< When true, attempt sparse direct/PCG absorption before MAP.
     double sparse_threshold = 0.0;                         //!< Max total FE levels to enable sparse absorption (0 = heuristic).
     DofAdjustmentMethod dof_method = DofAdjustmentMethod::All; //!< Degrees-of-freedom adjustment method (reghdfe default is all).
+    bool dof_mobility_groups = true;                        //!< Run first-pair/pairwise FE mobility-group redundancy checks.
     bool dof_adjust_clusters = true;                       //!< Apply cluster nesting DoF adjustments when clustering on absorbed variables.
-    bool dof_adjust_continuous = true;                     //!< Placeholder for reghdfe continuous-interaction DoF checks (no-op in this implementation).
+    bool dof_adjust_continuous = true;                     //!< Apply reghdfe-compatible continuous-interaction DoF checks.
     bool save_groupvar = false;                            //!< When true, compute and store the first mobility group variable (reghdfe groupvar()).
     std::vector<int> sweep_order_override;                 //!< Optional sweep order override (0-based FE indices); empty = auto.
     bool ssc_k_adj = true;                                 //!< Apply (N-1)/(N-K) small-sample adjustment (fixest K.adj).
@@ -130,6 +131,7 @@ struct HdfeResults {
     double tss_within = 0.0;       //!< Within total sum of squares.
     std::vector<int> fe_num_levels; //!< Number of levels in each fixed-effect dimension.
     std::vector<int> fe_base_levels; //!< Distinct FE levels present in the estimation sample per dimension (before any heterogeneous-slope DoF expansion).
+    std::vector<int> fe_base_redundant; //!< Redundant intercept-category DoF before heterogeneous-slope expansion.
     std::vector<int> fe_redundant;  //!< Redundant FE levels (M) per dimension (reghdfe-style).
     std::vector<int> fe_num_coefs;  //!< Non-redundant FE levels (K-M) per dimension.
     std::vector<int> fe_inexact;    //!< Flags for inexact redundancy counts per FE (1=inexact).

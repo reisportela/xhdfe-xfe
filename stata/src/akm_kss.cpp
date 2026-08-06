@@ -21,6 +21,7 @@
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/akm_kss_am_tabulation.hpp"
 #include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 
 #include <Eigen/Dense>
@@ -62,6 +63,51 @@
 namespace hdfe {
 
 namespace {
+
+void require_finite_vector(const Eigen::VectorXd& values,
+                           const char* label) {
+    if (detail::ieee_all_finite(values)) {
+        return;
+    }
+    for (Eigen::Index i = 0; i < values.size(); ++i) {
+        if (!detail::ieee_finite(values[i])) {
+            throw std::runtime_error(
+                std::string(label) + " must contain only finite values (row " +
+                std::to_string(i) + ")");
+        }
+    }
+}
+
+void require_finite_matrix(const Eigen::MatrixXd& values,
+                           const char* label) {
+    if (detail::ieee_all_finite(values)) {
+        return;
+    }
+    for (Eigen::Index col = 0; col < values.cols(); ++col) {
+        for (Eigen::Index row = 0; row < values.rows(); ++row) {
+            if (!detail::ieee_finite(values(row, col))) {
+                throw std::runtime_error(
+                    std::string(label) +
+                    " must contain only finite values (row " +
+                    std::to_string(row) + ", column " +
+                    std::to_string(col) + ")");
+            }
+        }
+    }
+}
+
+void require_nonnegative_ids(const Eigen::VectorXi& ids,
+                             const char* label) {
+    for (Eigen::Index i = 0; i < ids.size(); ++i) {
+        if (ids[i] < 0) {
+            throw std::runtime_error(
+                std::string(label) +
+                " must contain only nonnegative IDs (row " +
+                std::to_string(i) +
+                "); pandas.factorize() uses -1 for missing categories");
+        }
+    }
+}
 
 struct SpecializedThreadResolution {
     int requested = 0;
@@ -2156,20 +2202,15 @@ std::vector<long long> validate_fweights(const Eigen::VectorXd& fwv,
     // `double(INT64_MAX)` rounds to 2^63, whose conversion to int64_t is
     // outside the representable range.  The largest exactly representable
     // double below that boundary is therefore the safe per-row ceiling.
-    // Inspect the exponent bits instead of relying on std::isfinite: some
-    // package builds intentionally use aggressive FP flags.
+    // Use the shared bit-level predicate: package builds intentionally use
+    // aggressive FP flags.
     constexpr double kMaxSafeInt64AsDouble =
         9223372036854774784.0;
     std::vector<long long> out(static_cast<std::size_t>(n));
     std::int64_t total = 0;
     for (Eigen::Index i = 0; i < n; ++i) {
         const double v = fwv[i];
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, &v, sizeof(bits));
-        const bool finite =
-            (bits & UINT64_C(0x7ff0000000000000)) !=
-            UINT64_C(0x7ff0000000000000);
-        if (!finite || !(v > 0.0) ||
+        if (!hdfe::detail::ieee_finite(v) || !(v > 0.0) ||
             v > kMaxSafeInt64AsDouble ||
             std::floor(v) != v) {
             throw std::runtime_error(
@@ -2193,6 +2234,12 @@ LeaveOutSetResult leave_out_connected_set(const Eigen::VectorXi& worker_ids,
                                           const Eigen::VectorXi& firm_ids,
                                           const Eigen::VectorXd* fweights,
                                           const LeaveOutSetOptions& options) {
+    if (worker_ids.size() != firm_ids.size()) {
+        throw std::runtime_error(
+            "worker and firm vectors must have the same length");
+    }
+    require_nonnegative_ids(worker_ids, "worker IDs");
+    require_nonnegative_ids(firm_ids, "firm IDs");
     const SpecializedThreadResolution thread_resolution =
         resolve_specialized_threads(options.num_threads);
 #ifdef _OPENMP
@@ -2246,8 +2293,20 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (y.size() != worker_ids.size() || y.size() != firm_ids.size()) {
         throw std::runtime_error("y, worker and firm vectors must have the same length");
     }
+    require_finite_vector(y, "y");
+    require_nonnegative_ids(worker_ids, "worker IDs");
+    require_nonnegative_ids(firm_ids, "firm IDs");
     if (X != nullptr && X->rows() != y.size()) {
         throw std::runtime_error("X must have the same number of rows as y");
+    }
+    if (X != nullptr) {
+        require_finite_matrix(*X, "X");
+    }
+    if (Z != nullptr && Z->rows() != y.size()) {
+        throw std::runtime_error("Z must have the same number of rows as y");
+    }
+    if (Z != nullptr) {
+        require_finite_matrix(*Z, "Z");
     }
     if (options.jla_draws < 1) {
         throw std::runtime_error("jla_draws must be >= 1");
@@ -5591,6 +5650,9 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (X1_in.rows() != n0 || (q > 0 && X2_in.rows() != n0)) {
         throw std::runtime_error("gelbach: X1/X2 must have the same rows as y");
     }
+    require_finite_vector(y_in, "gelbach: y");
+    require_finite_matrix(X1_in, "gelbach: X1");
+    require_finite_matrix(X2_in, "gelbach: X2");
     {
         int acc = 0;
         for (int g : x2_group_sizes) {
@@ -5604,6 +5666,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     }
     for (const auto& f : fes_in) {
         if (f.size() != n0) throw std::runtime_error("gelbach: fe length mismatch");
+        require_nonnegative_ids(f, "gelbach: fixed-effect IDs");
     }
     const int nfe_all = static_cast<int>(fes_in.size());
     if (n_common_fes < 0 || n_common_fes > nfe_all) {
@@ -5615,11 +5678,17 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     if (options.vce == GelbachVce::Cluster && cluster == nullptr) {
         throw std::runtime_error("gelbach: cluster vce requires cluster ids");
     }
+    if (cluster != nullptr) {
+        if (cluster->size() != n0) {
+            throw std::runtime_error("gelbach: cluster length mismatch");
+        }
+        require_nonnegative_ids(*cluster, "gelbach: cluster IDs");
+    }
     if (x2_group_sizes.empty() && nfe == 0) {
         throw std::runtime_error(
             "gelbach: provide at least one x2 group or added FE dimension");
     }
-    if (!(options.tol > 0.0) || !std::isfinite(options.tol)) {
+    if (!(options.tol > 0.0) || !hdfe::detail::ieee_finite(options.tol)) {
         throw std::runtime_error("gelbach: tol must be finite and strictly positive");
     }
 

@@ -3,7 +3,9 @@ clear all
 set more off
 set seed 20260725
 
-adopath ++ "/home/mangelo/Documents/GitHub/xhdfe/stata"
+local STATA_DIR : environment XHDFE_STATA_ADOPATH
+if ("`STATA_DIR'" == "") local STATA_DIR "/home/mangelo/Documents/GitHub/xhdfe/stata"
+adopath ++ "`STATA_DIR'"
 
 set obs 240
 generate long cluster = ceil(_n / 10)
@@ -32,7 +34,9 @@ assert r(reps_valid) == 19
 assert r(reps_failed) == 0
 assert "`r(method)'" == "pairs"
 assert "`r(ci_method)'" == "percentile"
-assert "`r(version)'" == "1.0.0 25jul2026"
+* Runtime version captured here; compared to the ado header after the
+* remaining r() assertions, because findfile/file overwrite r().
+local runver "`r(version)'"
 assert r(gpu_requested) == 0
 assert r(gpu_required) == 0
 assert r(gpu_used_point) == 0
@@ -41,6 +45,23 @@ matrix PA = r(bootstrap_delta_draws)
 matrix PCA = r(bootstrap_delta_ci)
 assert rowsof(PA) == 19
 assert rowsof(PCA) == 4
+
+* The literal version string went stale at every release (25jul, then 30jul);
+* the invariant actually worth asserting is that the version the command
+* reports at runtime equals its own ado header — a header that has moved ahead
+* of the internal string is what broke the 2.22.0 staging.
+quietly findfile xhdfegelbachbootstrap.ado
+tempname fh
+file open `fh' using "`r(fn)'", read text
+file read `fh' adoline
+file close `fh'
+* Compare the number and date as tokens: header spacing is cosmetic and is not
+* uniform across the shipped ados.
+local hdrnum : word 3 of `adoline'
+local hdrdate : word 4 of `adoline'
+local runnum : word 1 of `runver'
+local rundate : word 2 of `runver'
+assert "`runnum'" != "" & "`runnum'" == "`hdrnum'" & "`rundate'" == "`hdrdate'"
 
 * Independent first-replication oracle: same Stata RNG draw, full public refit.
 preserve

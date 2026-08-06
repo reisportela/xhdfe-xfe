@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.0  30jul2026}{...}
+{* *! version 1.0.0  06aug2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachetable} {hline 2}}Multi-panel Gelbach tables{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.0 (30jul2026), distributed with xhdfegelbach 1.5.0.}{p_end}
+{pstd}{bf:Version 1.0.0 (06aug2026), distributed with xhdfegelbach 1.6.0.}{p_end}
 
 
 {title:Syntax}

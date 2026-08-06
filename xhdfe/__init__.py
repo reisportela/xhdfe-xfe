@@ -11,6 +11,7 @@ _CORE_EXPORTS = {
     "AbsorptionMethod",
     "ConvergenceCriterion",
     "HdfeRegressor",
+    "PrecisionWarning",
     "StandardErrorType",
 }
 
@@ -19,6 +20,7 @@ __all__ = [
     "AbsorptionMethod",
     "ConvergenceCriterion",
     "HdfeRegressor",
+    "PrecisionWarning",
     "StandardErrorType",
     "help_path",
     "help_text",

@@ -140,6 +140,12 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                            slopes_use, opts)
   })
 
+  if (!isTRUE(res$precision_certified)) {
+    message("xhdfe within-transform did not pass the independent precision ",
+            "certificate; inspect abs_residual_rel and consider ",
+            "tolerance_mode = \"strict-residual\"")
+  }
+
   out_mat <- cbind(res$y_tilde, res$X_tilde)
   colnames(out_mat) <- c(deparse1(spec$lhs), colnames(X))
   # With drop_singletons = TRUE the core removes rows; realign `rows` to the

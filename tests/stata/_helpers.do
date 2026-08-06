@@ -260,3 +260,198 @@ program define xcert_assert_var_close
         exit 9
     }
 end
+
+* ===========================================================================
+* reghdfe convention-parity helpers, shared by every parity layer.
+* ===========================================================================
+
+* Report every divergence in a spec before failing, so one run yields the whole
+* list instead of one item per re-run.
+capture program drop xcert_parity_check
+program define xcert_parity_check, rclass
+    version 16
+    syntax, Name(string) [BTOL(real 1e-10) BFLOOR(real .01) ///
+        SETOL(real 1e-8) SCALTOL(real 1e-8) SCALFLOOR(real 1) SKIPF ///
+        EXCEPT(string) KNOWN(string) KNOWNSE(real 0)]
+
+    * EXCEPT = a divergence that is correct and justified at the call site.
+    * KNOWN  = a real, open divergence from the canonical package: reported on
+    *          every run so it cannot be forgotten, but not failed, so that a
+    *          NEW divergence is what turns this suite red.
+    local fails 0
+    local known_hits 0
+
+    * ---- discrete: exact equality, no tolerance ----------------------------
+    foreach s in N df_r df_m df_a N_clust rank {
+        * An exception must be named per scalar and justified at the call site;
+        * it is never a blanket skip of the spec.
+        if (strpos(" `except' ", " `s' ")) {
+            di as text "  [`name'] e(`s') exempt: see call site"
+            continue
+        }
+        local xv = scalar(px_`s')
+        local rv = scalar(pr_`s')
+        local xm = missing(`xv')
+        local rm = missing(`rv')
+        if (`xm' != `rm' | (!`xm' & !`rm' & `xv' != `rv')) {
+            if (strpos(" `known' ", " `s' ")) {
+                di as text "XHDFE_KNOWN_OPEN|`name'|e(`s')|xhdfe=`xv'|reghdfe=`rv'"
+                local known_hits = `known_hits' + 1
+            }
+            else {
+                di as error "  [`name'] e(`s') EXACT mismatch: xhdfe=`xv' reghdfe=`rv'"
+                local fails = `fails' + 1
+            }
+        }
+    }
+
+    * ---- reported numerical statistics: missingness and value --------------
+    * The scale floor is explicit: below it the test is an absolute tolerance
+    * of scaltol*scalfloor, rather than the previous implicit unit floor.
+    foreach s in r2 r2_a rmse tss rss mss {
+        local xv = scalar(px_`s')
+        local rv = scalar(pr_`s')
+        local xm = missing(`xv')
+        local rm = missing(`rv')
+        if (`xm' != `rm') {
+            di as error "  [`name'] e(`s') missingness differs: " ///
+                "xhdfe missing=`xm' reghdfe missing=`rm'"
+            local fails = `fails' + 1
+        }
+        else if (!`xm' & !`rm') {
+            local scale = max(abs(`rv'), `scalfloor')
+            local reldiff = abs(`xv' - `rv') / `scale'
+            if (`reldiff' > `scaltol') {
+                di as error "  [`name'] e(`s') scaled diff " ///
+                    %9.2e `reldiff' " > `scaltol' (floor=`scalfloor')"
+                local fails = `fails' + 1
+            }
+        }
+    }
+
+    * ---- coefficient stripe and omission pattern ---------------------------
+    * A dropped term carries a zero (or missing) standard error in both
+    * engines; the pattern, not the value, is the convention under test.
+    local xcols : colnames px_b
+    local rcols : colnames pr_b
+    local nx : word count `xcols'
+    local nr : word count `rcols'
+    if (`nx' != `nr') {
+        di as error "  [`name'] e(b) column count differs: xhdfe=`nx' reghdfe=`nr'"
+        local fails = `fails' + 1
+    }
+    foreach c of local xcols {
+        local ci = colnumb(pr_b, "`c'")
+        if (`ci' == .) {
+            di as error "  [`name'] coefficient `c' absent from reghdfe e(b)"
+            local fails = `fails' + 1
+            continue
+        }
+        local xj = colnumb(px_b, "`c'")
+        local xse = sqrt(px_V[`xj', `xj'])
+        local rse = sqrt(pr_V[`ci', `ci'])
+        local xdrop = (missing(`xse') | `xse' == 0)
+        local rdrop = (missing(`rse') | `rse' == 0)
+        if (`xdrop' != `rdrop') {
+            di as error "  [`name'] omission differs for `c': " ///
+                "xhdfe dropped=`xdrop' reghdfe dropped=`rdrop'"
+            local fails = `fails' + 1
+        }
+    }
+    foreach c of local rcols {
+        if (colnumb(px_b, "`c'") == .) {
+            di as error "  [`name'] coefficient `c' absent from xhdfe e(b)"
+            local fails = `fails' + 1
+        }
+    }
+
+    * ---- continuous: solver tolerance --------------------------------------
+    foreach c of local xcols {
+        local ci = colnumb(pr_b, "`c'")
+        if (`ci' == .) continue
+        local xj = colnumb(px_b, "`c'")
+        local xb = px_b[1, `xj']
+        local rb = pr_b[1, `ci']
+        local xse = sqrt(px_V[`xj', `xj'])
+        local rse = sqrt(pr_V[`ci', `ci'])
+        if (missing(`xb') != missing(`rb')) {
+            di as error "  [`name'] b[`c'] missingness differs"
+            local fails = `fails' + 1
+        }
+        else if (!missing(`xb') & !missing(`rb')) {
+            local scale = max(abs(`rb'), `bfloor')
+            if (abs(`xb' - `rb') / `scale' > `btol') {
+                di as error "  [`name'] b[`c'] rel diff " ///
+                    %9.2e (abs(`xb' - `rb') / `scale') ///
+                    " > `btol' (floor=`bfloor')"
+                local fails = `fails' + 1
+            }
+        }
+        if (!missing(`xse') & !missing(`rse') & `rse' > 0) {
+            local sedev = abs(`xse' - `rse') / `rse'
+            if (`sedev' > `setol') {
+                if (`knownse' > 0 & `sedev' <= `knownse') {
+                    di as text "XHDFE_KNOWN_OPEN|`name'|se[`c']|reldiff=" %9.2e `sedev'
+                    local known_hits = `known_hits' + 1
+                }
+                else {
+                    di as error "  [`name'] se[`c'] rel diff " ///
+                        %9.2e `sedev' " > `setol'"
+                    local fails = `fails' + 1
+                }
+            }
+        }
+    }
+
+    * e(F) is excluded by default: the engines post different F conventions on
+    * some clustered designs (documented in dof-ssc.do at roughly 0.2%).
+    if ("`skipf'" == "") {
+        if (!missing(scalar(px_F)) & !missing(scalar(pr_F)) & scalar(pr_F) > 0) {
+            if (abs(scalar(px_F) - scalar(pr_F)) / scalar(pr_F) > 1e-6) {
+                di as error "  [`name'] e(F) rel diff " ///
+                    %9.2e (abs(scalar(px_F) - scalar(pr_F)) / scalar(pr_F))
+                local fails = `fails' + 1
+            }
+        }
+    }
+
+    if (`fails' == 0 & `known_hits' > 0) {
+        di as result "  PASS  `name' (`known_hits' known open divergence(s))"
+    }
+    else if (`fails' == 0) {
+        di as result "  PASS  `name'"
+    }
+    else {
+        di as error "  FAIL  `name' (`fails' divergences)"
+    }
+    return scalar fails = `fails'
+end
+
+* Run one specification through both engines and compare.
+capture program drop xcert_parity_spec
+program define xcert_parity_spec, rclass
+    version 16
+    syntax anything(everything) [aweight fweight pweight iweight], ///
+        Name(string) [XOPTS(string) ROPTS(string) ///
+        BTOL(real 1e-10) SETOL(real 1e-8) SKIPF EXCEPT(string) ///
+        KNOWN(string) KNOWNSE(real 0)]
+
+    quietly xhdfe `anything' [`weight'`exp'], ///
+        tolerancemode(reghdfe-comparable) tolerance(1e-12) ///
+        `xopts' noheader notable nofootnote
+    xcert_store_estimates, prefix(px) ///
+        scalars(N rmse tss rss mss r2 r2_a F df_r df_m df_a N_clust rank)
+
+    quietly reghdfe `anything' [`weight'`exp'], `ropts'
+    xcert_store_estimates, prefix(pr) ///
+        scalars(N rmse tss rss mss r2 r2_a F df_r df_m df_a N_clust rank)
+
+    xcert_parity_check, name("`name'") btol(`btol') setol(`setol') `skipf' ///
+        except(`except') known(`known') knownse(`knownse')
+    return scalar fails = r(fails)
+end
+
+capture program drop xcert_parity_tally
+program define xcert_parity_tally
+    global PARITY_FAILS = $PARITY_FAILS + r(fails)
+end

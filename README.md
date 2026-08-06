@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.22.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.23.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -60,10 +60,10 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 - **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` /
   `xhdfe_gelbach()`, validated against Gelbach's `b1x2`, with multiple focal
   coefficients, multiple observed blocks, common and added HDFEs, and
-  explicitly declared absorbed targets. Version 1.5.0 adds retained-sample
+  explicitly declared absorbed targets. Version 1.6.0 includes retained-sample
   provenance, connectivity and regularity diagnostics, joint-covariance
   inference, full-refit pairs bootstrap, and table and plot helpers. See
-  [`docs/releases/RELEASE_NOTES_2.22.1.20260730.md`](docs/releases/RELEASE_NOTES_2.22.1.20260730.md).
+  [`docs/releases/RELEASE_NOTES_2.23.0.20260806.md`](docs/releases/RELEASE_NOTES_2.23.0.20260806.md).
 
 ---
 
@@ -455,7 +455,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.22.1.
+> effects regression via a C++ backend.* Version 2.23.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

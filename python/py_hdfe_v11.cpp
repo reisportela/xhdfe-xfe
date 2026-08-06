@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -32,7 +33,29 @@ using hdfe::v11::ThreadingOptions;
 
 namespace {
 
+// Observation counts are integral row counts unless frequency weights are
+// active, in which case the effective count is a weighted total that can
+// exceed the int range. Return the plain row count when the effective count
+// carries no extra information, so the common case keeps its Python int type.
+py::object effective_count_or_rows(double effective, int rows) {
+    if (effective == static_cast<double>(rows)) {
+        return py::int_(rows);
+    }
+    if (effective >= 0.0 &&
+        effective <= 9223372036854774784.0 &&
+        std::floor(effective) == effective) {
+        return py::int_(static_cast<std::int64_t>(effective));
+    }
+    return py::float_(effective);
+}
+
 int checked_index_id(std::int64_t value, const char* label) {
+    if (value < 0) {
+        throw std::runtime_error(
+            std::string(label) +
+            " must contain only nonnegative IDs; pandas.factorize() uses -1 "
+            "for missing categories");
+    }
     if (value < static_cast<std::int64_t>(std::numeric_limits<int>::min()) ||
         value > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
         throw std::runtime_error(std::string(label) + " contains an id outside the int32 range");
@@ -56,6 +79,12 @@ Eigen::VectorXi remap_or_cast_int64_ids(ssize_t n, const char* label, Getter&& g
     ssize_t i = 0;
     for (; i < n; ++i) {
         const std::int64_t value = get_value(i);
+        if (value < 0) {
+            throw std::runtime_error(
+                std::string(label) +
+                " must contain only nonnegative IDs; pandas.factorize() uses "
+                "-1 for missing categories");
+        }
         if (!fits_int32(value)) {
             break;
         }
@@ -73,6 +102,12 @@ Eigen::VectorXi remap_or_cast_int64_ids(ssize_t n, const char* label, Getter&& g
     int next = 0;
     for (ssize_t i = 0; i < n; ++i) {
         const std::int64_t value = get_value(i);
+        if (value < 0) {
+            throw std::runtime_error(
+                std::string(label) +
+                " must contain only nonnegative IDs; pandas.factorize() uses "
+                "-1 for missing categories");
+        }
         auto it = levels.find(value);
         if (it == levels.end()) {
             if (next == std::numeric_limits<int>::max()) {
@@ -417,6 +452,7 @@ std::string method_name(AbsorptionMethod method) {
 
 struct ParsedDofAdjustments {
     DofAdjustmentMethod method = DofAdjustmentMethod::All;
+    bool mobility_groups = true;
     bool adjust_clusters = true;
     bool adjust_continuous = true;
 };
@@ -427,30 +463,37 @@ ParsedDofAdjustments parse_dofadjustments(py::object dof_obj) {
         return parsed;
     }
 
-    // When the user explicitly supplies dofadjustments(...), mimic Stata's behavior by
-    // starting from a blank slate (only the listed items are enabled).
-    parsed.method = DofAdjustmentMethod::All;
-    parsed.adjust_clusters = false;
-    parsed.adjust_continuous = false;
-
     std::vector<std::string> tokens;
-    if (py::isinstance<py::str>(dof_obj)) {
-        std::string raw = dof_obj.cast<std::string>();
+    auto append_tokens = [&tokens](std::string raw) {
         std::replace(raw.begin(), raw.end(), ',', ' ');
         std::istringstream iss(raw);
         std::string tok;
         while (iss >> tok) {
             tokens.push_back(tok);
         }
+    };
+    if (py::isinstance<py::str>(dof_obj)) {
+        append_tokens(dof_obj.cast<std::string>());
     } else if (py::isinstance<py::sequence>(dof_obj)) {
         py::sequence seq = py::reinterpret_borrow<py::sequence>(dof_obj);
         tokens.reserve(seq.size());
         for (auto item : seq) {
-            tokens.push_back(py::cast<std::string>(item));
+            append_tokens(py::cast<std::string>(item));
         }
     } else {
         throw std::runtime_error("dofadjustments must be a string or a sequence of strings");
     }
+    if (tokens.empty()) {
+        return parsed;
+    }
+
+    // A non-empty explicit option starts from a blank slate; a token-free
+    // string/sequence is equivalent to the absent Stata option and returned
+    // the defaults above.
+    parsed.method = DofAdjustmentMethod::All;
+    parsed.mobility_groups = false;
+    parsed.adjust_clusters = false;
+    parsed.adjust_continuous = false;
 
     auto normalize = [](std::string s) {
         std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -459,38 +502,61 @@ ParsedDofAdjustments parse_dofadjustments(py::object dof_obj) {
         return s;
     };
 
+    bool seen_all = false;
+    bool seen_none = false;
+    bool seen_firstpair = false;
+    bool seen_pairwise = false;
+    bool seen_clusters = false;
+    bool seen_continuous = false;
     for (const auto& tok_raw : tokens) {
         const std::string tok = normalize(tok_raw);
         if (tok.empty()) {
             continue;
         }
         if (tok == "all") {
+            seen_all = true;
             parsed.method = DofAdjustmentMethod::All;
+            parsed.mobility_groups = true;
             parsed.adjust_clusters = true;
             parsed.adjust_continuous = true;
             continue;
         }
         if (tok == "none") {
+            seen_none = true;
             parsed.method = DofAdjustmentMethod::None;
             continue;
         }
         if (tok == "firstpair" || tok == "first") {
+            seen_firstpair = true;
             parsed.method = DofAdjustmentMethod::FirstPair;
+            parsed.mobility_groups = true;
             continue;
         }
         if (tok == "pairwise" || tok == "pair") {
+            seen_pairwise = true;
             parsed.method = DofAdjustmentMethod::Pairwise;
+            parsed.mobility_groups = true;
             continue;
         }
         if (tok == "clusters" || tok == "cluster") {
+            seen_clusters = true;
             parsed.adjust_clusters = true;
             continue;
         }
         if (tok == "continuous" || tok == "cont") {
+            seen_continuous = true;
             parsed.adjust_continuous = true;
             continue;
         }
         throw std::runtime_error("Unknown dofadjustments token: " + tok_raw);
+    }
+
+    const int token_classes = static_cast<int>(seen_all) + static_cast<int>(seen_none) +
+                              static_cast<int>(seen_firstpair) + static_cast<int>(seen_pairwise) +
+                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous);
+    if ((seen_all && token_classes > 1) || (seen_none && token_classes > 1) ||
+        (seen_firstpair && seen_pairwise)) {
+        throw std::runtime_error("Mutually exclusive dofadjustments tokens");
     }
 
     return parsed;
@@ -543,6 +609,13 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
 )pbdoc";
     py::module_::import("numpy");
     pybind11::detail::npy_api::get();
+    py::object precision_warning = py::reinterpret_steal<py::object>(
+        PyErr_NewException("py_hdfe_v11.PrecisionWarning",
+                           PyExc_RuntimeWarning, nullptr));
+    if (!precision_warning) {
+        throw py::error_already_set();
+    }
+    m.attr("PrecisionWarning") = precision_warning;
 
     py::enum_<StandardErrorType>(m, "StandardErrorType", py::module_local())
         .value("homoskedastic", StandardErrorType::Homoskedastic)
@@ -630,6 +703,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
 
                  const ParsedDofAdjustments dof = parse_dofadjustments(dofadjustments);
                  opts.dof_method = dof.method;
+                 opts.dof_mobility_groups = dof.mobility_groups;
                  opts.dof_adjust_clusters = dof.adjust_clusters;
                  opts.dof_adjust_continuous = dof.adjust_continuous;
 
@@ -699,7 +773,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
              py::arg("tolerance_mode") = "reghdfe-comparable")
         .def(
             "fit",
-            [](HdfeRegressorV11& self,
+            [precision_warning](HdfeRegressorV11& self,
                py::array y_obj,
                py::array X_obj,
                py::object fes_obj,
@@ -710,7 +784,13 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                py::object group_obj,
                py::object individual_obj,
                const std::string& aggregation,
-               py::object slopes_obj) {
+               py::object slopes_obj,
+               bool fweights) {
+                self.set_weights_are_frequencies(fweights);
+                if (fweights && weights_obj.is_none()) {
+                    throw std::runtime_error(
+                        "fweights=True requires a weights vector");
+                }
                 auto y_arr =
                     py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
                 if (y_arr.ndim() != 1) {
@@ -877,6 +957,17 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                         self.fit(y_vec, X_mat, fes, w_ptr, c_ptr, inst_ptr, endogenous, slopes_ptr);
                     }
                 }
+                if (!self.results().precision_certified) {
+                    if (PyErr_WarnEx(
+                            precision_warning.ptr(),
+                            "xhdfe fit did not pass the independent "
+                            "precision certificate; inspect "
+                            "abs_residual_rel_ and consider a stricter "
+                            "tolerance mode",
+                            1) < 0) {
+                        throw py::error_already_set();
+                    }
+                }
             },
             py::arg("y"),
             py::arg("X"),
@@ -888,7 +979,16 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             py::arg("group") = py::none(),
             py::arg("individual") = py::none(),
             py::arg("aggregation") = "mean",
-            py::arg("slopes") = py::none())
+            py::arg("slopes") = py::none(),
+            py::arg("fweights") = false,
+            R"doc(
+Fit the HDFE model.
+
+By default, ``weights`` follow the package's analytic-weight convention. Set
+``fweights=True`` to interpret each positive-integer weight as literal row
+replication for sample-size, degrees-of-freedom, singleton, and variance
+bookkeeping. The flag is reset on every call and requires ``weights``.
+)doc")
         .def(
             "extract_group_individual_fes",
             [](const HdfeRegressorV11& self,
@@ -1076,14 +1176,66 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         .def_property_readonly("conf_int_", [](const HdfeRegressorV11& self) {
             return self.results().conf_int;
         })
+        // N follows the effective count, which is the row count unless
+        // frequency weights are active. The Stata plugin already posts
+        // nobs_effective as e(N) and the R binding already surfaces it, so
+        // returning the row count here made the same fit report a different
+        // N in Python than in Stata, and left df_resid_ larger than nobs_.
         .def_property_readonly("nobs_", [](const HdfeRegressorV11& self) {
-            return self.results().nobs;
+            return effective_count_or_rows(self.results().nobs_effective,
+                                           self.results().nobs);
         })
         .def_property_readonly("nobs_full_", [](const HdfeRegressorV11& self) {
-            return self.results().nobs_full;
+            return effective_count_or_rows(self.results().nobs_full_effective,
+                                           self.results().nobs_full);
         })
         .def_property_readonly("num_singletons_", [](const HdfeRegressorV11& self) {
+            return effective_count_or_rows(
+                self.results().num_singletons_effective,
+                self.results().num_singletons);
+        })
+        // Row counts, always the length of the input arrays; pair these with
+        // sample_index_, which indexes rows and not weighted units.
+        .def_property_readonly("nobs_rows_", [](const HdfeRegressorV11& self) {
+            return self.results().nobs;
+        })
+        .def_property_readonly("nobs_full_rows_", [](const HdfeRegressorV11& self) {
+            return self.results().nobs_full;
+        })
+        .def_property_readonly("num_singletons_rows_", [](const HdfeRegressorV11& self) {
             return self.results().num_singletons;
+        })
+        // Which coefficients were dropped, and why. The Stata plugin and the R
+        // binding already surface this; without it a Python caller sees a
+        // dropped regressor only as a zero coefficient with a NaN standard
+        // error, indistinguishable from an estimate of zero. Ordinary
+        // collinearity is represented here; an overflowed Gram matrix now
+        // fails explicitly and asks the caller to rescale the design.
+        .def_property_readonly("omitted_reason_", [](const HdfeRegressorV11& self) {
+            return self.results().omitted_reason;
+        })
+        .def_property_readonly("omitted_", [](const HdfeRegressorV11& self) {
+            const auto& reason = self.results().omitted_reason;
+            std::vector<bool> flags(reason.size());
+            for (std::size_t j = 0; j < reason.size(); ++j) {
+                flags[j] = reason[j] != 0;
+            }
+            return flags;
+        })
+        .def_property_readonly("any_omitted_", [](const HdfeRegressorV11& self) {
+            const auto& reason = self.results().omitted_reason;
+            return std::any_of(reason.begin(), reason.end(),
+                               [](int code) { return code != 0; });
+        })
+        .def_property_readonly("nobs_effective_", [](const HdfeRegressorV11& self) {
+            return self.results().nobs_effective;
+        })
+        .def_property_readonly("nobs_full_effective_", [](const HdfeRegressorV11& self) {
+            return self.results().nobs_full_effective;
+        })
+        .def_property_readonly("num_singletons_effective_",
+                               [](const HdfeRegressorV11& self) {
+            return self.results().num_singletons_effective;
         })
         .def_property_readonly("sample_index_", [](const HdfeRegressorV11& self) {
             return self.results().sample_index;
@@ -1133,6 +1285,26 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         .def_property_readonly("fe_num_levels_",
                               [](const HdfeRegressorV11& self) {
                                    return self.results().fe_num_levels;
+                               })
+        .def_property_readonly("fe_base_levels_",
+                              [](const HdfeRegressorV11& self) {
+                                   return self.results().fe_base_levels;
+                               })
+        .def_property_readonly("fe_base_redundant_",
+                              [](const HdfeRegressorV11& self) {
+                                   return self.results().fe_base_redundant;
+                               })
+        .def_property_readonly("fe_redundant_",
+                              [](const HdfeRegressorV11& self) {
+                                   return self.results().fe_redundant;
+                               })
+        .def_property_readonly("fe_num_coefs_",
+                              [](const HdfeRegressorV11& self) {
+                                   return self.results().fe_num_coefs;
+                               })
+        .def_property_readonly("fe_inexact_",
+                              [](const HdfeRegressorV11& self) {
+                                   return self.results().fe_inexact;
                                })
         .def_property_readonly("converged_",
                               [](const HdfeRegressorV11& self) {

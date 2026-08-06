@@ -413,6 +413,33 @@ dropped before estimation, and full-length outputs (residuals,
 prediction caches) are \code{NA} on those rows. \code{"fail"}: raise an
 error if any such missing value is present.}
 }
+\section{Fail-closed input and output contracts}{
+Estimation inputs are validated before any work is done. Non-finite
+values (\code{NaN}, \code{Inf}) in the outcome, the regressors, the
+instruments or the slope variables raise an error identifying the
+offending row (and column), as do negative fixed-effect, cluster,
+worker, firm, group or individual identifiers. Note that identifier
+codings which use a negative value for "missing" -- Python's
+\code{pandas.factorize()} returns \code{-1} -- are therefore rejected
+rather than silently treated as a category or dropped.
+
+On the output side, a fit reported as converged never carries a
+non-finite coefficient, nor a non-finite standard error for a
+coefficient whose inference is identified; such a result is rejected
+with an error. Inference is legitimately unavailable, and therefore
+exempt, for omitted (collinear) terms, an unidentified intercept, a
+saturated design, fewer than two clusters, and non-positive residual
+degrees of freedom.
+
+Do not infer that a regressor was dropped from the value of its standard
+error: a dropped regressor has a zero coefficient whose standard error is
+\code{NA} on most paths but zero on some degenerate ones. Read
+\code{omitted_reason} instead (0 kept, 1 collinear with the absorbed fixed
+effects, 2 other collinearity). Finite inputs can still overflow their FP64
+cross-products when the design is scaled extremely (roughly
+\code{abs(X) >= 1e153}). Such a fit raises an error rather than being
+misclassified as ordinary collinearity; rescale the outcome and/or regressors.
+}
 \value{
 An object of class \code{"xhdfe"}: a list whose fields are the R
 analogue of Stata's stored results (the corresponding \code{e()} names
@@ -492,7 +519,9 @@ are given where applicable).
 \strong{Fit statistics}
 \describe{
   \item{\code{r2}, \code{r2_within}}{overall and within R-squared
-    (\code{e(r2)}, \code{e(r2_within)}).}
+    (\code{e(r2)}, \code{e(r2_within)}). Both are \code{NA} when the
+    corresponding total sum of squares is zero (a constant outcome),
+    matching \code{regress} and \code{reghdfe}.}
   \item{\code{r2_a}, \code{r2_a_within}}{adjusted (within) R-squared,
     computed with the unadjusted residual degrees of freedom, as in
     \code{reghdfe} (\code{e(r2_a)}, \code{e(r2_a_within)}); forced to 1
@@ -1040,7 +1069,7 @@ stopifnot(mg$gpu_used == 1, mg$gpu_status == "used")
 }
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.21.0.
+effects regression via a C++ backend." Version 2.23.0.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

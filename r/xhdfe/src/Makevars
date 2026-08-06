@@ -63,6 +63,7 @@ ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 ifeq ($(UNAME_S),Darwin)
 $(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported for macOS R builds; install a CPU build)
 endif
+
 XHDFE_CUDA_ARCH_INPUT := $(if $(strip $(XHDFE_CUDA_ARCH)),$(strip $(XHDFE_CUDA_ARCH)),auto)
 XHDFE_CUDA_ARCH_CANON := $(shell printf '%s' '$(XHDFE_CUDA_ARCH_INPUT)' | tr '[:upper:]' '[:lower:]')
 ifeq ($(XHDFE_CUDA_ARCH_CANON),auto)
@@ -70,6 +71,7 @@ XHDFE_CUDA_ARCH_SELECTED := $(shell nvidia-smi --query-gpu=compute_cap --format=
 else
 XHDFE_CUDA_ARCH_SELECTED := $(shell printf '%s' '$(XHDFE_CUDA_ARCH_INPUT)' | sed -E 's/^[sS][mM]_//; s/\.//')
 endif
+
 ifeq ($(strip $(XHDFE_CUDA_ARCH_SELECTED)),)
 $(error CUDA architecture could not be detected; set XHDFE_CUDA_ARCH=90 or install nvidia-smi)
 endif
@@ -125,3 +127,9 @@ fe_absorption_cuda.o: fe_absorption_cuda.cu
 	    -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
 	    -I. -Iinclude -Ieigen -c $< -o $@
 endif
+
+# A development checkout may contain ignored object files from an earlier
+# build.  R's default rules track each .cpp but not the shared headers or this
+# Makevars file, which can otherwise link ABI-incompatible stale objects.
+XHDFE_BUILD_HEADERS = $(wildcard *.hpp include/*.hpp include/hdfe/*.hpp)
+$(OBJECTS): Makevars $(XHDFE_BUILD_HEADERS)

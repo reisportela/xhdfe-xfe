@@ -29,6 +29,7 @@
 #include "fe_absorption_cuda.hpp"
 #include "fe_absorption_metal.hpp"
 #include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 #include "schwarz_demean.hpp"
 
@@ -46,19 +47,6 @@ namespace {
 
 thread_local bool tls_gpu_backend_override_active = false;
 thread_local GpuBackend tls_gpu_backend_override = GpuBackend::Cpu;
-
-// Do not use std::isfinite in convergence guards: production builds may use
-// -ffast-math, under which the compiler is permitted to assume that NaN and
-// infinity never occur.  Inspecting the IEEE-754 exponent bits keeps
-// fail-closed solver checks effective under those builds.
-inline bool finite_double_bits(double value) {
-    static_assert(sizeof(double) == sizeof(std::uint64_t),
-                  "xhdfe requires 64-bit IEEE-754 doubles");
-    std::uint64_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return (bits & UINT64_C(0x7ff0000000000000)) !=
-           UINT64_C(0x7ff0000000000000);
-}
 
 // Mean group occupancy (observations per FE level) at or below which a
 // multi-FE problem is treated as ill-conditioned for plain Gauss-Seidel and is
@@ -4985,8 +4973,8 @@ FeProfileStats profile_fe(const FeIndexer& idx,
         std::max(0.0, sumsq / static_cast<double>(groups) - stats.mean * stats.mean);
     stats.stddev = std::sqrt(var);
     stats.cv = stats.mean > 0.0 ? stats.stddev / stats.mean : 0.0;
-    stats.min_val = std::isfinite(min_val) ? min_val : 0.0;
-    stats.max_val = std::isfinite(max_val) ? max_val : 0.0;
+    stats.min_val = hdfe::detail::ieee_finite(min_val) ? min_val : 0.0;
+    stats.max_val = hdfe::detail::ieee_finite(max_val) ? max_val : 0.0;
     stats.singleton_ratio = unit_weights
                                 ? static_cast<double>(singletons) / static_cast<double>(groups)
                                 : 0.0;
@@ -5024,8 +5012,8 @@ FeProfileStats profile_fe_from_weights(int num_groups,
         std::max(0.0, sumsq / static_cast<double>(num_groups) - stats.mean * stats.mean);
     stats.stddev = std::sqrt(var);
     stats.cv = stats.mean > 0.0 ? stats.stddev / stats.mean : 0.0;
-    stats.min_val = std::isfinite(min_val) ? min_val : 0.0;
-    stats.max_val = std::isfinite(max_val) ? max_val : 0.0;
+    stats.min_val = hdfe::detail::ieee_finite(min_val) ? min_val : 0.0;
+    stats.max_val = hdfe::detail::ieee_finite(max_val) ? max_val : 0.0;
     stats.singleton_ratio = unit_weights
                                 ? static_cast<double>(singletons) / static_cast<double>(num_groups)
                                 : 0.0;
@@ -6848,8 +6836,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     next_improvement = improvement;
                     bool cg_breakdown = false;
                     for (int k = 0; k < Sp; ++k) {
-                        if (!finite_double_bits(improvement[k]) ||
-                            !finite_double_bits(ssr[k]) || ssr[k] < 0.0) {
+                        if (!hdfe::detail::ieee_finite(improvement[k]) ||
+                            !hdfe::detail::ieee_finite(ssr[k]) || ssr[k] < 0.0) {
                             cg_breakdown = true;
                             break;
                         }
@@ -6870,16 +6858,16 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             recent[k] = 0.0;
                             continue;
                         }
-                        if (!finite_double_bits(denom[k]) || denom[k] <= 0.0) {
+                        if (!hdfe::detail::ieee_finite(denom[k]) || denom[k] <= 0.0) {
                             cg_breakdown = true;
                             break;
                         }
                         alpha[k] = ssr[k] / denom[k];
                         recent[k] = alpha[k] * ssr[k];
                         next_improvement[k] = improvement[k] - recent[k];
-                        if (!finite_double_bits(alpha[k]) || alpha[k] <= 0.0 ||
-                            !finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
-                            !finite_double_bits(next_improvement[k])) {
+                        if (!hdfe::detail::ieee_finite(alpha[k]) || alpha[k] <= 0.0 ||
+                            !hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
+                            !hdfe::detail::ieee_finite(next_improvement[k])) {
                             cg_breakdown = true;
                             break;
                         }
@@ -6897,8 +6885,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     ssr = packed_col_sumsq(r);
                     beta.setZero();
                     for (int k = 0; k < Sp; ++k) {
-                        if (!finite_double_bits(ssr[k]) || ssr[k] < 0.0 ||
-                            !finite_double_bits(ssr_old[k]) || ssr_old[k] < 0.0) {
+                        if (!hdfe::detail::ieee_finite(ssr[k]) || ssr[k] < 0.0 ||
+                            !hdfe::detail::ieee_finite(ssr_old[k]) || ssr_old[k] < 0.0) {
                             cg_breakdown = true;
                             break;
                         }
@@ -6924,7 +6912,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             break;
                         }
                         beta[k] = ssr[k] / ssr_old[k];
-                        if (!finite_double_bits(beta[k]) || beta[k] <= 0.0) {
+                        if (!hdfe::detail::ieee_finite(beta[k]) || beta[k] <= 0.0) {
                             cg_breakdown = true;
                             break;
                         }
@@ -6952,18 +6940,18 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             continue;
                         }
                         const double den = std::abs(improvement[k]);
-                        if (!finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
-                            !finite_double_bits(den) || den <= 0.0) {
+                        if (!hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
+                            !hdfe::detail::ieee_finite(den) || den <= 0.0) {
                             cg_breakdown = true;
                             break;
                         }
                         const double ratio = recent[k] / den;
-                        if (!finite_double_bits(ratio) || ratio <= 0.0) {
+                        if (!hdfe::detail::ieee_finite(ratio) || ratio <= 0.0) {
                             cg_breakdown = true;
                             break;
                         }
                         const double err = std::sqrt(ratio);
-                        if (!finite_double_bits(err)) {
+                        if (!hdfe::detail::ieee_finite(err)) {
                             cg_breakdown = true;
                             break;
                         }
@@ -7561,8 +7549,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 next_improvement = improvement;
                 bool cg_breakdown = false;
                 for (Eigen::Index k = 0; k < ssr.size(); ++k) {
-                    if (!finite_double_bits(improvement[k]) ||
-                        !finite_double_bits(ssr[k]) || ssr[k] < 0.0) {
+                    if (!hdfe::detail::ieee_finite(improvement[k]) ||
+                        !hdfe::detail::ieee_finite(ssr[k]) || ssr[k] < 0.0) {
                         cg_breakdown = true;
                         break;
                     }
@@ -7583,16 +7571,16 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         recent[k] = 0.0;
                         continue;
                     }
-                    if (!finite_double_bits(denom[k]) || denom[k] <= 0.0) {
+                    if (!hdfe::detail::ieee_finite(denom[k]) || denom[k] <= 0.0) {
                         cg_breakdown = true;
                         break;
                     }
                     alpha[k] = ssr[k] / denom[k];
                     recent[k] = alpha[k] * ssr[k];
                     next_improvement[k] = improvement[k] - recent[k];
-                    if (!finite_double_bits(alpha[k]) || alpha[k] <= 0.0 ||
-                        !finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
-                        !finite_double_bits(next_improvement[k])) {
+                    if (!hdfe::detail::ieee_finite(alpha[k]) || alpha[k] <= 0.0 ||
+                        !hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
+                        !hdfe::detail::ieee_finite(next_improvement[k])) {
                         cg_breakdown = true;
                         break;
                     }
@@ -7614,8 +7602,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 ssr = col_sumsq(r_y, r_X);
                 beta.setZero();
                 for (Eigen::Index k = 0; k < ssr.size(); ++k) {
-                    if (!finite_double_bits(ssr[k]) || ssr[k] < 0.0 ||
-                        !finite_double_bits(ssr_old[k]) || ssr_old[k] < 0.0) {
+                    if (!hdfe::detail::ieee_finite(ssr[k]) || ssr[k] < 0.0 ||
+                        !hdfe::detail::ieee_finite(ssr_old[k]) || ssr_old[k] < 0.0) {
                         cg_breakdown = true;
                         break;
                     }
@@ -7641,7 +7629,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         break;
                     }
                     beta[k] = ssr[k] / ssr_old[k];
-                    if (!finite_double_bits(beta[k]) || beta[k] <= 0.0) {
+                    if (!hdfe::detail::ieee_finite(beta[k]) || beta[k] <= 0.0) {
                         cg_breakdown = true;
                         break;
                     }
@@ -7661,18 +7649,18 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         continue;
                     }
                     const double den = std::abs(improvement[k]);
-                    if (!finite_double_bits(recent[k]) || recent[k] <= 0.0 ||
-                        !finite_double_bits(den) || den <= 0.0) {
+                    if (!hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
+                        !hdfe::detail::ieee_finite(den) || den <= 0.0) {
                         cg_breakdown = true;
                         break;
                     }
                     const double ratio = recent[k] / den;
-                    if (!finite_double_bits(ratio) || ratio <= 0.0) {
+                    if (!hdfe::detail::ieee_finite(ratio) || ratio <= 0.0) {
                         cg_breakdown = true;
                         break;
                     }
                     const double err = std::sqrt(ratio);
-                    if (!finite_double_bits(err)) {
+                    if (!hdfe::detail::ieee_finite(err)) {
                         cg_breakdown = true;
                         break;
                     }
@@ -8575,7 +8563,7 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                 irons_tuck_accumulate(result.X_tilde.data(), X_gx.data(), X_ggx.data(),
                                       X_gx.size(), stats);
             }
-            if (!(stats.ssq > 0.0) || !std::isfinite(stats.ssq)) {
+            if (!(stats.ssq > 0.0) || !hdfe::detail::ieee_finite(stats.ssq)) {
                 result.y_tilde = y_gx;
                 result.X_tilde = X_gx;
                 result.iterations = iter + 1;
@@ -8658,7 +8646,7 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
                         irons_tuck_accumulate(X_acc_a.data(), X_acc_b.data(), X_acc_c.data(),
                                               X_acc_a.size(), acc_stats);
                     }
-                    if (acc_stats.ssq != 0.0 && std::isfinite(acc_stats.ssq)) {
+                    if (acc_stats.ssq != 0.0 && hdfe::detail::ieee_finite(acc_stats.ssq)) {
                         const double acc_coef = acc_stats.vprod / acc_stats.ssq;
                         irons_tuck_update(y_acc_a.data(), y_acc_b.data(), y_acc_c.data(),
                                           y_acc_a.size(), acc_coef);
@@ -10698,7 +10686,7 @@ double schwarz_ridge_scale() {
         }
         char* end = nullptr;
         const double parsed = std::strtod(raw, &end);
-        return (end != raw && parsed >= 0.0 && std::isfinite(parsed)) ? parsed : 1.0e-10;
+        return (end != raw && parsed >= 0.0 && hdfe::detail::ieee_finite(parsed)) ? parsed : 1.0e-10;
     }();
     return scale;
 }
@@ -10734,7 +10722,7 @@ struct DenseSchwarzPreconditioner {
             }
 
             const Eigen::VectorXd sol = block.factor.solve(rhs);
-            if (!sol.allFinite()) {
+            if (!hdfe::detail::ieee_all_finite(sol)) {
                 continue;
             }
             for (int i = 0; i < local_n; ++i) {
@@ -10784,7 +10772,7 @@ double mlsmr_env_nonnegative_double(const char* name, double default_value) {
     }
     char* end = nullptr;
     const double parsed = std::strtod(raw, &end);
-    if (end == raw || parsed < 0.0 || !std::isfinite(parsed)) {
+    if (end == raw || parsed < 0.0 || !hdfe::detail::ieee_finite(parsed)) {
         return default_value;
     }
     return parsed;
@@ -10891,7 +10879,7 @@ int mlsmr_sample_weighted_suffix(const std::vector<double>& cumsum,
     }
     const double base = start > 0 ? cumsum[static_cast<std::size_t>(start - 1)] : 0.0;
     const double remaining = cumsum[static_cast<std::size_t>(end - 1)] - base;
-    if (!(remaining > kMlsmrApproxCholNearZero) || !std::isfinite(remaining)) {
+    if (!(remaining > kMlsmrApproxCholNearZero) || !hdfe::detail::ieee_finite(remaining)) {
         return -1;
     }
     const double draw = base + mlsmr_uniform01(rng) * remaining;
@@ -10915,7 +10903,7 @@ void mlsmr_clique_tree_sample_edges(std::vector<std::pair<int, double>>& entries
     entries.erase(std::remove_if(entries.begin(), entries.end(),
                                  [](const auto& e) {
                                      return e.second <= kMlsmrApproxCholNearZero ||
-                                            !std::isfinite(e.second);
+                                            !hdfe::detail::ieee_finite(e.second);
                                  }),
                   entries.end());
     if (entries.size() <= 1) {
@@ -10936,13 +10924,13 @@ void mlsmr_clique_tree_sample_edges(std::vector<std::pair<int, double>>& entries
         total_weight += entry.second;
         cumsum.push_back(total_weight);
     }
-    if (!(total_weight > kMlsmrApproxCholNearZero) || !std::isfinite(total_weight)) {
+    if (!(total_weight > kMlsmrApproxCholNearZero) || !hdfe::detail::ieee_finite(total_weight)) {
         return;
     }
 
     auto add_sampled_edge = [&](int u, int v, double weight) {
         if (u == v || !(weight > kMlsmrApproxCholNearZero) ||
-            !std::isfinite(weight)) {
+            !hdfe::detail::ieee_finite(weight)) {
             return;
         }
         if (u > v) {
@@ -11254,7 +11242,7 @@ struct MlsmrApproxCholFactor {
             y[vertex] = yi;
         }
 
-        return y.allFinite();
+        return hdfe::detail::ieee_all_finite(y);
     }
 
     static void add_edge_pair(std::vector<std::vector<MlsmrAcGraphEdge>>& adj,
@@ -11269,7 +11257,7 @@ struct MlsmrApproxCholFactor {
                               MlsmrBucketOrdering* bucket_ordering = nullptr) {
         if (u == v || u < 0 || v < 0 || u >= static_cast<int>(adj.size()) ||
             v >= static_cast<int>(adj.size()) ||
-            !(weight > kMlsmrApproxCholNearZero) || !std::isfinite(weight) ||
+            !(weight > kMlsmrApproxCholNearZero) || !hdfe::detail::ieee_finite(weight) ||
             count <= 0) {
             return;
         }
@@ -11487,7 +11475,7 @@ struct MlsmrApproxCholFactor {
         for (const auto& edge : edges) {
             if (edge.a < 0 || edge.b < 0 || edge.a >= n || edge.b >= n ||
                 edge.a == edge.b || !(edge.weight > kMlsmrApproxCholNearZero) ||
-                !std::isfinite(edge.weight)) {
+                !hdfe::detail::ieee_finite(edge.weight)) {
                 continue;
             }
             const int count = std::max(1, split_merge);
@@ -11570,7 +11558,7 @@ struct MlsmrApproxCholFactor {
                     cumsum.push_back(total_weight);
                 }
                 if (!(total_weight > kMlsmrApproxCholNearZero) ||
-                    !std::isfinite(total_weight)) {
+                    !hdfe::detail::ieee_finite(total_weight)) {
                     factor->record_column(v, {}, {}, column_diag);
                     if (bucket_ordering_enabled) {
                         eliminate_vertex_bucket(adj, eliminated, bucket_ordering, v);
@@ -11789,7 +11777,7 @@ struct MlsmrSchwarzDomain {
         if (reduced_ac_factor) {
             keep_solution = reduced_rhs;
             if (!reduced_ac_factor->solve_in_place(keep_solution) ||
-                keep_solution.size() != n_keep || !keep_solution.allFinite()) {
+                keep_solution.size() != n_keep || !hdfe::detail::ieee_all_finite(keep_solution)) {
                 return false;
             }
         } else if (factor_dim > 0) {
@@ -11806,7 +11794,7 @@ struct MlsmrSchwarzDomain {
             } else {
                 return false;
             }
-            if (anchored_sol.size() != factor_dim || !anchored_sol.allFinite()) {
+            if (anchored_sol.size() != factor_dim || !hdfe::detail::ieee_all_finite(anchored_sol)) {
                 return false;
             }
             keep_solution.head(factor_dim) = anchored_sol;
@@ -11841,7 +11829,7 @@ struct MlsmrSchwarzDomain {
                 sol[i] *= sqrt_diag[static_cast<std::size_t>(i)];
             }
         }
-        return sol.allFinite();
+        return hdfe::detail::ieee_all_finite(sol);
     }
 
     bool solve(const Eigen::Ref<const Eigen::VectorXd>& rhs,
@@ -11859,7 +11847,7 @@ struct MlsmrSchwarzDomain {
         } else {
             return false;
         }
-        return sol.size() == n_local && sol.allFinite();
+        return sol.size() == n_local && hdfe::detail::ieee_all_finite(sol);
     }
 };
 
@@ -12235,7 +12223,7 @@ bool build_mlsmr_domain_from_component(const MlsmrBuildComponent& comp,
         std::vector<double> inv_diag_elim(static_cast<std::size_t>(n_elim), 0.0);
         for (int k = 0; k < n_elim; ++k) {
             const double d = diag_elim[static_cast<std::size_t>(k)];
-            if (d <= 0.0 || !std::isfinite(d)) {
+            if (d <= 0.0 || !hdfe::detail::ieee_finite(d)) {
                 return false;
             }
             inv_diag_elim[static_cast<std::size_t>(k)] = 1.0 / d;
@@ -12307,7 +12295,7 @@ bool build_mlsmr_domain_from_component(const MlsmrBuildComponent& comp,
                                   int a,
                                   int b,
                                   double weight) {
-                if (a == b || weight <= 0.0 || !std::isfinite(weight)) {
+                if (a == b || weight <= 0.0 || !hdfe::detail::ieee_finite(weight)) {
                     return;
                 }
                 if (a > b) {
@@ -13545,7 +13533,7 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         Eigen::VectorXd z(total_fe);
         if (use_schwarz_preconditioner) {
             schwarz_preconditioner.apply(r, z);
-            if (!z.allFinite() || r.dot(z) <= 0.0) {
+            if (!hdfe::detail::ieee_all_finite(z) || r.dot(z) <= 0.0) {
                 z = r.cwiseQuotient(diagA);
             }
         } else {
@@ -13575,14 +13563,14 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
 
             if (use_schwarz_preconditioner) {
                 schwarz_preconditioner.apply(r, z);
-                if (!z.allFinite() || r.dot(z) <= 0.0) {
+                if (!hdfe::detail::ieee_all_finite(z) || r.dot(z) <= 0.0) {
                     z = r.cwiseQuotient(diagA);
                 }
             } else {
                 z = r.cwiseQuotient(diagA);
             }
             const double rz_new = r.dot(z);
-            if (!std::isfinite(rz_new) || rz_new <= 0.0) {
+            if (!hdfe::detail::ieee_finite(rz_new) || rz_new <= 0.0) {
                 break;
             }
             const double beta = rz_new / rz_old;
@@ -14085,13 +14073,13 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
 
         auto precondition_and_measure = [&]() {
             mlsmr_preconditioner.apply(p_tilde, v);
-            if (!v.allFinite()) {
+            if (!hdfe::detail::ieee_all_finite(v)) {
                 v = p_tilde;
                 return v.squaredNorm();
             }
             reorthogonalize_v();
             double measured = v.dot(p_tilde);
-            if (!std::isfinite(measured) || measured < 0.0) {
+            if (!hdfe::detail::ieee_finite(measured) || measured < 0.0) {
                 v = p_tilde;
                 measured = v.squaredNorm();
             }
@@ -14099,7 +14087,7 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         };
 
         double vp = precondition_and_measure();
-        if (!std::isfinite(vp) || vp < 0.0) {
+        if (!hdfe::detail::ieee_finite(vp) || vp < 0.0) {
             v = p_tilde;
             vp = v.squaredNorm();
         }
@@ -15317,7 +15305,7 @@ bool certify_group_individual_candidate(
         const double strict_limit =
             std::max(std::max(0.0, options.tol),
                      64.0 * std::numeric_limits<double>::epsilon());
-        passed = std::isfinite(max_mean) && max_mean <= strict_limit;
+        passed = hdfe::detail::ieee_finite(max_mean) && max_mean <= strict_limit;
     }
 
     result.converged = passed;

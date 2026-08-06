@@ -50,6 +50,7 @@ xhdfe_fit <- function(y, X, fes = NULL,
     }
   }
   fes_use <- lapply(seq_along(fes), function(i) to_ids(fes[[i]], fe_labels[i]))
+  fe_has_intercept <- rep(TRUE, length(fes_use))
 
   cluster_list <- if (is.null(cluster)) list() else {
     if (is.matrix(cluster)) {
@@ -114,6 +115,14 @@ xhdfe_fit <- function(y, X, fes = NULL,
            values = as.numeric(values),
            include_intercept = isTRUE(s$include_intercept) || isTRUE(s$intercept))
     })
+    slope_seen <- rep(FALSE, length(fes_use))
+    for (s in slopes_use) {
+      d <- s$fe_index + 1L
+      if (d < 1L || d > length(fes_use)) next
+      if (!slope_seen[d]) fe_has_intercept[d] <- FALSE
+      fe_has_intercept[d] <- fe_has_intercept[d] || isTRUE(s$include_intercept)
+      slope_seen[d] <- TRUE
+    }
   }
 
   if (!is.null(individual) && is.null(group)) {
@@ -126,6 +135,7 @@ xhdfe_fit <- function(y, X, fes = NULL,
     already <- any(vapply(fes_use, function(f) identical(f, individual_use), TRUE))
     if (!already) {
       fes_use[[length(fes_use) + 1L]] <- individual_use
+      fe_has_intercept <- c(fe_has_intercept, TRUE)
       fe_labels <- c(fe_labels, "individual")
     }
   }
@@ -147,6 +157,9 @@ xhdfe_fit <- function(y, X, fes = NULL,
   out <- finalize_xhdfe(res, coef_names, n, seq_len(n), cl, level,
                         backend, se_type, cluster_names, fe_labels,
                         tolerance_mode,
+                        model_has_cons = if (length(fes_use)) {
+                          any(fe_has_intercept)
+                        } else isTRUE(fit_intercept),
                         weights_sum = if (is.null(weights) ||
                                           length(res$sample_index0) == 0L) NULL
                                       else sum(weights[res$sample_index0 + 1L]),

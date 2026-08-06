@@ -32,3 +32,7 @@ OBJECTS = $(patsubst %.cpp,%.o,$(XHDFE_CPP_SOURCES))
 ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 $(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported by the Windows R Makevars yet; install a CPU build)
 endif
+
+# Do not reuse ignored objects after a shared header or build contract changes.
+XHDFE_BUILD_HEADERS = $(wildcard *.hpp include/*.hpp include/hdfe/*.hpp)
+$(OBJECTS): Makevars.win $(XHDFE_BUILD_HEADERS)

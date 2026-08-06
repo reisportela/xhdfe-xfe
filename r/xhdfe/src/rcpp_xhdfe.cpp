@@ -157,29 +157,54 @@ hdfe::v11::GroupAggregation parse_group_aggregation(const std::string& name) {
 }
 
 void apply_dofadjustments(hdfe::HdfeOptions& opts, const std::vector<std::string>& tokens) {
+    if (tokens.empty()) return;
+
     opts.dof_method = hdfe::DofAdjustmentMethod::All;
+    opts.dof_mobility_groups = false;
     opts.dof_adjust_clusters = false;
     opts.dof_adjust_continuous = false;
+    bool seen_all = false;
+    bool seen_none = false;
+    bool seen_firstpair = false;
+    bool seen_pairwise = false;
+    bool seen_clusters = false;
+    bool seen_continuous = false;
     for (const std::string& raw : tokens) {
         const std::string token = to_lower(raw);
         if (token.empty()) continue;
         if (token == "all") {
+            seen_all = true;
             opts.dof_method = hdfe::DofAdjustmentMethod::All;
+            opts.dof_mobility_groups = true;
             opts.dof_adjust_clusters = true;
             opts.dof_adjust_continuous = true;
         } else if (token == "none") {
+            seen_none = true;
             opts.dof_method = hdfe::DofAdjustmentMethod::None;
         } else if (token == "firstpair" || token == "first") {
+            seen_firstpair = true;
             opts.dof_method = hdfe::DofAdjustmentMethod::FirstPair;
+            opts.dof_mobility_groups = true;
         } else if (token == "pairwise" || token == "pair") {
+            seen_pairwise = true;
             opts.dof_method = hdfe::DofAdjustmentMethod::Pairwise;
+            opts.dof_mobility_groups = true;
         } else if (token == "clusters" || token == "cluster") {
+            seen_clusters = true;
             opts.dof_adjust_clusters = true;
         } else if (token == "continuous" || token == "cont") {
+            seen_continuous = true;
             opts.dof_adjust_continuous = true;
         } else {
             throw std::runtime_error("Unknown dofadjustments token: " + raw);
         }
+    }
+    const int token_classes = static_cast<int>(seen_all) + static_cast<int>(seen_none) +
+                              static_cast<int>(seen_firstpair) + static_cast<int>(seen_pairwise) +
+                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous);
+    if ((seen_all && token_classes > 1) || (seen_none && token_classes > 1) ||
+        (seen_firstpair && seen_pairwise)) {
+        throw std::runtime_error("Mutually exclusive dofadjustments tokens");
     }
 }
 
@@ -459,6 +484,7 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
 
     out["fe_num_levels"] = wrap_vector(res.fe_num_levels);
     out["fe_base_levels"] = wrap_vector(res.fe_base_levels);
+    out["fe_base_redundant"] = wrap_vector(res.fe_base_redundant);
     out["fe_redundant"] = wrap_vector(res.fe_redundant);
     out["fe_num_coefs"] = wrap_vector(res.fe_num_coefs);
     out["fe_inexact"] = wrap_vector(res.fe_inexact);

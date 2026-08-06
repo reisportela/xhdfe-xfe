@@ -13,10 +13,6 @@ from scipy import sparse
 from scipy.sparse.linalg import spsolve
 from scipy.stats import chi2
 
-REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
-sys.path.insert(0, REPO_ROOT)
 FAIL = []
 decompose = None
 tidy = None
@@ -85,6 +81,13 @@ def slow_chain():
     try:
         fast = decompose(y, x, {"z": z}, {"worker": worker, "firm": firm},
                          tol=1e-8)
+        # The default-tolerance call above verifies the historical convergence
+        # contract.  Use an explicitly tighter tolerance for comparison with
+        # the sparse direct-solve oracle: this chain graph amplifies an O(tol)
+        # absorption residual, so treating a 1e-8 fit as a 2e-7 coefficient
+        # oracle made this gate contradict its own accepted default semantics.
+        strict = decompose(y, x, {"z": z},
+                           {"worker": worker, "firm": firm}, tol=1e-10)
         os.environ["XHDFE_GELBACH_FAST_FIT"] = "0"
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -101,6 +104,11 @@ def slow_chain():
     else:
         print(f"[FAIL] slow-chain:default-converged: {fast['notes']}")
         FAIL.append("slow-chain:default-converged")
+    if strict["converged"]:
+        print("[PASS] slow-chain:strict-oracle-fit-converged")
+    else:
+        print(f"[FAIL] slow-chain:strict-oracle-fit-converged: {strict['notes']}")
+        FAIL.append("slow-chain:strict-oracle-fit-converged")
     if (not legacy["converged"] and
             "exact-normal-equations cross-check" in legacy["notes"]):
         print("[PASS] slow-chain:legacy-fails-closed")
@@ -124,12 +132,12 @@ def slow_chain():
         print(f"[FAIL] slow-chain:sparse-oracle-normal-equations: {normal_resid:.2e}")
         FAIL.append("slow-chain:sparse-oracle-normal-equations")
     hfe = np.asarray(Dw @ b[3:3 + m - 1] + Df @ b[3 + m - 1:]).ravel()
-    check("slow-chain:b_full-vs-LSDV", fast["b_full"][0], b[0], 5e-7)
-    check("slow-chain:observed-delta-vs-LSDV", fast["delta"]["z"]["coef"],
+    check("slow-chain:b_full-vs-LSDV", strict["b_full"][0], b[0], 5e-7)
+    check("slow-chain:observed-delta-vs-LSDV", strict["delta"]["z"]["coef"],
           project(x, z * b[1]), 2e-7)
     # As in the b1x2 strong-HDFE oracle, compare focal-regressor rows. The
     # intercept row moves with the omitted-dummy/FE normalization convention.
-    check("slow-chain:aggregate-FE-x1-vs-LSDV", fast["fe_total"]["coef"][:1],
+    check("slow-chain:aggregate-FE-x1-vs-LSDV", strict["fe_total"]["coef"][:1],
           project(x, hfe)[:1], 2e-7)
 
 
@@ -979,7 +987,7 @@ def main():
     if args.module_dir:
         sys.path.insert(0, os.path.abspath(args.module_dir))
         __import__("py_hdfe_v11")
-    sys.path.insert(0, REPO_ROOT)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from xhdfe.gelbach import decompose as loaded_decompose
     from xhdfe.gelbach import tidy as loaded_tidy
     decompose = loaded_decompose

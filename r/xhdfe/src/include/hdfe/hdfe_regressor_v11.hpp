@@ -125,6 +125,13 @@ public:
         const Eigen::VectorXd* weights = nullptr,
         const GroupIndividualFeOptions& options = GroupIndividualFeOptions{}) const;
 
+    // Bindings whose weight semantics are selected per call must set this
+    // explicitly before fit()/fit_grouped(). The Python binding resets it on
+    // every fit call, so a previous fweight fit cannot leak into a later call.
+    void set_weights_are_frequencies(bool value) noexcept {
+        options_.weights_are_frequencies = value;
+    }
+
     const HdfeResults& results() const noexcept { return results_; }
     int threads_used() const noexcept { return threads_used_; }
     int threads_requested() const noexcept { return threads_requested_; }

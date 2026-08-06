@@ -42,8 +42,8 @@ xhdfe y x1 x2, absorb(firm year) vce(cluster cluster1 cluster2) ///
     dofadjustments(none) ssc(K.adj=0 G.adj=0) statstyle(legacy) ///
     tolerancemode(reghdfe-comparable) tolerance(1e-12) noheader notable nofootnote
 xcert_store_estimates, prefix(ref) scalars("`scalars'")
-if (`"`e(dofmethod)'"' != "none") {
-    di as error "dofadjustments(none) should post e(dofmethod)=none"
+if (`"`e(dofmethod)'"' != "") {
+    di as error "dofadjustments(none) should post canonical empty e(dofmethod)"
     exit 9
 }
 if (missing(e(df_a)) | missing(e(df_r))) {

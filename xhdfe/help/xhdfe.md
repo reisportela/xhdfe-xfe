@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Published package version: 2.22.1.20260730. Use `python -m xhdfe --version`
+Published package version: 2.23.0.20260806. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -205,6 +205,57 @@ Arguments:
 - `aggregation`: `mean`, `avg`, `average`, or `sum`.
 - `slopes`: heterogeneous absorbed slopes. Each entry can be
   `{"fe_index": j, "values": z, "include_intercept": True}`.
+- `fweights`: set `True` to read `weights` as positive-integer frequency
+  weights (literal row replication) instead of analytic weights. The flag
+  applies to that call only.
+
+### Input validation
+
+Estimation inputs are validated before any work starts, and a violation
+raises rather than propagating into the results:
+
+- `y`, `X`, `instruments` and slope values must be finite. `NaN` or `Inf`
+  raises an error naming the offending row (and column). Drop or impute
+  missing data yourself — this library will not do it silently.
+- Fixed-effect, cluster, group and individual identifiers must be
+  non-negative. **`pandas.factorize()` returns `-1` for missing
+  categories**, so factorized columns containing missing values are
+  rejected. Previously a `-1` fixed effect was silently dropped and a `-1`
+  cluster silently became an extra cluster, which changed the standard
+  errors without any warning.
+- `weights` must be finite and non-negative; with `fweights=True` they must
+  additionally be positive integers representable as `int64`. Note that a
+  weight of exactly `0` is accepted and drops the row from the fit without
+  any diagnostic.
+
+Under `fweights`, `nobs_` reports the weight total (as Stata's `e(N)` does),
+`nobs_rows_` the number of input rows, and `sample_index_` indexes rows. The
+weight total is carried through a double, so it is exact only up to `2**53`;
+beyond that — a frequency total above about `9.0e15` — `nobs_` can be off by
+one unit.
+
+A fit reported as `converged_ == True` never returns a non-finite
+coefficient, nor a non-finite standard error for a coefficient whose
+inference is identified. Inference is legitimately unavailable — and is
+therefore exempt from that contract — for omitted (collinear) terms, an
+unidentified intercept, a saturated design, fewer than two clusters, and
+non-positive residual degrees of freedom.
+
+**Do not infer that a coefficient was dropped from the value of its
+standard error.** A dropped regressor is reported as a zero coefficient
+whose standard error is `NaN` on most paths but `0.0` on some degenerate
+ones, and a zero coefficient with a small standard error is also a
+perfectly ordinary estimate. Use the explicit flags instead:
+
+- `omitted_` — boolean per coefficient;
+- `omitted_reason_` — `0` kept, `1` collinear with the absorbed fixed
+  effects, `2` other collinearity;
+- `any_omitted_` — whether anything was dropped at all.
+
+Finite inputs can still overflow their FP64 cross-products when the design is
+scaled extremely (roughly `|X| >= 1e153`). Such a fit fails explicitly rather
+than being misclassified as ordinary collinearity. Rescale `y` and/or `X` and
+fit again.
 
 Heterogeneous slope example:
 
@@ -257,7 +308,9 @@ After `fit`, the regressor exposes:
 - Degrees of freedom: `df_resid_`, `df_resid_unadj_`, `df_m_`, `df_a_`,
   `df_a_levels_`, `df_a_exact_`, `df_a_nested_`.
 - Fit stats: `r2_`, `r2_within_`, `rss_`, `tss_`, `tss_within_`,
-  `saturated_`, `num_iterations_`, `converged_`.
+  `saturated_`, `num_iterations_`, `converged_`. `r2_` and `r2_within_` are
+  `NaN` when the corresponding total sum of squares is zero (a constant
+  outcome), matching Stata's `regress` and `reghdfe`.
 - Absorption certificate: `abs_residual_` is the maximum absolute
   `||D' W v_tilde||_2`, `abs_residual_rel_` is the corresponding maximum
   scale-normalized normal-equation residual
@@ -268,9 +321,22 @@ After `fit`, the regressor exposes:
   certificate is authoritative: any continuation sweeps are counted in
   `num_iterations_`, and `converged_` is true only when
   `precision_certified_` is also true.
+
+  When a fit stops with `precision_certified_` false, `fit` emits a
+  `py_hdfe_v11.PrecisionWarning` (a `RuntimeWarning` subclass, so it can be
+  filtered with `warnings.simplefilter`). On badly conditioned absorption
+  graphs the stopping rule can be satisfied while the coefficients are still
+  materially further from the exact within solution than the nominal
+  tolerance suggests; inspect `abs_residual_rel_` and consider
+  `tolerance_mode="strict-residual"` or a tighter `tol`. The warning changes
+  no estimate.
 - Fixed-effect stats: `fe_num_levels_`, `groupvar_`, `fe_effects_`.
 - Cluster stats: `num_clusters_`, `cluster_counts_`,
-  `cluster_combo_counts_`, `cluster_scale_`.
+  `cluster_combo_counts_`, `cluster_scale_`. With fewer than two clusters
+  the point estimates are still returned but all inference
+  (`stderr_`, `tvalues_`, `pvalues_`, `conf_int_`) is `NaN`, matching
+  `regress`/`reghdfe`; earlier releases reported standard errors of order
+  `1e-16`, which produced spurious significance.
 - Runtime diagnostics: `threads_requested_`, `threads_effective_`,
   `threads_used_` (largest team observed doing real work),
   `parallel_workers_active_` (largest useful-worker count in one region),

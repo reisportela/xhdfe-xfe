@@ -123,7 +123,8 @@ run_with_backend <- function(backend, fun) {
 # Post-process the raw C++ result list into the user-facing "xhdfe" object.
 finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
                            backend, se_type, cluster_names, fe_labels,
-                           tolerance_mode, weights_sum = NULL,
+                           tolerance_mode, model_has_cons = NULL,
+                           weights_sum = NULL,
                            X_used = NULL, y_used = NULL) {
   k <- length(coef_names)
   ncoef <- length(res$coefficients)
@@ -135,6 +136,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     stop(sprintf("internal error: %d coefficients for %d regressors", ncoef, k),
          call. = FALSE)
   }
+  if (is.null(model_has_cons)) model_has_cons <- has_cons
 
   coefficients <- stats::setNames(res$coefficients, coef_names)
   se <- stats::setNames(res$se, coef_names)
@@ -170,6 +172,18 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     residuals_full[sample_rows] <- res$residuals
   }
 
+  # Observation counts follow the effective (weight-total) count, as Stata's
+  # e(N) does. The effective count equals the row count unless frequency
+  # weights are active, and in that case the row count's integer type is kept
+  # so that unweighted and analytic-weight results are unchanged bit for bit,
+  # type included.
+  .xhdfe_effective_count <- function(effective, rows) {
+    if (is.null(effective) || !is.finite(effective) || effective == rows) {
+      return(rows)
+    }
+    if (effective <= .Machine$integer.max) as.integer(effective) else effective
+  }
+
   nobs <- res$nobs
   df_r <- res$df_resid
   df_m <- res$df_m
@@ -187,7 +201,8 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
   rmse <- if (used_df_r > 0) sqrt(res$rss / used_df_r) else sqrt(res$rss)
   r2_a <- r2_a_within <- NA_real_
   if (res$tss > 0 && used_df_r > 0) {
-    r2_a <- 1 - (res$rss / used_df_r) / (res$tss / max(n_eff - has_cons, 1))
+    r2_a <- 1 - (res$rss / used_df_r) /
+      (res$tss / max(n_eff - as.integer(isTRUE(model_has_cons)), 1))
   }
   if (res$tss_within > 0 && used_df_r + df_m > 0 && used_df_r > 0) {
     r2_a_within <- 1 - (res$rss / used_df_r) /
@@ -233,9 +248,21 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     vcov = covariance,
     residuals = residuals_full,
     omitted = omitted,
-    nobs = nobs,
-    nobs_full = res$nobs_full,
-    num_singletons = res$num_singletons,
+    # N follows the effective count, as Stata's e(N) does and as this
+    # package's own documentation states ("observation counts, degrees of
+    # freedom, and the *_effective count fields use the sum of the weights").
+    # Returning the row count here left df_r larger than nobs under frequency
+    # weights (04aug2026 audit). The effective counts equal the row counts
+    # whenever frequency weights are inactive, so nothing else changes.
+    nobs = .xhdfe_effective_count(n_eff, nobs),
+    nobs_full = .xhdfe_effective_count(res$nobs_full_effective,
+                                       res$nobs_full),
+    num_singletons = .xhdfe_effective_count(res$num_singletons_effective,
+                                            res$num_singletons),
+    # Row counts; pair these with sample_index, which indexes rows.
+    nobs_rows = res$nobs,
+    nobs_full_rows = res$nobs_full,
+    num_singletons_rows = res$num_singletons,
     nobs_effective = res$nobs_effective,
     nobs_full_effective = res$nobs_full_effective,
     num_singletons_effective = res$num_singletons_effective,
@@ -267,6 +294,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     saturated = res$saturated,
     fe_num_levels = res$fe_num_levels,
     fe_base_levels = res$fe_base_levels,
+    fe_base_redundant = res$fe_base_redundant,
     fe_redundant = res$fe_redundant,
     fe_num_coefs = res$fe_num_coefs,
     fe_inexact = res$fe_inexact,
@@ -342,6 +370,11 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
   if (!isTRUE(res$converged)) {
     warning("absorption did not converge within maxiter iterations; ",
             "estimates are reported but should not be trusted", call. = FALSE)
+  }
+  if (!isTRUE(res$precision_certified)) {
+    message("xhdfe fit did not pass the independent precision ",
+            "certificate; inspect abs_residual_rel and consider ",
+            "tolerance_mode = \"strict-residual\"")
   }
   if (isTRUE(res$vcv_psd_fixed)) {
     warning("the multiway-cluster VCV required the Cameron-Gelbach-Miller ",

@@ -13,17 +13,14 @@ import contextlib
 import inspect
 import io
 import re
-import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))
 
 import xhdfe
 from xhdfe import gelbach
 from xhdfe import _help
 
 
+ROOT = Path(__file__).resolve().parents[2]
 CHECKS = 0
 
 

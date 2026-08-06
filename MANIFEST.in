@@ -4,11 +4,14 @@ include LICENSE
 include README.md
 include setup.py
 include pyproject.toml
+include py_hdfe_v11.py
 recursive-include include *.hpp
 recursive-include src *.cpp *.hpp *.cu *.mm
 recursive-include python *.cpp
 recursive-include xhdfe *.py *.typed
 recursive-include xhdfe/help *.md
+recursive-include tests *.cpp *.py
+recursive-include tools *.cmake *.sh
 recursive-include third_party/eigen-3.4.0 *
 recursive-include third_party/pybind11-2.11.1 *
 prune build

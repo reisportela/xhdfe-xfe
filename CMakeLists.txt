@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.22.1.20260730 LANGUAGES CXX)
+project(xhdfe VERSION 2.23.0.20260806 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,7 @@ endif()
 
 include(FetchContent)
 include(CheckCXXCompilerFlag)
+include(CTest)
 
 set(XHDFE_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
@@ -222,6 +223,73 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -fassociative-math
         -freciprocal-math
     )
+
+    # Non-finite guards in the fast-math translation units must remain live
+    # in the exact production compilation mode. The portable source gate
+    # prevents raw std/Eigen predicates from returning. Native builds also run
+    # a code-generation probe; cross builds retain the source gate without
+    # attempting to execute a foreign binary.
+    if(CMAKE_CROSSCOMPILING)
+        add_custom_target(xhdfe_nonfinite_guard
+            COMMAND ${CMAKE_COMMAND} -P
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake
+            COMMENT "fast-math non-finite source guard"
+            VERBATIM)
+    else()
+        add_executable(xhdfe_ieee_bits_liveness EXCLUDE_FROM_ALL
+            tests/ieee_bits_liveness.cpp)
+        target_include_directories(xhdfe_ieee_bits_liveness PRIVATE include)
+        target_link_libraries(xhdfe_ieee_bits_liveness PRIVATE Eigen3::Eigen)
+        xhdfe_enable_native_tuning(xhdfe_ieee_bits_liveness)
+        target_compile_options(xhdfe_ieee_bits_liveness PRIVATE
+            -O3
+            -ffast-math
+            -funroll-loops
+            -ftree-vectorize
+            -fomit-frame-pointer
+            -fno-signed-zeros
+            -fno-trapping-math
+            -fassociative-math
+            -freciprocal-math
+        )
+        add_custom_target(xhdfe_nonfinite_guard
+            COMMAND ${CMAKE_COMMAND} -P
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake
+            COMMAND $<TARGET_FILE:xhdfe_ieee_bits_liveness>
+            DEPENDS xhdfe_ieee_bits_liveness
+            COMMENT "fast-math non-finite guard liveness gate"
+            VERBATIM)
+        if(BUILD_TESTING)
+            add_test(NAME xhdfe_ieee_bits_liveness
+                     COMMAND $<TARGET_FILE:xhdfe_ieee_bits_liveness>)
+        endif()
+    endif()
+    add_dependencies(xhdfe xhdfe_nonfinite_guard)
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME xhdfe_no_raw_nonfinite_guards
+             COMMAND ${CMAKE_COMMAND} -P
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake)
+
+    add_executable(xhdfe_fail_closed_entrypoints
+                   tests/fail_closed_entrypoints.cpp)
+    target_link_libraries(xhdfe_fail_closed_entrypoints PRIVATE xhdfe)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        xhdfe_enable_native_tuning(xhdfe_fail_closed_entrypoints)
+        target_compile_options(xhdfe_fail_closed_entrypoints PRIVATE
+            -O3
+            -ffast-math
+            -funroll-loops
+            -ftree-vectorize
+            -fomit-frame-pointer
+            -fno-signed-zeros
+            -fno-trapping-math
+            -fassociative-math
+            -freciprocal-math)
+    endif()
+    add_test(NAME xhdfe_fail_closed_entrypoints
+             COMMAND $<TARGET_FILE:xhdfe_fail_closed_entrypoints>)
 endif()
 
 # Python bindings
@@ -264,5 +332,18 @@ if(XHDFE_BUILD_PYTHON)
             -fassociative-math
             -freciprocal-math
         )
+    endif()
+
+    if(BUILD_TESTING AND NOT CMAKE_CROSSCOMPILING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            add_test(
+                NAME xhdfe_audit_20260804_contracts
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/audit_20260804_contracts.py
+                        --module-dir $<TARGET_FILE_DIR:py_hdfe_v11>)
+            set_tests_properties(xhdfe_audit_20260804_contracts PROPERTIES
+                ENVIRONMENT "XHDFE_GPU_BACKEND=cpu")
+        endif()
     endif()
 endif()

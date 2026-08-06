@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.21.0.
+#' effects regression via a C++ backend." Version 2.23.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -620,6 +620,11 @@ NULL
 #'   \item \emph{Restrictions.} Heterogeneous slopes are not supported with
 #'     \code{group}/\code{individual} or with the LSMR-family absorption
 #'     methods (\code{"lsmr"}, \code{"mlsmr"}, \code{"auto-mlsmr"}).
+#'   \item \emph{Extreme scaling.} Finite inputs can still overflow their FP64
+#'     cross-products when a design is scaled extremely (roughly
+#'     \code{abs(X) >= 1e153}). The fit then fails explicitly rather than
+#'     treating every slope as collinear; rescale the outcome and/or
+#'     regressors.
 #' }
 #'
 #' @section Tolerance modes:
@@ -931,6 +936,9 @@ NULL
 #'   \item{\code{fe_num_levels}}{number of categories after singleton
 #'     dropping.}
 #'   \item{\code{fe_base_levels}}{raw number of levels before adjustments.}
+#'   \item{\code{fe_base_redundant}}{redundancies attributed to the
+#'     intercept part of each absorbed dimension before heterogeneous-slope
+#'     adjustments.}
 #'   \item{\code{fe_redundant}}{redundant coefficients detected in the
 #'     dimension.}
 #'   \item{\code{fe_num_coefs}}{number of coefficients contributed by the
@@ -1058,7 +1066,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.21.0.
+#' effects regression via a C++ backend." Version 2.23.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

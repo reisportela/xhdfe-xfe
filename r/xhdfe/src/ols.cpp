@@ -305,8 +305,13 @@ OlsResult run_ols_fast_impl(const Eigen::VectorXd& y,
     result.rss = rss_d;
     result.tss = total_sum_squares;
     result.within_tss = within_sum_squares;
-    result.r2 = (total_sum_squares > 0.0) ? 1.0 - rss_d / total_sum_squares : 1.0;
-    result.r2_within = (within_sum_squares > 0.0) ? 1.0 - rss_d / within_sum_squares : 1.0;
+    const double missing_r2 = std::numeric_limits<double>::quiet_NaN();
+    result.r2 = (total_sum_squares > 0.0)
+                    ? 1.0 - rss_d / total_sum_squares
+                    : missing_r2;
+    result.r2_within = (within_sum_squares > 0.0)
+                           ? 1.0 - rss_d / within_sum_squares
+                           : missing_r2;
     result.sigma2 = sigma2;
     result.nobs = n;
     return result;
@@ -475,8 +480,13 @@ OlsResult run_ols_fast_from_xtx_impl(const Eigen::VectorXd& y,
     result.rss = rss_d;
     result.tss = total_sum_squares;
     result.within_tss = within_sum_squares;
-    result.r2 = (total_sum_squares > 0.0) ? 1.0 - rss_d / total_sum_squares : 1.0;
-    result.r2_within = (within_sum_squares > 0.0) ? 1.0 - rss_d / within_sum_squares : 1.0;
+    const double missing_r2 = std::numeric_limits<double>::quiet_NaN();
+    result.r2 = (total_sum_squares > 0.0)
+                    ? 1.0 - rss_d / total_sum_squares
+                    : missing_r2;
+    result.r2_within = (within_sum_squares > 0.0)
+                           ? 1.0 - rss_d / within_sum_squares
+                           : missing_r2;
     result.sigma2 = sigma2;
     result.nobs = n;
     return result;
@@ -1530,8 +1540,13 @@ OlsResult run_ols(const Eigen::VectorXd& y,
     result.rss = rss;
     result.tss = total_sum_squares;
     result.within_tss = within_sum_squares;
-    result.r2 = (total_sum_squares > 0.0) ? 1.0 - rss / total_sum_squares : 1.0;
-    result.r2_within = (within_sum_squares > 0.0) ? 1.0 - rss / within_sum_squares : 1.0;
+    const double missing_r2 = std::numeric_limits<double>::quiet_NaN();
+    result.r2 = (total_sum_squares > 0.0)
+                    ? 1.0 - rss / total_sum_squares
+                    : missing_r2;
+    result.r2_within = (within_sum_squares > 0.0)
+                           ? 1.0 - rss / within_sum_squares
+                           : missing_r2;
     result.sigma2 = sigma2;
     result.nobs = n;
     result.num_clusters = num_clusters;
@@ -1819,8 +1834,13 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
     result.rss = rss;
     result.tss = total_sum_squares;
     result.within_tss = within_sum_squares;
-    result.r2 = (total_sum_squares > 0.0) ? 1.0 - rss / total_sum_squares : 1.0;
-    result.r2_within = (within_sum_squares > 0.0) ? 1.0 - rss / within_sum_squares : 1.0;
+    const double missing_r2 = std::numeric_limits<double>::quiet_NaN();
+    result.r2 = (total_sum_squares > 0.0)
+                    ? 1.0 - rss / total_sum_squares
+                    : missing_r2;
+    result.r2_within = (within_sum_squares > 0.0)
+                           ? 1.0 - rss / within_sum_squares
+                           : missing_r2;
     result.sigma2 = sigma2;
     result.nobs = n;
     result.num_clusters = min_clusters;

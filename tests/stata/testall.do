@@ -28,6 +28,7 @@ local tests ///
     "part1/cluster.do" ///
     "part1/weights.do" ///
     "part1/factor-vars.do" ///
+    "part1/factor-downstream.do" ///
     "part1/multiway-fe.do" ///
     "part1/multiway-cluster.do" ///
     "part1/heterogeneous-slopes.do" ///
@@ -38,6 +39,10 @@ local tests ///
     "part1/group-individual.do" ///
     "part1/sample-missing.do" ///
     "part1/dof-ssc.do" ///
+    "part1/harness-mutation.do" ///
+    "part1/reghdfe-convention-parity.do" ///
+    "part1/reghdfe-parity-dof.do" ///
+    "part1/reghdfe-parity-features.do" ///
     "part1/string-interactions.do" ///
     "part1/collinearity.do" ///
     "part1/noconstant.do" ///
