@@ -1,10 +1,10 @@
-*! version 2.23.0 06aug2026
+*! version 2.23.1 06aug2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.23.0 06aug2026"
+        local version "2.23.1 06aug2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -2353,7 +2353,7 @@ program define xhdfe, eclass sortpreserve
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.23.0 06aug2026"
+    ereturn local version "2.23.1 06aug2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2703,7 +2703,7 @@ program define xhdfe_display
         tempname omit_reason
         matrix `omit_reason' = e(omit_reason)
         local cn : colnames e(b)
-        local k = colsof(e(b))
+        local k = rowsof(`omit_reason')
         forvalues j = 1/`k' {
             local name : word `j' of `cn'
             if ("`name'" == "_cons") continue

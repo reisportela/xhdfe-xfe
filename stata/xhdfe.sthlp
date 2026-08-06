@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.23.0 06aug2026}{...}
+{* *! version 2.23.1 06aug2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -1124,7 +1124,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.23.0.
+regression via a C++ backend." Version 2.23.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

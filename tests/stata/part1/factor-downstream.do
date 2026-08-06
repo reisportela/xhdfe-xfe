@@ -23,6 +23,8 @@ scalar factor_y_scale = max(1, abs(r(min)), abs(r(max)))
 * The single-# model must remain consumable by every standard postestimator.
 quietly xhdfe y x1 i.cat#i.grp, absorb(firm year) residuals(x_fit_resid) ///
     tolerancemode(reghdfe-comparable) tolerance(1e-12)
+capture noisily xhdfe
+assert _rc == 0
 local xstripe : colnames e(b)
 gen byte x_sample = e(sample)
 predict double x_xb if x_sample, xb

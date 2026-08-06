@@ -48,6 +48,13 @@ copy_tree() {
 copy_tree "${ROOT_DIR}/src"     "${PKG}/src"
 copy_tree "${ROOT_DIR}/include" "${PKG}/include"
 
+# CMake and the CUDA plugin builders execute repository-level scientific
+# gates, and the default CMake configuration also compiles the test probes.
+# Keep those inputs in the source archive instead of validating only the
+# vendored third-party dependencies.
+copy_tree "${ROOT_DIR}/tools" "${PKG}/tools"
+copy_tree "${ROOT_DIR}/tests" "${PKG}/tests"
+
 # ---- Stata plugin sources + build scripts + vendored deps -----------------
 copy_tree "${ROOT_DIR}/stata/src"     "${PKG}/stata/src"
 copy_tree "${ROOT_DIR}/stata/include" "${PKG}/stata/include"
@@ -71,7 +78,9 @@ done
 # ---- Python package -------------------------------------------------------
 copy_tree "${ROOT_DIR}/python" "${PKG}/python"
 copy_tree "${ROOT_DIR}/xhdfe"  "${PKG}/xhdfe"
-cp -a "${ROOT_DIR}/setup.py" "${ROOT_DIR}/pyproject.toml" "${ROOT_DIR}/CMakeLists.txt" "${PKG}/"
+cp -a "${ROOT_DIR}/setup.py" "${ROOT_DIR}/pyproject.toml" \
+      "${ROOT_DIR}/MANIFEST.in" "${ROOT_DIR}/py_hdfe_v11.py" \
+      "${ROOT_DIR}/CMakeLists.txt" "${PKG}/"
 
 # ---- Project documentation and notices -----------------------------------
 cp -a "${ROOT_DIR}/README.md" "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/NOTICE" \
