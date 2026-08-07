@@ -1,4 +1,4 @@
-*! version 2.23.0  06aug2026
+*! version 2.23.1  06aug2026
 *! xhdfegpu: build and install a CUDA (GPU) xhdfe/xfe plugin for this machine.
 *!
 *! net install ships CPU-only plugins. On a machine with an NVIDIA GPU, run
@@ -156,8 +156,8 @@ program define xhdfegpu, rclass
     capture shell cd "`srcdir'" && XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=`cc' bash stata/tools/build-xfe-plugin.sh --linux --openmp >> "`blog'" 2>&1
     local rc_xfe = _rc
     if (`rc_xhdfe' | !fileexists("`srcdir'/stata/xhdfe.plugin")) {
-        di as err "xhdfegpu: the CUDA build failed. Last lines of the build log:"
-        capture type "`blog'", lines(20)
+        di as err "xhdfegpu: the CUDA build failed. Build log:"
+        capture noisily type "`blog'"
         exit 198
     }
 
