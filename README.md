@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.23.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.23.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -36,10 +36,10 @@ and clusters standard errors at the worker level:
 | `fixest` | CPU | 486.5 | 7.5x |
 | `pyfixest` | CPU | 110.4 | 33.2x |
 | `FixedEffectModels.jl` | CUDA | 105.7 | 34.7x |
-| `xhdfe`, Stata | CPU | 64.6 | 56.8x |
-| `xhdfe`, Python | CPU | 53.2 | 69.0x |
-| `xhdfe`, Stata | CUDA | 24.4 | 150.5x |
-| `xhdfe`, Python | CUDA | 13.2 | 277.7x |
+| `xhdfe`, Stata | CPU | 61.3 | 59.8x |
+| `xhdfe`, Python | CPU | 53.6 | 68.4x |
+| `xhdfe`, Stata | CUDA | 22.7 | 161.7x |
+| `xhdfe`, Python | CUDA | 14.5 | 252.2x |
 
 The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 `reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
@@ -58,8 +58,9 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 - **Optional GPU** — CUDA absorber with explicit request and status reporting; fail-closed (never a silent CPU fallback).
 - **AKM / worker-firm post-estimation** — leave-out (KSS) variance decomposition with plug-in, AGSU and KSS corrections, exact and Johnson-Lindenstrauss leverages, component standard errors, Andrews-Mikusheva weak-identification confidence intervals, fweights, and a leave-one-out connected-set utility (`xhdfeakm` / `xhdfeconnected` in Stata, `xhdfe.akm` in Python, `xhdfe_akm_kss()` in R); validated against Saggio's LeaveOutTwoWay (the canonical KSS implementation) and pytwoway. See [`docs/akm-kss.md`](docs/akm-kss.md).
 - **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` /
-  `xhdfe_gelbach()`, validated against Gelbach's `b1x2`, with multiple focal
-  coefficients, multiple observed blocks, common and added HDFEs, and
+  `xhdfe_gelbach()`, validated against Gelbach's `b1x2` on overlapping classic
+  OLS specifications, with multiple focal coefficients, multiple observed
+  blocks, common and added HDFEs, and
   explicitly declared absorbed targets. Version 1.6.0 includes retained-sample
   provenance, connectivity and regularity diagnostics, joint-covariance
   inference, full-refit pairs bootstrap, and table and plot helpers. See
@@ -455,7 +456,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.23.0.
+> effects regression via a C++ backend.* Version 2.23.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
