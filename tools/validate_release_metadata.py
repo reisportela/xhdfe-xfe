@@ -140,7 +140,15 @@ def validate(expected_version: str) -> None:
 
     package_files = _package_files("stata/xhdfe.pkg")
     package_files.update(_package_files("stata/xfe.pkg"))
-    for relative in sorted(package_files):
+    # The public source tree deliberately omits compiled plugins. Their names
+    # remain mandatory here; the staged net-install validator checks the actual
+    # CI-built binaries after platform assembly.
+    generated_plugins = {"stata/xhdfe.plugin", "stata/xfe.plugin"}
+    _require(
+        generated_plugins.issubset(package_files),
+        "Stata package manifests must reference both generated plugins",
+    )
+    for relative in sorted(package_files - generated_plugins):
         _require(
             (ROOT / relative).is_file(),
             f"required Stata package file is missing: {relative}",
