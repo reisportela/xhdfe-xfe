@@ -81,8 +81,9 @@ closure, and a successful import and regression after Strawberry's compiler
 directory is removed from `PATH`.
 
 The prebuilt Windows asset is a CPython 3.12 x86-64 wheel. It is built and
-tested on Windows Server 2022 with machine-specific instruction tuning disabled
-and is intended for ordinary 64-bit Windows 10/11 hosts. Other Python ABIs
+tested on a GitHub-hosted Windows x86-64 runner with Strawberry MinGW 5.42 /
+GCC 13.2, with machine-specific instruction tuning disabled, and is intended
+for ordinary 64-bit Windows 10/11 hosts. Other Python ABIs
 require a source build and were not separately Windows-certified in this
 release.
 
