@@ -386,7 +386,7 @@ jobs:
           }) -join ';'
           Push-Location $env:RUNNER_TEMP
           try {
-            & $python -c 'import numpy as np, xhdfe; from xhdfe import HdfeRegressor; x=np.arange(30., dtype=float).reshape(-1,1); y=1.5+2*x[:,0]; m=HdfeRegressor(); m.fit(y,x); assert np.allclose(m.coef_, [2.,1.5]); print("WINDOWS_WHEEL_BASE_IMPORT_PASS")'
+            & $python -c 'import numpy as np, py_hdfe_v11 as legacy, xhdfe; from xhdfe import HdfeRegressor; assert legacy.HdfeRegressor is HdfeRegressor; x=np.arange(30., dtype=float).reshape(-1,1); y=1.5+2*x[:,0]; m=HdfeRegressor(); m.fit(y,x); assert np.allclose(m.coef_, [2.,1.5]); print("WINDOWS_WHEEL_BASE_IMPORT_PASS")'
             & $python -m pip install "$($wheel.FullName)[formula]"
             & $python -m pip check
             & $python -c 'import numpy as np, pandas as pd, xhdfe; rng=np.random.default_rng(240814); n=180; d=pd.DataFrame({"x":rng.normal(size=n),"g":rng.choice(["a","b","c"],n),"firm":rng.integers(0,18,n),"year":rng.integers(0,7,n)}); d["y"]=1+2*d["x"]+(d["g"]=="b")*.4+rng.normal(scale=.1,size=n); m=xhdfe.feols("y ~ C(g)*x | firm + year",data=d); assert m.converged_ and np.isfinite(m.coef_).all(); print("WINDOWS_WHEEL_FORMULA_PASS")'

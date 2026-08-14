@@ -5,12 +5,15 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import xhdfe
 
 
 def _load_setup_module():
@@ -41,6 +44,52 @@ def _write_cmake_toolchain(build_dir: Path, compiler: Path, compiler_id: str) ->
 
 
 class WindowsRuntimePackagingTest(unittest.TestCase):
+    def test_directory_without_packaged_gnu_runtime_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp)
+            (package_dir / "unrelated.dll").write_bytes(b"runtime")
+
+            def unexpected_register(_path):
+                raise AssertionError("non-MinGW directory must not be registered")
+
+            self.assertIsNone(
+                xhdfe._register_packaged_dll_directory(
+                    package_dir, add_dll_directory=unexpected_register
+                )
+            )
+
+    def test_packaged_runtime_directory_is_registered_and_handle_retained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_dir = Path(tmp)
+            (package_dir / "libgomp-1.dll").write_bytes(b"runtime")
+            handle = object()
+            calls = []
+
+            def register(path):
+                calls.append(path)
+                return handle
+
+            saved_handles = xhdfe._PACKAGED_DLL_DIRECTORY_HANDLES
+            xhdfe._PACKAGED_DLL_DIRECTORY_HANDLES = {}
+            try:
+                first = xhdfe._register_packaged_dll_directory(
+                    package_dir, add_dll_directory=register
+                )
+                second = xhdfe._register_packaged_dll_directory(
+                    package_dir, add_dll_directory=register
+                )
+                self.assertIs(first, handle)
+                self.assertIs(second, handle)
+                self.assertEqual(calls, [str(package_dir.resolve())])
+                self.assertIs(
+                    xhdfe._PACKAGED_DLL_DIRECTORY_HANDLES[
+                        str(package_dir.resolve())
+                    ],
+                    handle,
+                )
+            finally:
+                xhdfe._PACKAGED_DLL_DIRECTORY_HANDLES = saved_handles
+
     def test_strawberry_style_adjacent_objdump_is_preferred(self):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "Strawberry" / "c" / "bin"

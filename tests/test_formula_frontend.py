@@ -930,12 +930,16 @@ class FormulaLazyImportTest(unittest.TestCase):
             """
             import sys
             import xhdfe
+            assert "xhdfe.py_hdfe_v11" not in sys.modules
+            assert "py_hdfe_v11" not in sys.modules
             assert "formulaic" not in sys.modules
             assert "pandas" not in sys.modules
             assert "scipy" not in sys.modules
             from xhdfe import PreparedFormula, feols, prepare_formula
             assert callable(feols) and callable(prepare_formula)
             assert PreparedFormula.__name__ == "PreparedFormula"
+            assert "xhdfe.py_hdfe_v11" not in sys.modules
+            assert "py_hdfe_v11" not in sys.modules
             assert "formulaic" not in sys.modules
             assert "pandas" not in sys.modules
             assert "scipy" not in sys.modules

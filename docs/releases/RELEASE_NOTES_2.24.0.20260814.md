@@ -68,6 +68,12 @@ Strawberry Perl toolchains. Missing or conflicting runtime files fail the wheel
 build instead of producing an artefact that fails later at import time. MSVC
 builds are unchanged.
 
+Before the native import, the package now registers the installed directory
+containing those DLLs with `os.add_dll_directory()` and retains the returned
+handle for the lifetime of the process. This closes Python 3.8+'s restricted
+DLL-search behaviour without relying on Strawberry Perl's `PATH` entry or a
+user-side workaround.
+
 The logic has fail-closed unit coverage. Release certification additionally
 requires a real Windows/Strawberry wheel build, inspection of the wheel DLL
 closure, and a successful import and regression after Strawberry's compiler
@@ -91,12 +97,12 @@ restamped only to preserve the repository's unified release identity:
 
 ## Source-candidate validation
 
-- Python `unittest` discovery suite: 49/49 tests passed against the current compiled
+- Python `unittest` discovery suite: 51/51 tests passed against the current compiled
   binding, including formula/array parity and frequency weights.
 - Formula-focused suite: 35 tests passed; lazy optional imports, categorical
   coding, interactions, missing-data failures, identifier exactness, clusters,
   weights, result metadata, and FP64 transform arithmetic are covered.
-- Windows runtime packaging suite: nine fail-closed dependency-closure tests
+- Windows runtime packaging suite: eleven fail-closed dependency-closure and loader tests
   passed on the source candidate.
 - The existing direct-array API passed a separate smoke without importing the
   optional formula stack.

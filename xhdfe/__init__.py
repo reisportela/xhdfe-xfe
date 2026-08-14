@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import os
+from pathlib import Path
 
 from ._version import __version__
 from ._help import help_path, help_text, print_help
@@ -21,6 +23,17 @@ _FORMULA_EXPORTS = {
     "prepare_formula",
 }
 
+_MINGW_RUNTIME_DLL_PREFIXES = (
+    "libgcc_s_",
+    "libstdc++-",
+    "libgomp-",
+    "libwinpthread-",
+    "libatomic-",
+    "libssp-",
+    "libquadmath-",
+)
+_PACKAGED_DLL_DIRECTORY_HANDLES: dict[str, object] = {}
+
 __all__ = [
     "__version__",
     "AbsorptionMethod",
@@ -35,6 +48,50 @@ __all__ = [
     "help_text",
     "print_help",
 ]
+
+
+def _register_packaged_dll_directory(
+    package_dir=None, *, add_dll_directory=None
+):
+    """Register bundled MinGW runtimes before loading the native extension."""
+
+    if add_dll_directory is None:
+        if os.name != "nt":
+            return None
+        add_dll_directory = getattr(os, "add_dll_directory", None)
+
+    directory = (
+        Path(__file__).resolve().parent
+        if package_dir is None
+        else Path(package_dir).resolve()
+    )
+    has_mingw_runtime = any(
+        candidate.is_file()
+        and candidate.name.lower().endswith(".dll")
+        and candidate.name.lower().startswith(_MINGW_RUNTIME_DLL_PREFIXES)
+        for candidate in directory.iterdir()
+    )
+    if not has_mingw_runtime:
+        return None
+    if add_dll_directory is None:
+        raise ImportError(
+            "This xhdfe installation contains bundled MinGW runtime DLLs, but "
+            "this Python runtime does not provide os.add_dll_directory()."
+        )
+
+    key = str(directory)
+    if key not in _PACKAGED_DLL_DIRECTORY_HANDLES:
+        try:
+            _PACKAGED_DLL_DIRECTORY_HANDLES[key] = add_dll_directory(key)
+        except OSError as exc:
+            raise ImportError(
+                "xhdfe could not register its packaged DLL directory before "
+                "loading the compiled extension."
+            ) from exc
+    return _PACKAGED_DLL_DIRECTORY_HANDLES[key]
+
+
+_register_packaged_dll_directory()
 
 
 def _load_core():

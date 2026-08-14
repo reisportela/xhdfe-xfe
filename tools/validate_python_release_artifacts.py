@@ -63,6 +63,15 @@ def _runtime_notice_checks(text: str, label: str) -> None:
     )
 
 
+def _dll_bootstrap_checks(text: str, label: str) -> None:
+    _require(
+        "add_dll_directory" in text
+        and "_PACKAGED_DLL_DIRECTORY_HANDLES" in text
+        and "_register_packaged_dll_directory()" in text,
+        f"{label} omits the retained packaged-DLL directory bootstrap",
+    )
+
+
 def _member_with_suffix(names: Iterable[str], suffix: str, label: str) -> str:
     matches = [
         name
@@ -115,11 +124,20 @@ def _validate_mingw_closure(wheel: Path, objdump: Path) -> None:
             archive.extractall(root)
         pyds = list(root.rglob("*.pyd"))
         _require(len(pyds) == 1, f"wheel must contain one .pyd, found {pyds}")
-        runtime_files = {
-            path.name.lower(): path
+        runtime_paths = [
+            path
             for path in root.rglob("*.dll")
             if _MINGW_RUNTIME_DLL_RE.fullmatch(path.name)
-        }
+        ]
+        _require(
+            all(path.parent == pyds[0].parent for path in runtime_paths),
+            "wheel GNU runtime DLLs must be beside the native extension",
+        )
+        runtime_files = {path.name.lower(): path for path in runtime_paths}
+        _require(
+            len(runtime_files) == len(runtime_paths),
+            "wheel contains duplicate case-insensitive GNU runtime DLL names",
+        )
         root_dependencies = _pe_dependencies(objdump, pyds[0])
         _require(
             any(name.lower() == "libgomp-1.dll" for name in root_dependencies),
@@ -160,6 +178,10 @@ def validate_wheel(
     _require(wheel.is_file(), f"wheel not found: {wheel}")
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
+        init_name = _member_with_suffix(names, "/xhdfe/__init__.py", "wheel")
+        _dll_bootstrap_checks(
+            archive.read(init_name).decode("utf-8"), "wheel xhdfe/__init__.py"
+        )
         _member_with_suffix(names, "/xhdfe/_formula.py", "wheel")
         _member_with_suffix(names, "/xhdfe/help/xhdfe.md", "wheel")
         _wheel_notice_member(names, "LICENSE")
@@ -188,6 +210,7 @@ def validate_sdist(sdist: Path, expected_version: str) -> None:
             "/setup.py",
             "/LICENSE",
             "/NOTICE",
+            "/xhdfe/__init__.py",
             "/xhdfe/_formula.py",
             "/xhdfe/help/xhdfe.md",
             "/tests/test_formula_frontend.py",
@@ -195,6 +218,11 @@ def validate_sdist(sdist: Path, expected_version: str) -> None:
         ):
             expected = root + suffix
             _require(expected in names, f"sdist is missing {expected}")
+        init_member = archive.extractfile(root + "/xhdfe/__init__.py")
+        _require(init_member is not None, "sdist xhdfe/__init__.py could not be read")
+        _dll_bootstrap_checks(
+            init_member.read().decode("utf-8"), "sdist xhdfe/__init__.py"
+        )
         notice_member = archive.extractfile(root + "/NOTICE")
         _require(notice_member is not None, "sdist NOTICE could not be read")
         notice = notice_member.read().decode("utf-8")

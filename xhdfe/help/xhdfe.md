@@ -48,6 +48,16 @@ XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
 
 Equivalent CMake definitions can be passed through `CMAKE_ARGS`.
 
+### Windows native runtime loading
+
+GNU/MinGW builds bundle their required runtime DLL closure beside the compiled
+extension. On Python 3.8 and later, `xhdfe` registers that exact installed
+package directory with `os.add_dll_directory()` before loading the extension
+and retains the returned handle for the lifetime of the process. A certified
+wheel therefore needs neither Strawberry Perl's compiler directory on `PATH`
+nor a user-written `os.add_dll_directory(...)` workaround. MSVC builds do not
+take this MinGW-specific path.
+
 ## Imports
 
 Preferred package import:
