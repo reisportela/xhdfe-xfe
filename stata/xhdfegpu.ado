@@ -1,4 +1,4 @@
-*! version 2.23.1  06aug2026
+*! version 2.24.0  14aug2026
 *! xhdfegpu: build and install a CUDA (GPU) xhdfe/xfe plugin for this machine.
 *!
 *! net install ships CPU-only plugins. On a machine with an NVIDIA GPU, run

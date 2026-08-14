@@ -1,12 +1,15 @@
 name: Release plugins
 
-# A version tag (v*) builds a draft release. After the exact CI CUDA artifacts
-# pass runtime validation on the maintainer H100, a matching publish-v* marker
-# publishes that existing draft and its net-install snapshot. A plain
-# workflow_dispatch is intentionally non-releasing.
+# A preflight-v* tag runs the build/test matrix and full release assembly
+# without creating a release. workflow_dispatch runs the build/test matrix.
+# A version tag (v*) assembles the same assets and creates a draft release.
+# After the exact CI CUDA artifacts pass runtime validation on the maintainer
+# H100, a matching publish-v* marker publishes that existing draft and its
+# net-install snapshot.
 on:
   push:
     tags:
+      - 'preflight-v*' # build/test + assembly only; never creates or publishes a release
       - 'v*'           # build a draft release
       - 'publish-v*'   # publish only after exact CI CUDA assets pass H100 validation
   workflow_dispatch:
@@ -38,21 +41,47 @@ jobs:
   # ---------------------------------------------------------------------------
   build-linux:
     name: Build Linux (CPU + CUDA fatbin) and Windows/OpenMP
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify unified metadata and release tag
+        run: |
+          set -euo pipefail
+          EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
+          python3 tools/validate_release_metadata.py \
+            --expected-version "$EXPECTED_VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test "$GITHUB_REF_NAME" = "v${EXPECTED_VERSION}" || {
+              echo "ERROR: tag $GITHUB_REF_NAME does not match v${EXPECTED_VERSION}" >&2
+              exit 1
+            }
+          elif [[ "$GITHUB_REF" == refs/tags/preflight-v* ]]; then
+            PREFLIGHT_BASE="preflight-v${EXPECTED_VERSION}"
+            if [[ "$GITHUB_REF_NAME" != "$PREFLIGHT_BASE" ]]; then
+              ATTEMPT="${GITHUB_REF_NAME#"${PREFLIGHT_BASE}-r"}"
+              test "$GITHUB_REF_NAME" = "${PREFLIGHT_BASE}-r${ATTEMPT}" \
+                && [[ "$ATTEMPT" =~ ^[1-9][0-9]*$ ]] || {
+                  echo "ERROR: preflight tag $GITHUB_REF_NAME must be ${PREFLIGHT_BASE} or ${PREFLIGHT_BASE}-rN" >&2
+                  exit 1
+                }
+            fi
+          fi
 
       - name: Install toolchains (g++, mingw POSIX, binutils, curl, tar)
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential g++ binutils curl ca-certificates tar gzip zip \
+            build-essential g++ binutils cmake curl ca-certificates tar gzip zip \
             g++-mingw-w64-x86-64 \
             python3-dev python3-pip python3-venv python3-numpy \
-            python3-setuptools python3-wheel r-base-core
+            python3-setuptools python3-wheel r-base-core r-cran-rcpp \
+            r-cran-testthat
           sudo update-alternatives --set x86_64-w64-mingw32-g++ \
             /usr/bin/x86_64-w64-mingw32-g++-posix
           x86_64-w64-mingw32-g++ --version
@@ -219,17 +248,55 @@ jobs:
           echo "expected version: $EXPECTED_VERSION"
           python3 -m venv --system-site-packages /tmp/xhdfe-wheel-smoke
           WHEELS=(artifacts/xhdfe-*.whl)
+          SDISTS=(artifacts/xhdfe-*.tar.gz)
           test "${#WHEELS[@]}" -eq 1
+          test "${#SDISTS[@]}" -eq 1
+          python3 tools/validate_python_release_artifacts.py \
+            --wheel "${WHEELS[0]}" \
+            --sdist "${SDISTS[0]}" \
+            --expected-version "$EXPECTED_VERSION"
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install \
             --no-deps "${WHEELS[0]}"
           (
             cd /tmp
             /tmp/xhdfe-wheel-smoke/bin/python -c \
-              'import numpy as np; import xhdfe; from xhdfe import gelbach; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); print("PYTHON_WHEEL_SMOKE_PASS")'
+              'import sys; import numpy as np; import xhdfe; from xhdfe import feols, gelbach; assert "formulaic" not in sys.modules; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); assert callable(feols); assert "formulaic" not in sys.modules; print("PYTHON_WHEEL_BASE_SMOKE_PASS")'
           )
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install "${WHEELS[0]}[formula]"
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'formulaic==1.2.1'
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip check
+          cp tests/test_formula_frontend.py /tmp/test_formula_frontend.py
+          (
+            cd /tmp
+            /tmp/xhdfe-wheel-smoke/bin/python - <<'PY'
+          import formulaic
+          import pandas
+          import unittest
+
+          suite = unittest.defaultTestLoader.loadTestsFromName("test_formula_frontend")
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if not result.wasSuccessful() or result.skipped or result.testsRun != 35:
+              raise SystemExit(
+                  f"formula wheel gate expected 35 passing tests without skips; "
+                  f"ran={result.testsRun}, skipped={result.skipped}"
+              )
+          print("PYTHON_WHEEL_FORMULA_SUITE_PASS")
+          PY
+          )
+          python3 -m venv --system-site-packages /tmp/xhdfe-sdist-smoke
+          /tmp/xhdfe-sdist-smoke/bin/python -m pip install \
+            --no-deps "${SDISTS[0]}"
+          (
+            cd /tmp
+            /tmp/xhdfe-sdist-smoke/bin/python -c \
+              'import xhdfe; from xhdfe import HdfeRegressor; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); assert HdfeRegressor is not None; print("PYTHON_SDIST_REBUILD_SMOKE_PASS")'
+          )
+          python3 -m unittest -v tests.test_windows_runtime_packaging
           R CMD build --no-build-vignettes --no-manual r/xhdfe
           R_TARBALL="xhdfe_${EXPECTED_VERSION}.tar.gz"
           test -f "$R_TARBALL"
+          _R_CHECK_FORCE_SUGGESTS_=false R CMD check \
+            --no-build-vignettes --no-manual "$R_TARBALL"
           mv "$R_TARBALL" artifacts/
           ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
             artifacts/xhdfe_*.tar.gz
@@ -254,6 +321,89 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Windows runner: build the Python wheel with Strawberry Perl's MinGW and
+  # prove that its compiled extension imports after the compiler directory is
+  # removed from PATH. This is the end-to-end gate for the packaged GNU runtime
+  # DLL closure used by CPython 3.8+.
+  # ---------------------------------------------------------------------------
+  build-windows-python:
+    name: Build/import Windows Python wheel (Strawberry MinGW)
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Strawberry Perl MinGW toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          choco install strawberryperl --no-progress -y
+          $strawberryBin = 'C:\Strawberry\c\bin'
+          if (-not (Test-Path "$strawberryBin\g++.exe")) {
+            throw "Strawberry MinGW compiler not found at $strawberryBin"
+          }
+          $strawberryBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build and inspect MinGW wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install --upgrade pip setuptools wheel cmake numpy
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $env:XHDFE_ENABLE_CUDA = 'OFF'
+          $env:CMAKE_ARGS = '-G "MinGW Makefiles" -DCMAKE_CXX_COMPILER=C:/Strawberry/c/bin/g++.exe -DXHDFE_ENABLE_MARCH_NATIVE=OFF'
+          python -m pip wheel . --no-build-isolation --no-deps --wheel-dir artifacts
+          $expected = python -c 'import re; s=open("xhdfe/_version.py").read(); print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", s).group(1))'
+          $wheel = Get-ChildItem artifacts\xhdfe-*.whl
+          if ($wheel.Count -ne 1) { throw "Expected one Windows wheel, found $($wheel.Count)" }
+          python tools/validate_python_release_artifacts.py `
+            --wheel $wheel.FullName `
+            --expected-version $expected `
+            --mingw-objdump C:\Strawberry\c\bin\objdump.exe
+
+      - name: Import wheel without Strawberry on PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $wheel = Get-ChildItem artifacts\xhdfe-*.whl
+          python -m venv $env:RUNNER_TEMP\xhdfe-wheel-smoke
+          $python = "$env:RUNNER_TEMP\xhdfe-wheel-smoke\Scripts\python.exe"
+          & $python -m pip install --upgrade pip
+          & $python -m pip install $wheel.FullName
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and $_.TrimEnd('\') -ine 'C:\Strawberry\c\bin'
+          }) -join ';'
+          Push-Location $env:RUNNER_TEMP
+          try {
+            & $python -c 'import numpy as np, xhdfe; from xhdfe import HdfeRegressor; x=np.arange(30., dtype=float).reshape(-1,1); y=1.5+2*x[:,0]; m=HdfeRegressor(); m.fit(y,x); assert np.allclose(m.coef_, [2.,1.5]); print("WINDOWS_WHEEL_BASE_IMPORT_PASS")'
+            & $python -m pip install "$($wheel.FullName)[formula]"
+            & $python -m pip check
+            & $python -c 'import numpy as np, pandas as pd, xhdfe; rng=np.random.default_rng(240814); n=180; d=pd.DataFrame({"x":rng.normal(size=n),"g":rng.choice(["a","b","c"],n),"firm":rng.integers(0,18,n),"year":rng.integers(0,7,n)}); d["y"]=1+2*d["x"]+(d["g"]=="b")*.4+rng.normal(scale=.1,size=n); m=xhdfe.feols("y ~ C(g)*x | firm + year",data=d); assert m.converged_ and np.isfinite(m.coef_).all(); print("WINDOWS_WHEEL_FORMULA_PASS")'
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Upload Windows Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-windows-python
+          path: artifacts/xhdfe-*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # macOS Apple Silicon runner: builds a universal (x86_64 + arm64) Mach-O
   # bundle for both xhdfe and xfe. No OpenMP (Apple clang rejects bare -fopenmp;
   # the script forces OpenMP OFF on Darwin). The xfe script is run under Homebrew
@@ -262,8 +412,10 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: Build macOS universal (CPU, no OpenMP)
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-14                    # arm64 / Apple Silicon
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -340,17 +492,17 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Release staging: assemble per-platform Stata bundles, attach the raw CUDA
-  # fatbins and an offline source/runtime ZIP, and create a DRAFT release.
-  # Publication and gh-pages promotion are a separate H100-certified marker job.
+  # Release staging: assemble and validate per-platform Stata bundles, raw CUDA
+  # fatbins, Python/R packages, the offline source/runtime ZIP, and net-install
+  # snapshot. This runs for preflight and version tags with read-only contents.
   # ---------------------------------------------------------------------------
-  release:
-    name: Build and stage DRAFT GitHub Release
-    needs: [build-linux, build-macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+  assemble-release:
+    name: Assemble and validate release snapshot
+    needs: [build-linux, build-windows-python, build-macos]
+    if: startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -371,6 +523,7 @@ jobs:
       - name: List downloaded plugins (fail-fast on any missing REQUIRED variant)
         run: |
           set -euo pipefail
+          shopt -s nullglob
           echo "== downloaded artifacts =="
           ls -la dl
           # Required set: Linux CPU + Linux CUDA + Windows/OpenMP + macOS.
@@ -385,7 +538,11 @@ jobs:
           PY_WHEELS=(dl/xhdfe-*.whl)
           PY_SDISTS=(dl/xhdfe-*.tar.gz)
           R_TARBALLS=(dl/xhdfe_*.tar.gz)
-          test "${#PY_WHEELS[@]}" -eq 1
+          test "${#PY_WHEELS[@]}" -eq 2
+          LINUX_PY_WHEELS=(dl/xhdfe-*manylinux*.whl)
+          WINDOWS_PY_WHEELS=(dl/xhdfe-*win_amd64.whl)
+          test "${#LINUX_PY_WHEELS[@]}" -eq 1
+          test "${#WINDOWS_PY_WHEELS[@]}" -eq 1
           test "${#PY_SDISTS[@]}" -eq 1
           test "${#R_TARBALLS[@]}" -eq 1
 
@@ -396,6 +553,7 @@ jobs:
 
           # Shared, platform-independent Stata package files.
           SHARED=(
+            stata/LICENSE stata/NOTICE
             stata/xhdfe.ado stata/xhdfe.sthlp stata/xhdfe.pkg
             stata/xhdfe_p.ado stata/xhdfe_estat.ado
             stata/xhdfeakm.ado stata/xhdfeakm.sthlp
@@ -536,6 +694,8 @@ jobs:
             --windows-libgomp dl/libgomp-1.dll \
             --windows-libwinpthread dl/libwinpthread-1.dll
           cp release_assets/xhdfe-src.zip netinstall_site/stata/xhdfe-src.zip
+          bash tools/validate_stata_package_site.sh \
+            "$GITHUB_WORKSPACE/netinstall_site/stata"
           ( cd "$GITHUB_WORKSPACE/netinstall_site" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/xhdfe_xfe-stata-netinstall-site.zip" . )
           echo "built release_assets/xhdfe_xfe-stata-netinstall-site.zip"
 
@@ -554,17 +714,28 @@ jobs:
         run: |
           set -euo pipefail
           EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
-          cat > release_body.md <<EOF
-          # xhdfe / xfe — ${{ github.ref_name }}
+          RELEASE_NOTES="docs/releases/RELEASE_NOTES_${EXPECTED_VERSION}.md"
+          test -f "$RELEASE_NOTES" || {
+            echo "ERROR: missing tagged release notes: $RELEASE_NOTES" >&2
+            exit 1
+          }
+          cp "$RELEASE_NOTES" release_body.md
+          cat >> release_body.md <<EOF
+
+          ---
+
+          ## Release assets and installation
 
           Stata plugins built automatically on GitHub-hosted runners.
 
-          > **CI itself proves COMPILE + LINK only.** GitHub runners have **no GPU**
-          > and **no Stata license**. The workflow initially stages this release as a
-          > draft and permits publication only after the exact attached CUDA fatbins
-          > pass Stata-functional validation on real hardware (an NVIDIA H100,
+          > GitHub-hosted CI imports and exercises the Python wheels and runs
+          > \`R CMD check\`. For the Stata plugins it proves **COMPILE + LINK only**:
+          > the runners have **no Stata license**, and they have **no GPU** for CUDA
+          > runtime validation. The workflow initially stages this release as a
+          > draft and permits publication only after the exact attached plugins pass
+          > Stata CPU/CUDA functional validation on real hardware (an NVIDIA H100,
           > \`sm_90\`). A published release therefore records completion of that
-          > external H100 gate.
+          > external gate.
 
           ## Online Stata install
 
@@ -593,9 +764,12 @@ jobs:
           - \`xhdfe-linux-cuda.plugin\`, \`xfe-linux-cuda.plugin\` — the same Linux CUDA binaries as in the CUDA bundle, attached standalone.
 
           ### Python and R packages
-          - \`xhdfe-${EXPECTED_VERSION}-*.whl\` — Linux x86_64 CPU wheel, installed
-            and exercised from an isolated environment in CI; use the source
-            distribution on systems with an incompatible glibc/Python ABI.
+          - \`xhdfe-${EXPECTED_VERSION}-*manylinux*.whl\` — Linux x86_64 CPU
+            wheel, installed and exercised from an isolated environment in CI.
+          - \`xhdfe-${EXPECTED_VERSION}-*win_amd64.whl\` — Windows x86_64 CPU
+            wheel built with Strawberry MinGW; its GNU runtime DLL closure is
+            inspected and import-tested with Strawberry removed from \`PATH\`.
+            Use the source distribution on other systems or Python ABIs.
           - \`xhdfe-${EXPECTED_VERSION}.tar.gz\` — Python source distribution.
           - \`xhdfe_${EXPECTED_VERSION}.tar.gz\` — R source package.
 
@@ -613,13 +787,50 @@ jobs:
           ## Build matrix
           | Platform | Backend | Runner | Notes |
           |---|---|---|---|
-          | Linux x86_64 | CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
-          | Linux x86_64 | CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
-          | Windows 11 x86_64 | CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
-          | macOS x86_64+arm64 | CPU | macos-14 | universal bundle, no OpenMP |
+          | Linux x86_64 | Stata CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
+          | Linux x86_64 | Stata CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
+          | Linux x86_64 | Python CPU wheel | manylinux_2_28 + ubuntu-latest | repaired manylinux wheel; clean installed-wheel formula smoke |
+          | Windows 11 x86_64 | Stata CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
+          | Windows 11 x86_64 | Python CPU/OpenMP wheel | windows-latest (Strawberry MinGW) | recursive DLL closure; import and formula smoke without Strawberry on PATH |
+          | macOS x86_64+arm64 | Stata CPU | macos-14 | universal bundle, no OpenMP |
           EOF
           echo "---- release body ----"
           cat release_body.md
+
+      - name: Upload assembled release snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: assembled-release-${{ github.ref_name }}
+          path: |
+            release_assets
+            release_body.md
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Version tags alone may turn the already-validated assembly artifact into a
+  # DRAFT release. Publication remains a separate H100-certified marker job.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Stage DRAFT GitHub Release
+    needs: [assemble-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download assembled release snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: assembled-release-${{ github.ref_name }}
+          path: staged
+
+      - name: Verify downloaded release snapshot
+        run: |
+          set -euo pipefail
+          test -f staged/release_body.md
+          test -f staged/release_assets/SHA256SUMS.txt
+          ( cd staged/release_assets && sha256sum -c SHA256SUMS.txt )
 
       - name: Create DRAFT release with assets
         uses: softprops/action-gh-release@v2
@@ -627,14 +838,14 @@ jobs:
           draft: true                              # nothing public until a maintainer reviews + publishes
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          body_path: release_body.md
+          body_path: staged/release_body.md
           fail_on_unmatched_files: true
           files: |
-            release_assets/*.zip
-            release_assets/*.plugin
-            release_assets/*.whl
-            release_assets/*.tar.gz
-            release_assets/SHA256SUMS.txt
+            staged/release_assets/*.zip
+            staged/release_assets/*.plugin
+            staged/release_assets/*.whl
+            staged/release_assets/*.tar.gz
+            staged/release_assets/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # built-in token; no extra secrets
 

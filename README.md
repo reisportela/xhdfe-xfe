@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.23.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.24.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -47,6 +47,7 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 ## Features
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
+- **Dual Python API** — low-overhead arrays or an optional R-style formula frontend with categories and interactions.
 - **Heterogeneous (group-specific) slopes** — `fe#c.x` and `fe##c.x` designs.
 - **IV / 2SLS** with absorbed fixed effects.
 - **Weights** — analytic, frequency, probability, and importance weights.
@@ -253,6 +254,35 @@ assert reg_gpu.gpu_status_code_ == 1
 os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
+The optional R-style formula frontend uses the same native estimator while
+adding named dataframe designs. Install the extra from a source checkout:
+
+```bash
+python -m pip install '.[formula]'
+```
+
+If `xhdfe` is already installed from a GitHub release asset, install its
+optional formula dependency with
+`python -m pip install 'formulaic>=1.2.1,<2' 'pandas>=1.3'`.
+
+```python
+model = xhdfe.feols(
+    "y ~ x1 + x2 + C(industry) | firm + year",
+    data=d,
+    se_type="cluster",
+    clusters="firm",
+)
+print(model.tidy())
+```
+
+`C(g)` is the R-style counterpart of Stata's `i.g`; `x:z` is a product-only
+interaction and `x*z` expands to `x + z + x:z`. Fixed effects after `|` are
+read as identifier columns, encoded as group IDs, and passed to the native
+absorber, so they do not become dummy columns. The existing
+`HdfeRegressor.fit(y, X, ...)` API remains the lowest-overhead route for small
+regressions in loops. See the packaged Python help for formula semantics,
+categorical reference levels, and `prepare_formula()`.
+
 ### R
 
 Install from GitHub (the package lives in the `r/xhdfe` subdirectory). This
@@ -456,7 +486,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.23.1.
+> effects regression via a C++ backend.* Version 2.24.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

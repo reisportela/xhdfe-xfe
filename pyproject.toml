@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xhdfe"
-version = "2.23.1.20260806"
+version = "2.24.0.20260814"
 description = "High-dimensional fixed effects regression backed by the xhdfe C++ core"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -20,7 +20,6 @@ keywords = ["econometrics", "fixed effects", "HDFE", "regression", "reghdfe"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
-  "Operating System :: OS Independent",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
@@ -28,6 +27,12 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.23",
+]
+
+[project.optional-dependencies]
+formula = [
+  "formulaic>=1.2.1,<2",
+  "pandas>=1.3",
 ]
 
 [project.urls]

@@ -15,6 +15,12 @@ _CORE_EXPORTS = {
     "StandardErrorType",
 }
 
+_FORMULA_EXPORTS = {
+    "PreparedFormula",
+    "feols",
+    "prepare_formula",
+}
+
 __all__ = [
     "__version__",
     "AbsorptionMethod",
@@ -22,6 +28,9 @@ __all__ = [
     "HdfeRegressor",
     "PrecisionWarning",
     "StandardErrorType",
+    "PreparedFormula",
+    "feols",
+    "prepare_formula",
     "help_path",
     "help_text",
     "print_help",
@@ -42,6 +51,8 @@ def _load_core():
 def __getattr__(name: str):
     if name in _CORE_EXPORTS:
         return getattr(_load_core(), name)
+    if name in _FORMULA_EXPORTS:
+        return getattr(importlib.import_module("._formula", __name__), name)
     if name == "akm":
         return importlib.import_module(".akm", __name__)
     if name == "gelbach":

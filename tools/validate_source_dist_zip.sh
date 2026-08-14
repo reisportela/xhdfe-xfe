@@ -39,8 +39,14 @@ required_entries=(
   "xhdfe-src/CMakeLists.txt"
   "xhdfe-src/LICENSE"
   "xhdfe-src/MANIFEST.in"
+  "xhdfe-src/pyproject.toml"
+  "xhdfe-src/setup.py"
   "xhdfe-src/NOTICE"
   "xhdfe-src/py_hdfe_v11.py"
+  "xhdfe-src/xhdfe/_formula.py"
+  "xhdfe-src/xhdfe/help/xhdfe.md"
+  "xhdfe-src/tests/test_formula_frontend.py"
+  "xhdfe-src/tests/test_windows_runtime_packaging.py"
   "xhdfe-src/third_party/eigen-3.4.0/Eigen/Core"
   "xhdfe-src/third_party/pybind11-2.11.1/include/pybind11/pybind11.h"
   "xhdfe-src/stata/tools/build-plugin.sh"
@@ -48,8 +54,12 @@ required_entries=(
   "xhdfe-src/stata/tools/cuda-common.sh"
   "xhdfe-src/stata/tools/_deps/eigen-3.4.0.tar.gz"
   "xhdfe-src/stata/tools/_deps/stplugin.h"
+  "xhdfe-src/stata/LICENSE"
+  "xhdfe-src/stata/NOTICE"
   "xhdfe-src/tools/check_no_raw_isfinite.cmake"
   "xhdfe-src/tools/check_verifier_device_fma.sh"
+  "xhdfe-src/tools/validate_python_release_artifacts.py"
+  "xhdfe-src/tools/validate_release_metadata.py"
   "xhdfe-src/tests/ieee_bits_liveness.cpp"
   "xhdfe-src/tests/fail_closed_entrypoints.cpp"
   "xhdfe-src/tests/audit_20260804_contracts.py"
@@ -76,6 +86,17 @@ bash -n \
   "${source_root}/stata/tools/build-xfe-plugin.sh" \
   "${source_root}/stata/tools/cuda-common.sh" \
   "${source_root}/tools/check_verifier_device_fma.sh"
+
+command -v python3 >/dev/null 2>&1 || {
+  echo "python3 is required to validate the Python source closure" >&2
+  exit 1
+}
+python3 -m py_compile \
+  "${source_root}/xhdfe/_formula.py" \
+  "${source_root}/tests/test_formula_frontend.py" \
+  "${source_root}/tests/test_windows_runtime_packaging.py" \
+  "${source_root}/tools/validate_python_release_artifacts.py" \
+  "${source_root}/tools/validate_release_metadata.py"
 
 command -v cmake >/dev/null 2>&1 || {
   echo "cmake is required to validate the autonomous source archive" >&2
@@ -111,6 +132,10 @@ grep -Fq "${EXPECTED_RCPP_SHA256}" "${provenance_path}" || {
 }
 grep -Fq "Rcpp_${EXPECTED_RCPP_VERSION}.tar.gz" "${offline_doc}" || {
   echo "BUILD_OFFLINE.md does not give the pinned Rcpp install path" >&2
+  exit 1
+}
+grep -Fq "Formulaic >= 1.2.1,<2" "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md does not delimit the optional formula dependency" >&2
   exit 1
 }
 grep -Fq "Rcpp ${EXPECTED_RCPP_VERSION}" "${notice}" || {

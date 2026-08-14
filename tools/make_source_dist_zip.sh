@@ -4,10 +4,10 @@
 # Python package, and the R package --- for CPU and GPU (CUDA), on a machine
 # WITHOUT internet access.
 #
-# Every package-side dependency is vendored (Eigen, pybind11, Rcpp, and Stata's
-# stplugin inputs), so no network download is needed. Only a system toolchain
-# is required at build time (C++ compiler, CMake, Python + dev headers, R, and
-# the CUDA toolkit/driver for GPU builds).
+# Native build dependencies are vendored (Eigen, pybind11, Rcpp, and Stata's
+# stplugin inputs), so no network download is needed for those build paths.
+# Python runtime packages such as NumPy, and the optional Formulaic stack, must
+# already be available in the offline Python environment.
 #
 # The archive is published to the gh-pages net-install site and fetched by the
 # `xhdfegpu` Stata command, which builds a CUDA plugin for the local GPU and
@@ -25,8 +25,8 @@ OUT_ZIP="${1:-${ROOT_DIR}/xhdfe-src.zip}"
 mkdir -p "$(dirname -- "${OUT_ZIP}")"
 OUT_ZIP="$(cd -- "$(dirname -- "${OUT_ZIP}")" && pwd)/$(basename -- "${OUT_ZIP}")"
 
-VERSION="$(grep -m1 '^\*! version' "${ROOT_DIR}/stata/xhdfe.ado" | sed -E 's/^\*! version[[:space:]]+//')"
-[[ -n "${VERSION}" ]] || { echo "could not read version from stata/xhdfe.ado" >&2; exit 1; }
+VERSION="$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' "${ROOT_DIR}/xhdfe/_version.py")"
+[[ -n "${VERSION}" ]] || { echo "could not read version from xhdfe/_version.py" >&2; exit 1; }
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "${STAGE}"' EXIT
@@ -74,6 +74,7 @@ for f in "${ROOT_DIR}"/stata/*.ado "${ROOT_DIR}"/stata/*.sthlp \
          "${ROOT_DIR}"/stata/*.pkg "${ROOT_DIR}"/stata/stata.toc; do
   cp -a "$f" "${PKG}/stata/"
 done
+cp -a "${ROOT_DIR}/stata/LICENSE" "${ROOT_DIR}/stata/NOTICE" "${PKG}/stata/"
 
 # ---- Python package -------------------------------------------------------
 copy_tree "${ROOT_DIR}/python" "${PKG}/python"
@@ -105,16 +106,20 @@ printf '%s\n' "${VERSION}" > "${PKG}/VERSION"
 cat > "${PKG}/BUILD_OFFLINE.md" <<EOF
 # xhdfe / xfe --- offline source distribution (version ${VERSION})
 
-Self-contained sources to build every component for CPU and GPU with **no
-internet access**. All package-side dependencies are vendored (Eigen,
-pybind11, the official Rcpp 1.1.2 CRAN source archive, and Stata
-\`stplugin\` inputs).
+Self-contained sources to build every native component for CPU and GPU with
+**no internet access**. Native package dependencies are vendored (Eigen,
+pybind11, the official Rcpp 1.1.2 CRAN source archive, and Stata \`stplugin\`
+inputs). Python runtime dependencies must be present in the local environment.
 
 ## System requirements (not bundled)
 
 - A C++17 compiler (GCC/Clang; MSVC on Windows).
 - For GPU: the NVIDIA CUDA toolkit (\`nvcc\`) and a compatible driver.
-- Python builds: Python >= 3.9 with development headers and CMake >= 3.18.
+- Python builds: Python >= 3.9 with development headers, CMake >= 3.18, and
+  NumPy >= 1.23 already installed.
+- Optional Python formula interface: Formulaic >= 1.2.1,<2 and its pandas/SciPy
+  dependencies already installed; these optional runtime packages are not
+  vendored in this archive.
 - R builds: R >= 4.0 and its source-package build toolchain. Rcpp itself is
   bundled and does not need to be downloaded or preinstalled.
 - Stata builds: none beyond the C++ (and CUDA) toolchain.
@@ -138,6 +143,8 @@ adopath (next to \`xhdfe.ado\`). The \`xhdfegpu\` command automates the GPU case
 \`\`\`bash
 python -m pip install .                      # CPU
 XHDFE_ENABLE_CUDA=auto python -m pip install .   # GPU
+# Formula frontend, when its optional dependencies are available locally:
+python -m pip install --no-index --no-deps --no-build-isolation '.[formula]'
 \`\`\`
 
 ## R package

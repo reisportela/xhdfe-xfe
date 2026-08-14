@@ -6,4 +6,6 @@ d If the bundled plugin is not compatible with your platform, build it from sour
 d   `bash stata/tools/build-xfe-plugin.sh`
 f xfe.ado
 f xfe.sthlp
+f LICENSE
+f NOTICE
 f xfe.plugin

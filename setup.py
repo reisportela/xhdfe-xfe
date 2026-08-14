@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import filecmp
 import os
 import re
 import shlex
@@ -14,6 +15,14 @@ from setuptools.command.build_ext import build_ext
 
 
 MIN_CUDA_ARCH = 75
+
+# CPython 3.8+ does not use PATH as a general search path for extension-module
+# dependencies. Keep MinGW's non-system runtime closure beside the built .pyd.
+_MINGW_RUNTIME_DLL_RE = re.compile(
+    r"^(?:libgcc_s_.+|libstdc\+\+-\d+|libgomp-\d+|libwinpthread-\d+|"
+    r"libatomic-\d+|libssp-\d+|libquadmath-\d+)\.dll$",
+    re.IGNORECASE,
+)
 
 
 def _lower(value: str | None) -> str:
@@ -220,6 +229,169 @@ def _check_python_headers() -> None:
     )
 
 
+def _cmake_cache_value(build_dir: Path, name: str) -> str | None:
+    cache = build_dir / "CMakeCache.txt"
+    if not cache.is_file():
+        return None
+
+    prefix = f"{name}:"
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith(prefix) and "=" in line:
+            value = line.split("=", 1)[1].strip().strip('"')
+            return value or None
+    return None
+
+
+def _cmake_cxx_compiler_id(build_dir: Path) -> str | None:
+    compiler_files = sorted(
+        (build_dir / "CMakeFiles").glob("*/CMakeCXXCompiler.cmake")
+    )
+    pattern = re.compile(r'^set\(CMAKE_CXX_COMPILER_ID\s+"([^"]+)"\)')
+    for compiler_file in compiler_files:
+        for line in compiler_file.read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines():
+            match = pattern.match(line.strip())
+            if match:
+                return match.group(1)
+    return None
+
+
+def _find_mingw_objdump(compiler: Path) -> Path | None:
+    names: list[str] = []
+    compiler_name = compiler.name
+    compiler_name_lower = compiler_name.lower()
+    if compiler_name_lower.endswith("g++.exe"):
+        names.append(f"{compiler_name[:-len('g++.exe')]}objdump.exe")
+    elif compiler_name_lower.endswith("g++"):
+        names.append(f"{compiler_name[:-len('g++')]}objdump")
+    names.extend(("objdump.exe", "objdump"))
+
+    for name in names:
+        adjacent = compiler.parent / name
+        if adjacent.is_file():
+            return adjacent
+        resolved = shutil.which(name)
+        if resolved:
+            return Path(resolved)
+    return None
+
+
+def _pe_dll_dependencies(objdump: Path, binary: Path) -> set[str]:
+    result = subprocess.run(
+        [str(objdump), "-p", str(binary)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        errors="replace",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise RuntimeError(
+            f"Could not inspect Windows DLL dependencies for {binary.name}: {detail}"
+        )
+
+    dependencies: set[str] = set()
+    pattern = re.compile(r"^\s*DLL Name:\s*(\S+)\s*$", re.IGNORECASE)
+    for line in result.stdout.splitlines():
+        match = pattern.match(line)
+        if match:
+            dependencies.add(match.group(1))
+    return dependencies
+
+
+def _compiler_runtime_path(compiler: Path, dll_name: str) -> Path | None:
+    result = subprocess.run(
+        [str(compiler), f"-print-file-name={dll_name}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        errors="replace",
+    )
+    if result.returncode == 0:
+        reported = result.stdout.strip().strip('"')
+        if reported and reported.lower() != dll_name.lower():
+            candidate = Path(reported)
+            if candidate.is_file():
+                return candidate
+
+    adjacent = compiler.parent / dll_name
+    if adjacent.is_file():
+        return adjacent
+    return None
+
+
+def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
+    compiler_id = _cmake_cxx_compiler_id(build_dir)
+    if compiler_id is None:
+        raise RuntimeError(
+            "CMake did not record the Windows C++ compiler identity; refusing "
+            "to create a wheel with unverifiable runtime dependencies."
+        )
+    if compiler_id != "GNU":
+        return []
+
+    compiler_value = _cmake_cache_value(build_dir, "CMAKE_CXX_COMPILER")
+    if not compiler_value:
+        raise RuntimeError(
+            "CMake selected GNU on Windows but did not record CMAKE_CXX_COMPILER; "
+            "refusing to create a wheel with unverifiable runtime dependencies."
+        )
+    compiler = Path(compiler_value)
+    objdump = _find_mingw_objdump(compiler)
+    if objdump is None:
+        raise RuntimeError(
+            "A MinGW-built Python extension requires objdump to identify its "
+            "runtime DLL closure, but objdump was not found beside the active "
+            f"compiler ({compiler}) or on PATH."
+        )
+
+    pending = sorted(
+        name
+        for name in _pe_dll_dependencies(objdump, extension)
+        if _MINGW_RUNTIME_DLL_RE.fullmatch(name)
+    )
+    bundled: list[Path] = []
+    visited: set[str] = set()
+
+    while pending:
+        dll_name = pending.pop(0)
+        key = dll_name.lower()
+        if key in visited:
+            continue
+        visited.add(key)
+
+        source = _compiler_runtime_path(compiler, dll_name)
+        if source is None:
+            raise RuntimeError(
+                f"The MinGW-built extension depends on {dll_name}, but the active "
+                f"compiler ({compiler}) could not locate that runtime DLL. "
+                "Refusing to create a wheel that would fail at import time."
+            )
+
+        destination = extension.parent / dll_name
+        if destination.exists():
+            if not filecmp.cmp(source, destination, shallow=False):
+                raise RuntimeError(
+                    f"Conflicting MinGW runtime DLL already exists: {destination}. "
+                    "Remove the stale build output and rebuild."
+                )
+        else:
+            shutil.copy2(source, destination)
+        bundled.append(destination)
+
+        for dependency in sorted(_pe_dll_dependencies(objdump, source)):
+            if (
+                _MINGW_RUNTIME_DLL_RE.fullmatch(dependency)
+                and dependency.lower() not in visited
+            ):
+                pending.append(dependency)
+
+    return bundled
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, sourcedir: str = ".") -> None:
         super().__init__(name, sources=[])
@@ -287,6 +459,12 @@ class CMakeBuild(build_ext):
                 shutil.copy2(candidates[0], ext_fullpath)
         if not ext_fullpath.exists():
             raise RuntimeError(f"CMake did not produce expected extension: {ext_fullpath}")
+
+        if sys.platform.startswith("win"):
+            bundled = _bundle_mingw_runtime_dlls(ext_fullpath, build_temp)
+            if bundled:
+                names = ", ".join(sorted(path.name for path in bundled))
+                print(f"Bundled MinGW runtime DLLs beside the extension: {names}")
 
 
 setup(

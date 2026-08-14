@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.24.0 | 14 August 2026 | [Python formula interface and Windows source-build runtime closure](RELEASE_NOTES_2.24.0.20260814.md) |
 | 2.23.1 | 6 August 2026 | [Stata display and autonomous source-archive hotfix](RELEASE_NOTES_2.23.1.20260806.md) |
 | 2.23.0 | 6 August 2026 | [Functional contracts and scientific precision repair](RELEASE_NOTES_2.23.0.20260806.md) |
 | 2.22.1 | 30 July 2026 | [Weight validation, e(version) fix, GPU-certificate machinery](RELEASE_NOTES_2.22.1.20260730.md) |

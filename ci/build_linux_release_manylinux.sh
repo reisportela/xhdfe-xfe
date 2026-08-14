@@ -20,6 +20,7 @@
 # Every ELF is gated by tools/check_binary_floor.sh before this script exits;
 # a floor violation is a build FAILURE, not a warning.
 set -euo pipefail
+shopt -s nullglob
 
 FLOOR_GLIBC="${XHDFE_FLOOR_GLIBC:-2.28}"
 FLOOR_GLIBCXX="${XHDFE_FLOOR_GLIBCXX:-3.4.25}"
@@ -66,8 +67,13 @@ bash tools/check_binary_floor.sh --max-glibc "$FLOOR_GLIBC" --max-glibcxx "$FLOO
 
 echo "== python wheel + sdist (cp312, march-native OFF, CUDA OFF) =="
 "$PYBIN" -m pip install --quiet numpy setuptools wheel
+RAW_WHEEL_DIR="$(mktemp -d)"
 XHDFE_ENABLE_CUDA=OFF XHDFE_ENABLE_MARCH_NATIVE=OFF \
-  "$PYBIN" -m pip wheel . --no-build-isolation --no-deps --wheel-dir artifacts
+  "$PYBIN" -m pip wheel . --no-build-isolation --no-deps --wheel-dir "$RAW_WHEEL_DIR"
+RAW_WHEELS=("$RAW_WHEEL_DIR"/xhdfe-*.whl)
+test "${#RAW_WHEELS[@]}" -eq 1
+auditwheel repair --plat manylinux_2_28_x86_64 \
+  --wheel-dir artifacts "${RAW_WHEELS[0]}"
 XHDFE_ENABLE_CUDA=OFF XHDFE_ENABLE_MARCH_NATIVE=OFF \
   "$PYBIN" setup.py --quiet sdist --dist-dir artifacts
 

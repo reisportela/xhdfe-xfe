@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Published package version: 2.23.1.20260806. Use `python -m xhdfe --version`
+Package documentation version: 2.24.0.20260814. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -108,6 +108,158 @@ assert reg_gpu.gpu_used_ == 1
 assert reg_gpu.gpu_status_code_ == 1
 os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
+
+## Optional formula interface
+
+The dataframe/formula layer is optional. It delegates estimation to the same
+compiled `HdfeRegressor`; the array API remains available and unchanged.
+Install the extra from a source checkout with:
+
+```bash
+python -m pip install '.[formula]'
+# If xhdfe is already installed from a release asset:
+python -m pip install 'formulaic>=1.2.1,<2' 'pandas>=1.3'
+```
+
+The extra is imported lazily: importing `xhdfe`, `feols`, or
+`prepare_formula` does not itself import Formulaic, pandas, or SciPy.
+
+```python
+import xhdfe
+
+reg = xhdfe.feols(
+    "wage ~ tenure + experience + C(education) | firm + year",
+    data=d,
+    se_type="cluster",
+    clusters="firm",
+)
+
+print(reg.coef_names_)
+print(reg.tidy())
+```
+
+`data` may be a dataframe or a mapping of column names to equal-length vectors.
+Custom transforms must be supplied explicitly through a `context` mapping;
+Formulaic never captures arbitrary caller-local names implicitly.
+
+The supported operators use standard R/Formulaic semantics. The closest common
+Stata factor-variable spellings are:
+
+| Purpose | Formula interface | Closest Stata spelling |
+|---|---|---|
+| Categorical main effect | `C(g)` | `i.g` |
+| Choose category 3 as reference | `C(g, Treatment(reference=3))` | `ib3.g` |
+| Continuous product only | `x:z` | `c.x#c.z` |
+| Main effects plus product | `x*z` | `c.x##c.z` |
+| Category main effects plus explicit slope interactions | `C(g)*x` | `i.g##c.x` |
+| Arithmetic square | `I(x**2)` | `c.x#c.x` |
+| Remove the intercept | `0 + x` or `x - 1` | `noconstant` |
+
+Use `C(...)` explicitly for categorical variables, especially numeric category
+codes and pandas nullable strings. Object and pandas categorical columns are
+normally encoded automatically, but numeric columns without `C(...)` are
+continuous. Formulaic treatment coding uses the first level in its encoded
+level order as the default reference when an intercept is present. Declare a
+pandas `Categorical` order or specify `Treatment(reference=...)` when the
+reference must be reproducible and explicit. With `0 + C(g)`, all category
+columns are retained. For a non-syntactic column name, use Formulaic's quoted
+lookup, for example `Q("industry code")` or `C(Q("industry code"))`. In this
+first release, the data argument of `C(...)` must be a direct column lookup,
+either bare or through `Q(...)`; create a derived category as a dataframe
+column before using it in the formula. Names containing literal quote
+characters are not supported through `Q(...)`.
+
+The interface deliberately follows R/Formulaic rather than implementing a
+second Stata parser. In particular, `C(g):x` with an intercept produces one
+slope for every category, whereas standalone Stata `i.g#c.x` omits its base
+category interaction. These are not merely different coefficient bases: their
+dimensions and fitted values can differ. Use `x + C(g):x` for a common slope
+plus category slope deviations (the analogue of `c.x i.g#c.x`), or `C(g)*x`
+when category main effects are also required (the analogue of `i.g##c.x`),
+holding the reference category fixed. Also, `x:x` and `x**2` are formula
+operators and do not square `x`; use `I(x**2)` for arithmetic.
+
+Only bare column names are accepted after `|` in this first interface:
+
+```python
+reg = xhdfe.feols("y ~ x1 + x2 | firm + year", data=d)
+```
+
+Those columns are encoded as identifiers and passed to the unchanged HDFE
+absorber. They are never materialized as a dense Formulaic dummy matrix. Put a
+high-cardinality effect such as `firm` after `|`; `C(firm)` on the regression
+RHS intentionally creates explicit dummy columns and can require substantial
+memory. FE interactions or transforms after `|`, multi-part/IV formulas, and
+the `.` shorthand are rejected explicitly in this first version; list RHS
+columns or use the array API for existing `instruments`, `group`, `individual`,
+or native heterogeneous-slope workflows.
+
+Numeric FE and cluster arrays follow the native nonnegative-ID contract: a
+negative value such as pandas' `-1` missing-category sentinel is rejected, as
+are non-finite numeric identifiers. String, categorical, datetime, and
+other label columns are factorized without conversion through floating point.
+Nonnegative `int64` identifiers, including values above `2**53`, also retain
+their exact integer identity.
+
+`weights` and `clusters` accept either arrays or dataframe column names. A
+two-dimensional cluster array has shape `(n, q)`; a list/tuple of arrays is
+interpreted as `q` separate length-`n` cluster vectors. Frequency weights use
+`weights=...` together with `fweights=True`. The formula layer validates
+positive integer values, checked cumulative `int64` totals, and exact
+representability through the core's current float64 Python binding; it rejects
+an integer that would be rounded in transit. Clustered inference still requires
+the native constructor option `se_type="cluster"`:
+
+```python
+reg = xhdfe.feols(
+    "y ~ x | firm + year",
+    data=d,
+    weights="sampling_weight",
+    clusters=["firm", "region"],
+    se_type="cluster",
+)
+```
+
+Missing values fail closed by default across the response, regressors, fixed
+effects, weights, and clusters. The first formula release supports only
+`na_action="raise"`; clean, drop, or impute rows explicitly before estimation
+so every input stays positionally aligned.
+
+The returned object is a Python subclass of the native `HdfeRegressor`, so its
+coefficients, standard errors, diagnostics, retained fixed effects, and methods
+remain available. Formula metadata adds `formula_`, `coef_names_`, `fe_names_`,
+`fe_levels_`, `cluster_levels_`, `data_index_`, `estimation_index_`,
+`intercept_index_`, and `used_fast_path_`. The native core stores its intercept
+last; `coef_names_` and `tidy()` use that same order. If a real regressor is
+itself named `Intercept`, the native intercept is labelled `Intercept [xhdfe]`
+to keep result keys unique.
+
+Formula parsing and dataframe materialization necessarily add overhead. Simple
+numeric lookups and numeric `:` interactions use a direct NumPy construction
+path, promoting inputs to FP64 before interaction arithmetic; categories and
+transforms use Formulaic. Numeric columns referenced directly or inside Python
+transforms such as `I(x**2)`—on either side of `~`—are promoted before Formulaic
+evaluation, including in a mixed formula such as `C(g) + x:z`. If one non-FP64
+column is used both as `C(g)` and as a numeric regressor, create a separate FP64
+column for the numeric role; the wrapper rejects that ambiguous mixed use rather
+than risk collapsing large integer category IDs. For repeated fits of the exact
+same response/design/FE snapshot, prepare it once:
+
+```python
+prepared = xhdfe.prepare_formula(
+    "y ~ x1 + x2 | firm + year",
+    data=d,
+    num_threads=1,
+)
+
+first = prepared.fit()
+second = prepared.fit()
+```
+
+`PreparedFormula` owns read-only array copies, so later dataframe mutations do
+not alter the prepared design. When variables or samples change inside a tight
+loop, construct arrays once and call `HdfeRegressor.fit(y, X, ...)` directly for
+the lowest overhead.
 
 ## Constructor
 

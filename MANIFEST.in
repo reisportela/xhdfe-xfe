@@ -1,6 +1,7 @@
 include CMakeLists.txt
 include CITATION.cff
 include LICENSE
+include NOTICE
 include README.md
 include setup.py
 include pyproject.toml
@@ -12,6 +13,7 @@ recursive-include xhdfe *.py *.typed
 recursive-include xhdfe/help *.md
 recursive-include tests *.cpp *.py
 recursive-include tools *.cmake *.sh
+recursive-include tools *.py
 recursive-include third_party/eigen-3.4.0 *
 recursive-include third_party/pybind11-2.11.1 *
 prune build

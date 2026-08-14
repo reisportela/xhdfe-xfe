@@ -79,6 +79,8 @@ copy_optional_pair() {
 }
 
 shared=(
+  LICENSE
+  NOTICE
   stata/xhdfe.ado
   stata/xhdfe_p.ado
   stata/xhdfe_estat.ado
@@ -169,11 +171,15 @@ f xhdfegpu.ado
 f xhdfegpu.sthlp
 f xfe.ado
 f xfe.sthlp
+f LICENSE
+f NOTICE
 EOF
   else
     cat >> "$pkg" <<'EOF'
 f xfe.ado
 f xfe.sthlp
+f LICENSE
+f NOTICE
 EOF
   fi
 

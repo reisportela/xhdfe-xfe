@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>xhdfe Python help</title>
+  <style>
+    html {
+      line-height: 1.5;
+      font-family: Georgia, serif;
+      font-size: 20px;
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      word-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 1em;
+      }
+    }
+    @media print {
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, 'Lucida Console', Consolas, monospace;
+      font-size: 85%;
+      margin: 0;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    span.underline{text-decoration: underline;}
+    div.column{display: inline-block; vertical-align: top; width: 50%;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">xhdfe Python help</h1>
+</header>
+<h1 id="xhdfe-python-help">xhdfe Python help</h1>
+<p>Package documentation version: 2.24.0.20260814. Use <code>python -m xhdfe --version</code> to inspect the installed package rather than relying on this static document.</p>
+<p><code>xhdfe</code> is the Python package wrapper around the v11 xhdfe C++ backend. It exposes the same compiled estimator that older scripts imported as <code>py_hdfe_v11</code>, while adding a package namespace, install metadata, and packaged help.</p>
+<p>The package is a proof of concept. Estimates, standard errors, and recovered fixed effects should be validated for the user’s research design, just as with the Stata package.</p>
+<h2 id="installation">Installation</h2>
+<p>From the repository root:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install .</span></code></pre></div>
+<p>For development:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install <span class="at">-e</span> .</span></code></pre></div>
+<p>The build uses CMake and compiles the existing <code>py_hdfe_v11</code> extension into the <code>xhdfe</code> package. CPU is the default backend.</p>
+<p>Portable source installs do not require <code>-march=native</code>. On Apple platforms, native tuning defaults to off so Apple Silicon hosts can also build x86_64 Python environments under Rosetta. The explicit safe-path workaround is:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_ENABLE_MARCH_NATIVE</span><span class="op">=</span>OFF <span class="ex">python</span> <span class="at">-m</span> pip install .</span></code></pre></div>
+<p>CUDA builds require the source (build from a clone or <code>git+</code> URL, not a prebuilt wheel) and the NVIDIA toolkit. Set the architecture to the GPU’s compute capability (<code>nvidia-smi --query-gpu=compute_cap --format=csv,noheader</code>; for example, <code>9.0</code> maps to <code>90</code>) and request CUDA with environment variables:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_ENABLE_CUDA</span><span class="op">=</span>ON <span class="va">CMAKE_CUDA_ARCHITECTURES</span><span class="op">=</span>90 <span class="ex">python</span> <span class="at">-m</span> pip install .</span></code></pre></div>
+<p>Equivalent CMake definitions can be passed through <code>CMAKE_ARGS</code>.</p>
+<h2 id="imports">Imports</h2>
+<p>Preferred package import:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.HdfeRegressor()</span></code></pre></div>
+<p>The legacy import remains available after installation:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> py_hdfe_v11</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> py_hdfe_v11.HdfeRegressor()</span></code></pre></div>
+<p>Companion modules use the same compiled core:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> xhdfe <span class="im">import</span> akm, gelbach</span></code></pre></div>
+<p>For the complete Gelbach decomposition API, including absorbed targets, focal reporting, signed shares and contrasts, run:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe gelbach</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> gelbach</span></code></pre></div>
+<h2 id="minimal-example">Minimal example</h2>
+<div class="sourceCode" id="cb9"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> os</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>n <span class="op">=</span> <span class="dv">2000</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>rng <span class="op">=</span> np.random.default_rng(<span class="dv">0</span>)</span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>y <span class="op">=</span> rng.normal(size<span class="op">=</span>n)</span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a>X <span class="op">=</span> rng.normal(size<span class="op">=</span>(n, <span class="dv">3</span>))</span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a>firm_id <span class="op">=</span> rng.integers(<span class="dv">0</span>, <span class="dv">200</span>, size<span class="op">=</span>n)</span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a>year_id <span class="op">=</span> rng.integers(<span class="dv">0</span>, <span class="dv">20</span>, size<span class="op">=</span>n)</span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.HdfeRegressor(se_type<span class="op">=</span><span class="st">&quot;robust&quot;</span>, tol<span class="op">=</span><span class="fl">1e-8</span>)</span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a>reg.fit(y, X, fes<span class="op">=</span>[firm_id, year_id])</span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(reg.coef_)</span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(reg.summary())</span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a><span class="co"># Optional: request CUDA after installing a CUDA-enabled build</span></span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a>os.environ[<span class="st">&quot;XHDFE_GPU_BACKEND&quot;</span>] <span class="op">=</span> <span class="st">&quot;cuda&quot;</span></span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a>reg_gpu <span class="op">=</span> xhdfe.HdfeRegressor(se_type<span class="op">=</span><span class="st">&quot;robust&quot;</span>, tol<span class="op">=</span><span class="fl">1e-8</span>)</span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a>reg_gpu.fit(y, X, fes<span class="op">=</span>[firm_id, year_id])</span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> reg_gpu.gpu_used_ <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> reg_gpu.gpu_status_code_ <span class="op">==</span> <span class="dv">1</span></span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a>os.environ.pop(<span class="st">&quot;XHDFE_GPU_BACKEND&quot;</span>, <span class="va">None</span>)</span></code></pre></div>
+<h2 id="optional-formula-interface">Optional formula interface</h2>
+<p>The dataframe/formula layer is optional. It delegates estimation to the same compiled <code>HdfeRegressor</code>; the array API remains available and unchanged. Install the extra from a source checkout with:</p>
+<div class="sourceCode" id="cb10"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install <span class="st">&#39;.[formula]&#39;</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="co"># If xhdfe is already installed from a release asset:</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> pip install <span class="st">&#39;formulaic&gt;=1.2.1,&lt;2&#39;</span> <span class="st">&#39;pandas&gt;=1.3&#39;</span></span></code></pre></div>
+<p>The extra is imported lazily: importing <code>xhdfe</code>, <code>feols</code>, or <code>prepare_formula</code> does not itself import Formulaic, pandas, or SciPy.</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.feols(</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;wage ~ tenure + experience + C(education) | firm + year&quot;</span>,</span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>    data<span class="op">=</span>d,</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>    se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>,</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>    clusters<span class="op">=</span><span class="st">&quot;firm&quot;</span>,</span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(reg.coef_names_)</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(reg.tidy())</span></code></pre></div>
+<p><code>data</code> may be a dataframe or a mapping of column names to equal-length vectors. Custom transforms must be supplied explicitly through a <code>context</code> mapping; Formulaic never captures arbitrary caller-local names implicitly.</p>
+<p>The supported operators use standard R/Formulaic semantics. The closest common Stata factor-variable spellings are:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Purpose</th>
+<th>Formula interface</th>
+<th>Closest Stata spelling</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Categorical main effect</td>
+<td><code>C(g)</code></td>
+<td><code>i.g</code></td>
+</tr>
+<tr class="even">
+<td>Choose category 3 as reference</td>
+<td><code>C(g, Treatment(reference=3))</code></td>
+<td><code>ib3.g</code></td>
+</tr>
+<tr class="odd">
+<td>Continuous product only</td>
+<td><code>x:z</code></td>
+<td><code>c.x#c.z</code></td>
+</tr>
+<tr class="even">
+<td>Main effects plus product</td>
+<td><code>x*z</code></td>
+<td><code>c.x##c.z</code></td>
+</tr>
+<tr class="odd">
+<td>Category main effects plus explicit slope interactions</td>
+<td><code>C(g)*x</code></td>
+<td><code>i.g##c.x</code></td>
+</tr>
+<tr class="even">
+<td>Arithmetic square</td>
+<td><code>I(x**2)</code></td>
+<td><code>c.x#c.x</code></td>
+</tr>
+<tr class="odd">
+<td>Remove the intercept</td>
+<td><code>0 + x</code> or <code>x - 1</code></td>
+<td><code>noconstant</code></td>
+</tr>
+</tbody>
+</table>
+<p>Use <code>C(...)</code> explicitly for categorical variables, especially numeric category codes and pandas nullable strings. Object and pandas categorical columns are normally encoded automatically, but numeric columns without <code>C(...)</code> are continuous. Formulaic treatment coding uses the first level in its encoded level order as the default reference when an intercept is present. Declare a pandas <code>Categorical</code> order or specify <code>Treatment(reference=...)</code> when the reference must be reproducible and explicit. With <code>0 + C(g)</code>, all category columns are retained. For a non-syntactic column name, use Formulaic’s quoted lookup, for example <code>Q("industry code")</code> or <code>C(Q("industry code"))</code>. In this first release, the data argument of <code>C(...)</code> must be a direct column lookup, either bare or through <code>Q(...)</code>; create a derived category as a dataframe column before using it in the formula. Names containing literal quote characters are not supported through <code>Q(...)</code>.</p>
+<p>The interface deliberately follows R/Formulaic rather than implementing a second Stata parser. In particular, <code>C(g):x</code> with an intercept produces one slope for every category, whereas standalone Stata <code>i.g#c.x</code> omits its base category interaction. These are not merely different coefficient bases: their dimensions and fitted values can differ. Use <code>x + C(g):x</code> for a common slope plus category slope deviations (the analogue of <code>c.x i.g#c.x</code>), or <code>C(g)*x</code> when category main effects are also required (the analogue of <code>i.g##c.x</code>), holding the reference category fixed. Also, <code>x:x</code> and <code>x**2</code> are formula operators and do not square <code>x</code>; use <code>I(x**2)</code> for arithmetic.</p>
+<p>Only bare column names are accepted after <code>|</code> in this first interface:</p>
+<div class="sourceCode" id="cb12"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.feols(<span class="st">&quot;y ~ x1 + x2 | firm + year&quot;</span>, data<span class="op">=</span>d)</span></code></pre></div>
+<p>Those columns are encoded as identifiers and passed to the unchanged HDFE absorber. They are never materialized as a dense Formulaic dummy matrix. Put a high-cardinality effect such as <code>firm</code> after <code>|</code>; <code>C(firm)</code> on the regression RHS intentionally creates explicit dummy columns and can require substantial memory. FE interactions or transforms after <code>|</code>, multi-part/IV formulas, and the <code>.</code> shorthand are rejected explicitly in this first version; list RHS columns or use the array API for existing <code>instruments</code>, <code>group</code>, <code>individual</code>, or native heterogeneous-slope workflows.</p>
+<p>Numeric FE and cluster arrays follow the native nonnegative-ID contract: a negative value such as pandas’ <code>-1</code> missing-category sentinel is rejected, as are non-finite numeric identifiers. String, categorical, datetime, and other label columns are factorized without conversion through floating point. Nonnegative <code>int64</code> identifiers, including values above <code>2**53</code>, also retain their exact integer identity.</p>
+<p><code>weights</code> and <code>clusters</code> accept either arrays or dataframe column names. A two-dimensional cluster array has shape <code>(n, q)</code>; a list/tuple of arrays is interpreted as <code>q</code> separate length-<code>n</code> cluster vectors. Frequency weights use <code>weights=...</code> together with <code>fweights=True</code>. The formula layer validates positive integer values, checked cumulative <code>int64</code> totals, and exact representability through the core’s current float64 Python binding; it rejects an integer that would be rounded in transit. Clustered inference still requires the native constructor option <code>se_type="cluster"</code>:</p>
+<div class="sourceCode" id="cb13"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.feols(</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;y ~ x | firm + year&quot;</span>,</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    data<span class="op">=</span>d,</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    weights<span class="op">=</span><span class="st">&quot;sampling_weight&quot;</span>,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    clusters<span class="op">=</span>[<span class="st">&quot;firm&quot;</span>, <span class="st">&quot;region&quot;</span>],</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>,</span>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p>Missing values fail closed by default across the response, regressors, fixed effects, weights, and clusters. The first formula release supports only <code>na_action="raise"</code>; clean, drop, or impute rows explicitly before estimation so every input stays positionally aligned.</p>
+<p>The returned object is a Python subclass of the native <code>HdfeRegressor</code>, so its coefficients, standard errors, diagnostics, retained fixed effects, and methods remain available. Formula metadata adds <code>formula_</code>, <code>coef_names_</code>, <code>fe_names_</code>, <code>fe_levels_</code>, <code>cluster_levels_</code>, <code>data_index_</code>, <code>estimation_index_</code>, <code>intercept_index_</code>, and <code>used_fast_path_</code>. The native core stores its intercept last; <code>coef_names_</code> and <code>tidy()</code> use that same order. If a real regressor is itself named <code>Intercept</code>, the native intercept is labelled <code>Intercept [xhdfe]</code> to keep result keys unique.</p>
+<p>Formula parsing and dataframe materialization necessarily add overhead. Simple numeric lookups and numeric <code>:</code> interactions use a direct NumPy construction path, promoting inputs to FP64 before interaction arithmetic; categories and transforms use Formulaic. Numeric columns referenced directly or inside Python transforms such as <code>I(x**2)</code>—on either side of <code>~</code>—are promoted before Formulaic evaluation, including in a mixed formula such as <code>C(g) + x:z</code>. If one non-FP64 column is used both as <code>C(g)</code> and as a numeric regressor, create a separate FP64 column for the numeric role; the wrapper rejects that ambiguous mixed use rather than risk collapsing large integer category IDs. For repeated fits of the exact same response/design/FE snapshot, prepare it once:</p>
+<div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>prepared <span class="op">=</span> xhdfe.prepare_formula(</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;y ~ x1 + x2 | firm + year&quot;</span>,</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    data<span class="op">=</span>d,</span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    num_threads<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a>first <span class="op">=</span> prepared.fit()</span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a>second <span class="op">=</span> prepared.fit()</span></code></pre></div>
+<p><code>PreparedFormula</code> owns read-only array copies, so later dataframe mutations do not alter the prepared design. When variables or samples change inside a tight loop, construct arrays once and call <code>HdfeRegressor.fit(y, X, ...)</code> directly for the lowest overhead.</p>
+<h2 id="constructor">Constructor</h2>
+<div class="sourceCode" id="cb15"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>xhdfe.HdfeRegressor(</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    se_type<span class="op">=</span><span class="st">&quot;unadjusted&quot;</span>,</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    tol<span class="op">=</span><span class="fl">1e-8</span>,</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    max_iter<span class="op">=</span><span class="dv">100000</span>,</span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>    check_interval<span class="op">=</span><span class="dv">1</span>,</span>
+<span id="cb15-6"><a href="#cb15-6" aria-hidden="true" tabindex="-1"></a>    convergence<span class="op">=</span><span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb15-7"><a href="#cb15-7" aria-hidden="true" tabindex="-1"></a>    fit_intercept<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb15-8"><a href="#cb15-8" aria-hidden="true" tabindex="-1"></a>    num_threads<span class="op">=</span><span class="dv">0</span>,</span>
+<span id="cb15-9"><a href="#cb15-9" aria-hidden="true" tabindex="-1"></a>    default_threads<span class="op">=</span><span class="dv">0</span>,</span>
+<span id="cb15-10"><a href="#cb15-10" aria-hidden="true" tabindex="-1"></a>    max_threads<span class="op">=</span><span class="dv">0</span>,</span>
+<span id="cb15-11"><a href="#cb15-11" aria-hidden="true" tabindex="-1"></a>    min_parallel_rows<span class="op">=</span><span class="dv">20000</span>,</span>
+<span id="cb15-12"><a href="#cb15-12" aria-hidden="true" tabindex="-1"></a>    target_rows_per_thread<span class="op">=</span><span class="dv">500000</span>,</span>
+<span id="cb15-13"><a href="#cb15-13" aria-hidden="true" tabindex="-1"></a>    drop_singletons<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb15-14"><a href="#cb15-14" aria-hidden="true" tabindex="-1"></a>    retain_fes<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb15-15"><a href="#cb15-15" aria-hidden="true" tabindex="-1"></a>    symmetric_sweep<span class="op">=</span><span class="va">False</span>,</span>
+<span id="cb15-16"><a href="#cb15-16" aria-hidden="true" tabindex="-1"></a>    absorption_method<span class="op">=</span><span class="st">&quot;auto&quot;</span>,</span>
+<span id="cb15-17"><a href="#cb15-17" aria-hidden="true" tabindex="-1"></a>    jacobi_relaxation<span class="op">=</span><span class="fl">0.0</span>,</span>
+<span id="cb15-18"><a href="#cb15-18" aria-hidden="true" tabindex="-1"></a>    level<span class="op">=</span><span class="fl">95.0</span>,</span>
+<span id="cb15-19"><a href="#cb15-19" aria-hidden="true" tabindex="-1"></a>    keepsingletons<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-20"><a href="#cb15-20" aria-hidden="true" tabindex="-1"></a>    dofadjustments<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-21"><a href="#cb15-21" aria-hidden="true" tabindex="-1"></a>    groupvar<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-22"><a href="#cb15-22" aria-hidden="true" tabindex="-1"></a>    ssc_k_adj<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-23"><a href="#cb15-23" aria-hidden="true" tabindex="-1"></a>    ssc_k_fixef<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-24"><a href="#cb15-24" aria-hidden="true" tabindex="-1"></a>    ssc_k_exact<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-25"><a href="#cb15-25" aria-hidden="true" tabindex="-1"></a>    ssc_g_adj<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-26"><a href="#cb15-26" aria-hidden="true" tabindex="-1"></a>    ssc_g_df<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-27"><a href="#cb15-27" aria-hidden="true" tabindex="-1"></a>    ssc_t_df<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb15-28"><a href="#cb15-28" aria-hidden="true" tabindex="-1"></a>    tolerance_mode<span class="op">=</span><span class="st">&quot;reghdfe-comparable&quot;</span>,</span>
+<span id="cb15-29"><a href="#cb15-29" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p>Main options:</p>
+<ul>
+<li><code>se_type</code>: <code>unadjusted</code>, <code>homoskedastic</code>, <code>robust</code>, or <code>cluster</code>.</li>
+<li><code>tol</code>: fixed-effect absorber convergence tolerance.</li>
+<li><code>max_iter</code>: maximum absorber iterations.</li>
+<li><code>convergence</code>: <code>auto</code>, <code>normchange</code>, <code>reghdfe</code>, or <code>both</code>.</li>
+<li><code>fit_intercept</code>: append an intercept to the slope regression.</li>
+<li><code>num_threads</code>: authoritative OpenMP request when positive; zero uses auto-threading. Positive requests bypass automatic row-count, FE-shape, and <code>max_threads</code> heuristics and are clamped only to the logical processors and OpenMP runtime limit visible to the process. A serial build fails loudly for requests above one.</li>
+<li><code>drop_singletons</code>: drop singleton observations before estimation.</li>
+<li><code>keepsingletons</code>: reghdfe-compatible override for <code>drop_singletons</code>.</li>
+<li><code>retain_fes</code>: recover per-observation fixed-effect contributions.</li>
+<li><code>absorption_method</code>: <code>auto</code>, <code>gauss-seidel</code>, <code>symmetric-gauss-seidel</code>, <code>jacobi</code>, <code>mlsmr</code>, <code>lsmr</code>, or <code>auto-mlsmr</code> with documented aliases.</li>
+<li><code>tolerance_mode</code>: <code>reghdfe-comparable</code> (default), <code>xhdfe-fast</code>, or <code>strict-residual</code>.</li>
+<li><code>dofadjustments</code>: <code>all</code>, <code>none</code>, <code>firstpair</code>, <code>pairwise</code>, <code>clusters</code>, and <code>continuous</code>, as a string or sequence.</li>
+<li><code>ssc_*</code>: fixest-style small-sample correction controls.</li>
+</ul>
+<h2 id="fit">Fit</h2>
+<div class="sourceCode" id="cb16"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>reg.fit(</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    y,</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    X,</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    fes<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    weights<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>    clusters<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>    instruments<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>    endogenous_idx<span class="op">=</span>[],</span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>    group<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a>    individual<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-11"><a href="#cb16-11" aria-hidden="true" tabindex="-1"></a>    aggregation<span class="op">=</span><span class="st">&quot;mean&quot;</span>,</span>
+<span id="cb16-12"><a href="#cb16-12" aria-hidden="true" tabindex="-1"></a>    slopes<span class="op">=</span><span class="va">None</span>,</span>
+<span id="cb16-13"><a href="#cb16-13" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<p>Arguments:</p>
+<ul>
+<li><p><code>y</code>: 1-D numeric array with <code>n</code> observations.</p></li>
+<li><p><code>X</code>: 2-D numeric array with <code>n</code> rows. For large jobs, Fortran-contiguous arrays avoid a copy.</p></li>
+<li><p><code>fes</code>: sequence of 1-D integer arrays, one per fixed-effect dimension.</p></li>
+<li><p><code>weights</code>: optional 1-D weights.</p></li>
+<li><p><code>clusters</code>: one cluster array, an <code>(n, q)</code> matrix, or a sequence of cluster arrays.</p></li>
+<li><p><code>instruments</code> and <code>endogenous_idx</code>: 2SLS inputs. <code>endogenous_idx</code> uses zero-based column positions in <code>X</code>.</p>
+<p>With absorbed fixed effects, the reported intercept is the finite normalization <code>mean(y) - mean(X) @ beta</code>, under zero-mean absorbed contributions. It is normalization-dependent, not a structural IV parameter.</p></li>
+<li><p><code>group</code>: group-level outcome identifier.</p></li>
+<li><p><code>individual</code>: individual identifier for group/individual fixed effects.</p></li>
+<li><p><code>aggregation</code>: <code>mean</code>, <code>avg</code>, <code>average</code>, or <code>sum</code>.</p></li>
+<li><p><code>slopes</code>: heterogeneous absorbed slopes. Each entry can be <code>{"fe_index": j, "values": z, "include_intercept": True}</code>.</p></li>
+<li><p><code>fweights</code>: set <code>True</code> to read <code>weights</code> as positive-integer frequency weights (literal row replication) instead of analytic weights. The flag applies to that call only.</p></li>
+</ul>
+<h3 id="input-validation">Input validation</h3>
+<p>Estimation inputs are validated before any work starts, and a violation raises rather than propagating into the results:</p>
+<ul>
+<li><code>y</code>, <code>X</code>, <code>instruments</code> and slope values must be finite. <code>NaN</code> or <code>Inf</code> raises an error naming the offending row (and column). Drop or impute missing data yourself — this library will not do it silently.</li>
+<li>Fixed-effect, cluster, group and individual identifiers must be non-negative. <strong><code>pandas.factorize()</code> returns <code>-1</code> for missing categories</strong>, so factorized columns containing missing values are rejected. Previously a <code>-1</code> fixed effect was silently dropped and a <code>-1</code> cluster silently became an extra cluster, which changed the standard errors without any warning.</li>
+<li><code>weights</code> must be finite and non-negative; with <code>fweights=True</code> they must additionally be positive integers representable as <code>int64</code>. Note that a weight of exactly <code>0</code> is accepted and drops the row from the fit without any diagnostic.</li>
+</ul>
+<p>Under <code>fweights</code>, <code>nobs_</code> reports the weight total (as Stata’s <code>e(N)</code> does), <code>nobs_rows_</code> the number of input rows, and <code>sample_index_</code> indexes rows. The weight total is carried through a double, so it is exact only up to <code>2**53</code>; beyond that — a frequency total above about <code>9.0e15</code> — <code>nobs_</code> can be off by one unit.</p>
+<p>A fit reported as <code>converged_ == True</code> never returns a non-finite coefficient, nor a non-finite standard error for a coefficient whose inference is identified. Inference is legitimately unavailable — and is therefore exempt from that contract — for omitted (collinear) terms, an unidentified intercept, a saturated design, fewer than two clusters, and non-positive residual degrees of freedom.</p>
+<p><strong>Do not infer that a coefficient was dropped from the value of its standard error.</strong> A dropped regressor is reported as a zero coefficient whose standard error is <code>NaN</code> on most paths but <code>0.0</code> on some degenerate ones, and a zero coefficient with a small standard error is also a perfectly ordinary estimate. Use the explicit flags instead:</p>
+<ul>
+<li><code>omitted_</code> — boolean per coefficient;</li>
+<li><code>omitted_reason_</code> — <code>0</code> kept, <code>1</code> collinear with the absorbed fixed effects, <code>2</code> other collinearity;</li>
+<li><code>any_omitted_</code> — whether anything was dropped at all.</li>
+</ul>
+<p>Finite inputs can still overflow their FP64 cross-products when the design is scaled extremely (roughly <code>|X| &gt;= 1e153</code>). Such a fit fails explicitly rather than being misclassified as ordinary collinearity. Rescale <code>y</code> and/or <code>X</code> and fit again.</p>
+<p>Heterogeneous slope example:</p>
+<div class="sourceCode" id="cb17"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>reg.fit(</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    y,</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    X,</span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    fes<span class="op">=</span>[worker_id, year_id, firm_id, firm_id],</span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>    clusters<span class="op">=</span>[worker_id, firm_id],</span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>    slopes<span class="op">=</span>[</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>        {<span class="st">&quot;fe_index&quot;</span>: <span class="dv">2</span>, <span class="st">&quot;values&quot;</span>: firm_seniority, <span class="st">&quot;include_intercept&quot;</span>: <span class="va">True</span>},</span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>        {<span class="st">&quot;fe_index&quot;</span>: <span class="dv">3</span>, <span class="st">&quot;values&quot;</span>: firm_seniority_sq, <span class="st">&quot;include_intercept&quot;</span>: <span class="va">False</span>},</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>    ],</span>
+<span id="cb17-10"><a href="#cb17-10" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
+<h2 id="group-and-individual-fixed-effects">Group and individual fixed effects</h2>
+<p><code>group</code> without <code>individual</code> collapses data by group and estimates on the collapsed sample.</p>
+<p><code>group</code> with <code>individual</code> uses the group/individual absorber. The individual identifier must also be present among <code>fes</code>. This mode does not support IV or heterogeneous slopes. Fixed-effect recovery through <code>retain_fes</code> is not available for the combined group/individual path.</p>
+<h2 id="fixed-effect-recovery">Fixed-effect recovery</h2>
+<p>Use <code>retain_fes=True</code> in the constructor:</p>
+<div class="sourceCode" id="cb18"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>reg <span class="op">=</span> xhdfe.HdfeRegressor(retain_fes<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>reg.fit(y, X, fes<span class="op">=</span>[firm_id, year_id])</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>effects <span class="op">=</span> reg.fe_effects_</span></code></pre></div>
+<p>Recovery diagnostics:</p>
+<ul>
+<li><code>fe_recovery_iterations_</code></li>
+<li><code>fe_recovery_max_delta_</code></li>
+<li><code>fe_recovery_converged_</code></li>
+</ul>
+<h2 id="output-attributes">Output attributes</h2>
+<p>After <code>fit</code>, the regressor exposes:</p>
+<ul>
+<li><p>Estimates: <code>coef_</code>, <code>stderr_</code>, <code>tvalues_</code>, <code>pvalues_</code>, <code>conf_int_</code>, <code>covariance_</code>, <code>residuals_</code>.</p></li>
+<li><p>Sample stats: <code>nobs_</code>, <code>nobs_full_</code>, <code>num_singletons_</code>, <code>sample_index_</code>.</p></li>
+<li><p>Degrees of freedom: <code>df_resid_</code>, <code>df_resid_unadj_</code>, <code>df_m_</code>, <code>df_a_</code>, <code>df_a_levels_</code>, <code>df_a_exact_</code>, <code>df_a_nested_</code>.</p></li>
+<li><p>Fit stats: <code>r2_</code>, <code>r2_within_</code>, <code>rss_</code>, <code>tss_</code>, <code>tss_within_</code>, <code>saturated_</code>, <code>num_iterations_</code>, <code>converged_</code>. <code>r2_</code> and <code>r2_within_</code> are <code>NaN</code> when the corresponding total sum of squares is zero (a constant outcome), matching Stata’s <code>regress</code> and <code>reghdfe</code>.</p></li>
+<li><p>Absorption certificate: <code>abs_residual_</code> is the maximum absolute <code>||D' W v_tilde||_2</code>, <code>abs_residual_rel_</code> is the corresponding maximum scale-normalized normal-equation residual <code>||D' W v_tilde||_2 / (||D' W||_F ||v||_2)</code>, where <code>v</code> is the original pre-absorption right-hand side, and <code>precision_certified_</code> reports whether the explicit post-solve check meets its numerical limit. For combined <code>group</code>/<code>individual</code> absorption this certificate is authoritative: any continuation sweeps are counted in <code>num_iterations_</code>, and <code>converged_</code> is true only when <code>precision_certified_</code> is also true.</p>
+<p>When a fit stops with <code>precision_certified_</code> false, <code>fit</code> emits a <code>py_hdfe_v11.PrecisionWarning</code> (a <code>RuntimeWarning</code> subclass, so it can be filtered with <code>warnings.simplefilter</code>). On badly conditioned absorption graphs the stopping rule can be satisfied while the coefficients are still materially further from the exact within solution than the nominal tolerance suggests; inspect <code>abs_residual_rel_</code> and consider <code>tolerance_mode="strict-residual"</code> or a tighter <code>tol</code>. The warning changes no estimate.</p></li>
+<li><p>Fixed-effect stats: <code>fe_num_levels_</code>, <code>groupvar_</code>, <code>fe_effects_</code>.</p></li>
+<li><p>Cluster stats: <code>num_clusters_</code>, <code>cluster_counts_</code>, <code>cluster_combo_counts_</code>, <code>cluster_scale_</code>. With fewer than two clusters the point estimates are still returned but all inference (<code>stderr_</code>, <code>tvalues_</code>, <code>pvalues_</code>, <code>conf_int_</code>) is <code>NaN</code>, matching <code>regress</code>/<code>reghdfe</code>; earlier releases reported standard errors of order <code>1e-16</code>, which produced spurious significance.</p></li>
+<li><p>Runtime diagnostics: <code>threads_requested_</code>, <code>threads_effective_</code>, <code>threads_used_</code> (largest team observed doing real work), <code>parallel_workers_active_</code> (largest useful-worker count in one region), <code>thread_capacity_</code>, <code>openmp_enabled_</code>, <code>thread_limit_code_</code>, <code>thread_limit_reason_</code>, <code>absorption_method_used</code>, <code>gpu_attempted_</code>, <code>gpu_used_</code>, <code>gpu_status_code_</code>, <code>gpu_absorption_converged_</code>, <code>gpu_absorption_iterations_</code>.</p></li>
+</ul>
+<p><code>summary()</code> returns a formatted text table.</p>
+<h2 id="gpu-selection">GPU selection</h2>
+<p>GPU acceleration targets the fixed-effect absorber. CPU remains the reference path.</p>
+<p>Runtime backend selection uses:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cpu</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cuda</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>metal</span></code></pre></div>
+<p>CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device. Metal is currently reserved.</p>
+<h2 id="help-commands">Help commands</h2>
+<p>Print the packaged help:</p>
+<div class="sourceCode" id="cb20"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span></span></code></pre></div>
+<p>List or open companion topics:</p>
+<div class="sourceCode" id="cb21"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> <span class="at">--topics</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> gelbach</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe gelbach</span></code></pre></div>
+<p>Print the help resource path:</p>
+<div class="sourceCode" id="cb22"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe <span class="at">--path</span></span></code></pre></div>
+<p>Inside Python:</p>
+<div class="sourceCode" id="cb23"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text())</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text(<span class="st">&quot;gelbach&quot;</span>))</span></code></pre></div>
+</body>
+</html>
