@@ -357,13 +357,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          choco install strawberryperl --no-progress -y
+          choco upgrade strawberryperl --version=5.42.0.1 --no-progress -y
           $strawberryBin = 'C:\Strawberry\c\bin'
           if (-not (Test-Path "$strawberryBin\g++.exe")) {
             throw "Strawberry MinGW compiler not found at $strawberryBin"
           }
           & "$strawberryBin\g++.exe" --version
-          choco list --local-only --exact strawberryperl
+          choco list strawberryperl --exact --limit-output
           $strawberryBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build and inspect MinGW wheel
