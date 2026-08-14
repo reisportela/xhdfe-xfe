@@ -365,12 +365,12 @@ jobs:
           if ($package -notmatch '(?im)^strawberryperl\|5\.42\.0\.1$') {
             throw "Expected Strawberry Perl 5.42.0.1, found: $package"
           }
-          $compiler = & "$strawberryBin\g++.exe" --version
-          if ($compiler -notmatch '13\.2\.0') {
-            throw "Expected Strawberry GCC 13.2.0, found: $compiler"
+          $compilerVersion = (& "$strawberryBin\g++.exe" -dumpfullversion -dumpversion).Trim()
+          if ($compilerVersion -ne '13.2.0') {
+            throw "Expected Strawberry GCC 13.2.0, found: $compilerVersion"
           }
           $package
-          $compiler
+          & "$strawberryBin\g++.exe" --version
           $strawberryBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build and inspect MinGW wheel
