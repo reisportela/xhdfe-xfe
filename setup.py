@@ -17,12 +17,77 @@ from setuptools.command.build_ext import build_ext
 MIN_CUDA_ARCH = 75
 
 # CPython 3.8+ does not use PATH as a general search path for extension-module
-# dependencies. Keep MinGW's non-system runtime closure beside the built .pyd.
-_MINGW_RUNTIME_DLL_RE = re.compile(
-    r"^(?:libgcc_s_.+|libstdc\+\+-\d+|libgomp-\d+|libwinpthread-\d+|"
-    r"libatomic-\d+|libssp-\d+|libquadmath-\d+)\.dll$",
+# dependencies. Keep every non-system MinGW dependency beside the built .pyd.
+_WINDOWS_HOST_DLL_RE = re.compile(
+    r"^(?:api|ext)-ms-win-.+\.dll$",
     re.IGNORECASE,
 )
+_PYTHON_HOST_DLL_NAMES = frozenset(
+    {
+        "python3.dll",
+        f"python{sys.version_info.major}{sys.version_info.minor}.dll",
+        f"python{sys.version_info.major}{sys.version_info.minor}_d.dll",
+    }
+)
+# Conservative Windows 10/11 system-provider policy, informed by delvewheel's
+# versioned baseline lists. Unknown names are deliberately treated as package
+# dependencies and must be resolved or the build fails closed.
+# https://github.com/adang1345/delvewheel/tree/6c13cea9ba5092f327c6766eb427e5371bf498b3/dll_lists
+_WINDOWS_HOST_DLL_NAMES = frozenset(
+    {
+        "advapi32.dll",
+        "bcrypt.dll",
+        "cfgmgr32.dll",
+        "combase.dll",
+        "comctl32.dll",
+        "comdlg32.dll",
+        "crypt32.dll",
+        "dwmapi.dll",
+        "gdi32.dll",
+        "imagehlp.dll",
+        "imm32.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "kernelbase.dll",
+        "mpr.dll",
+        "msvcrt.dll",
+        "netapi32.dll",
+        "normaliz.dll",
+        "nsi.dll",
+        "ntdll.dll",
+        "ole32.dll",
+        "oleaut32.dll",
+        "powrprof.dll",
+        "psapi.dll",
+        "rpcrt4.dll",
+        "sechost.dll",
+        "secur32.dll",
+        "setupapi.dll",
+        "shcore.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "ucrtbase.dll",
+        "user32.dll",
+        "userenv.dll",
+        "version.dll",
+        "winhttp.dll",
+        "winmm.dll",
+        "winspool.drv",
+        "ws2_32.dll",
+        "wtsapi32.dll",
+    }
+)
+
+
+def _is_windows_host_dll(dll_name: str) -> bool:
+    """Return whether Windows or the active CPython provides this dependency."""
+
+    name = Path(dll_name).name.lower()
+    return (
+        name in _WINDOWS_HOST_DLL_NAMES
+        or name in _PYTHON_HOST_DLL_NAMES
+        or bool(_WINDOWS_HOST_DLL_RE.fullmatch(name))
+    )
 
 
 def _lower(value: str | None) -> str:
@@ -278,6 +343,8 @@ def _find_mingw_objdump(compiler: Path) -> Path | None:
 
 
 def _pe_dll_dependencies(objdump: Path, binary: Path) -> set[str]:
+    env = os.environ.copy()
+    env.update({"LANG": "C", "LC_ALL": "C"})
     result = subprocess.run(
         [str(objdump), "-p", str(binary)],
         check=False,
@@ -285,6 +352,7 @@ def _pe_dll_dependencies(objdump: Path, binary: Path) -> set[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         errors="replace",
+        env=env,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
@@ -301,7 +369,43 @@ def _pe_dll_dependencies(objdump: Path, binary: Path) -> set[str]:
     return dependencies
 
 
-def _compiler_runtime_path(compiler: Path, dll_name: str) -> Path | None:
+def _pe_architecture(objdump: Path, binary: Path) -> str:
+    env = os.environ.copy()
+    env.update({"LANG": "C", "LC_ALL": "C"})
+    result = subprocess.run(
+        [str(objdump), "-f", str(binary)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        errors="replace",
+        env=env,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        raise RuntimeError(
+            f"Could not inspect Windows architecture for {binary.name}: {detail}"
+        )
+    match = re.search(
+        r"\b(pe(?:i)?-[a-z0-9_-]+)\s*$",
+        result.stdout,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if match is None:
+        raise RuntimeError(
+            f"Could not identify Windows architecture for {binary.name}."
+        )
+    return match.group(1).lower()
+
+
+def _compiler_runtime_path(
+    compiler: Path, dll_name: str, search_dirs: tuple[Path, ...] = ()
+) -> Path | None:
+    for directory in search_dirs:
+        candidate = directory / dll_name
+        if candidate.is_file():
+            return candidate
+
     result = subprocess.run(
         [str(compiler), f"-print-file-name={dll_name}"],
         check=False,
@@ -348,28 +452,46 @@ def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
             f"compiler ({compiler}) or on PATH."
         )
 
+    extension_architecture = _pe_architecture(objdump, extension)
     pending = sorted(
-        name
+        (name, None)
         for name in _pe_dll_dependencies(objdump, extension)
-        if _MINGW_RUNTIME_DLL_RE.fullmatch(name)
+        if not _is_windows_host_dll(name)
     )
     bundled: list[Path] = []
-    visited: set[str] = set()
+    resolved_sources: dict[str, Path] = {}
 
     while pending:
-        dll_name = pending.pop(0)
+        dll_name, requester_dir = pending.pop(0)
         key = dll_name.lower()
-        if key in visited:
-            continue
-        visited.add(key)
 
-        source = _compiler_runtime_path(compiler, dll_name)
+        search_dirs = () if requester_dir is None else (requester_dir,)
+        source = _compiler_runtime_path(compiler, dll_name, search_dirs)
+        previous_source = resolved_sources.get(key)
+        if previous_source is not None:
+            if source is not None and not filecmp.cmp(
+                previous_source, source, shallow=False
+            ):
+                raise RuntimeError(
+                    f"Conflicting MinGW runtime DLL sources for {dll_name}: "
+                    f"{previous_source} and {source}. Windows loads DLLs by "
+                    "basename, so the wheel cannot safely contain both."
+                )
+            continue
         if source is None:
             raise RuntimeError(
                 f"The MinGW-built extension depends on {dll_name}, but the active "
                 f"compiler ({compiler}) could not locate that runtime DLL. "
                 "Refusing to create a wheel that would fail at import time."
             )
+        source_architecture = _pe_architecture(objdump, source)
+        if source_architecture != extension_architecture:
+            raise RuntimeError(
+                f"The MinGW-built extension is {extension_architecture}, but "
+                f"{source.name} is {source_architecture}. Refusing to bundle a "
+                "runtime DLL for a different architecture."
+            )
+        resolved_sources[key] = source
 
         destination = extension.parent / dll_name
         if destination.exists():
@@ -383,11 +505,8 @@ def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
         bundled.append(destination)
 
         for dependency in sorted(_pe_dll_dependencies(objdump, source)):
-            if (
-                _MINGW_RUNTIME_DLL_RE.fullmatch(dependency)
-                and dependency.lower() not in visited
-            ):
-                pending.append(dependency)
+            if not _is_windows_host_dll(dependency):
+                pending.append((dependency, source.parent))
 
     return bundled
 

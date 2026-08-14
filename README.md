@@ -254,11 +254,15 @@ assert reg_gpu.gpu_status_code_ == 1
 os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
-On Windows, a GNU/MinGW build bundles its runtime DLL closure beside the
-extension. The package registers that internal directory before loading the
-native module and retains the Windows DLL-directory handle, so an installed
-wheel does not depend on Strawberry Perl remaining on `PATH` and does not
-require a user-side `os.add_dll_directory(...)` call.
+On Windows, a GNU/MinGW build recursively bundles every detected non-system DLL
+dependency beside the extension. The package registers that internal directory
+before loading the native module and retains the Windows DLL-directory handle,
+so an installed wheel does not depend on the build toolchain remaining on
+`PATH` and does not require a user-side `os.add_dll_directory(...)` call. The
+build fails closed if the active toolchain cannot supply a matching x86-64
+binary for any detected dependency. The prebuilt Windows asset in this release
+is for CPython 3.12 x86-64; other Python ABIs require a source build and were
+not separately Windows-certified for this release.
 
 The optional R-style formula frontend uses the same native estimator while
 adding named dataframe designs. Install the extra from a source checkout:

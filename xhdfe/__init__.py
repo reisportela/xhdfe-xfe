@@ -23,15 +23,6 @@ _FORMULA_EXPORTS = {
     "prepare_formula",
 }
 
-_MINGW_RUNTIME_DLL_PREFIXES = (
-    "libgcc_s_",
-    "libstdc++-",
-    "libgomp-",
-    "libwinpthread-",
-    "libatomic-",
-    "libssp-",
-    "libquadmath-",
-)
 _PACKAGED_DLL_DIRECTORY_HANDLES: dict[str, object] = {}
 
 __all__ = [
@@ -65,13 +56,11 @@ def _register_packaged_dll_directory(
         if package_dir is None
         else Path(package_dir).resolve()
     )
-    has_mingw_runtime = any(
-        candidate.is_file()
-        and candidate.name.lower().endswith(".dll")
-        and candidate.name.lower().startswith(_MINGW_RUNTIME_DLL_PREFIXES)
+    has_packaged_dependency = any(
+        candidate.is_file() and candidate.suffix.lower() == ".dll"
         for candidate in directory.iterdir()
     )
-    if not has_mingw_runtime:
+    if not has_packaged_dependency:
         return None
     if add_dll_directory is None:
         raise ImportError(

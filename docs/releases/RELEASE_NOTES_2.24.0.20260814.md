@@ -61,23 +61,30 @@ formula-versus-array parity tests.
 ## Windows Python source builds
 
 When CMake selects GNU/MinGW on Windows, the build now inspects the resulting
-`.pyd` and recursively bundles its non-system GNU runtime DLL closure beside
+`.pyd` and recursively bundles every detected non-system DLL dependency beside
 the extension. This covers runtimes such as `libgcc_s_seh-1.dll`,
-`libstdc++-6.dll`, `libgomp-1.dll`, and `libwinpthread-1.dll`, including
-Strawberry Perl toolchains. Missing or conflicting runtime files fail the wheel
-build instead of producing an artefact that fails later at import time. MSVC
-builds are unchanged.
+`libstdc++-6.dll`, `libgomp-1.dll`, `libwinpthread-1.dll`, and the transitive
+`libdl.dll` required by current Strawberry Perl toolchains. Missing or
+conflicting runtime files fail the wheel build instead of producing an
+artefact that fails later at import time. MSVC builds are unchanged.
 
 Before the native import, the package now registers the installed directory
 containing those DLLs with `os.add_dll_directory()` and retains the returned
-handle for the lifetime of the process. This closes Python 3.8+'s restricted
-DLL-search behaviour without relying on Strawberry Perl's `PATH` entry or a
-user-side workaround.
+handle for the lifetime of the process. CPython changed this DLL-search
+behaviour in 3.8; on xhdfe's supported Python versions (3.9 and later), the
+package no longer relies on Strawberry Perl's `PATH` entry or a user-side
+workaround.
 
 The logic has fail-closed unit coverage. Release certification additionally
 requires a real Windows/Strawberry wheel build, inspection of the wheel DLL
 closure, and a successful import and regression after Strawberry's compiler
 directory is removed from `PATH`.
+
+The prebuilt Windows asset is a CPython 3.12 x86-64 wheel. It is built and
+tested on Windows Server 2022 with machine-specific instruction tuning disabled
+and is intended for ordinary 64-bit Windows 10/11 hosts. Other Python ABIs
+require a source build and were not separately Windows-certified in this
+release.
 
 ## R and Stata scope
 
@@ -97,12 +104,12 @@ restamped only to preserve the repository's unified release identity:
 
 ## Source-candidate validation
 
-- Python `unittest` discovery suite: 51/51 tests passed against the current compiled
+- Python `unittest` discovery suite: 53/53 tests passed against the current compiled
   binding, including formula/array parity and frequency weights.
 - Formula-focused suite: 35 tests passed; lazy optional imports, categorical
   coding, interactions, missing-data failures, identifier exactness, clusters,
   weights, result metadata, and FP64 transform arithmetic are covered.
-- Windows runtime packaging suite: eleven fail-closed dependency-closure and loader tests
+- Windows runtime packaging suite: thirteen fail-closed dependency-closure and loader tests
   passed on the source candidate.
 - The existing direct-array API passed a separate smoke without importing the
   optional formula stack.

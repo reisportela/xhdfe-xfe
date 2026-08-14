@@ -212,6 +212,14 @@ jobs:
           LIBWINPTHREAD="$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)"
           test -f "$LIBGOMP"
           test -f "$LIBWINPTHREAD"
+          x86_64-w64-mingw32-g++ --version
+          for runtime in "$LIBGOMP" "$LIBWINPTHREAD"; do
+            provider="$(dpkg-query -S "$runtime")"
+            provider="${provider%%:*}"
+            dpkg-query -W \
+              -f='Runtime-Package=${binary:Package} Version=${Version} Source=${source:Package} Source-Version=${source:Version} Built-Using=${Built-Using}\n' \
+              "$provider"
+          done
           cp "$LIBGOMP" artifacts/libgomp-1.dll
           cp "$LIBWINPTHREAD" artifacts/libwinpthread-1.dll
 
@@ -284,8 +292,9 @@ jobs:
           PY
           )
           python3 -m venv --system-site-packages /tmp/xhdfe-sdist-smoke
-          /tmp/xhdfe-sdist-smoke/bin/python -m pip install \
-            --no-deps "${SDISTS[0]}"
+          env -u XHDFE_CUDA_ARCHS XHDFE_ENABLE_CUDA=OFF \
+            /tmp/xhdfe-sdist-smoke/bin/python -m pip install \
+              --no-deps "${SDISTS[0]}"
           (
             cd /tmp
             /tmp/xhdfe-sdist-smoke/bin/python -c \
@@ -324,12 +333,14 @@ jobs:
   # Windows runner: build the Python wheel with Strawberry Perl's MinGW and
   # prove that its compiled extension imports after the compiler directory is
   # removed from PATH. This is the end-to-end gate for the packaged GNU runtime
-  # DLL closure used by CPython 3.8+.
+  # DLL closure needed after CPython changed its Windows DLL search in 3.8.
+  # xhdfe supports Python >=3.9. The older hosted image lowers the OS/API build
+  # baseline; machine-specific instruction tuning remains disabled.
   # ---------------------------------------------------------------------------
   build-windows-python:
     name: Build/import Windows Python wheel (Strawberry MinGW)
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
+    runs-on: windows-2022
     permissions:
       contents: read
     steps:
@@ -351,6 +362,8 @@ jobs:
           if (-not (Test-Path "$strawberryBin\g++.exe")) {
             throw "Strawberry MinGW compiler not found at $strawberryBin"
           }
+          & "$strawberryBin\g++.exe" --version
+          choco list --local-only --exact strawberryperl
           $strawberryBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build and inspect MinGW wheel
@@ -805,7 +818,7 @@ jobs:
           | Linux x86_64 | Stata CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
           | Linux x86_64 | Python CPU wheel | manylinux_2_28 + ubuntu-latest | repaired manylinux wheel; clean installed-wheel formula smoke |
           | Windows 11 x86_64 | Stata CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
-          | Windows 11 x86_64 | Python CPU/OpenMP wheel | windows-latest (Strawberry MinGW) | recursive DLL closure; import and formula smoke without Strawberry on PATH |
+          | Windows x86_64, CPython 3.12 | Python CPU/OpenMP wheel | Windows Server 2022 (Strawberry MinGW) | generic recursive non-system DLL closure; intended for Windows 10/11; import and formula smoke without Strawberry on PATH |
           | macOS x86_64+arm64 | Stata CPU | macos-14 | universal bundle, no OpenMP |
           EOF
           echo "---- release body ----"

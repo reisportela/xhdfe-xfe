@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from email.parser import Parser
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -14,11 +15,92 @@ from typing import Iterable, Optional
 import zipfile
 
 
-_MINGW_RUNTIME_DLL_RE = re.compile(
+_WINDOWS_HOST_DLL_RE = re.compile(
+    r"^(?:api|ext)-ms-win-.+\.dll$",
+    re.IGNORECASE,
+)
+_LICENSED_BUNDLED_DLL_RE = re.compile(
     r"^(?:libgcc_s_.+|libstdc\+\+-\d+|libgomp-\d+|libwinpthread-\d+|"
     r"libatomic-\d+|libssp-\d+|libquadmath-\d+)\.dll$",
     re.IGNORECASE,
 )
+_LICENSED_BUNDLED_DLL_NAMES = frozenset({"libdl.dll"})
+# Keep this conservative policy aligned with setup.py. Unknown names are
+# package dependencies, never silently assumed to exist on a target.
+# Source: delvewheel 1.13.0 baseline lists at the pinned upstream commit.
+# https://github.com/adang1345/delvewheel/tree/6c13cea9ba5092f327c6766eb427e5371bf498b3/dll_lists
+_WINDOWS_HOST_DLL_NAMES = frozenset(
+    {
+        "advapi32.dll",
+        "bcrypt.dll",
+        "cfgmgr32.dll",
+        "combase.dll",
+        "comctl32.dll",
+        "comdlg32.dll",
+        "crypt32.dll",
+        "dwmapi.dll",
+        "gdi32.dll",
+        "imagehlp.dll",
+        "imm32.dll",
+        "iphlpapi.dll",
+        "kernel32.dll",
+        "kernelbase.dll",
+        "mpr.dll",
+        "msvcrt.dll",
+        "netapi32.dll",
+        "normaliz.dll",
+        "nsi.dll",
+        "ntdll.dll",
+        "ole32.dll",
+        "oleaut32.dll",
+        "powrprof.dll",
+        "psapi.dll",
+        "rpcrt4.dll",
+        "sechost.dll",
+        "secur32.dll",
+        "setupapi.dll",
+        "shcore.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "ucrtbase.dll",
+        "user32.dll",
+        "userenv.dll",
+        "version.dll",
+        "winhttp.dll",
+        "winmm.dll",
+        "winspool.drv",
+        "ws2_32.dll",
+        "wtsapi32.dll",
+    }
+)
+
+
+def _is_windows_host_dll(
+    dll_name: str, python_host_dll_names: frozenset[str]
+) -> bool:
+    name = Path(dll_name).name.lower()
+    return (
+        name in _WINDOWS_HOST_DLL_NAMES
+        or name in python_host_dll_names
+        or bool(_WINDOWS_HOST_DLL_RE.fullmatch(name))
+    )
+
+
+def _is_licensed_bundled_dll(dll_name: str) -> bool:
+    """Return whether NOTICE has an explicit license family for this DLL."""
+
+    name = Path(dll_name).name.lower()
+    return (
+        name in _LICENSED_BUNDLED_DLL_NAMES
+        or bool(_LICENSED_BUNDLED_DLL_RE.fullmatch(name))
+    )
+
+
+def _python_host_dll_names(pyd: Path) -> frozenset[str]:
+    match = re.search(r"\.cp(\d{2,3})-", pyd.name, re.IGNORECASE)
+    _require(match is not None, f"cannot derive CPython ABI from {pyd.name}")
+    abi = match.group(1)
+    return frozenset({"python3.dll", f"python{abi}.dll", f"python{abi}_d.dll"})
 
 
 def _require(condition: bool, message: str) -> None:
@@ -58,8 +140,14 @@ def _metadata_checks(text: str, expected_version: str, label: str) -> None:
 def _runtime_notice_checks(text: str, label: str) -> None:
     _require(
         re.search(r"GCC Runtime\s+Library Exception 3\.1", text) is not None
-        and "winpthreads" in text,
+        and "winpthreads" in text
+        and "Copyright (c) 2011 mingw-w64 project" in text
+        and "Copyright (c) 2010 Lockless Inc." in text,
         f"{label} omits GNU/MinGW runtime licensing",
+    )
+    _require(
+        "dlfcn-win32" in text and "MIT License" in text,
+        f"{label} omits libdl/dlfcn-win32 runtime licensing",
     )
 
 
@@ -96,6 +184,8 @@ def _wheel_notice_member(names: Iterable[str], filename: str) -> str:
 
 
 def _pe_dependencies(objdump: Path, binary: Path) -> set[str]:
+    env = os.environ.copy()
+    env.update({"LANG": "C", "LC_ALL": "C"})
     result = subprocess.run(
         [str(objdump), "-p", str(binary)],
         check=False,
@@ -103,6 +193,7 @@ def _pe_dependencies(objdump: Path, binary: Path) -> set[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         errors="replace",
+        env=env,
     )
     _require(
         result.returncode == 0,
@@ -116,6 +207,32 @@ def _pe_dependencies(objdump: Path, binary: Path) -> set[str]:
     }
 
 
+def _pe_architecture(objdump: Path, binary: Path) -> str:
+    env = os.environ.copy()
+    env.update({"LANG": "C", "LC_ALL": "C"})
+    result = subprocess.run(
+        [str(objdump), "-f", str(binary)],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        errors="replace",
+        env=env,
+    )
+    _require(
+        result.returncode == 0,
+        f"objdump architecture check failed for {binary.name}: "
+        f"{result.stderr.strip() or result.stdout.strip()}",
+    )
+    match = re.search(
+        r"\b(pe(?:i)?-[a-z0-9_-]+)\s*$",
+        result.stdout,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _require(match is not None, f"could not identify architecture for {binary.name}")
+    return match.group(1).lower()
+
+
 def _validate_mingw_closure(wheel: Path, objdump: Path) -> None:
     _require(objdump.is_file(), f"MinGW objdump not found: {objdump}")
     with tempfile.TemporaryDirectory() as tmp:
@@ -124,20 +241,33 @@ def _validate_mingw_closure(wheel: Path, objdump: Path) -> None:
             archive.extractall(root)
         pyds = list(root.rglob("*.pyd"))
         _require(len(pyds) == 1, f"wheel must contain one .pyd, found {pyds}")
-        runtime_paths = [
-            path
-            for path in root.rglob("*.dll")
-            if _MINGW_RUNTIME_DLL_RE.fullmatch(path.name)
-        ]
+        python_host_dll_names = _python_host_dll_names(pyds[0])
+        runtime_paths = list(root.rglob("*.dll"))
+        uncovered_licenses = sorted(
+            path.name
+            for path in runtime_paths
+            if not _is_licensed_bundled_dll(path.name)
+        )
+        _require(
+            not uncovered_licenses,
+            "wheel contains non-system DLLs without an explicit release "
+            "license ledger: " + ", ".join(uncovered_licenses),
+        )
         _require(
             all(path.parent == pyds[0].parent for path in runtime_paths),
-            "wheel GNU runtime DLLs must be beside the native extension",
+            "wheel non-system DLLs must be beside the native extension",
         )
         runtime_files = {path.name.lower(): path for path in runtime_paths}
         _require(
             len(runtime_files) == len(runtime_paths),
-            "wheel contains duplicate case-insensitive GNU runtime DLL names",
+            "wheel contains duplicate case-insensitive DLL names",
         )
+        extension_architecture = _pe_architecture(objdump, pyds[0])
+        for runtime in runtime_paths:
+            _require(
+                _pe_architecture(objdump, runtime) == extension_architecture,
+                f"wheel runtime DLL has wrong architecture: {runtime.name}",
+            )
         root_dependencies = _pe_dependencies(objdump, pyds[0])
         _require(
             any(name.lower() == "libgomp-1.dll" for name in root_dependencies),
@@ -146,9 +276,9 @@ def _validate_mingw_closure(wheel: Path, objdump: Path) -> None:
         pending = sorted(
             name
             for name in root_dependencies
-            if _MINGW_RUNTIME_DLL_RE.fullmatch(name)
+            if not _is_windows_host_dll(name, python_host_dll_names)
         )
-        _require(pending, "MinGW wheel .pyd has no detected GNU runtime dependency")
+        _require(pending, "MinGW wheel .pyd has no detected non-system dependency")
         visited: set[str] = set()
         while pending:
             name = pending.pop(0)
@@ -159,13 +289,13 @@ def _validate_mingw_closure(wheel: Path, objdump: Path) -> None:
             _require(key in runtime_files, f"wheel is missing required runtime DLL {name}")
             for dependency in _pe_dependencies(objdump, runtime_files[key]):
                 if (
-                    _MINGW_RUNTIME_DLL_RE.fullmatch(dependency)
+                    not _is_windows_host_dll(dependency, python_host_dll_names)
                     and dependency.lower() not in visited
                 ):
                     pending.append(dependency)
         _require(
             visited == set(runtime_files),
-            "wheel contains unreferenced GNU runtime DLLs: "
+            "wheel contains unreferenced non-system DLLs: "
             + ", ".join(sorted(set(runtime_files) - visited)),
         )
 

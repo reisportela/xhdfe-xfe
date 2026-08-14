@@ -31,6 +31,21 @@ def _load_setup_module():
 SETUP_MODULE = _load_setup_module()
 
 
+def _load_validator_module():
+    spec = importlib.util.spec_from_file_location(
+        "xhdfe_python_artifact_validator_test",
+        ROOT / "tools" / "validate_python_release_artifacts.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not load Python artifact validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+VALIDATOR_MODULE = _load_validator_module()
+
+
 def _write_cmake_toolchain(build_dir: Path, compiler: Path, compiler_id: str) -> None:
     build_dir.mkdir(parents=True)
     (build_dir / "CMakeCache.txt").write_text(
@@ -44,10 +59,43 @@ def _write_cmake_toolchain(build_dir: Path, compiler: Path, compiler_id: str) ->
 
 
 class WindowsRuntimePackagingTest(unittest.TestCase):
-    def test_directory_without_packaged_gnu_runtime_is_unchanged(self):
+    def test_windows_host_dependency_policy_is_fail_closed(self):
+        self.assertTrue(SETUP_MODULE._is_windows_host_dll("KERNEL32.dll"))
+        self.assertTrue(
+            SETUP_MODULE._is_windows_host_dll(
+                "api-ms-win-crt-runtime-l1-1-0.dll"
+            )
+        )
+        self.assertTrue(SETUP_MODULE._is_windows_host_dll("python312.dll"))
+        self.assertFalse(SETUP_MODULE._is_windows_host_dll("python999.dll"))
+        self.assertFalse(SETUP_MODULE._is_windows_host_dll("libdl.dll"))
+        self.assertFalse(SETUP_MODULE._is_windows_host_dll("vcruntime999.dll"))
+        self.assertFalse(SETUP_MODULE._is_windows_host_dll("vendor-runtime.dll"))
+        self.assertTrue(
+            VALIDATOR_MODULE._is_licensed_bundled_dll("libgomp-1.dll")
+        )
+        self.assertTrue(
+            VALIDATOR_MODULE._is_licensed_bundled_dll("libwinpthread-1.dll")
+        )
+        self.assertTrue(
+            VALIDATOR_MODULE._is_licensed_bundled_dll("libdl.dll")
+        )
+        self.assertFalse(
+            VALIDATOR_MODULE._is_licensed_bundled_dll("vendor-runtime.dll")
+        )
+        self.assertEqual(
+            SETUP_MODULE._WINDOWS_HOST_DLL_NAMES,
+            VALIDATOR_MODULE._WINDOWS_HOST_DLL_NAMES,
+        )
+        self.assertEqual(
+            SETUP_MODULE._WINDOWS_HOST_DLL_RE.pattern,
+            VALIDATOR_MODULE._WINDOWS_HOST_DLL_RE.pattern,
+        )
+
+    def test_directory_without_packaged_dll_is_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             package_dir = Path(tmp)
-            (package_dir / "unrelated.dll").write_bytes(b"runtime")
+            (package_dir / "unrelated.txt").write_bytes(b"not a DLL")
 
             def unexpected_register(_path):
                 raise AssertionError("non-MinGW directory must not be registered")
@@ -61,7 +109,7 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
     def test_packaged_runtime_directory_is_registered_and_handle_retained(self):
         with tempfile.TemporaryDirectory() as tmp:
             package_dir = Path(tmp)
-            (package_dir / "libgomp-1.dll").write_bytes(b"runtime")
+            (package_dir / "vendor-runtime.dll").write_bytes(b"runtime")
             handle = object()
             calls = []
 
@@ -107,6 +155,8 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
             args=[],
             returncode=0,
             stdout=(
+                "py_hdfe_v11.pyd: file format pei-x86-64\n"
+                "architecture: i386:x86-64, flags 0x0000012f:\n"
                 "The Import Tables\n"
                 "\tDLL Name: KERNEL32.dll\n"
                 "\tDLL Name: libgomp-1.dll\n"
@@ -118,10 +168,14 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
             dependencies = SETUP_MODULE._pe_dll_dependencies(
                 Path("objdump.exe"), Path("py_hdfe_v11.pyd")
             )
+            architecture = SETUP_MODULE._pe_architecture(
+                Path("objdump.exe"), Path("py_hdfe_v11.pyd")
+            )
         self.assertEqual(
             dependencies,
             {"KERNEL32.dll", "libgomp-1.dll", "libstdc++-6.dll"},
         )
+        self.assertEqual(architecture, "pei-x86-64")
 
     def test_compiler_reported_runtime_path_is_used(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,6 +236,8 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                 "libgomp-1.dll",
                 "libwinpthread-1.dll",
                 "libatomic-1.dll",
+                "libdl.dll",
+                "vendor-runtime.dll",
             )
             runtimes = {}
             for name in runtime_names:
@@ -199,16 +255,23 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                 "libgomp-1.dll": {
                     "libgcc_s_seh-1.dll",
                     "libwinpthread-1.dll",
+                    "libdl.dll",
                 },
                 "libwinpthread-1.dll": {"libgcc_s_seh-1.dll"},
                 "libgcc_s_seh-1.dll": set(),
                 "libatomic-1.dll": {"libgcc_s_seh-1.dll"},
+                "libdl.dll": {
+                    "KERNEL32.dll",
+                    "api-ms-win-crt-runtime-l1-1-0.dll",
+                    "vendor-runtime.dll",
+                },
+                "vendor-runtime.dll": {"KERNEL32.dll"},
             }
 
             def inspect_dependencies(_objdump, binary):
                 return dependencies[binary.name.lower()]
 
-            def find_runtime(_compiler, name):
+            def find_runtime(_compiler, name, _search_dirs=()):
                 return runtimes.get(name.lower())
 
             with (
@@ -216,6 +279,11 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                     SETUP_MODULE,
                     "_find_mingw_objdump",
                     return_value=root / "objdump.exe",
+                ),
+                patch.object(
+                    SETUP_MODULE,
+                    "_pe_architecture",
+                    return_value="i386:x86-64",
                 ),
                 patch.object(
                     SETUP_MODULE,
@@ -259,6 +327,11 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                 ),
                 patch.object(
                     SETUP_MODULE,
+                    "_pe_architecture",
+                    return_value="i386:x86-64",
+                ),
+                patch.object(
+                    SETUP_MODULE,
                     "_pe_dll_dependencies",
                     return_value={"libgomp-1.dll"},
                 ),
@@ -268,6 +341,78 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "depends on libgomp-1.dll"
+                ):
+                    SETUP_MODULE._bundle_mingw_runtime_dlls(
+                        extension, build_dir
+                    )
+
+    def test_conflicting_transitive_runtime_sources_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build_dir = root / "build"
+            compiler = root / "toolchain" / "bin" / "g++.exe"
+            compiler.parent.mkdir(parents=True)
+            compiler.write_bytes(b"compiler")
+            _write_cmake_toolchain(build_dir, compiler, "GNU")
+
+            extension = root / "wheel" / "xhdfe" / "py_hdfe_v11.pyd"
+            extension.parent.mkdir(parents=True)
+            extension.write_bytes(b"extension")
+
+            runtime_a = root / "runtime-a"
+            runtime_b = root / "runtime-b"
+            runtime_a.mkdir()
+            runtime_b.mkdir()
+            parent_a = runtime_a / "parent-a.dll"
+            parent_b = runtime_b / "parent-b.dll"
+            shared_a = runtime_a / "shared.dll"
+            shared_b = runtime_b / "shared.dll"
+            parent_a.write_bytes(b"parent-a")
+            parent_b.write_bytes(b"parent-b")
+            shared_a.write_bytes(b"shared-a")
+            shared_b.write_bytes(b"shared-b")
+
+            def inspect_dependencies(_objdump, binary):
+                if binary == extension:
+                    return {"parent-a.dll", "parent-b.dll"}
+                if binary.name.lower().startswith("parent-"):
+                    return {"shared.dll"}
+                return set()
+
+            def find_runtime(_compiler, name, search_dirs=()):
+                if search_dirs:
+                    candidate = search_dirs[0] / name
+                    if candidate.is_file():
+                        return candidate
+                return {
+                    "parent-a.dll": parent_a,
+                    "parent-b.dll": parent_b,
+                }.get(name.lower())
+
+            with (
+                patch.object(
+                    SETUP_MODULE,
+                    "_find_mingw_objdump",
+                    return_value=root / "objdump.exe",
+                ),
+                patch.object(
+                    SETUP_MODULE,
+                    "_pe_architecture",
+                    return_value="i386:x86-64",
+                ),
+                patch.object(
+                    SETUP_MODULE,
+                    "_pe_dll_dependencies",
+                    side_effect=inspect_dependencies,
+                ),
+                patch.object(
+                    SETUP_MODULE,
+                    "_compiler_runtime_path",
+                    side_effect=find_runtime,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Conflicting MinGW runtime DLL sources"
                 ):
                     SETUP_MODULE._bundle_mingw_runtime_dlls(
                         extension, build_dir
@@ -311,6 +456,11 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                     SETUP_MODULE,
                     "_find_mingw_objdump",
                     return_value=root / "objdump.exe",
+                ),
+                patch.object(
+                    SETUP_MODULE,
+                    "_pe_architecture",
+                    return_value="i386:x86-64",
                 ),
                 patch.object(
                     SETUP_MODULE,
