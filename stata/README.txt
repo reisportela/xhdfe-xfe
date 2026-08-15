@@ -9,5 +9,9 @@ The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
 file is installed under the canonical runtime name xhdfe.plugin or xfe.plugin.
-Windows packages also install the colocated libgomp-1.dll and
-libwinpthread-1.dll required by the production OpenMP plugins.
+Windows packages install every colocated runtime DLL named and hashed by the
+release's windows-stata-provider-ledger.json. The independent PE graph is in
+windows-stata-runtime-ledger.json; the dependency set is not hard-coded here.
+Every package installs the exact GNU/MinGW and Eigen license texts. When the
+two NVIDIA license inputs are supplied, their CUDA 12.6/CCCL 2.5.0 materials
+are also listed in both package manifests.

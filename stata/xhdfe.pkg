@@ -1,4 +1,4 @@
-v 2.23.1
+v 2.24.0
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
@@ -23,6 +23,19 @@ f xhdfegpu.ado
 f xhdfegpu.sthlp
 f xfe.ado
 f xfe.sthlp
+f LICENSE
+f NOTICE
+f GCC-13.2.0-COPYING3
+f GCC-13.2.0-COPYING.RUNTIME
+f mingw-w64-11.0.1-winpthreads-COPYING
+f dlfcn-win32-1.4.1-COPYING
+f Eigen-3.4.0-COPYING.APACHE
+f Eigen-3.4.0-COPYING.BSD
+f Eigen-3.4.0-COPYING.GPL
+f Eigen-3.4.0-COPYING.LGPL
+f Eigen-3.4.0-COPYING.MINPACK
+f Eigen-3.4.0-COPYING.MPL2
+f Eigen-3.4.0-COPYING.README
 g LINUX64 xhdfe.linux64.plugin xhdfe.plugin
 g LINUX64P xhdfe.linux64.plugin xhdfe.plugin
 g MACARM64 xhdfe.macos-universal.plugin xhdfe.plugin
@@ -37,7 +50,10 @@ g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
 g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
 g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
 g WIN64 xfe.win64.plugin xfe.plugin
+g WIN64 libgcc_s_seh-1.dll libgcc_s_seh-1.dll
 g WIN64 libgomp-1.dll libgomp-1.dll
 g WIN64 libwinpthread-1.dll libwinpthread-1.dll
+g WIN64 windows-stata-provider-ledger.json windows-stata-provider-ledger.json
+g WIN64 windows-stata-runtime-ledger.json windows-stata-runtime-ledger.json
 h xhdfe.plugin
 h xfe.plugin

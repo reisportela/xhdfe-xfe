@@ -1,0 +1,53 @@
+{
+  "artifact": "xhdfe-xfe-stata-windows-cpu",
+  "closure_ledger": "windows-stata-runtime-ledger.json",
+  "compiler": {
+    "target": "x86_64-w64-mingw32",
+    "version": "13-posix"
+  },
+  "entries": [
+    {
+      "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "license_file": "GCC-13.2.0-COPYING.RUNTIME",
+      "name": "libgcc_s_seh-1.dll",
+      "packaged_sha256": "306983c483d96a6d08a2df044e360f0962e21dac021baf8311d3c0cb3b2c9def",
+      "runtime_package": "gcc-mingw-w64-x86-64-posix-runtime",
+      "runtime_version": "13.2.0-6ubuntu1+26.1",
+      "sha256": "306983c483d96a6d08a2df044e360f0962e21dac021baf8311d3c0cb3b2c9def",
+      "size": 774200,
+      "source_package": "gcc-mingw-w64",
+      "source_path": "/usr/lib/gcc/x86_64-w64-mingw32/13-posix/libgcc_s_seh-1.dll",
+      "source_version": "26.1"
+    },
+    {
+      "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "license_file": "GCC-13.2.0-COPYING.RUNTIME",
+      "name": "libgomp-1.dll",
+      "packaged_sha256": "1afecfb57b9cc08a49073ee07415c023fc4be92d73a1a7df940ef65dcf209ee6",
+      "runtime_package": "gcc-mingw-w64-x86-64-posix-runtime",
+      "runtime_version": "13.2.0-6ubuntu1+26.1",
+      "sha256": "1afecfb57b9cc08a49073ee07415c023fc4be92d73a1a7df940ef65dcf209ee6",
+      "size": 1709733,
+      "source_package": "gcc-mingw-w64",
+      "source_path": "/usr/lib/gcc/x86_64-w64-mingw32/13-posix/libgomp-1.dll",
+      "source_version": "26.1"
+    },
+    {
+      "built_using": "",
+      "license": "MIT AND BSD-3-Clause",
+      "license_file": "mingw-w64-11.0.1-winpthreads-COPYING",
+      "name": "libwinpthread-1.dll",
+      "packaged_sha256": "fc9f14551f6609dd51801daec2c194579d35345551ef84fe465cbdb3339c2a6f",
+      "runtime_package": "mingw-w64-x86-64-dev",
+      "runtime_version": "11.0.1-3build1",
+      "sha256": "fc9f14551f6609dd51801daec2c194579d35345551ef84fe465cbdb3339c2a6f",
+      "size": 324451,
+      "source_package": "mingw-w64",
+      "source_path": "/usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll",
+      "source_version": "11.0.1-3build1"
+    }
+  ],
+  "schema_version": 1
+}

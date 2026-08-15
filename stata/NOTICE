@@ -1,0 +1,163 @@
+xhdfe
+Copyright (c) 2025-2026 Miguel Portela and Tiago Tavares
+
+This product is licensed under the MIT License (see LICENSE).
+
+--------------------------------------------------------------------------
+Bundled third-party components
+--------------------------------------------------------------------------
+
+Eigen 3.4.0 (third_party/eigen-3.4.0/ and, mirrored, r/xhdfe/src/eigen/)
+  A C++ template library for linear algebra, bundled unmodified and used
+  header-only.
+  Copyright (c) the Eigen authors.
+  License: primarily MPL-2.0, with parts under BSD-3-Clause and Apache-2.0.
+  Full license texts ship with the headers:
+    third_party/eigen-3.4.0/COPYING.{MPL2,BSD,APACHE,MINPACK,README}
+    r/xhdfe/src/eigen/COPYING.*
+  The default configuration used here relies only on the MPL-2.0 / BSD /
+  Apache-2.0 parts of Eigen.
+  Homepage: https://eigen.tuxfamily.org
+
+Rcpp 1.1.2 (third_party/Rcpp_1.1.2.tar.gz)
+  The official, unmodified CRAN source archive is carried in autonomous
+  source/offline release media so the xhdfe R package can be installed with
+  networking disabled.
+  Copyright (c) the Rcpp authors.
+  License: GPL (>= 2), as recorded in the archive's DESCRIPTION. The archive
+  contains the complete upstream source and license metadata.
+  Provenance and certified SHA-256:
+    third_party/RCPP_SOURCE_PROVENANCE.md
+  Homepage: https://www.rcpp.org
+
+MinGW runtime and compatibility libraries (binary artifacts when required)
+  Windows builds made with GNU/MinGW carry the recursively detected non-system
+  DLL closure beside the extension or Stata plugin. GCC runtimes can include
+  libgcc, libstdc++, libgomp, libatomic, libquadmath, and libssp. Additional
+  compatibility libraries can include libwinpthread and libdl. Windows runtime
+  DLLs are copied byte-identically from the compiler provider; the release
+  ledger records both hashes and rejects a mismatch.
+
+  Linux wheels repaired by auditwheel may likewise carry a private GNU runtime
+  library needed by the extension. auditwheel can rewrite ELF metadata or the
+  SONAME while grafting that library, so byte identity is not claimed there.
+  The release ledger separately records the provider path/hash, packaged member
+  path/hash, package NEVRA, SOURCERPM, and exact source-RPM payload.
+
+  GCC runtime libraries are distributed under GPLv3 with the GCC Runtime
+  Library Exception 3.1 where stated by GCC. Verbatim license texts ship as:
+    third_party/licenses/GCC-13.2.0-COPYING3
+    third_party/licenses/GCC-13.2.0-COPYING.RUNTIME
+  Versioned upstream information:
+    https://gcc.gnu.org/onlinedocs/libstdc++/manual/license.html
+    https://www.gnu.org/licenses/gcc-exception-3.1.html
+
+  The exact corresponding sources and build recipes for redistributed GNU /
+  MinGW runtime binaries are supplied in the versioned release asset:
+    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.24.0.20260815/xhdfe-2.24.0.20260815-corresponding-source.zip
+  That asset includes a machine-readable provenance manifest and SHA-256
+  manifest over the source archives actually supplied to the release job.
+
+  winpthreads is part of mingw-w64. Its upstream notice records copyright by
+  the mingw-w64 project and Lockless Inc. and permissive MIT/BSD-style terms:
+    https://github.com/mingw-w64/mingw-w64/blob/v11.0.1/mingw-w64-libraries/winpthreads/COPYING
+    third_party/licenses/mingw-w64-11.0.1-winpthreads-COPYING
+
+  Full winpthreads redistribution notice:
+
+  Copyright (c) 2011 mingw-w64 project
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+  and/or sell copies of the Software, and to permit persons to whom the
+  Software is furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+  DEALINGS IN THE SOFTWARE.
+
+  Parts of winpthreads are derived from the Posix Threads library for
+  Microsoft Windows:
+
+  Copyright (c) 2010 Lockless Inc.
+  All rights reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  * Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  * Redistributions in binary form must reproduce the above copyright notice,
+    this list of conditions and the following disclaimer in the documentation
+    and/or other materials provided with the distribution.
+  * Neither the name of Lockless Inc. nor the names of its contributors may be
+    used to endorse or promote products derived from this software without
+    specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE.
+
+  libdl.dll is provided by dlfcn-win32 v1.4.1 under the MIT License.
+  Copyright (c) 2007 Ramiro Polla; 2015 Tiancheng "Timothy" Gu;
+  2019 Pali Rohár; and 2020 Ralf Habacker. Versioned license materials:
+    https://github.com/dlfcn-win32/dlfcn-win32/blob/v1.4.1/COPYING
+    third_party/licenses/dlfcn-win32-1.4.1-COPYING
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+  Redistributors must retain the notices and license materials supplied with
+  the exact compiler/runtime from which these binary files were taken.
+
+NVIDIA CUDA 12.6 redistributable components (CUDA plugin artifacts only)
+  The Linux CUDA plugins statically incorporate libcudadevrt and
+  libcudart_static. Their compilation can also incorporate libdevice.10.bc
+  and CUB headers from CCCL 2.5.0. They do not link or redistribute cuRAND.
+
+  libcudadevrt, libcudart_static, and libdevice are NVIDIA Redistributable
+  Software under the CUDA Toolkit 12.6 EULA and its Attachment A. CUB is
+  covered by the CCCL 2.5.0 license. CUDA release bundles carry the exact
+  applicable license materials as:
+    NVIDIA-CUDA-12.6-EULA.pdf
+    NVIDIA-CCCL-2.5.0-LICENSE
+  The bundled EULA bytes are the official CUDA 12.6 PDF (also applicable to
+  the 12.6 Update 3 toolkit used for these plugins). Versioned references:
+    https://docs.nvidia.com/cuda/archive/12.6.0/pdf/EULA.pdf
+    https://github.com/NVIDIA/cccl/blob/v2.5.0/LICENSE
+
+  These proprietary/BSD-licensed NVIDIA inputs are not GNU GPL Corresponding
+  Source. The separate corresponding-source asset closes the GNU/MinGW source
+  mappings without representing NVIDIA toolkit archives as GPL source.

@@ -1,0 +1,76 @@
+{
+  "format": "xhdfe-windows-runtime-closure-v1",
+  "roots": [
+    {
+      "architecture": "pei-x86-64",
+      "dependencies": [
+        "KERNEL32.dll",
+        "libgomp-1.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "member": "xfe.plugin.windows",
+      "member_sha256": "d20213fb315cc749f2579e7db19e517194b6e97a6c462316d527399696299a53",
+      "size": 4680192
+    },
+    {
+      "architecture": "pei-x86-64",
+      "dependencies": [
+        "KERNEL32.dll",
+        "libgomp-1.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "member": "xhdfe.plugin.windows",
+      "member_sha256": "df6a6d77556456239eb4310b44321b5e4dc25607dc020078641a5e240e7a1cc9",
+      "size": 6093824
+    }
+  ],
+  "runtimes": [
+    {
+      "architecture": "pei-x86-64",
+      "dependencies": [
+        "KERNEL32.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "member": "libgcc_s_seh-1.dll",
+      "member_sha256": "306983c483d96a6d08a2df044e360f0962e21dac021baf8311d3c0cb3b2c9def",
+      "resolution_method": "runtime-search-directory",
+      "size": 774200,
+      "source_path": "/usr/lib/gcc/x86_64-w64-mingw32/13-posix/libgcc_s_seh-1.dll",
+      "source_sha256": "306983c483d96a6d08a2df044e360f0962e21dac021baf8311d3c0cb3b2c9def"
+    },
+    {
+      "architecture": "pei-x86-64",
+      "dependencies": [
+        "KERNEL32.dll",
+        "libgcc_s_seh-1.dll",
+        "libwinpthread-1.dll",
+        "msvcrt.dll"
+      ],
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "member": "libgomp-1.dll",
+      "member_sha256": "1afecfb57b9cc08a49073ee07415c023fc4be92d73a1a7df940ef65dcf209ee6",
+      "resolution_method": "runtime-search-directory",
+      "size": 1709733,
+      "source_path": "/usr/lib/gcc/x86_64-w64-mingw32/13-posix/libgomp-1.dll",
+      "source_sha256": "1afecfb57b9cc08a49073ee07415c023fc4be92d73a1a7df940ef65dcf209ee6"
+    },
+    {
+      "architecture": "pei-x86-64",
+      "dependencies": [
+        "KERNEL32.dll",
+        "msvcrt.dll"
+      ],
+      "license": "MIT AND BSD-3-Clause",
+      "member": "libwinpthread-1.dll",
+      "member_sha256": "fc9f14551f6609dd51801daec2c194579d35345551ef84fe465cbdb3339c2a6f",
+      "resolution_method": "runtime-search-directory",
+      "size": 324451,
+      "source_path": "/usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll",
+      "source_sha256": "fc9f14551f6609dd51801daec2c194579d35345551ef84fe465cbdb3339c2a6f"
+    }
+  ]
+}
