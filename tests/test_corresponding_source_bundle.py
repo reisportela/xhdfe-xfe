@@ -38,10 +38,14 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                     linux_provenance.ProvenanceError, "no source RPM metadata"
                 ):
                     linux_provenance._rpm_info_for_path(
-                        binary, allow_missing_source_rpm=False
+                        binary,
+                        allow_missing_source_rpm=False,
+                        allow_multiple_owners=False,
                     )
                 info = linux_provenance._rpm_info_for_path(
-                    binary, allow_missing_source_rpm=True
+                    binary,
+                    allow_missing_source_rpm=True,
+                    allow_multiple_owners=False,
                 )
                 self.assertEqual(info["nevra"], "cuda-nvcc-12-6-12.6.85-1.x86_64")
                 self.assertIsNone(info["source_rpm"])
@@ -57,7 +61,9 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             )
             with mock.patch.object(linux_provenance, "_run", return_value=source_query):
                 info = linux_provenance._rpm_info_for_path(
-                    binary, allow_missing_source_rpm=False
+                    binary,
+                    allow_missing_source_rpm=False,
+                    allow_multiple_owners=False,
                 )
                 self.assertEqual(
                     info["source_rpm"],
@@ -77,8 +83,82 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                 ),
             ):
                 linux_provenance._rpm_info_for_path(
-                    binary, allow_missing_source_rpm=True
+                    binary,
+                    allow_missing_source_rpm=True,
+                    allow_multiple_owners=False,
                 )
+
+            coowned = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "cuda-nvvm-12-6\t0\t12.6.85\t1\tx86_64\t"
+                    "cuda-nvcc-12-6-12.6.85-1.src.rpm\n"
+                    "cuda-nvcc-12-6\t0\t12.6.85\t1\tx86_64\t"
+                    "cuda-nvcc-12-6-12.6.85-1.src.rpm\n"
+                ),
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=coowned):
+                info = linux_provenance._rpm_info_for_path(
+                    binary,
+                    allow_missing_source_rpm=False,
+                    allow_multiple_owners=True,
+                )
+                self.assertEqual(info["name"], "cuda-nvcc-12-6")
+                self.assertEqual(
+                    [owner["name"] for owner in info["coowners"]],
+                    ["cuda-nvvm-12-6"],
+                )
+                with self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError,
+                    "multiple RPM owners are not permitted",
+                ):
+                    linux_provenance._rpm_info_for_path(
+                        binary,
+                        allow_missing_source_rpm=False,
+                        allow_multiple_owners=False,
+                    )
+
+            duplicated = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=coowned.stdout.splitlines(keepends=True)[0] * 2,
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=duplicated):
+                with self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError,
+                    "duplicate or conflicting RPM ownership metadata",
+                ):
+                    linux_provenance._rpm_info_for_path(
+                        binary,
+                        allow_missing_source_rpm=False,
+                        allow_multiple_owners=True,
+                    )
+
+            conflicting = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    coowned.stdout.splitlines(keepends=True)[0]
+                    + coowned.stdout.splitlines(keepends=True)[0].replace(
+                        "cuda-nvcc-12-6-12.6.85-1.src.rpm",
+                        "contradictory-source.src.rpm",
+                    )
+                ),
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=conflicting):
+                with self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError,
+                    "duplicate or conflicting RPM ownership metadata",
+                ):
+                    linux_provenance._rpm_info_for_path(
+                        binary,
+                        allow_missing_source_rpm=False,
+                        allow_multiple_owners=True,
+                    )
 
     def test_cuda_eula_is_an_explicit_hash_pinned_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -96,36 +96,60 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _rpm_info_for_path(
-    path: Path, *, allow_missing_source_rpm: bool
+    path: Path, *, allow_missing_source_rpm: bool, allow_multiple_owners: bool
 ) -> dict[str, Any]:
     canonical = path.resolve(strict=True)
-    query = "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}"
+    query = "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\n"
     result = _run(["rpm", "-qf", "--qf", query, str(canonical)])
-    fields = result.stdout.rstrip("\r\n").split("\t")
-    if len(fields) != 6 or any(not field for field in fields[:5]):
-        raise ProvenanceError(
-            f"incomplete RPM ownership metadata for {canonical}: {result.stdout!r}"
+    owner_lines = result.stdout.splitlines()
+    if not owner_lines:
+        raise ProvenanceError(f"RPM query returned no owners for {canonical}")
+    owners: list[dict[str, Any]] = []
+    owner_keys: set[tuple[str, str, str, str, str]] = set()
+    for line in owner_lines:
+        fields = line.split("\t")
+        if len(fields) != 6 or any(not field for field in fields[:5]):
+            raise ProvenanceError(
+                f"incomplete RPM ownership metadata for {canonical}: {result.stdout!r}"
+            )
+        name, epoch, version, release, arch, source_rpm = fields
+        epoch_prefix = "" if epoch in {"0", "(none)", "(null)"} else f"{epoch}:"
+        source_rpm = source_rpm.strip()
+        if source_rpm in {"", "(none)", "(null)"}:
+            source_rpm = None
+        if source_rpm is None and not allow_missing_source_rpm:
+            raise ProvenanceError(f"RPM provider has no source RPM metadata: {canonical}")
+        owner_key = (name, epoch, version, release, arch)
+        if owner_key in owner_keys:
+            raise ProvenanceError(
+                "duplicate or conflicting RPM ownership metadata for "
+                f"{canonical}: {line!r}"
+            )
+        owner_keys.add(owner_key)
+        owners.append(
+            {
+                "name": name,
+                "epoch": epoch,
+                "version": version,
+                "release": release,
+                "arch": arch,
+                "nevra": f"{name}-{epoch_prefix}{version}-{release}.{arch}",
+                "source_rpm": source_rpm,
+            }
         )
-    name, epoch, version, release, arch, source_rpm = fields
-    epoch_prefix = "" if epoch in {"0", "(none)", "(null)"} else f"{epoch}:"
-    source_rpm = source_rpm.strip()
-    if source_rpm in {"", "(none)", "(null)"}:
-        source_rpm = None
-    if source_rpm is None and not allow_missing_source_rpm:
-        raise ProvenanceError(f"RPM provider has no source RPM metadata: {canonical}")
-    return {
-        "name": name,
-        "epoch": epoch,
-        "version": version,
-        "release": release,
-        "arch": arch,
-        "nevra": f"{name}-{epoch_prefix}{version}-{release}.{arch}",
-        "source_rpm": source_rpm,
-    }
+    owners.sort(key=lambda item: (item["name"], item["nevra"]))
+    if len(owners) > 1 and not allow_multiple_owners:
+        raise ProvenanceError(
+            f"multiple RPM owners are not permitted for {canonical}: "
+            f"{[owner['nevra'] for owner in owners]}"
+        )
+    primary = dict(owners[0])
+    primary["coowners"] = owners[1:]
+    return primary
 
 
 def _file_record(
-    path: Path, *, allow_missing_source_rpm: bool
+    path: Path, *, allow_missing_source_rpm: bool, allow_multiple_rpm_owners: bool
 ) -> dict[str, Any]:
     canonical = path.resolve(strict=True)
     if not canonical.is_file():
@@ -135,7 +159,9 @@ def _file_record(
         "sha256": _sha256_file(canonical),
         "size": canonical.stat().st_size,
         "rpm": _rpm_info_for_path(
-            canonical, allow_missing_source_rpm=allow_missing_source_rpm
+            canonical,
+            allow_missing_source_rpm=allow_missing_source_rpm,
+            allow_multiple_owners=allow_multiple_rpm_owners,
         ),
     }
 
@@ -389,9 +415,16 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
         raise ProvenanceError("CUDA ledger must cover exactly the two staged CUDA plugins")
 
     cub_rpm = _rpm_info_for_path(
-        components["cub/cub.cuh"], allow_missing_source_rpm=True
+        components["cub/cub.cuh"],
+        allow_missing_source_rpm=True,
+        allow_multiple_owners=True,
     )
-    package_files = _run(["rpm", "-ql", cub_rpm["nevra"]]).stdout.splitlines()
+    cub_owners = [cub_rpm, *cub_rpm["coowners"]]
+    package_files: list[str] = []
+    for owner in cub_owners:
+        package_files.extend(
+            _run(["rpm", "-ql", owner["nevra"]]).stdout.splitlines()
+        )
     cccl_license_candidates = [
         Path(item)
         for item in package_files
@@ -404,7 +437,8 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
         cccl_licenses[str(canonical)] = canonical
     if not cccl_licenses:
         raise ProvenanceError(
-            f"the CUB provider {cub_rpm['nevra']} does not expose an installed license file"
+            "the CUB providers do not expose an installed license file: "
+            f"{[owner['nevra'] for owner in cub_owners]}"
         )
 
     toolkit_eula = _validated_cuda_eula(args.toolkit_eula)
@@ -428,7 +462,11 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
                 "size": source.stat().st_size,
             }
         else:
-            record = _file_record(source, allow_missing_source_rpm=True)
+            record = _file_record(
+                source,
+                allow_missing_source_rpm=True,
+                allow_multiple_rpm_owners=True,
+            )
         record.update(
             {
                 "label": label,
@@ -452,14 +490,22 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
             "path": str(nvcc),
             "sha256": _sha256_file(nvcc),
             "version_output": nvcc_version,
-            "rpm": _rpm_info_for_path(nvcc, allow_missing_source_rpm=True),
+            "rpm": _rpm_info_for_path(
+                nvcc,
+                allow_missing_source_rpm=True,
+                allow_multiple_owners=True,
+            ),
         },
         "cuda_root": str(cuda_root),
         "cccl_cub_version": "2.5.0",
         "components": [
             {
                 "name": name,
-                **_file_record(path, allow_missing_source_rpm=True),
+                **_file_record(
+                    path,
+                    allow_missing_source_rpm=True,
+                    allow_multiple_rpm_owners=True,
+                ),
             }
             for name, path in sorted(components.items())
         ],
@@ -493,7 +539,11 @@ def _wheel_ledger(args: argparse.Namespace) -> int:
     provider = Path(args.libgomp_provider).resolve(strict=True)
     source_rpm = Path(args.libgomp_source_rpm).resolve(strict=True)
 
-    provider_rpm = _rpm_info_for_path(provider, allow_missing_source_rpm=False)
+    provider_rpm = _rpm_info_for_path(
+        provider,
+        allow_missing_source_rpm=False,
+        allow_multiple_owners=False,
+    )
     if not provider.name.startswith("libgomp.so"):
         raise ProvenanceError(f"libgomp provider path has unexpected basename: {provider}")
     if source_rpm.name != provider_rpm["source_rpm"]:
