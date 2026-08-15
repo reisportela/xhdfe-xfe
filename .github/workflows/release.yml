@@ -873,6 +873,10 @@ jobs:
             "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1.orig.tar.bz2" \
             3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10
           fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1.orig.tar.bz2.asc \
+            "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1.orig.tar.bz2.asc" \
+            2d0fbff66504777860c5970b2dd1699159721d030566e928e2b730abb3e049e2
+          fetch_sha256 \
             https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1-3build1.debian.tar.xz \
             "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1-3build1.debian.tar.xz" \
             8c182708e1b329bb6d5b6ea95f5cafeb7681027604b89dfb3e2031a73bc90576

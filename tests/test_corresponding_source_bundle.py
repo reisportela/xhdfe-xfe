@@ -201,9 +201,31 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             )
         provider_paths = {}
         for object_id in sorted(builder.REQUIRED_PROVIDERS):
-            provider_paths[object_id] = self._file(
-                root, f"providers/{object_id}.src", f"provider:{object_id}\n".encode()
-            )
+            if object_id in builder.DEBIAN_SOURCE_PROVIDERS:
+                provider_dir = root / "providers" / object_id
+                payload = self._file(
+                    provider_dir,
+                    f"{object_id}.orig.tar.xz",
+                    f"provider:{object_id}\n".encode(),
+                )
+                digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+                self._file(
+                    provider_dir,
+                    f"{object_id}.dsc",
+                    (
+                        "Format: 3.0 (quilt)\n"
+                        "Checksums-Sha256:\n"
+                        f" {digest} {payload.stat().st_size} {payload.name}\n"
+                        "Files:\n"
+                    ).encode(),
+                )
+                provider_paths[object_id] = provider_dir
+            else:
+                provider_paths[object_id] = self._file(
+                    root,
+                    f"providers/{object_id}.src",
+                    f"provider:{object_id}\n".encode(),
+                )
 
         components = [f"{name}={path}" for name, path in component_paths.items()]
         providers = [f"{name}={path}" for name, path in provider_paths.items()]
@@ -419,6 +441,73 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             ]
             with self.assertRaisesRegex(ValueError, "missing source components: gcc"):
                 builder.build_archive(args)
+
+    def test_debian_provider_dsc_closure_rejects_missing_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = self._inputs(root)
+            assignment = next(
+                value
+                for value in args.provider_source
+                if value.startswith("ubuntu-mingw-w64=")
+            )
+            provider_dir = Path(assignment.split("=", 1)[1])
+            dsc = next(provider_dir.glob("*.dsc"))
+            dsc.write_text(
+                dsc.read_text(encoding="utf-8").replace(
+                    "Files:\n",
+                    f" {'0' * 64} 269 missing-orig-signature.asc\nFiles:\n",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "missing Debian source payload"):
+                builder.build_archive(args)
+
+    def test_validator_rejects_reclosed_archive_missing_dsc_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root_path = Path(temporary)
+            args = self._inputs(root_path)
+            builder.build_archive(args)
+            source = Path(args.output)
+            tampered = root_path / "tampered-corresponding-source.zip"
+            with zipfile.ZipFile(source) as archive:
+                payloads = {
+                    info.filename: archive.read(info.filename)
+                    for info in archive.infolist()
+                }
+            archive_root = next(iter(payloads)).split("/", 1)[0]
+            provenance_name = f"{archive_root}/PROVENANCE.json"
+            provenance = json.loads(payloads[provenance_name])
+            provider = next(
+                entry
+                for entry in provenance["provider_sources"]
+                if entry["id"] == "ubuntu-mingw-w64"
+            )
+            dropped = next(
+                record
+                for record in provider["files"]
+                if record["path"].endswith(".orig.tar.xz")
+            )
+            provider["files"].remove(dropped)
+            provider["tree_sha256"] = builder.tree_sha256(provider["files"])
+            payloads.pop(
+                f"{archive_root}/{provider['bundle_path']}/{dropped['path']}"
+            )
+            payloads[provenance_name] = (
+                json.dumps(provenance, indent=2, sort_keys=True) + "\n"
+            ).encode()
+            manifest_name = f"{archive_root}/MANIFEST.sha256"
+            payloads[manifest_name] = "".join(
+                f"{hashlib.sha256(data).hexdigest()}  "
+                f"{name[len(archive_root) + 1:]}\n"
+                for name, data in sorted(payloads.items())
+                if name != manifest_name
+            ).encode()
+            with zipfile.ZipFile(tampered, "w") as archive:
+                for name, data in sorted(payloads.items()):
+                    archive.writestr(name, data)
+            with self.assertRaisesRegex(ValueError, "missing Debian source payload"):
+                validator.validate(tampered)
 
     def test_extra_runtime_requires_full_mapping_and_is_manifested(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

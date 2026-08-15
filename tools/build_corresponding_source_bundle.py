@@ -70,6 +70,8 @@ CUDA_LICENSE_HASHES = {
 }
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]{8}$")
+DSC_SHA256_LINE = re.compile(r"^([0-9a-fA-F]{64})\s+([0-9]+)\s+(\S+)$")
+DEBIAN_SOURCE_PROVIDERS = {"ubuntu-mingw-gcc", "ubuntu-mingw-w64"}
 
 
 def sha256(path: Path) -> str:
@@ -125,6 +127,69 @@ def checked_input(path_text: str) -> Path:
     if not (path.is_file() or path.is_dir()):
         raise ValueError(f"input is not a regular file or directory: {path}")
     return path
+
+
+def dsc_sha256_records(payload: bytes, label: str) -> list[tuple[str, int, str]]:
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{label}: DSC is not UTF-8 text") from error
+    starts = [index for index, line in enumerate(lines) if line == "Checksums-Sha256:"]
+    if len(starts) != 1:
+        raise ValueError(f"{label}: expected exactly one Checksums-Sha256 field")
+    records: list[tuple[str, int, str]] = []
+    names: set[str] = set()
+    for line in lines[starts[0] + 1 :]:
+        if not line.startswith((" ", "\t")):
+            break
+        match = DSC_SHA256_LINE.fullmatch(line.strip())
+        if match is None:
+            raise ValueError(f"{label}: malformed Checksums-Sha256 line: {line!r}")
+        digest, size_text, name = match.groups()
+        if Path(name).name != name or "/" in name or "\\" in name:
+            raise ValueError(f"{label}: unsafe DSC payload name: {name!r}")
+        if name in names:
+            raise ValueError(f"{label}: duplicate DSC payload name: {name}")
+        names.add(name)
+        records.append((digest.lower(), int(size_text), name))
+    if not records:
+        raise ValueError(f"{label}: empty Checksums-Sha256 field")
+    return records
+
+
+def validate_debian_source_directory(source: Path, provider_id: str) -> None:
+    if not source.is_dir():
+        raise ValueError(f"{provider_id}: Debian provider source must be a directory")
+    files = sorted(
+        (item for item in source.rglob("*") if item.is_file()),
+        key=lambda item: item.as_posix(),
+    )
+    dsc_files = [item for item in files if item.suffix == ".dsc"]
+    if not dsc_files:
+        raise ValueError(f"{provider_id}: provider source contains no DSC")
+    closed = {item.relative_to(source).as_posix() for item in dsc_files}
+    for dsc in dsc_files:
+        label = f"{provider_id}/{dsc.relative_to(source).as_posix()}"
+        for expected_hash, expected_size, name in dsc_sha256_records(
+            dsc.read_bytes(), label
+        ):
+            payload = dsc.parent / name
+            relative = payload.relative_to(source).as_posix()
+            if not payload.is_file():
+                raise ValueError(f"{label}: missing Debian source payload: {name}")
+            if payload.stat().st_size != expected_size:
+                raise ValueError(f"{label}: Debian source payload size mismatch: {name}")
+            if sha256(payload) != expected_hash:
+                raise ValueError(f"{label}: Debian source payload hash mismatch: {name}")
+            closed.add(relative)
+    actual = {item.relative_to(source).as_posix() for item in files}
+    if actual != closed:
+        extras = sorted(actual - closed)
+        missing = sorted(closed - actual)
+        raise ValueError(
+            f"{provider_id}: DSC source closure mismatch; "
+            f"unreferenced={extras}, missing={missing}"
+        )
 
 
 def copy_payload(source: Path, destination: Path) -> list[dict[str, object]]:
@@ -312,6 +377,10 @@ def build_archive(args: argparse.Namespace) -> None:
         provider_binaries,
         metadata,
     )
+    for provider_id in sorted(DEBIAN_SOURCE_PROVIDERS):
+        validate_debian_source_directory(
+            checked_input(providers[provider_id]), provider_id
+        )
 
     output = Path(args.output).resolve()
     if output.exists() and not args.force:

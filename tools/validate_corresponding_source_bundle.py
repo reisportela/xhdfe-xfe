@@ -53,6 +53,8 @@ CUDA_LICENSE_HASHES = {
 }
 HASH_LINE = re.compile(r"^([0-9a-f]{64})  ([^\r\n]+)$")
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
+DSC_SHA256_LINE = re.compile(r"^([0-9a-fA-F]{64})\s+([0-9]+)\s+(\S+)$")
+DEBIAN_SOURCE_PROVIDERS = {"ubuntu-mingw-gcc", "ubuntu-mingw-w64"}
 
 
 def sha256_member(archive: zipfile.ZipFile, name: str) -> str:
@@ -85,6 +87,72 @@ def metadata(entry: dict[str, object]) -> dict[str, str]:
     value = entry.get("metadata")
     require(isinstance(value, dict), f"{entry.get('id')}: invalid metadata")
     return value  # type: ignore[return-value]
+
+
+def dsc_sha256_records(payload: bytes, label: str) -> list[tuple[str, int, str]]:
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise ValueError(f"{label}: DSC is not UTF-8 text") from error
+    starts = [index for index, line in enumerate(lines) if line == "Checksums-Sha256:"]
+    require(len(starts) == 1, f"{label}: expected exactly one Checksums-Sha256 field")
+    records: list[tuple[str, int, str]] = []
+    names: set[str] = set()
+    for line in lines[starts[0] + 1 :]:
+        if not line.startswith((" ", "\t")):
+            break
+        match = DSC_SHA256_LINE.fullmatch(line.strip())
+        require(match is not None, f"{label}: malformed Checksums-Sha256 line: {line!r}")
+        digest, size_text, name = match.groups()
+        require(
+            PurePosixPath(name).name == name and "/" not in name and "\\" not in name,
+            f"{label}: unsafe DSC payload name: {name!r}",
+        )
+        require(name not in names, f"{label}: duplicate DSC payload name: {name}")
+        names.add(name)
+        records.append((digest.lower(), int(size_text), name))
+    require(bool(records), f"{label}: empty Checksums-Sha256 field")
+    return records
+
+
+def validate_debian_source_entry(
+    archive: zipfile.ZipFile, root: str, entry: dict[str, object]
+) -> None:
+    provider_id = str(entry["id"])
+    bundle_path = str(entry["bundle_path"])
+    records = entry["files"]
+    require(isinstance(records, list), f"{provider_id}: invalid source files")
+    record_map = {
+        str(record["path"]): record
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("path"), str)
+    }
+    require(len(record_map) == len(records), f"{provider_id}: invalid source records")
+    dsc_paths = sorted(path for path in record_map if path.endswith(".dsc"))
+    require(bool(dsc_paths), f"{provider_id}: provider source contains no DSC")
+    closed = set(dsc_paths)
+    for dsc_path in dsc_paths:
+        label = f"{provider_id}/{dsc_path}"
+        member = f"{root}/{bundle_path}/{dsc_path}"
+        for expected_hash, expected_size, name in dsc_sha256_records(
+            archive.read(member), label
+        ):
+            relative = (PurePosixPath(dsc_path).parent / name).as_posix()
+            record = record_map.get(relative)
+            require(record is not None, f"{label}: missing Debian source payload: {name}")
+            require(
+                record.get("sha256") == expected_hash,
+                f"{label}: Debian source payload hash mismatch: {name}",
+            )
+            require(
+                record.get("size") == expected_size,
+                f"{label}: Debian source payload size mismatch: {name}",
+            )
+            closed.add(relative)
+    require(
+        set(record_map) == closed,
+        f"{provider_id}: DSC source closure mismatch",
+    )
 
 
 def validate_entry_files(
@@ -223,6 +291,8 @@ def validate(path: Path) -> dict[str, object]:
                 f"sources/providers/{entry['id']}",
                 referenced_sources,
             )
+            if entry["id"] in DEBIAN_SOURCE_PROVIDERS:
+                validate_debian_source_entry(archive, root, entry)
         actual_sources = {
             name for name in names if name.startswith(f"{root}/sources/")
         }
