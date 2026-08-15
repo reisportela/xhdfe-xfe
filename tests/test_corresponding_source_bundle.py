@@ -15,6 +15,7 @@ from unittest import mock
 import zipfile
 
 from tools import build_corresponding_source_bundle as builder
+from tools import record_linux_release_provenance as linux_provenance
 from tools import validate_corresponding_source_bundle as validator
 
 
@@ -22,6 +23,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CorrespondingSourceBundleTests(unittest.TestCase):
+    def test_cuda_eula_is_an_explicit_hash_pinned_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            eula = Path(temporary) / "NVIDIA-CUDA-12.6-EULA.pdf"
+            payload = b"synthetic pinned CUDA EULA"
+            eula.write_bytes(payload)
+            digest = hashlib.sha256(payload).hexdigest()
+            with mock.patch.object(linux_provenance, "_CUDA_EULA_SHA256", digest):
+                self.assertEqual(
+                    linux_provenance._validated_cuda_eula(eula),
+                    eula.resolve(),
+                )
+                eula.write_bytes(payload + b" tampered")
+                with self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "EULA hash mismatch"
+                ):
+                    linux_provenance._validated_cuda_eula(eula)
+
+        self.assertEqual(
+            linux_provenance._CUDA_EULA_SHA256,
+            "7c2dc636ad47cf67a0efb97d9c11246efcc471ac9d11eb8efceae3bfd56d8649",
+        )
+        manylinux_path = REPO_ROOT / "ci" / "build_linux_release_manylinux.sh"
+        if manylinux_path.is_file():
+            manylinux = manylinux_path.read_text(encoding="utf-8")
+            self.assertIn('CUDA_EULA_INPUT="${XHDFE_CUDA_EULA:?', manylinux)
+            self.assertIn('--toolkit-eula "$CUDA_EULA_INPUT"', manylinux)
+
     def _file(self, root: Path, name: str, data: bytes) -> Path:
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)

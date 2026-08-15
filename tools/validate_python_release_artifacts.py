@@ -209,11 +209,21 @@ def _member_with_suffix(names: Iterable[str], suffix: str, label: str) -> str:
 
 
 def _wheel_notice_member(names: Iterable[str], filename: str) -> str:
-    pattern = re.compile(
-        rf"\.dist-info/(?:licenses/)?{re.escape(filename)}$",
-        re.IGNORECASE,
-    )
-    matches = [name for name in names if pattern.search(name)]
+    allowed_suffixes = {
+        f".dist-info/{filename}".casefold(),
+        f".dist-info/licenses/{filename}".casefold(),
+    }
+    if filename in _RUNTIME_LICENSE_HASHES:
+        # PEP 639 preserves the source-relative path of entries selected by
+        # `license-files = ["third_party/licenses/*"]` under `.dist-info/licenses`.
+        allowed_suffixes.add(
+            f".dist-info/licenses/third_party/licenses/{filename}".casefold()
+        )
+    matches = [
+        name
+        for name in names
+        if any(name.casefold().endswith(suffix) for suffix in allowed_suffixes)
+    ]
     _require(
         len(matches) == 1,
         f"wheel: expected one packaged {filename}, found {matches}",

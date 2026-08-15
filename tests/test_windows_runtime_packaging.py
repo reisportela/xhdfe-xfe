@@ -122,6 +122,26 @@ def _write_synthetic_wheel(
 
 
 class WindowsRuntimePackagingTest(unittest.TestCase):
+    def test_pep639_nested_runtime_license_member_is_strictly_recognized(self):
+        dist_info = "xhdfe-2.24.0.20260815.dist-info"
+        filename = "GCC-13.2.0-COPYING3"
+        nested = f"{dist_info}/licenses/third_party/licenses/{filename}"
+
+        self.assertEqual(
+            VALIDATOR_MODULE._wheel_notice_member([nested], filename),
+            nested,
+        )
+        with self.assertRaisesRegex(RuntimeError, "expected one packaged"):
+            VALIDATOR_MODULE._wheel_notice_member(
+                [nested, f"{dist_info}/licenses/{filename}"],
+                filename,
+            )
+        with self.assertRaisesRegex(RuntimeError, r"found \[\]"):
+            VALIDATOR_MODULE._wheel_notice_member(
+                [f"xhdfe/third_party/licenses/{filename}"],
+                filename,
+            )
+
     def test_windows_native_tuning_is_portable_by_default(self):
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
         self.assertIn("if(APPLE OR WIN32)", cmake)

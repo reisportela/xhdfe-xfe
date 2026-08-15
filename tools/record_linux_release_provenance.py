@@ -47,6 +47,10 @@ _NVIDIA_LIBRARY_PREFIXES = (
     "nv",
 )
 _ALLOWED_STATIC_CUDA_LIBRARIES = {"cudadevrt", "cudart_static"}
+_CUDA_EULA_SHA256 = (
+    "7c2dc636ad47cf67a0efb97d9c11246efcc471ac9d11eb8efceae3bfd56d8649"
+)
+_CUDA_EULA_URL = "https://docs.nvidia.com/cuda/archive/12.6.0/pdf/EULA.pdf"
 
 
 class ProvenanceError(RuntimeError):
@@ -133,6 +137,19 @@ def _unique_existing(paths: Iterable[Path], label: str) -> Path:
         listed = ", ".join(sorted(canonical)) or "none"
         raise ProvenanceError(f"expected one canonical {label}; found: {listed}")
     return next(iter(canonical.values()))
+
+
+def _validated_cuda_eula(path: str | Path) -> Path:
+    candidate = Path(path).resolve(strict=True)
+    if not candidate.is_file():
+        raise ProvenanceError(f"CUDA toolkit EULA is not a regular file: {candidate}")
+    digest = _sha256_file(candidate)
+    if digest != _CUDA_EULA_SHA256:
+        raise ProvenanceError(
+            "CUDA toolkit EULA hash mismatch: "
+            f"expected {_CUDA_EULA_SHA256}, got {digest}"
+        )
+    return candidate
 
 
 def _cuda_component(cuda_root: Path, relative_candidates: list[str], label: str) -> Path:
@@ -375,10 +392,7 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
             f"the CUB provider {cub_rpm['nevra']} does not expose an installed license file"
         )
 
-    toolkit_eula = _unique_existing(
-        [cuda_root / "EULA.txt", cuda_root / "EULA", cuda_root / "LICENSE.txt"],
-        "CUDA toolkit EULA",
-    )
+    toolkit_eula = _validated_cuda_eula(args.toolkit_eula)
     license_dir = Path(args.license_dir)
     license_dir.mkdir(parents=True, exist_ok=True)
     license_records: list[dict[str, Any]] = []
@@ -390,7 +404,16 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
         suffix = source.suffix if source.suffix else ".txt"
         destination = license_dir / f"{label}{suffix}"
         shutil.copyfile(source, destination)
-        record = _file_record(source)
+        if label == "cuda-toolkit-eula":
+            record = {
+                "source_path": str(source),
+                "source_kind": "pinned-upstream-license",
+                "upstream_url": _CUDA_EULA_URL,
+                "sha256": _sha256_file(source),
+                "size": source.stat().st_size,
+            }
+        else:
+            record = _file_record(source)
         record.update(
             {
                 "label": label,
@@ -594,6 +617,7 @@ def _parser() -> argparse.ArgumentParser:
     cuda.add_argument("--trace-jsonl", required=True)
     cuda.add_argument("--link-dryrun", required=True)
     cuda.add_argument("--plugin", action="append", required=True)
+    cuda.add_argument("--toolkit-eula", required=True)
     cuda.add_argument("--license-dir", required=True)
     cuda.add_argument("--output", required=True)
 

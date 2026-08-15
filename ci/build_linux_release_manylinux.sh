@@ -28,6 +28,8 @@ FLOOR_GLIBC="${XHDFE_FLOOR_GLIBC:-2.28}"
 FLOOR_GLIBCXX="${XHDFE_FLOOR_GLIBCXX:-3.4.25}"
 CUDA_MM="${XHDFE_CUDA_VERSION:-12-6}"      # dnf package suffix, e.g. 12-6
 PYBIN="${XHDFE_PYBIN:-/opt/python/cp312-cp312/bin/python}"
+CUDA_EULA_INPUT="${XHDFE_CUDA_EULA:?set XHDFE_CUDA_EULA to the pinned CUDA 12.6 EULA input}"
+test -f "$CUDA_EULA_INPUT"
 
 echo "== toolchain =="
 dnf -y install gcc-toolset-13-gcc-c++ cmake dnf-plugins-core git zip >/dev/null
@@ -93,6 +95,7 @@ echo "== CUDA static-link provenance gate =="
   --link-dryrun "$XHDFE_NVCC_LINK_DRYRUN" \
   --plugin artifacts/xhdfe.plugin.linux-cuda \
   --plugin artifacts/xfe.plugin.linux-cuda \
+  --toolkit-eula "$CUDA_EULA_INPUT" \
   --license-dir artifacts/cuda-license-files \
   --output artifacts/linux-cuda-provenance.json
 

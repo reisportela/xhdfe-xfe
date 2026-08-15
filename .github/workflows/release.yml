@@ -111,7 +111,14 @@ jobs:
           command -v cuobjdump && cuobjdump --version | head -2 || echo "WARN: cuobjdump not on PATH"
 
       - name: Prepare artifacts dir
-        run: mkdir -p artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release-inputs
+          curl --fail --location --retry 3 \
+            https://docs.nvidia.com/cuda/archive/12.6.0/pdf/EULA.pdf \
+            --output artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf
+          echo "7c2dc636ad47cf67a0efb97d9c11246efcc471ac9d11eb8efceae3bfd56d8649  artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf" \
+            | sha256sum --check --strict
 
       # ---- Linux ELF artifacts: built inside manylinux_2_28 (glibc 2.28 floor) ----
       # Release 2.21.0's Linux binaries were built directly on the Ubuntu runner
@@ -127,6 +134,7 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$PWD:/w" -w /w \
             -e XHDFE_CUDA_ARCHS="$XHDFE_CUDA_ARCHS" \
+            -e XHDFE_CUDA_EULA=/w/artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf \
             quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4 \
             bash ci/build_linux_release_manylinux.sh
 
