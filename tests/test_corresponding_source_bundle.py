@@ -23,6 +23,63 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CorrespondingSourceBundleTests(unittest.TestCase):
+    def test_proprietary_rpm_may_omit_source_rpm_but_libgomp_may_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            binary = Path(temporary) / "libdevice.10.bc"
+            binary.write_bytes(b"synthetic libdevice")
+            rpm_query = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="cuda-nvcc-12-6\t0\t12.6.85\t1\tx86_64\t",
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=rpm_query):
+                with self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "no source RPM metadata"
+                ):
+                    linux_provenance._rpm_info_for_path(
+                        binary, allow_missing_source_rpm=False
+                    )
+                info = linux_provenance._rpm_info_for_path(
+                    binary, allow_missing_source_rpm=True
+                )
+                self.assertEqual(info["nevra"], "cuda-nvcc-12-6-12.6.85-1.x86_64")
+                self.assertIsNone(info["source_rpm"])
+
+            source_query = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "libgomp\t0\t13.2.1\t6.el8\tx86_64\t"
+                    "gcc-toolset-13-gcc-13.2.1-6.el8.src.rpm"
+                ),
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=source_query):
+                info = linux_provenance._rpm_info_for_path(
+                    binary, allow_missing_source_rpm=False
+                )
+                self.assertEqual(
+                    info["source_rpm"],
+                    "gcc-toolset-13-gcc-13.2.1-6.el8.src.rpm",
+                )
+
+            malformed = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="cuda-nvcc-12-6\t\t12.6.85\t1\tx86_64\t(none)",
+                stderr="",
+            )
+            with (
+                mock.patch.object(linux_provenance, "_run", return_value=malformed),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "incomplete RPM ownership"
+                ),
+            ):
+                linux_provenance._rpm_info_for_path(
+                    binary, allow_missing_source_rpm=True
+                )
+
     def test_cuda_eula_is_an_explicit_hash_pinned_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             eula = Path(temporary) / "NVIDIA-CUDA-12.6-EULA.pdf"

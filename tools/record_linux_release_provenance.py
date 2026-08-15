@@ -95,15 +95,24 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def _rpm_info_for_path(path: Path) -> dict[str, str]:
+def _rpm_info_for_path(
+    path: Path, *, allow_missing_source_rpm: bool
+) -> dict[str, Any]:
     canonical = path.resolve(strict=True)
     query = "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}"
     result = _run(["rpm", "-qf", "--qf", query, str(canonical)])
-    fields = result.stdout.strip().split("\t")
-    if len(fields) != 6 or any(not field for field in fields):
-        raise ProvenanceError(f"incomplete RPM ownership metadata for {canonical}")
+    fields = result.stdout.rstrip("\r\n").split("\t")
+    if len(fields) != 6 or any(not field for field in fields[:5]):
+        raise ProvenanceError(
+            f"incomplete RPM ownership metadata for {canonical}: {result.stdout!r}"
+        )
     name, epoch, version, release, arch, source_rpm = fields
     epoch_prefix = "" if epoch in {"0", "(none)", "(null)"} else f"{epoch}:"
+    source_rpm = source_rpm.strip()
+    if source_rpm in {"", "(none)", "(null)"}:
+        source_rpm = None
+    if source_rpm is None and not allow_missing_source_rpm:
+        raise ProvenanceError(f"RPM provider has no source RPM metadata: {canonical}")
     return {
         "name": name,
         "epoch": epoch,
@@ -115,7 +124,9 @@ def _rpm_info_for_path(path: Path) -> dict[str, str]:
     }
 
 
-def _file_record(path: Path) -> dict[str, Any]:
+def _file_record(
+    path: Path, *, allow_missing_source_rpm: bool
+) -> dict[str, Any]:
     canonical = path.resolve(strict=True)
     if not canonical.is_file():
         raise ProvenanceError(f"not a regular file: {canonical}")
@@ -123,7 +134,9 @@ def _file_record(path: Path) -> dict[str, Any]:
         "source_path": str(canonical),
         "sha256": _sha256_file(canonical),
         "size": canonical.stat().st_size,
-        "rpm": _rpm_info_for_path(canonical),
+        "rpm": _rpm_info_for_path(
+            canonical, allow_missing_source_rpm=allow_missing_source_rpm
+        ),
     }
 
 
@@ -375,7 +388,9 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
     }:
         raise ProvenanceError("CUDA ledger must cover exactly the two staged CUDA plugins")
 
-    cub_rpm = _rpm_info_for_path(components["cub/cub.cuh"])
+    cub_rpm = _rpm_info_for_path(
+        components["cub/cub.cuh"], allow_missing_source_rpm=True
+    )
     package_files = _run(["rpm", "-ql", cub_rpm["nevra"]]).stdout.splitlines()
     cccl_license_candidates = [
         Path(item)
@@ -413,7 +428,7 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
                 "size": source.stat().st_size,
             }
         else:
-            record = _file_record(source)
+            record = _file_record(source, allow_missing_source_rpm=True)
         record.update(
             {
                 "label": label,
@@ -437,12 +452,16 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
             "path": str(nvcc),
             "sha256": _sha256_file(nvcc),
             "version_output": nvcc_version,
-            "rpm": _rpm_info_for_path(nvcc),
+            "rpm": _rpm_info_for_path(nvcc, allow_missing_source_rpm=True),
         },
         "cuda_root": str(cuda_root),
         "cccl_cub_version": "2.5.0",
         "components": [
-            {"name": name, **_file_record(path)} for name, path in sorted(components.items())
+            {
+                "name": name,
+                **_file_record(path, allow_missing_source_rpm=True),
+            }
+            for name, path in sorted(components.items())
         ],
         "licenses": license_records,
         "link_trace": {
@@ -474,7 +493,7 @@ def _wheel_ledger(args: argparse.Namespace) -> int:
     provider = Path(args.libgomp_provider).resolve(strict=True)
     source_rpm = Path(args.libgomp_source_rpm).resolve(strict=True)
 
-    provider_rpm = _rpm_info_for_path(provider)
+    provider_rpm = _rpm_info_for_path(provider, allow_missing_source_rpm=False)
     if not provider.name.startswith("libgomp.so"):
         raise ProvenanceError(f"libgomp provider path has unexpected basename: {provider}")
     if source_rpm.name != provider_rpm["source_rpm"]:
