@@ -43,6 +43,7 @@ RUNTIME_PROVIDERS = {
     "windows-python-libgomp": "gcc",
     "windows-python-libwinpthread": "mingw-w64",
     "windows-python-libdl": "dlfcn-win32",
+    "windows-stata-libgcc": "ubuntu-mingw-gcc",
     "windows-stata-libgomp": "ubuntu-mingw-gcc",
     "windows-stata-libwinpthread": "ubuntu-mingw-w64",
     "manylinux-wheel-libgomp": "manylinux-libgomp",

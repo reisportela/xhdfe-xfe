@@ -397,6 +397,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
         runtime_dir = root / "stata-runtimes"
         runtime_dir.mkdir()
         claims = {
+            "libgcc_s_seh-1.dll": "GCC-13.2.0-COPYING.RUNTIME",
             "libgomp-1.dll": "GCC-13.2.0-COPYING.RUNTIME",
             "libstdc++-6.dll": "GCC-13.2.0-COPYING.RUNTIME",
             "libwinpthread-1.dll": "mingw-w64-11.0.1-winpthreads-COPYING",
@@ -536,6 +537,35 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                 set(builder.RUNTIME_PROVIDERS),
                 {entry["id"] for entry in provenance["runtime_binaries"]},
             )
+
+    def test_release_workflow_maps_current_stata_runtime_closure(self) -> None:
+        self.assertEqual(builder.RUNTIME_PROVIDERS, validator.RUNTIME_PROVIDERS)
+        self.assertEqual(
+            {
+                runtime_id: provider
+                for runtime_id, provider in builder.RUNTIME_PROVIDERS.items()
+                if runtime_id.startswith("windows-stata-")
+            },
+            {
+                "windows-stata-libgcc": "ubuntu-mingw-gcc",
+                "windows-stata-libgomp": "ubuntu-mingw-gcc",
+                "windows-stata-libwinpthread": "ubuntu-mingw-w64",
+            },
+        )
+        workflow_path = REPO_ROOT / ".github" / "workflows" / "release.yml"
+        if not workflow_path.is_file():
+            return
+        workflow = workflow_path.read_text(encoding="utf-8")
+        for fragment in (
+            'test "${#STATA_RUNTIME_DLLS[@]}" -eq 3',
+            '"libgcc_s_seh-1.dll",',
+            'STATA_LIBGCC="$(one_file \'libgcc_s_*.dll\'',
+            '--runtime-binary "windows-stata-libgcc=$STATA_LIBGCC"',
+            '--runtime-provider windows-stata-libgcc=ubuntu-mingw-gcc',
+            "--metadata windows-stata-libgcc.release_path="
+            "xhdfe_xfe-stata-windows-cpu.zip/libgcc_s_seh-1.dll",
+        ):
+            self.assertIn(fragment, workflow)
 
     def test_archive_is_deterministic_across_staging_paths(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:

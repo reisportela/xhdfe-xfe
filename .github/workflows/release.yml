@@ -719,7 +719,7 @@ jobs:
           MANYLINUX_PROVIDER_DLLS=(dl/linux-wheel-provider-runtime/*)
           MANYLINUX_PACKAGED_DLLS=(dl/linux-wheel-packaged-runtime/*)
           MANYLINUX_SOURCE_RPMS=(dl/corresponding-source/*.src.rpm dl/corresponding-source/*.nosrc.rpm)
-          test "${#STATA_RUNTIME_DLLS[@]}" -ge 2
+          test "${#STATA_RUNTIME_DLLS[@]}" -eq 3
           test "${#WINPY_PROVIDER_DLLS[@]}" -ge 5
           test "${#MANYLINUX_PROVIDER_DLLS[@]}" -eq 1
           test "${#MANYLINUX_PACKAGED_DLLS[@]}" -eq 1
@@ -731,7 +731,11 @@ jobs:
           def dlls(path: str) -> set[str]:
               return {item.name.casefold() for item in Path(path).glob("*.dll")}
 
-          stata_expected = {"libgomp-1.dll", "libwinpthread-1.dll"}
+          stata_expected = {
+              "libgcc_s_seh-1.dll",
+              "libgomp-1.dll",
+              "libwinpthread-1.dll",
+          }
           python_expected = {
               "libdl.dll",
               "libgcc_s_seh-1.dll",
@@ -791,6 +795,12 @@ jobs:
           ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
           entries = {item["name"].casefold(): item for item in ledger["entries"]}
           expected = {
+              "libgcc_s_seh-1.dll": {
+                  "runtime_version": "13.2.0-6ubuntu1+26.1",
+                  "source_package": "gcc-mingw-w64",
+                  "source_version": "26.1",
+                  "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
+              },
               "libgomp-1.dll": {
                   "runtime_version": "13.2.0-6ubuntu1+26.1",
                   "source_package": "gcc-mingw-w64",
@@ -963,6 +973,7 @@ jobs:
           WINPY_LIBGOMP="$(one_file 'libgomp-*.dll' "$WINPY_PACKAGED")"
           WINPY_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' "$WINPY_PACKAGED")"
           WINPY_LIBDL="$(one_file 'libdl.dll' "$WINPY_PACKAGED")"
+          STATA_LIBGCC="$(one_file 'libgcc_s_*.dll' dl/windows-stata-runtime)"
           STATA_LIBGOMP="$(one_file 'libgomp-*.dll' dl/windows-stata-runtime)"
           STATA_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' dl/windows-stata-runtime)"
           MANY_PACKAGED="$(one_file '*' dl/linux-wheel-packaged-runtime)"
@@ -1034,6 +1045,9 @@ jobs:
             --runtime-binary "windows-python-libdl=$WINPY_LIBDL" \
             --runtime-provider windows-python-libdl=dlfcn-win32 \
             --provider-binary "windows-python-libdl=$WINPY_PROVIDER/$(basename "$WINPY_LIBDL")" \
+            --runtime-binary "windows-stata-libgcc=$STATA_LIBGCC" \
+            --runtime-provider windows-stata-libgcc=ubuntu-mingw-gcc \
+            --provider-binary "windows-stata-libgcc=$STATA_LIBGCC" \
             --runtime-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
             --runtime-provider windows-stata-libgomp=ubuntu-mingw-gcc \
             --provider-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
@@ -1073,6 +1087,8 @@ jobs:
             --metadata "windows-python-libwinpthread.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBWINPTHREAD")")" \
             --metadata "windows-python-libdl.release_path=wheel/xhdfe/$(basename "$WINPY_LIBDL")" \
             --metadata "windows-python-libdl.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBDL")")" \
+            --metadata windows-stata-libgcc.release_path=xhdfe_xfe-stata-windows-cpu.zip/libgcc_s_seh-1.dll \
+            --metadata "windows-stata-libgcc.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBGCC")")" \
             --metadata windows-stata-libgomp.release_path=xhdfe_xfe-stata-windows-cpu.zip/libgomp-1.dll \
             --metadata "windows-stata-libgomp.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBGOMP")")" \
             --metadata windows-stata-libwinpthread.release_path=xhdfe_xfe-stata-windows-cpu.zip/libwinpthread-1.dll \
