@@ -166,6 +166,51 @@ def _file_record(
     }
 
 
+def _source_rpm_info(path: Path) -> dict[str, Any]:
+    canonical = path.resolve(strict=True)
+    query = (
+        "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t"
+        "%{SOURCEPACKAGE}\t%|SOURCERPM?{present}:{absent}|\n"
+    )
+    result = _run(["rpm", "-qp", "--qf", query, str(canonical)])
+    lines = result.stdout.splitlines()
+    if len(lines) != 1:
+        raise ProvenanceError(f"not a valid source RPM: {canonical}")
+    fields = lines[0].split("\t")
+    missing = {"", "(none)", "(null)"}
+    if (
+        len(fields) != 7
+        or any(field != field.strip() for field in fields)
+        or any(fields[index] in missing for index in (0, 2, 3, 4))
+        or not fields[1].isdecimal()
+    ):
+        raise ProvenanceError(f"not a valid source RPM: {canonical}")
+    name, epoch, version, release, arch, source_package, source_rpm_state = fields
+    if source_package != "1" or source_rpm_state != "absent":
+        raise ProvenanceError(f"not a valid source RPM: {canonical}")
+    if canonical.name.endswith(".src.rpm"):
+        file_kind = "src"
+    elif canonical.name.endswith(".nosrc.rpm"):
+        file_kind = "nosrc"
+    else:
+        raise ProvenanceError(f"source RPM has an invalid filename: {canonical}")
+    expected_name = f"{name}-{version}-{release}.{file_kind}.rpm"
+    if canonical.name != expected_name:
+        raise ProvenanceError(
+            f"source RPM header/filename mismatch: {canonical.name} != {expected_name}"
+        )
+    epoch_prefix = "" if epoch in {"0", "(none)", "(null)"} else f"{epoch}:"
+    return {
+        "rpm_name": name,
+        "epoch": epoch,
+        "version": version,
+        "release": release,
+        "arch": arch,
+        "file_kind": file_kind,
+        "nevra": f"{name}-{epoch_prefix}{version}-{release}.{arch}",
+    }
+
+
 def _unique_existing(paths: Iterable[Path], label: str) -> Path:
     canonical: dict[str, Path] = {}
     for candidate in paths:
@@ -550,18 +595,7 @@ def _wheel_ledger(args: argparse.Namespace) -> int:
         raise ProvenanceError(
             f"source RPM mismatch: expected {provider_rpm['source_rpm']}, got {source_rpm.name}"
         )
-    source_query = _run(
-        ["rpm", "-qp", "--qf", "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}", str(source_rpm)]
-    ).stdout.strip().split("\t")
-    if len(source_query) != 5 or source_query[4] not in {"src", "nosrc"}:
-        raise ProvenanceError(f"not a valid source RPM: {source_rpm}")
-    source_epoch_prefix = (
-        "" if source_query[1] in {"0", "(none)", "(null)"} else f"{source_query[1]}:"
-    )
-    source_nevra = (
-        f"{source_query[0]}-{source_epoch_prefix}{source_query[2]}-"
-        f"{source_query[3]}.{source_query[4]}"
-    )
+    source_info = _source_rpm_info(source_rpm)
 
     with zipfile.ZipFile(raw_wheel) as archive:
         raw_extensions = [
@@ -660,12 +694,7 @@ def _wheel_ledger(args: argparse.Namespace) -> int:
             "path": str(source_rpm),
             "sha256": _sha256_file(source_rpm),
             "size": source_rpm.stat().st_size,
-            "rpm_name": source_query[0],
-            "epoch": source_query[1],
-            "version": source_query[2],
-            "release": source_query[3],
-            "arch": source_query[4],
-            "nevra": source_nevra,
+            **source_info,
             "expected_filename": provider_rpm["source_rpm"],
         },
     }

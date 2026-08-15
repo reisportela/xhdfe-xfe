@@ -23,6 +23,121 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class CorrespondingSourceBundleTests(unittest.TestCase):
+    def test_source_rpm_identity_uses_sourcepackage_not_arch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source_rpm = Path(temporary) / "gcc-8.5.0-28.el8_10.alma.1.src.rpm"
+            source_rpm.write_bytes(b"synthetic source rpm")
+            genuine = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "gcc\t0\t8.5.0\t28.el8_10.alma.1\tx86_64\t1\tabsent\n"
+                ),
+                stderr="warning: Header RSA/SHA256 Signature, key ID: NOKEY\n",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=genuine):
+                info = linux_provenance._source_rpm_info(source_rpm)
+            self.assertEqual(info["rpm_name"], "gcc")
+            self.assertEqual(info["arch"], "x86_64")
+            self.assertEqual(info["file_kind"], "src")
+            self.assertEqual(info["nevra"], "gcc-8.5.0-28.el8_10.alma.1.x86_64")
+
+            binary_header = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "libgomp\t0\t8.5.0\t28.el8_10.alma.1\tx86_64\t0\tpresent\n"
+                ),
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    linux_provenance, "_run", return_value=binary_header
+                ),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "not a valid source RPM"
+                ),
+            ):
+                linux_provenance._source_rpm_info(source_rpm)
+
+            inconsistent_source = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "gcc\t0\t8.5.0\t28.el8_10.alma.1\tx86_64\t1\tpresent\n"
+                ),
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    linux_provenance, "_run", return_value=inconsistent_source
+                ),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "not a valid source RPM"
+                ),
+            ):
+                linux_provenance._source_rpm_info(source_rpm)
+
+            wrong_header = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="gcc\t0\t8.5.1\t1.el8\tx86_64\t1\tabsent\n",
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    linux_provenance, "_run", return_value=wrong_header
+                ),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "header/filename mismatch"
+                ),
+            ):
+                linux_provenance._source_rpm_info(source_rpm)
+
+            malformed_epoch = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=(
+                    "gcc\t(none)\t8.5.0\t28.el8_10.alma.1\tx86_64\t1\tabsent\n"
+                ),
+                stderr="",
+            )
+            with (
+                mock.patch.object(
+                    linux_provenance, "_run", return_value=malformed_epoch
+                ),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "not a valid source RPM"
+                ),
+            ):
+                linux_provenance._source_rpm_info(source_rpm)
+
+            repeated = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=genuine.stdout * 2,
+                stderr="",
+            )
+            with (
+                mock.patch.object(linux_provenance, "_run", return_value=repeated),
+                self.assertRaisesRegex(
+                    linux_provenance.ProvenanceError, "not a valid source RPM"
+                ),
+            ):
+                linux_provenance._source_rpm_info(source_rpm)
+
+            nosrc_rpm = Path(temporary) / "restricted-1.0-2.nosrc.rpm"
+            nosrc_rpm.write_bytes(b"synthetic no-source rpm")
+            nosrc = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="restricted\t0\t1.0\t2\tnoarch\t1\tabsent\n",
+                stderr="",
+            )
+            with mock.patch.object(linux_provenance, "_run", return_value=nosrc):
+                info = linux_provenance._source_rpm_info(nosrc_rpm)
+            self.assertEqual(info["file_kind"], "nosrc")
+
     def test_proprietary_rpm_may_omit_source_rpm_but_libgomp_may_not(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             binary = Path(temporary) / "libdevice.10.bc"
