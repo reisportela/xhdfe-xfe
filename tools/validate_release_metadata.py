@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import hashlib
 from pathlib import Path
 import re
 
@@ -107,6 +108,10 @@ def validate(expected_version: str) -> None:
         "pyproject.toml is missing the pandas formula-extra dependency",
     )
     _require(
+        "if(APPLE OR WIN32)" in _read("CMakeLists.txt"),
+        "CMakeLists.txt must disable native CPU tuning by default on Windows",
+    )
+    _require(
         f"Package documentation version: {expected_version}" in _read("xhdfe/help/xhdfe.md"),
         "xhdfe/help/xhdfe.md has a stale package version",
     )
@@ -159,6 +164,28 @@ def validate(expected_version: str) -> None:
         and "winpthreads" in notice,
         "NOTICE omits GNU/MinGW runtime licensing",
     )
+    source_asset = (
+        "https://github.com/reisportela/xhdfe-xfe/releases/download/"
+        f"v{expected_version}/xhdfe-{expected_version}-corresponding-source.zip"
+    )
+    _require(source_asset in notice, "NOTICE has a stale corresponding-source URL")
+    license_hashes = {
+        "GCC-13.2.0-COPYING3":
+            "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+        "GCC-13.2.0-COPYING.RUNTIME":
+            "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "mingw-w64-11.0.1-winpthreads-COPYING":
+            "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177",
+        "dlfcn-win32-1.4.1-COPYING":
+            "4cc7ac997b9293db5919baf630100cc09b3508efdfe6a6611c95511fb863b3c7",
+    }
+    for filename, expected_hash in license_hashes.items():
+        path = ROOT / "third_party" / "licenses" / filename
+        _require(path.is_file(), f"missing runtime license: {path}")
+        _require(
+            hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash,
+            f"runtime license hash mismatch: {filename}",
+        )
     _require(
         (ROOT / "LICENSE").read_bytes() == (ROOT / "stata/LICENSE").read_bytes()
         and (ROOT / "NOTICE").read_bytes() == (ROOT / "stata/NOTICE").read_bytes(),

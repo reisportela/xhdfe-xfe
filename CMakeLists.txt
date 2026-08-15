@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.24.0.20260814 LANGUAGES CXX)
+project(xhdfe VERSION 2.24.0.20260815 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,9 @@ include(CTest)
 set(XHDFE_THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
 set(XHDFE_ENABLE_MARCH_NATIVE_DEFAULT ON)
-if(APPLE)
+if(APPLE OR WIN32)
+    # Prebuilt/native-extension artifacts must not inherit the build host's
+    # instruction set. Users can still opt in explicitly for a local-only build.
     set(XHDFE_ENABLE_MARCH_NATIVE_DEFAULT OFF)
 endif()
 option(XHDFE_ENABLE_MARCH_NATIVE "Enable -march=native optimizations when supported by the active target compiler." ${XHDFE_ENABLE_MARCH_NATIVE_DEFAULT})

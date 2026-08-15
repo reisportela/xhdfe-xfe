@@ -1,0 +1,5 @@
+# Preserve byte-exact upstream redistribution texts and their certified hashes.
+third_party/licenses/GCC-13.2.0-COPYING3 -text -diff
+third_party/licenses/GCC-13.2.0-COPYING.RUNTIME -text -diff
+third_party/licenses/mingw-w64-11.0.1-winpthreads-COPYING -text -diff
+third_party/licenses/dlfcn-win32-1.4.1-COPYING -text -diff

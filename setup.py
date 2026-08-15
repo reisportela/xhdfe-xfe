@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import filecmp
+import hashlib
+import json
 import os
 import re
 import shlex
@@ -78,6 +80,23 @@ _WINDOWS_HOST_DLL_NAMES = frozenset(
     }
 )
 
+_WINDOWS_RUNTIME_MANIFEST = "_windows_runtime_manifest.json"
+_WINDOWS_RUNTIME_LICENSES = (
+    (
+        re.compile(
+            r"^(?:libgcc_s_.+|libstdc\+\+-\d+|libgomp-\d+|libatomic-\d+|"
+            r"libssp-\d+|libquadmath-\d+)\.dll$",
+            re.IGNORECASE,
+        ),
+        "GPL-3.0-or-later WITH GCC-exception-3.1",
+    ),
+    (
+        re.compile(r"^libwinpthread-\d+\.dll$", re.IGNORECASE),
+        "MIT AND BSD-3-Clause",
+    ),
+    (re.compile(r"^libdl\.dll$", re.IGNORECASE), "MIT"),
+)
+
 
 def _is_windows_host_dll(dll_name: str) -> bool:
     """Return whether Windows or the active CPython provides this dependency."""
@@ -88,6 +107,22 @@ def _is_windows_host_dll(dll_name: str) -> bool:
         or name in _PYTHON_HOST_DLL_NAMES
         or bool(_WINDOWS_HOST_DLL_RE.fullmatch(name))
     )
+
+
+def _windows_runtime_license(dll_name: str) -> str | None:
+    name = Path(dll_name).name
+    for pattern, license_expression in _WINDOWS_RUNTIME_LICENSES:
+        if pattern.fullmatch(name):
+            return license_expression
+    return None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _lower(value: str | None) -> str:
@@ -401,10 +436,17 @@ def _pe_architecture(objdump: Path, binary: Path) -> str:
 def _compiler_runtime_path(
     compiler: Path, dll_name: str, search_dirs: tuple[Path, ...] = ()
 ) -> Path | None:
+    path, _ = _compiler_runtime_resolution(compiler, dll_name, search_dirs)
+    return path
+
+
+def _compiler_runtime_resolution(
+    compiler: Path, dll_name: str, search_dirs: tuple[Path, ...] = ()
+) -> tuple[Path | None, str | None]:
     for directory in search_dirs:
         candidate = directory / dll_name
         if candidate.is_file():
-            return candidate
+            return candidate.resolve(), "requester-directory"
 
     result = subprocess.run(
         [str(compiler), f"-print-file-name={dll_name}"],
@@ -419,12 +461,12 @@ def _compiler_runtime_path(
         if reported and reported.lower() != dll_name.lower():
             candidate = Path(reported)
             if candidate.is_file():
-                return candidate
+                return candidate.resolve(), "compiler-print-file-name"
 
     adjacent = compiler.parent / dll_name
     if adjacent.is_file():
-        return adjacent
-    return None
+        return adjacent.resolve(), "compiler-adjacent"
+    return None, None
 
 
 def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
@@ -460,13 +502,16 @@ def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
     )
     bundled: list[Path] = []
     resolved_sources: dict[str, Path] = {}
+    runtime_records: dict[str, dict[str, object]] = {}
 
     while pending:
         dll_name, requester_dir = pending.pop(0)
         key = dll_name.lower()
 
         search_dirs = () if requester_dir is None else (requester_dir,)
-        source = _compiler_runtime_path(compiler, dll_name, search_dirs)
+        source, resolution_method = _compiler_runtime_resolution(
+            compiler, dll_name, search_dirs
+        )
         previous_source = resolved_sources.get(key)
         if previous_source is not None:
             if source is not None and not filecmp.cmp(
@@ -491,6 +536,7 @@ def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
                 f"{source.name} is {source_architecture}. Refusing to bundle a "
                 "runtime DLL for a different architecture."
             )
+        license_expression = _windows_runtime_license(dll_name) or "UNMAPPED"
         resolved_sources[key] = source
 
         destination = extension.parent / dll_name
@@ -502,11 +548,52 @@ def _bundle_mingw_runtime_dlls(extension: Path, build_dir: Path) -> list[Path]:
                 )
         else:
             shutil.copy2(source, destination)
+        source_sha256 = _sha256(source)
+        member_sha256 = _sha256(destination)
+        if member_sha256 != source_sha256:
+            raise RuntimeError(
+                f"Bundled MinGW runtime DLL {dll_name} does not match its source."
+            )
         bundled.append(destination)
 
-        for dependency in sorted(_pe_dll_dependencies(objdump, source)):
+        dependencies = sorted(
+            _pe_dll_dependencies(objdump, source), key=str.casefold
+        )
+        runtime_records[key] = {
+            "architecture": source_architecture,
+            "dependencies": dependencies,
+            "license": license_expression,
+            "member": destination.name,
+            "member_sha256": member_sha256,
+            "resolution_method": resolution_method,
+            "size": destination.stat().st_size,
+            "source_path": str(source),
+            "source_sha256": source_sha256,
+        }
+        for dependency in dependencies:
             if not _is_windows_host_dll(dependency):
                 pending.append((dependency, source.parent))
+
+    extension_dependencies = sorted(
+        _pe_dll_dependencies(objdump, extension), key=str.casefold
+    )
+    manifest = {
+        "format": "xhdfe-windows-runtime-closure-v1",
+        "roots": [
+            {
+                "architecture": extension_architecture,
+                "dependencies": extension_dependencies,
+                "member": extension.name,
+                "member_sha256": _sha256(extension),
+                "size": extension.stat().st_size,
+            }
+        ],
+        "runtimes": [runtime_records[key] for key in sorted(runtime_records)],
+    }
+    manifest_path = extension.parent / _WINDOWS_RUNTIME_MANIFEST
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
     return bundled
 

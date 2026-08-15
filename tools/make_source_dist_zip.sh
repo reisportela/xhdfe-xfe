@@ -93,6 +93,7 @@ copy_tree "${ROOT_DIR}/r/xhdfe" "${PKG}/r/xhdfe"
 # ---- Vendored third-party for CMake/Python (offline) ----------------------
 copy_tree "${ROOT_DIR}/third_party/eigen-3.4.0"      "${PKG}/third_party/eigen-3.4.0"
 copy_tree "${ROOT_DIR}/third_party/pybind11-2.11.1"  "${PKG}/third_party/pybind11-2.11.1"
+copy_tree "${ROOT_DIR}/third_party/licenses"          "${PKG}/third_party/licenses"
 
 # ---- Vendored R dependency (official CRAN source, offline) ----------------
 # Keep Rcpp as its upstream source archive rather than unpacking or modifying

@@ -42,6 +42,10 @@ required_entries=(
   "xhdfe-src/pyproject.toml"
   "xhdfe-src/setup.py"
   "xhdfe-src/NOTICE"
+  "xhdfe-src/third_party/licenses/GCC-13.2.0-COPYING3"
+  "xhdfe-src/third_party/licenses/GCC-13.2.0-COPYING.RUNTIME"
+  "xhdfe-src/third_party/licenses/mingw-w64-11.0.1-winpthreads-COPYING"
+  "xhdfe-src/third_party/licenses/dlfcn-win32-1.4.1-COPYING"
   "xhdfe-src/py_hdfe_v11.py"
   "xhdfe-src/xhdfe/_formula.py"
   "xhdfe-src/xhdfe/help/xhdfe.md"
@@ -60,9 +64,13 @@ required_entries=(
   "xhdfe-src/tools/check_verifier_device_fma.sh"
   "xhdfe-src/tools/validate_python_release_artifacts.py"
   "xhdfe-src/tools/validate_release_metadata.py"
+  "xhdfe-src/tools/build_corresponding_source_bundle.py"
+  "xhdfe-src/tools/record_linux_release_provenance.py"
+  "xhdfe-src/tools/validate_corresponding_source_bundle.py"
   "xhdfe-src/tests/ieee_bits_liveness.cpp"
   "xhdfe-src/tests/fail_closed_entrypoints.cpp"
   "xhdfe-src/tests/audit_20260804_contracts.py"
+  "xhdfe-src/tests/test_corresponding_source_bundle.py"
   "${RCPP_ARCHIVE}"
   "${RCPP_PROVENANCE}"
 )
@@ -95,8 +103,17 @@ python3 -m py_compile \
   "${source_root}/xhdfe/_formula.py" \
   "${source_root}/tests/test_formula_frontend.py" \
   "${source_root}/tests/test_windows_runtime_packaging.py" \
+  "${source_root}/tests/test_corresponding_source_bundle.py" \
   "${source_root}/tools/validate_python_release_artifacts.py" \
-  "${source_root}/tools/validate_release_metadata.py"
+  "${source_root}/tools/validate_release_metadata.py" \
+  "${source_root}/tools/build_corresponding_source_bundle.py" \
+  "${source_root}/tools/record_linux_release_provenance.py" \
+  "${source_root}/tools/validate_corresponding_source_bundle.py"
+
+(
+  cd "${source_root}"
+  PYTHONPATH=. python3 -m unittest -v tests.test_corresponding_source_bundle
+)
 
 command -v cmake >/dev/null 2>&1 || {
   echo "cmake is required to validate the autonomous source archive" >&2
@@ -142,6 +159,22 @@ grep -Fq "Rcpp ${EXPECTED_RCPP_VERSION}" "${notice}" || {
   echo "NOTICE does not disclose the bundled Rcpp source" >&2
   exit 1
 }
+
+license_checks=(
+  "GCC-13.2.0-COPYING3:8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+  "GCC-13.2.0-COPYING.RUNTIME:9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74"
+  "mingw-w64-11.0.1-winpthreads-COPYING:63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177"
+  "dlfcn-win32-1.4.1-COPYING:4cc7ac997b9293db5919baf630100cc09b3508efdfe6a6611c95511fb863b3c7"
+)
+for item in "${license_checks[@]}"; do
+  name="${item%%:*}"
+  expected="${item#*:}"
+  actual="$(sha256_file "${source_root}/third_party/licenses/${name}")"
+  [[ "$actual" == "$expected" ]] || {
+    echo "${name}: license SHA-256 mismatch: ${actual}" >&2
+    exit 1
+  }
+done
 
 echo "Autonomous source archive closure OK: ${ARCHIVE}"
 echo "CMake configure and non-finite guard build: OK"

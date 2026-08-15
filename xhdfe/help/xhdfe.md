@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.24.0.20260814. Use `python -m xhdfe --version`
+Package documentation version: 2.24.0.20260815. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -29,9 +29,10 @@ python -m pip install -e .
 The build uses CMake and compiles the existing `py_hdfe_v11` extension into the
 `xhdfe` package. CPU is the default backend.
 
-Portable source installs do not require `-march=native`. On Apple platforms,
-native tuning defaults to off so Apple Silicon hosts can also build x86_64
-Python environments under Rosetta. The explicit safe-path workaround is:
+Portable source installs do not require `-march=native`. Native tuning defaults
+to off on Apple and Windows: Apple Silicon hosts can also build x86_64 Python
+environments under Rosetta, and Windows binaries do not inherit the build
+machine's instruction set. The explicit safe-path override is:
 
 ```bash
 XHDFE_ENABLE_MARCH_NATIVE=OFF python -m pip install .

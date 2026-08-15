@@ -127,7 +127,7 @@ jobs:
           set -euo pipefail
           docker run --rm -v "$PWD:/w" -w /w \
             -e XHDFE_CUDA_ARCHS="$XHDFE_CUDA_ARCHS" \
-            quay.io/pypa/manylinux_2_28_x86_64 \
+            quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4 \
             bash ci/build_linux_release_manylinux.sh
 
       - name: Enforce glibc floor on Linux artifacts (fail-closed, host-side re-check)
@@ -198,9 +198,9 @@ jobs:
           done
 
       # ---- Windows x86_64 CPU/OpenMP (mingw POSIX cross-compile) ----
-      # OpenMP is mandatory for production plugins. The two runtime DLLs are
-      # shipped beside the plugins so Windows' DLL loader resolves them from the
-      # package directory without a machine-wide installation.
+      # OpenMP is mandatory for production plugins. The recursively resolved
+      # non-system runtime closure is shipped beside the plugins so Windows'
+      # loader does not depend on a machine-wide MinGW installation.
       - name: Build windows-cpu OpenMP (xhdfe + xfe, mingw cross)
         run: |
           set -euo pipefail
@@ -208,20 +208,87 @@ jobs:
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
           bash stata/tools/build-xfe-plugin.sh --windows --openmp
           cp stata/xfe.plugin artifacts/xfe.plugin.windows
-          LIBGOMP="$(x86_64-w64-mingw32-g++ -print-file-name=libgomp-1.dll)"
-          LIBWINPTHREAD="$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)"
+          LIBGOMP="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libgomp-1.dll)")"
+          LIBWINPTHREAD="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)")"
           test -f "$LIBGOMP"
           test -f "$LIBWINPTHREAD"
           x86_64-w64-mingw32-g++ --version
-          for runtime in "$LIBGOMP" "$LIBWINPTHREAD"; do
-            provider="$(dpkg-query -S "$runtime")"
-            provider="${provider%%:*}"
-            dpkg-query -W \
-              -f='Runtime-Package=${binary:Package} Version=${Version} Source=${source:Package} Source-Version=${source:Version} Built-Using=${Built-Using}\n' \
-              "$provider"
-          done
-          cp "$LIBGOMP" artifacts/libgomp-1.dll
-          cp "$LIBWINPTHREAD" artifacts/libwinpthread-1.dll
+          mkdir -p artifacts/windows-stata-runtime
+          python3 tools/validate_python_release_artifacts.py \
+            --pe-binary artifacts/xhdfe.plugin.windows \
+            --pe-binary artifacts/xfe.plugin.windows \
+            --runtime-search-dir "$(dirname "$LIBGOMP")" \
+            --runtime-search-dir "$(dirname "$LIBWINPTHREAD")" \
+            --runtime-dir artifacts/windows-stata-runtime \
+            --write-runtime-ledger artifacts/windows-stata-runtime-ledger.json \
+            --mingw-objdump "$(command -v x86_64-w64-mingw32-objdump)"
+          python3 - artifacts/windows-stata-runtime-ledger.json <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          def output(*args: str) -> str:
+              return subprocess.check_output(args, text=True).strip()
+
+          closure = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          license_files = {
+              "GPL-3.0-or-later WITH GCC-exception-3.1":
+                  "GCC-13.2.0-COPYING.RUNTIME",
+              "MIT AND BSD-3-Clause":
+                  "mingw-w64-11.0.1-winpthreads-COPYING",
+              "MIT": "dlfcn-win32-1.4.1-COPYING",
+          }
+          entries = []
+          for runtime in closure["runtimes"]:
+              source = Path(runtime["source_path"]).resolve(strict=True)
+              provider = output("dpkg-query", "-S", str(source)).split(":", 1)[0]
+              fields = output(
+                  "dpkg-query",
+                  "-W",
+                  "-f=${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\t${Built-Using}\tEND",
+                  provider,
+              ).split("\t")
+              if len(fields) != 6 or fields[-1] != "END":
+                  raise SystemExit(f"unexpected dpkg metadata for {provider}: {fields!r}")
+              payload = source.read_bytes()
+              source_hash = hashlib.sha256(payload).hexdigest()
+              if source_hash != runtime["source_sha256"] or source_hash != runtime["member_sha256"]:
+                  raise SystemExit(f"runtime/provider hash mismatch for {source}")
+              entry = {
+                  "name": source.name,
+                  "sha256": source_hash,
+                  "size": len(payload),
+                  "source_path": str(source),
+                  "runtime_package": fields[0],
+                  "runtime_version": fields[1],
+                  "source_package": fields[2],
+                  "source_version": fields[3],
+                  "built_using": fields[4],
+                  "license": runtime["license"],
+                  "license_file": license_files[runtime["license"]],
+                  "packaged_sha256": runtime["member_sha256"],
+              }
+              entries.append(entry)
+              print("WINDOWS_STATA_RUNTIME " + json.dumps(entry, sort_keys=True))
+
+          ledger = {
+              "schema_version": 1,
+              "artifact": "xhdfe-xfe-stata-windows-cpu",
+              "compiler": {
+                  "target": output("x86_64-w64-mingw32-g++", "-dumpmachine"),
+                  "version": output(
+                      "x86_64-w64-mingw32-g++", "-dumpfullversion", "-dumpversion"
+                  ),
+              },
+              "closure_ledger": "windows-stata-runtime-ledger.json",
+              "entries": sorted(entries, key=lambda item: item["name"].lower()),
+          }
+          Path("artifacts/windows-stata-provider-ledger.json").write_text(
+              json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
 
       - name: Verify windows-cpu plugins (PE32+ + OpenMP runtime)
         run: |
@@ -239,10 +306,18 @@ jobs:
                 exit 1
               }
           done
-          for f in artifacts/libgomp-1.dll artifacts/libwinpthread-1.dll; do
-            test -f "$f"
+          shopt -s nullglob
+          RUNTIME_DLLS=(artifacts/windows-stata-runtime/*.dll)
+          test "${#RUNTIME_DLLS[@]}" -ge 2
+          for f in "${RUNTIME_DLLS[@]}"; do
             file "$f" | grep -Eq 'PE32\+|PE32 '
           done
+          python3 tools/validate_python_release_artifacts.py \
+            --pe-binary artifacts/xhdfe.plugin.windows \
+            --pe-binary artifacts/xfe.plugin.windows \
+            --runtime-dir artifacts/windows-stata-runtime \
+            --runtime-ledger artifacts/windows-stata-runtime-ledger.json \
+            --mingw-objdump "$(command -v x86_64-w64-mingw32-objdump)"
 
       - name: Smoke-test manylinux Python wheel and build R source package
         run: |
@@ -311,6 +386,7 @@ jobs:
             artifacts/xhdfe_*.tar.gz
 
       - name: Upload Linux/Windows plugin artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: plugins-linux            # MUST be unique per job (v4 artifacts are immutable)
@@ -321,8 +397,17 @@ jobs:
             artifacts/xfe.plugin.linux-cuda
             artifacts/xhdfe.plugin.windows
             artifacts/xfe.plugin.windows
-            artifacts/libgomp-1.dll
-            artifacts/libwinpthread-1.dll
+            artifacts/windows-stata-runtime
+            artifacts/windows-stata-runtime-ledger.json
+            artifacts/windows-stata-provider-ledger.json
+            artifacts/linux-cuda-provenance.json
+            artifacts/cuda-nvcc-invocations.jsonl
+            artifacts/cuda-nvcc-link-dryrun.log
+            artifacts/cuda-license-files
+            artifacts/linux-wheel-runtime-ledger.json
+            artifacts/linux-wheel-provider-runtime
+            artifacts/linux-wheel-packaged-runtime
+            artifacts/corresponding-source
             artifacts/xhdfe-*.whl
             artifacts/xhdfe-*.tar.gz
             artifacts/xhdfe_*.tar.gz
@@ -390,6 +475,46 @@ jobs:
             --wheel $wheel.FullName `
             --expected-version $expected `
             --mingw-objdump C:\Strawberry\c\bin\objdump.exe
+          $providerDir = New-Item -ItemType Directory -Force `
+            artifacts\windows-python-provider-runtimes
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($wheel.FullName)
+          try {
+            $manifestEntries = @($archive.Entries | Where-Object {
+              $_.FullName -match '(^|/)_windows_runtime_manifest\.json$'
+            })
+            if ($manifestEntries.Count -ne 1) {
+              throw "Expected one Windows runtime manifest in wheel, found $($manifestEntries.Count)"
+            }
+            $reader = New-Object System.IO.StreamReader($manifestEntries[0].Open())
+            try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            $manifest = $manifestText | ConvertFrom-Json
+            [System.IO.File]::WriteAllText(
+              (Join-Path $providerDir '_windows_runtime_manifest.json'),
+              $manifestText,
+              [System.Text.UTF8Encoding]::new($false)
+            )
+            foreach ($runtime in $manifest.runtimes) {
+              $source = [string]$runtime.source_path
+              if (-not (Test-Path $source -PathType Leaf)) {
+                throw "Runtime provider source disappeared after wheel build: $source"
+              }
+              $sourceHash = (Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($sourceHash -ne [string]$runtime.source_sha256) {
+                throw "Runtime provider hash differs from the embedded manifest: $source"
+              }
+              $destination = Join-Path $providerDir ([string]$runtime.member)
+              Copy-Item -LiteralPath $source -Destination $destination
+              $destinationHash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($destinationHash -ne [string]$runtime.member_sha256) {
+                throw "Exported runtime provider bytes differ from packaged bytes: $destination"
+              }
+              Write-Host "WINDOWS_RUNTIME_PROVIDER $destinationHash $source"
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
 
       - name: Import wheel without Strawberry on PATH
         shell: pwsh
@@ -414,6 +539,8 @@ jobs:
             Get-ChildItem $packageDir -File | Where-Object {
               $_.Extension -in '.pyd', '.dll'
             } | Sort-Object Name | ForEach-Object {
+              $packagedHash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              Write-Host "PACKAGED_PE_SHA256 $packagedHash $($_.Length) $($_.Name)"
               Write-Host "PE dependencies: $($_.Name)"
               & C:\Strawberry\c\bin\objdump.exe -p $_.FullName |
                 Select-String 'DLL Name:'
@@ -433,7 +560,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: plugins-windows-python
-          path: artifacts/xhdfe-*.whl
+          path: |
+            artifacts/xhdfe-*.whl
+            artifacts/windows-python-provider-runtimes
           if-no-files-found: error
           retention-days: 7
 
@@ -526,8 +655,8 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
-  # Release staging: assemble and validate per-platform Stata bundles, raw CUDA
-  # fatbins, Python/R packages, the offline source/runtime ZIP, and net-install
+  # Release staging: assemble and validate per-platform Stata bundles,
+  # Python/R packages, the offline source/runtime ZIP, and net-install
   # snapshot. This runs for preflight and version tags with read-only contents.
   # ---------------------------------------------------------------------------
   assemble-release:
@@ -545,7 +674,9 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y zip unzip python3
+          sudo apt-get install -y \
+            binutils-mingw-w64-x86-64 curl ca-certificates \
+            zip unzip python3 xz-utils
 
       - name: Download all plugin artifacts
         uses: actions/download-artifact@v4
@@ -565,10 +696,46 @@ jobs:
             dl/xhdfe.plugin.linux-cpu dl/xfe.plugin.linux-cpu \
             dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda \
             dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
-            dl/libgomp-1.dll dl/libwinpthread-1.dll \
+            dl/windows-stata-runtime-ledger.json \
+            dl/windows-stata-provider-ledger.json \
+            dl/windows-python-provider-runtimes/_windows_runtime_manifest.json \
+            dl/linux-cuda-provenance.json \
+            dl/cuda-nvcc-invocations.jsonl \
+            dl/cuda-nvcc-link-dryrun.log \
+            dl/linux-wheel-runtime-ledger.json \
             dl/xhdfe.plugin.macos dl/xfe.plugin.macos ; do
             test -f "$f" || { echo "MISSING required plugin: $f" >&2; exit 1; }
           done
+          STATA_RUNTIME_DLLS=(dl/windows-stata-runtime/*.dll)
+          WINPY_PROVIDER_DLLS=(dl/windows-python-provider-runtimes/*.dll)
+          MANYLINUX_PROVIDER_DLLS=(dl/linux-wheel-provider-runtime/*)
+          MANYLINUX_PACKAGED_DLLS=(dl/linux-wheel-packaged-runtime/*)
+          MANYLINUX_SOURCE_RPMS=(dl/corresponding-source/*.src.rpm dl/corresponding-source/*.nosrc.rpm)
+          test "${#STATA_RUNTIME_DLLS[@]}" -ge 2
+          test "${#WINPY_PROVIDER_DLLS[@]}" -ge 5
+          test "${#MANYLINUX_PROVIDER_DLLS[@]}" -eq 1
+          test "${#MANYLINUX_PACKAGED_DLLS[@]}" -eq 1
+          test "${#MANYLINUX_SOURCE_RPMS[@]}" -eq 1
+          test -d dl/cuda-license-files
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def dlls(path: str) -> set[str]:
+              return {item.name.casefold() for item in Path(path).glob("*.dll")}
+
+          stata_expected = {"libgomp-1.dll", "libwinpthread-1.dll"}
+          python_expected = {
+              "libdl.dll",
+              "libgcc_s_seh-1.dll",
+              "libgomp-1.dll",
+              "libstdc++-6.dll",
+              "libwinpthread-1.dll",
+          }
+          if dlls("dl/windows-stata-runtime") != stata_expected:
+              raise SystemExit("Stata runtime closure changed; update source/license mapping")
+          if dlls("dl/windows-python-provider-runtimes") != python_expected:
+              raise SystemExit("Python runtime closure changed; update source/license mapping")
+          PY
           PY_WHEELS=(dl/xhdfe-*.whl)
           PY_SDISTS=(dl/xhdfe-*.tar.gz)
           R_TARBALLS=(dl/xhdfe_*.tar.gz)
@@ -580,10 +747,336 @@ jobs:
           test "${#PY_SDISTS[@]}" -eq 1
           test "${#R_TARBALLS[@]}" -eq 1
 
+      - name: Revalidate downloaded Windows runtime closures
+        run: |
+          set -euo pipefail
+          python3 tools/validate_python_release_artifacts.py \
+            --pe-binary dl/xhdfe.plugin.windows \
+            --pe-binary dl/xfe.plugin.windows \
+            --runtime-dir dl/windows-stata-runtime \
+            --runtime-ledger dl/windows-stata-runtime-ledger.json \
+            --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
+          WINDOWS_WHEELS=(dl/xhdfe-*win_amd64.whl)
+          test "${#WINDOWS_WHEELS[@]}" -eq 1
+          EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
+          python3 tools/validate_python_release_artifacts.py \
+            --wheel "${WINDOWS_WHEELS[0]}" \
+            --expected-version "$EXPECTED_VERSION" \
+            --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
+
+      - name: Build and validate exact corresponding-source asset
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
+          INPUTS="$RUNNER_TEMP/xhdfe-corresponding-inputs"
+          mkdir -p \
+            "$INPUTS/components" \
+            "$INPUTS/providers/ubuntu-mingw-gcc" \
+            "$INPUTS/providers/ubuntu-mingw-w64" \
+            "$INPUTS/licenses" \
+            "$INPUTS/windows-python-packaged"
+
+          python3 - dl/windows-stata-provider-ledger.json <<'PY'
+          import json, sys
+
+          ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          entries = {item["name"].casefold(): item for item in ledger["entries"]}
+          expected = {
+              "libgomp-1.dll": {
+                  "runtime_version": "13.2.0-6ubuntu1+26.1",
+                  "source_package": "gcc-mingw-w64",
+                  "source_version": "26.1",
+                  "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
+              },
+              "libwinpthread-1.dll": {
+                  "runtime_version": "11.0.1-3build1",
+                  "source_package": "mingw-w64",
+                  "source_version": "11.0.1-3build1",
+                  "built_using": "",
+              },
+          }
+          if set(entries) != set(expected):
+              raise SystemExit("Windows Stata provider set changed; source mapping is stale")
+          for name, fields in expected.items():
+              for field, value in fields.items():
+                  if entries[name][field] != value:
+                      raise SystemExit(
+                          f"{name}: expected {field}={value!r}, got {entries[name][field]!r}"
+                      )
+          PY
+
+          fetch_sha256() {
+            local url="$1" output="$2" expected="$3"
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "$output" "$url"
+            echo "$expected  $output" | sha256sum --check --strict
+          }
+          fetch_sha512() {
+            local url="$1" output="$2" expected="$3"
+            curl --fail --location --retry 5 --retry-all-errors \
+              --output "$output" "$url"
+            echo "$expected  $output" | sha512sum --check --strict
+          }
+
+          fetch_sha512 \
+            https://gcc.gnu.org/pub/gcc/releases/gcc-13.2.0/gcc-13.2.0.tar.xz \
+            "$INPUTS/components/gcc-13.2.0.tar.xz" \
+            d99e4826a70db04504467e349e9fbaedaa5870766cda7c5cab50cdebedc4be755ebca5b789e1232a34a20be1a0b60097de9280efe47bdb71c73251e30b0862a2
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1.orig.tar.bz2 \
+            "$INPUTS/components/mingw-w64_11.0.1.orig.tar.bz2" \
+            3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10
+          fetch_sha256 \
+            https://codeload.github.com/dlfcn-win32/dlfcn-win32/tar.gz/refs/tags/v1.4.1 \
+            "$INPUTS/components/dlfcn-win32-v1.4.1.tar.gz" \
+            30a9f72bdf674857899eb7e553df1f0d362c5da2a576ae51f886e1171fbdb399
+          fetch_sha256 \
+            https://codeload.github.com/brechtsanders/winlibs_recipes/tar.gz/b209c11b4b4bed71816d52d5cc4682bfcd05b41f \
+            "$INPUTS/components/winlibs-recipes-b209c11.tar.gz" \
+            b14c37c6556ccffc5a6374f4b4004a8d1908ac9f1bdbd4795b4f4dcc1c781a9a
+          fetch_sha256 \
+            https://codeload.github.com/brechtsanders/winlibs_tools/tar.gz/0ad30ed8b99071629e63e4c3f5531ec0e5abbc0a \
+            "$INPUTS/components/winlibs-tools-0ad30ed.tar.gz" \
+            6eaf14b6e66dfd07a4113164c343497f2d58f617bf4d98fe2c3a0a6d16886686
+
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/gcc-mingw-w64/26.1/gcc-mingw-w64_26.1.dsc \
+            "$INPUTS/providers/ubuntu-mingw-gcc/gcc-mingw-w64_26.1.dsc" \
+            9cc5a84101b1c1641c001b43e457ea710619c5c8301151f0080a917e9fe64272
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/gcc-mingw-w64/26.1/gcc-mingw-w64_26.1.tar.xz \
+            "$INPUTS/providers/ubuntu-mingw-gcc/gcc-mingw-w64_26.1.tar.xz" \
+            57ad0cef766683b97b37de82a16a5b69f81a28c1469512832f557bca2506c8ef
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/gcc-13/13.2.0-6ubuntu1/gcc-13_13.2.0.orig.tar.gz \
+            "$INPUTS/providers/ubuntu-mingw-gcc/gcc-13_13.2.0.orig.tar.gz" \
+            84d4bbded73e549b2af0411691cbd7bea6a86e15796881a92518fb741cdaad2f
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/gcc-13/13.2.0-6ubuntu1/gcc-13_13.2.0-6ubuntu1.debian.tar.xz \
+            "$INPUTS/providers/ubuntu-mingw-gcc/gcc-13_13.2.0-6ubuntu1.debian.tar.xz" \
+            03d3cd0699bf75c3629af27e17b0799b933a9031e14863a08e7f31a5897634bf
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/gcc-13/13.2.0-6ubuntu1/gcc-13_13.2.0-6ubuntu1.dsc \
+            "$INPUTS/providers/ubuntu-mingw-gcc/gcc-13_13.2.0-6ubuntu1.dsc" \
+            49a7446a379bfa3efeafcbf7fd6fd812d7319f516aceba1806777d9c53bf4472
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1.orig.tar.bz2 \
+            "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1.orig.tar.bz2" \
+            3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1-3build1.debian.tar.xz \
+            "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1-3build1.debian.tar.xz" \
+            8c182708e1b329bb6d5b6ea95f5cafeb7681027604b89dfb3e2031a73bc90576
+          fetch_sha256 \
+            https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mingw-w64/11.0.1-3build1/mingw-w64_11.0.1-3build1.dsc \
+            "$INPUTS/providers/ubuntu-mingw-w64/mingw-w64_11.0.1-3build1.dsc" \
+            a9c601ae428084b0d4d1685e41fad9d5aaa4c67ab8a3ac99d3dae0ec2999db4f
+
+          cp third_party/licenses/GCC-13.2.0-COPYING3 \
+            third_party/licenses/GCC-13.2.0-COPYING.RUNTIME \
+            third_party/licenses/mingw-w64-11.0.1-winpthreads-COPYING \
+            third_party/licenses/dlfcn-win32-1.4.1-COPYING \
+            "$INPUTS/licenses/"
+          fetch_sha256 \
+            https://docs.nvidia.com/cuda/archive/12.6.0/pdf/EULA.pdf \
+            "$INPUTS/licenses/NVIDIA-CUDA-12.6-EULA.pdf" \
+            7c2dc636ad47cf67a0efb97d9c11246efcc471ac9d11eb8efceae3bfd56d8649
+          fetch_sha256 \
+            https://raw.githubusercontent.com/NVIDIA/cccl/v2.5.0/LICENSE \
+            "$INPUTS/licenses/NVIDIA-CCCL-2.5.0-LICENSE" \
+            01b767dcd7d36f42efb608076741cf83f154a995e198028cb698aadc3a43b63b
+
+          WINDOWS_WHEELS=(dl/xhdfe-*win_amd64.whl)
+          test "${#WINDOWS_WHEELS[@]}" -eq 1
+          python3 - "${WINDOWS_WHEELS[0]}" \
+            dl/windows-python-provider-runtimes/_windows_runtime_manifest.json \
+            "$INPUTS/windows-python-packaged" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import sys
+          import zipfile
+
+          wheel = Path(sys.argv[1])
+          exported_manifest = Path(sys.argv[2]).read_bytes()
+          output = Path(sys.argv[3])
+          manifest = json.loads(exported_manifest)
+          expected_hashes = {
+              "libdl.dll": "5371648a682af6c79544a0799fca73a3363c20c59d59a7d29fd9f9230032bc0e",
+              "libgcc_s_seh-1.dll": "89f1eaf8576f691e1aafc8707173618a74b8c82d6d0ac17a1be62c76a6c79aa1",
+              "libgomp-1.dll": "796b4f63a78769783923d3d5bc682c263d7a16284471f1028a4003cd2db7a2c0",
+              "libstdc++-6.dll": "7b787b2436175470328e47193c292b047a4cac9df7ad4b5800b2f876fe305832",
+              "libwinpthread-1.dll": "4bde68fbb2c6a9a64535928fc505056ebf6f5dc44f82ea2eaac3c714dc22ce79",
+          }
+          actual_hashes = {
+              item["member"].casefold(): item["member_sha256"]
+              for item in manifest["runtimes"]
+          }
+          if actual_hashes != expected_hashes:
+              raise SystemExit("Strawberry runtime bytes changed; pinned source mapping is stale")
+          with zipfile.ZipFile(wheel) as archive:
+              entries = [
+                  name for name in archive.namelist()
+                  if PurePosixPath(name).name.casefold() == "_windows_runtime_manifest.json"
+              ]
+              if len(entries) != 1 or archive.read(entries[0]) != exported_manifest:
+                  raise SystemExit("wheel/exported Windows runtime manifests differ")
+              package_dir = PurePosixPath(entries[0]).parent
+              for runtime in manifest["runtimes"]:
+                  member = str(package_dir / runtime["member"])
+                  payload = archive.read(member)
+                  digest = hashlib.sha256(payload).hexdigest()
+                  if digest != runtime["member_sha256"]:
+                      raise SystemExit(f"wheel runtime hash mismatch: {member}")
+                  provider = Path("dl/windows-python-provider-runtimes") / runtime["member"]
+                  if hashlib.sha256(provider.read_bytes()).hexdigest() != digest:
+                      raise SystemExit(f"provider/runtime bytes differ: {runtime['member']}")
+                  (output / runtime["member"]).write_bytes(payload)
+          PY
+
+          one_file() {
+            local pattern="$1"; shift
+            local matches=("$@"/$pattern)
+            test "${#matches[@]}" -eq 1 || {
+              echo "ERROR: expected one match for $*/$pattern; found ${#matches[@]}" >&2
+              exit 1
+            }
+            printf '%s\n' "${matches[0]}"
+          }
+          WINPY_PACKAGED="$INPUTS/windows-python-packaged"
+          WINPY_PROVIDER="dl/windows-python-provider-runtimes"
+          WINPY_LIBGCC="$(one_file 'libgcc_s_*.dll' "$WINPY_PACKAGED")"
+          WINPY_LIBSTDCXX="$(one_file 'libstdc++-*.dll' "$WINPY_PACKAGED")"
+          WINPY_LIBGOMP="$(one_file 'libgomp-*.dll' "$WINPY_PACKAGED")"
+          WINPY_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' "$WINPY_PACKAGED")"
+          WINPY_LIBDL="$(one_file 'libdl.dll' "$WINPY_PACKAGED")"
+          STATA_LIBGOMP="$(one_file 'libgomp-*.dll' dl/windows-stata-runtime)"
+          STATA_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' dl/windows-stata-runtime)"
+          MANY_PACKAGED="$(one_file '*' dl/linux-wheel-packaged-runtime)"
+          MANY_PROVIDER="$(one_file '*' dl/linux-wheel-provider-runtime)"
+          MANY_SRPM="$(one_file '*.src.rpm' dl/corresponding-source)"
+
+          metadata_value() {
+            python3 - "$1" "$2" <<'PY'
+          import json, sys
+          value = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          for part in sys.argv[2].split("."):
+              value = value[int(part)] if isinstance(value, list) else value[part]
+          print(value)
+          PY
+          }
+          MANY_NEVRA="$(metadata_value dl/linux-wheel-runtime-ledger.json repaired_wheel.private_libraries.0.provider_rpm.nevra)"
+          MANY_SRPM_NAME="$(metadata_value dl/linux-wheel-runtime-ledger.json repaired_wheel.private_libraries.0.provider_rpm.source_rpm)"
+          MANY_PROVIDER_PATH="$(metadata_value dl/linux-wheel-runtime-ledger.json repaired_wheel.private_libraries.0.provider_source_path)"
+          test "$(basename "$MANY_SRPM")" = "$MANY_SRPM_NAME"
+
+          WINPY_MANIFEST=dl/windows-python-provider-runtimes/_windows_runtime_manifest.json
+          runtime_source_path() {
+            python3 - "$WINPY_MANIFEST" "$1" <<'PY'
+          import json, sys
+          ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          matches = [item["source_path"] for item in ledger["runtimes"] if item["member"].casefold() == sys.argv[2].casefold()]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one runtime member {sys.argv[2]!r}; found {len(matches)}")
+          print(matches[0])
+          PY
+          }
+          stata_runtime_source_path() {
+            python3 - dl/windows-stata-runtime-ledger.json "$1" <<'PY'
+          import json, sys
+          ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
+          matches = [item["source_path"] for item in ledger["runtimes"] if item["member"].casefold() == sys.argv[2].casefold()]
+          if len(matches) != 1:
+              raise SystemExit(f"expected one Stata runtime member {sys.argv[2]!r}; found {len(matches)}")
+          print(matches[0])
+          PY
+          }
+
+          mkdir -p release_assets
+          python3 tools/build_corresponding_source_bundle.py \
+            --output "release_assets/xhdfe-${EXPECTED_VERSION}-corresponding-source.zip" \
+            --version "$EXPECTED_VERSION" \
+            --contains-cuda \
+            --license-dir "$INPUTS/licenses" \
+            --component "gcc=$INPUTS/components/gcc-13.2.0.tar.xz" \
+            --component "mingw-w64=$INPUTS/components/mingw-w64_11.0.1.orig.tar.bz2" \
+            --component "dlfcn-win32=$INPUTS/components/dlfcn-win32-v1.4.1.tar.gz" \
+            --component "winlibs-recipes=$INPUTS/components/winlibs-recipes-b209c11.tar.gz" \
+            --component "winlibs-tools=$INPUTS/components/winlibs-tools-0ad30ed.tar.gz" \
+            --provider-source "ubuntu-mingw-gcc=$INPUTS/providers/ubuntu-mingw-gcc" \
+            --provider-source "ubuntu-mingw-w64=$INPUTS/providers/ubuntu-mingw-w64" \
+            --provider-source "manylinux-libgomp=dl/corresponding-source" \
+            --runtime-binary "windows-python-libgcc=$WINPY_LIBGCC" \
+            --runtime-provider windows-python-libgcc=gcc \
+            --provider-binary "windows-python-libgcc=$WINPY_PROVIDER/$(basename "$WINPY_LIBGCC")" \
+            --runtime-binary "windows-python-libstdcxx=$WINPY_LIBSTDCXX" \
+            --runtime-provider windows-python-libstdcxx=gcc \
+            --provider-binary "windows-python-libstdcxx=$WINPY_PROVIDER/$(basename "$WINPY_LIBSTDCXX")" \
+            --runtime-binary "windows-python-libgomp=$WINPY_LIBGOMP" \
+            --runtime-provider windows-python-libgomp=gcc \
+            --provider-binary "windows-python-libgomp=$WINPY_PROVIDER/$(basename "$WINPY_LIBGOMP")" \
+            --runtime-binary "windows-python-libwinpthread=$WINPY_LIBWINPTHREAD" \
+            --runtime-provider windows-python-libwinpthread=mingw-w64 \
+            --provider-binary "windows-python-libwinpthread=$WINPY_PROVIDER/$(basename "$WINPY_LIBWINPTHREAD")" \
+            --runtime-binary "windows-python-libdl=$WINPY_LIBDL" \
+            --runtime-provider windows-python-libdl=dlfcn-win32 \
+            --provider-binary "windows-python-libdl=$WINPY_PROVIDER/$(basename "$WINPY_LIBDL")" \
+            --runtime-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
+            --runtime-provider windows-stata-libgomp=ubuntu-mingw-gcc \
+            --provider-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
+            --runtime-binary "windows-stata-libwinpthread=$STATA_LIBWINPTHREAD" \
+            --runtime-provider windows-stata-libwinpthread=ubuntu-mingw-w64 \
+            --provider-binary "windows-stata-libwinpthread=$STATA_LIBWINPTHREAD" \
+            --runtime-binary "manylinux-wheel-libgomp=$MANY_PACKAGED" \
+            --runtime-provider manylinux-wheel-libgomp=manylinux-libgomp \
+            --provider-binary "manylinux-wheel-libgomp=$MANY_PROVIDER" \
+            --metadata gcc.version=13.2.0 \
+            --metadata gcc.upstream_url=https://gcc.gnu.org/pub/gcc/releases/gcc-13.2.0/ \
+            --metadata mingw-w64.version=11.0.1 \
+            --metadata mingw-w64.upstream_url=https://launchpad.net/ubuntu/noble/+source/mingw-w64/11.0.1-3build1 \
+            --metadata dlfcn-win32.version=1.4.1 \
+            --metadata dlfcn-win32.upstream_url=https://github.com/dlfcn-win32/dlfcn-win32/tree/v1.4.1 \
+            --metadata winlibs-recipes.commit=b209c11b4b4bed71816d52d5cc4682bfcd05b41f \
+            --metadata winlibs-recipes.upstream_url=https://github.com/brechtsanders/winlibs_recipes/commit/b209c11b4b4bed71816d52d5cc4682bfcd05b41f \
+            --metadata winlibs-tools.commit=0ad30ed8b99071629e63e4c3f5531ec0e5abbc0a \
+            --metadata winlibs-tools.upstream_url=https://github.com/brechtsanders/winlibs_tools/commit/0ad30ed8b99071629e63e4c3f5531ec0e5abbc0a \
+            --metadata ubuntu-mingw-gcc.source_package=gcc-mingw-w64 \
+            --metadata ubuntu-mingw-gcc.source_version=26.1+gcc-13_13.2.0-6ubuntu1 \
+            --metadata ubuntu-mingw-gcc.upstream_url=https://launchpad.net/ubuntu/noble/+source/gcc-mingw-w64/26.1 \
+            --metadata ubuntu-mingw-w64.source_package=mingw-w64 \
+            --metadata ubuntu-mingw-w64.source_version=11.0.1-3build1 \
+            --metadata ubuntu-mingw-w64.upstream_url=https://launchpad.net/ubuntu/noble/+source/mingw-w64/11.0.1-3build1 \
+            --metadata "manylinux-libgomp.nevra=$MANY_NEVRA" \
+            --metadata "manylinux-libgomp.sourcerpm=$MANY_SRPM_NAME" \
+            --metadata "manylinux-libgomp.provider_path=$MANY_PROVIDER_PATH" \
+            --metadata manylinux-libgomp.upstream_url=https://git.centos.org/rpms/gcc-toolset-13-gcc \
+            --metadata "windows-python-libgcc.release_path=wheel/xhdfe/$(basename "$WINPY_LIBGCC")" \
+            --metadata "windows-python-libgcc.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBGCC")")" \
+            --metadata "windows-python-libstdcxx.release_path=wheel/xhdfe/$(basename "$WINPY_LIBSTDCXX")" \
+            --metadata "windows-python-libstdcxx.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBSTDCXX")")" \
+            --metadata "windows-python-libgomp.release_path=wheel/xhdfe/$(basename "$WINPY_LIBGOMP")" \
+            --metadata "windows-python-libgomp.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBGOMP")")" \
+            --metadata "windows-python-libwinpthread.release_path=wheel/xhdfe/$(basename "$WINPY_LIBWINPTHREAD")" \
+            --metadata "windows-python-libwinpthread.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBWINPTHREAD")")" \
+            --metadata "windows-python-libdl.release_path=wheel/xhdfe/$(basename "$WINPY_LIBDL")" \
+            --metadata "windows-python-libdl.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBDL")")" \
+            --metadata windows-stata-libgomp.release_path=xhdfe_xfe-stata-windows-cpu.zip/libgomp-1.dll \
+            --metadata "windows-stata-libgomp.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBGOMP")")" \
+            --metadata windows-stata-libwinpthread.release_path=xhdfe_xfe-stata-windows-cpu.zip/libwinpthread-1.dll \
+            --metadata "windows-stata-libwinpthread.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBWINPTHREAD")")" \
+            --metadata "manylinux-wheel-libgomp.release_path=$(metadata_value dl/linux-wheel-runtime-ledger.json repaired_wheel.private_libraries.0.member)" \
+            --metadata "manylinux-wheel-libgomp.provider_path=$MANY_PROVIDER_PATH"
+          python3 tools/validate_corresponding_source_bundle.py \
+            "release_assets/xhdfe-${EXPECTED_VERSION}-corresponding-source.zip"
+
       - name: Assemble per-platform Stata bundles + release assets
         run: |
           set -euo pipefail
           mkdir -p release_assets
+          NVIDIA_LICENSE_DIR="$RUNNER_TEMP/xhdfe-corresponding-inputs/licenses"
+          test -f "$NVIDIA_LICENSE_DIR/NVIDIA-CUDA-12.6-EULA.pdf"
+          test -f "$NVIDIA_LICENSE_DIR/NVIDIA-CCCL-2.5.0-LICENSE"
 
           # Shared, platform-independent Stata package files.
           SHARED=(
@@ -600,7 +1093,20 @@ jobs:
             stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg
             stata/stata.toc
           )
-          for s in "${SHARED[@]}"; do
+          LICENSE_MATERIALS=(
+            third_party/licenses/GCC-13.2.0-COPYING3
+            third_party/licenses/GCC-13.2.0-COPYING.RUNTIME
+            third_party/licenses/mingw-w64-11.0.1-winpthreads-COPYING
+            third_party/licenses/dlfcn-win32-1.4.1-COPYING
+            third_party/eigen-3.4.0/COPYING.APACHE
+            third_party/eigen-3.4.0/COPYING.BSD
+            third_party/eigen-3.4.0/COPYING.GPL
+            third_party/eigen-3.4.0/COPYING.LGPL
+            third_party/eigen-3.4.0/COPYING.MINPACK
+            third_party/eigen-3.4.0/COPYING.MPL2
+            third_party/eigen-3.4.0/COPYING.README
+          )
+          for s in "${SHARED[@]}" "${LICENSE_MATERIALS[@]}"; do
             test -f "$s" || { echo "MISSING shared Stata file: $s" >&2; exit 1; }
           done
 
@@ -618,10 +1124,100 @@ jobs:
             cp "$xfe_src"   "$stage/xfe.plugin"
             local s
             for s in "${SHARED[@]}"; do cp "$s" "$stage/"; done
+            for s in "${LICENSE_MATERIALS[@]}"; do
+              if [[ "$s" == third_party/eigen-3.4.0/* ]]; then
+                cp "$s" "$stage/Eigen-3.4.0-$(basename "$s")"
+              else
+                cp "$s" "$stage/"
+              fi
+            done
             for s in "$@"; do
               test -f "$s" || { echo "MISSING runtime dependency: $s" >&2; exit 1; }
               cp "$s" "$stage/"
             done
+            if [[ "$zipname" == "xhdfe_xfe-stata-linux-cuda.zip" ]]; then
+              mkdir -p "$stage/artifacts"
+              cp -R dl/cuda-license-files "$stage/artifacts/"
+              python3 - dl/linux-cuda-provenance.json "$stage" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path, PurePosixPath
+          import sys
+
+          ledger = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          stage = Path(sys.argv[2])
+          records = ledger.get("licenses")
+          if not isinstance(records, list) or len(records) < 2:
+              raise SystemExit("CUDA provenance has no complete license ledger")
+          expected = set()
+          for record in records:
+              relative = record.get("artifact_path")
+              pure = PurePosixPath(relative) if isinstance(relative, str) else None
+              if (
+                  pure is None
+                  or pure.is_absolute()
+                  or ".." in pure.parts
+                  or pure.parts[:2] != ("artifacts", "cuda-license-files")
+              ):
+                  raise SystemExit(f"unsafe CUDA license artifact path: {relative!r}")
+              target = stage.joinpath(*pure.parts)
+              if not target.is_file() or target.is_symlink():
+                  raise SystemExit(f"missing CUDA license artifact: {relative}")
+              payload = target.read_bytes()
+              digest = hashlib.sha256(payload).hexdigest()
+              if (
+                  digest != record.get("artifact_sha256")
+                  or digest != record.get("sha256")
+              ):
+                  raise SystemExit(f"CUDA license hash mismatch: {relative}")
+              expected.add(target.resolve())
+          actual = {
+              path.resolve()
+              for path in (stage / "artifacts" / "cuda-license-files").iterdir()
+              if path.is_file() and not path.is_symlink()
+          }
+          if actual != expected:
+              raise SystemExit("CUDA license directory differs from provenance ledger")
+          PY
+            fi
+            if [[ "$zipname" == "xhdfe_xfe-stata-windows-cpu.zip" ]]; then
+              python3 - "$stage" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+
+          stage = Path(sys.argv[1])
+          provider = json.loads(
+              (stage / "windows-stata-provider-ledger.json").read_text(encoding="utf-8")
+          )
+          runtime_names = [entry["name"] for entry in provider["entries"]]
+          additions = runtime_names + [
+              "windows-stata-provider-ledger.json",
+              "windows-stata-runtime-ledger.json",
+              "GCC-13.2.0-COPYING3",
+              "GCC-13.2.0-COPYING.RUNTIME",
+              "mingw-w64-11.0.1-winpthreads-COPYING",
+              "dlfcn-win32-1.4.1-COPYING",
+              "Eigen-3.4.0-COPYING.APACHE",
+              "Eigen-3.4.0-COPYING.BSD",
+              "Eigen-3.4.0-COPYING.GPL",
+              "Eigen-3.4.0-COPYING.LGPL",
+              "Eigen-3.4.0-COPYING.MINPACK",
+              "Eigen-3.4.0-COPYING.MPL2",
+              "Eigen-3.4.0-COPYING.README",
+          ]
+          for name in additions:
+              if not (stage / name).is_file():
+                  raise SystemExit(f"Windows ZIP package input is missing: {name}")
+          for pkg_name in ("xhdfe.pkg", "xfe.pkg"):
+              pkg = stage / pkg_name
+              lines = pkg.read_text(encoding="utf-8").splitlines()
+              existing = {line[2:] for line in lines if line.startswith("f ")}
+              lines.extend(f"f {name}" for name in additions if name not in existing)
+              pkg.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+              bash tools/validate_stata_package_site.sh "$stage"
+            fi
             ( cd "$stage" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/$zipname" . )
             rm -rf "$stage"
             echo "built release_assets/$zipname"
@@ -629,15 +1225,22 @@ jobs:
           }
 
           bundle xhdfe_xfe-stata-linux-cpu.zip       dl/xhdfe.plugin.linux-cpu  dl/xfe.plugin.linux-cpu
-          bundle xhdfe_xfe-stata-linux-cuda.zip      dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda
+          bundle xhdfe_xfe-stata-linux-cuda.zip \
+            dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda \
+            "$NVIDIA_LICENSE_DIR/NVIDIA-CUDA-12.6-EULA.pdf" \
+            "$NVIDIA_LICENSE_DIR/NVIDIA-CCCL-2.5.0-LICENSE" \
+            dl/linux-cuda-provenance.json \
+            dl/cuda-nvcc-invocations.jsonl \
+            dl/cuda-nvcc-link-dryrun.log
           bundle xhdfe_xfe-stata-macos-universal.zip dl/xhdfe.plugin.macos      dl/xfe.plugin.macos
+          WINDOWS_RUNTIME_FILES=(dl/windows-stata-runtime/*.dll)
+          test "${#WINDOWS_RUNTIME_FILES[@]}" -ge 2
           bundle xhdfe_xfe-stata-windows-cpu.zip \
             dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
-            dl/libgomp-1.dll dl/libwinpthread-1.dll
+            "${WINDOWS_RUNTIME_FILES[@]}" \
+            dl/windows-stata-runtime-ledger.json \
+            dl/windows-stata-provider-ledger.json
 
-          # Also attach the raw CUDA fatbin plugins separately (for direct H100 validation).
-          cp dl/xhdfe.plugin.linux-cuda release_assets/xhdfe-linux-cuda.plugin
-          cp dl/xfe.plugin.linux-cuda   release_assets/xfe-linux-cuda.plugin
           cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz dl/xhdfe_*.tar.gz release_assets/
 
           # Source-only archive used by xhdfegpu and offline local builds.
@@ -669,7 +1272,10 @@ jobs:
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/xhdfe.plugin"
           cp dl/xfe.plugin.windows \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/xfe.plugin"
-          cp dl/libgomp-1.dll dl/libwinpthread-1.dll \
+          cp dl/windows-stata-runtime/*.dll \
+            "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
+          cp dl/windows-stata-runtime-ledger.json \
+            dl/windows-stata-provider-ledger.json \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
           mkdir -p "$OFFLINE_STAGE/prebuilt/macos_universal"
           cp dl/xhdfe.plugin.macos \
@@ -680,6 +1286,18 @@ jobs:
           cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz \
             "$OFFLINE_STAGE/packages/python/"
           cp dl/xhdfe_*.tar.gz "$OFFLINE_STAGE/packages/R/"
+          mkdir -p "$OFFLINE_STAGE/provenance"
+          cp dl/linux-cuda-provenance.json \
+            dl/cuda-nvcc-invocations.jsonl \
+            dl/cuda-nvcc-link-dryrun.log \
+            dl/linux-wheel-runtime-ledger.json \
+            "$OFFLINE_STAGE/provenance/"
+          cp -R dl/cuda-license-files "$OFFLINE_STAGE/provenance/"
+          cp release_assets/xhdfe-*-corresponding-source.zip \
+            "$OFFLINE_STAGE/"
+          cp "$NVIDIA_LICENSE_DIR/NVIDIA-CUDA-12.6-EULA.pdf" \
+            "$NVIDIA_LICENSE_DIR/NVIDIA-CCCL-2.5.0-LICENSE" \
+            "$OFFLINE_STAGE/third_party/licenses/"
           cp dl/xhdfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xhdfe.plugin"
           cp dl/xfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xfe.plugin"
           cat > "$OFFLINE_STAGE/OFFLINE_ARTIFACT_SCOPE.md" <<'EOF'
@@ -694,7 +1312,9 @@ jobs:
           `stata/xhdfe.plugin` and `stata/xfe.plugin` are portable Linux CPU/OpenMP
           defaults. `prebuilt/` also contains the exact Linux CUDA fatbins,
           Windows x86_64 OpenMP plugins and runtime DLLs, and macOS universal
-          plugins from the release workflow.
+          plugins from the release workflow. The root-level corresponding-source
+          ZIP closes the GNU/MinGW runtime source mappings, while the NVIDIA
+          CUDA 12.6 EULA and CCCL 2.5.0 notices accompany the CUDA fatbins.
 
           GitHub-hosted CI has no Stata licence or GPU and therefore certifies only
           compilation, linking, binary format, OpenMP linkage, and embedded CUDA
@@ -725,8 +1345,9 @@ jobs:
             --macos-xfe   dl/xfe.plugin.macos \
             --windows-xhdfe dl/xhdfe.plugin.windows \
             --windows-xfe   dl/xfe.plugin.windows \
-            --windows-libgomp dl/libgomp-1.dll \
-            --windows-libwinpthread dl/libwinpthread-1.dll
+            --windows-runtime-dir dl/windows-stata-runtime \
+            --windows-runtime-provider-ledger dl/windows-stata-provider-ledger.json \
+            --windows-runtime-closure-ledger dl/windows-stata-runtime-ledger.json
           cp release_assets/xhdfe-src.zip netinstall_site/stata/xhdfe-src.zip
           bash tools/validate_stata_package_site.sh \
             "$GITHUB_WORKSPACE/netinstall_site/stata"
@@ -766,7 +1387,8 @@ jobs:
           > \`R CMD check\`. For the Stata plugins it proves **COMPILE + LINK only**:
           > the runners have **no Stata license**, and they have **no GPU** for CUDA
           > runtime validation. The workflow initially stages this release as a
-          > draft and permits publication only after the exact attached plugins pass
+          > draft and permits publication only after the exact plugins contained in
+          > the attached Linux CUDA bundle pass
           > Stata CPU/CUDA functional validation on real hardware (an NVIDIA H100,
           > \`sm_90\`). A published release therefore records completion of that
           > external gate.
@@ -790,12 +1412,9 @@ jobs:
 
           ### Per-platform Stata bundles (plugin renamed to canonical \`xhdfe.plugin\` / \`xfe.plugin\` + shared ado/sthlp/pkg/stata.toc)
           - \`xhdfe_xfe-stata-linux-cpu.zip\` — **Linux x86_64, CPU/OpenMP** (portable ELF, links libgomp; no \`-march=native\`).
-          - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; links libcudart + libgomp). CI compile-verifies this path; publication additionally requires the external H100 runtime gate.
-          - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows 11 x86_64, CPU/OpenMP** (PE32+ plugins plus the required \`libgomp-1.dll\` and \`libwinpthread-1.dll\` runtime files).
+          - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; incorporates the static CUDA runtime/device runtime and dynamically links libgomp). CI compile-verifies this path; publication additionally requires the external H100 runtime gate.
+          - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows x86_64, CPU/OpenMP** (PE32+ plugins plus their validated MinGW runtime closure; intended for 64-bit Windows 10/11).
           - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfe.plugin\` before Stata loads them.
-
-          ### Raw CUDA fatbin plugins (for direct H100 validation and reproducibility)
-          - \`xhdfe-linux-cuda.plugin\`, \`xfe-linux-cuda.plugin\` — the same Linux CUDA binaries as in the CUDA bundle, attached standalone.
 
           ### Python and R packages
           - \`xhdfe-${EXPECTED_VERSION}-*manylinux*.whl\` — Linux x86_64 CPU
@@ -810,7 +1429,11 @@ jobs:
           ### Offline source bundle
           - \`xhdfe_xfe-offline-source-and-platform-binaries.zip\` — exact tagged
             sources, vendored offline build inputs, and the exact Linux CPU/CUDA,
-            Windows 11 x86_64 OpenMP, and macOS universal plugins from this workflow.
+            Windows x86_64 OpenMP, and macOS universal plugins from this workflow.
+          - \`xhdfe-${EXPECTED_VERSION}-corresponding-source.zip\` — exact
+            GNU/MinGW runtime sources, distribution patches/build recipes,
+            provider source packages, license texts, and byte-level provenance
+            for the runtime libraries carried by the release artifacts.
 
           ### Online net-install site snapshot
           - \`xhdfe_xfe-stata-netinstall-site.zip\` — the exact \`stata/\` tree published to \`gh-pages\` for online \`net install\`.
@@ -824,7 +1447,7 @@ jobs:
           | Linux x86_64 | Stata CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
           | Linux x86_64 | Stata CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
           | Linux x86_64 | Python CPU wheel | manylinux_2_28 + ubuntu-latest | repaired manylinux wheel; clean installed-wheel formula smoke |
-          | Windows 11 x86_64 | Stata CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + colocated OpenMP runtime DLLs |
+          | Windows x86_64 | Stata CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + validated colocated runtime DLL closure; intended for Windows 10/11 |
           | Windows x86_64, CPython 3.12 | Python CPU/OpenMP wheel | GitHub-hosted Windows x86-64 (Strawberry MinGW 5.42 / GCC 13.2) | generic recursive non-system DLL closure; intended for Windows 10/11; import and formula smoke without Strawberry on PATH |
           | macOS x86_64+arm64 | Stata CPU | macos-14 | universal bundle, no OpenMP |
           EOF
@@ -876,7 +1499,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             staged/release_assets/*.zip
-            staged/release_assets/*.plugin
             staged/release_assets/*.whl
             staged/release_assets/*.tar.gz
             staged/release_assets/SHA256SUMS.txt

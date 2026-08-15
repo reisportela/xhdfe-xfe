@@ -2,6 +2,7 @@ include CMakeLists.txt
 include CITATION.cff
 include LICENSE
 include NOTICE
+recursive-include third_party/licenses *
 include README.md
 include setup.py
 include pyproject.toml

@@ -260,7 +260,10 @@ before loading the native module and retains the Windows DLL-directory handle,
 so an installed wheel does not depend on the build toolchain remaining on
 `PATH` and does not require a user-side `os.add_dll_directory(...)` call. The
 build fails closed if the active toolchain cannot supply a matching x86-64
-binary for any detected dependency. The prebuilt Windows asset in this release
+binary for any detected dependency. Machine-specific instruction tuning is
+disabled by default on Windows, so source-built artefacts do not inherit the
+build host's instruction set; explicitly local-only builds may opt in. The
+prebuilt Windows asset in this release
 is for CPython 3.12 x86-64; other Python ABIs require a source build and were
 not separately Windows-certified for this release.
 
