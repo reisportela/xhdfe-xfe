@@ -91,7 +91,28 @@ def _load_core():
             "The xhdfe compiled extension is not available. Build or install the "
             "package with `python -m pip install .` from the repository root."
         ) from exc
+    _attach_maketables_hooks(core)
     return core
+
+
+def _attach_maketables_hooks(core):
+    """Expose the maketables plug-in format on the native regressor.
+
+    The hooks are duck-typed attributes read by maketables when a user renders a
+    table; nothing is imported from it and no optional dependency is pulled in.
+    See :mod:`xhdfe._maketables`. Attaching is idempotent and never allowed to
+    break estimation: a core build that rejects attribute injection simply keeps
+    the array API untabulatable, which is how it behaved before.
+    """
+    regressor = getattr(core, "HdfeRegressor", None)
+    if regressor is None:
+        return
+    from . import _maketables
+
+    try:
+        _maketables.attach(regressor)
+    except (AttributeError, TypeError):
+        pass
 
 
 def __getattr__(name: str):

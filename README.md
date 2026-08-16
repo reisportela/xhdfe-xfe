@@ -48,6 +48,7 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
 - **Dual Python API** — low-overhead arrays or an optional R-style formula frontend with categories and interactions.
+- **Publication tables** — results plug straight into [maketables](https://github.com/py-econometrics/maketables) (`ETable`) with no adapter and no added dependency.
 - **Heterogeneous (group-specific) slopes** — `fe#c.x` and `fe##c.x` designs.
 - **IV / 2SLS** with absorbed fixed effects.
 - **Weights** — analytic, frequency, probability, and importance weights.
@@ -295,6 +296,22 @@ absorber, so they do not become dummy columns. The existing
 `HdfeRegressor.fit(y, X, ...)` API remains the lowest-overhead route for small
 regressions in loops. See the packaged Python help for formula semantics,
 categorical reference levels, and `prepare_formula()`.
+
+Fitted results implement the plug-in format of
+[maketables](https://github.com/py-econometrics/maketables), so publication
+tables need no adapter and no registration step:
+
+```python
+import maketables as mt
+
+print(mt.ETable([model_a, model_b], drop="Intercept").make(type="tex"))
+```
+
+maketables is not a dependency: the integration is a set of duck-typed
+attributes it reads when it is installed. Absorbed fixed effects become their own
+indicator rows, singleton counts and absorbed degrees of freedom are available as
+table statistics, and Stata variable labels carried on the frame are picked up
+automatically. See the packaged Python help for the full statistic list.
 
 ### R
 

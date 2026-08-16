@@ -18,6 +18,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from . import _load_core
+from . import _maketables
 
 
 _FORMULA_METADATA = (
@@ -27,6 +28,9 @@ _FORMULA_METADATA = (
     "fe_names_",
     "fe_levels_",
     "cluster_levels_",
+    "cluster_names_",
+    "se_type_",
+    "var_labels_",
     "model_spec_",
     "data_index_",
     "estimation_index_",
@@ -352,9 +356,45 @@ def _resolve_weights(
     return _numeric_vector(value, n_rows, "weights", pd)
 
 
+def _variable_labels(data: Any) -> Optional[Mapping[str, str]]:
+    """Snapshot descriptive variable labels carried on the estimation frame.
+
+    pandas propagates ``DataFrame.attrs``, and ``maketables.import_dta`` writes
+    Stata variable labels under the ``variable_labels`` key there. Reading that
+    key is a plain dict lookup, so the labels reach a rendered table without
+    xhdfe depending on, or importing, any table package.
+    """
+    attrs = getattr(data, "attrs", None)
+    if not isinstance(attrs, Mapping):
+        return None
+    labels = attrs.get("variable_labels")
+    if not isinstance(labels, Mapping):
+        return None
+    snapshot = {
+        str(key): str(value)
+        for key, value in labels.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+    return MappingProxyType(snapshot) if snapshot else None
+
+
+def _normalized_se_type(regressor_options: Mapping[str, Any]) -> str:
+    """Name the standard-error family a fit requested.
+
+    The native constructor takes ``se_type`` as a string and defaults it to
+    ``unadjusted``, which is its spelling of homoskedastic errors; both spellings
+    collapse to ``homoskedastic`` here so downstream consumers see one name. A
+    ``StandardErrorType`` member is accepted defensively and read by name.
+    """
+    raw = regressor_options.get("se_type", "unadjusted")
+    name = getattr(raw, "name", None)
+    text = str(name if name is not None else raw).lower()
+    return "homoskedastic" if text == "unadjusted" else text
+
+
 def _resolve_clusters(clusters: Any, data: Any, n_rows: int, pd: Any):
     if clusters is None:
-        return None, {}
+        return None, {}, ()
 
     labels: list[str] = []
     values: list[Any] = []
@@ -418,7 +458,9 @@ def _resolve_clusters(clusters: Any, data: Any, n_rows: int, pd: Any):
         encoded.append(codes)
         if category_levels is not None:
             levels[label] = category_levels
-    return encoded, levels
+    # ``levels`` only records categorical clusters, so the labels are returned
+    # separately: they are the sole record of which variables were clustered on.
+    return encoded, levels, tuple(labels)
 
 
 def _simple_numeric_matrix(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
@@ -688,6 +730,8 @@ class _MaterializedFormula:
     fe_names: tuple[str, ...]
     fe_levels: Mapping[str, np.ndarray]
     cluster_levels: Mapping[str, np.ndarray]
+    cluster_names: tuple[str, ...]
+    var_labels: Optional[Mapping[str, str]]
     model_spec: Any
     data_index: np.ndarray
     used_fast_path: bool
@@ -751,7 +795,9 @@ def _materialize_formula(
     )
     if fweights and resolved_weights is None:
         raise ValueError("fweights=True requires weights")
-    resolved_clusters, cluster_levels = _resolve_clusters(clusters, data, n_rows, pd)
+    resolved_clusters, cluster_levels, cluster_names = _resolve_clusters(
+        clusters, data, n_rows, pd
+    )
     intercept_index: Optional[int] = None
     coef_names = slope_names
     if fit_intercept:
@@ -777,6 +823,8 @@ def _materialize_formula(
         fe_names=fe_names,
         fe_levels=MappingProxyType(fe_levels),
         cluster_levels=MappingProxyType(cluster_levels),
+        cluster_names=cluster_names,
+        var_labels=_variable_labels(data),
         model_spec=model_spec,
         data_index=_data_index(data, n_rows),
         used_fast_path=used_fast_path,
@@ -856,6 +904,7 @@ def _formula_regressor_class():
     FormulaRegressor.__name__ = "FormulaRegressor"
     FormulaRegressor.__qualname__ = "FormulaRegressor"
     FormulaRegressor.__module__ = __name__
+    _maketables.attach(FormulaRegressor)
     return FormulaRegressor
 
 
@@ -894,6 +943,9 @@ def _fit_materialized(
     model.fe_names_ = materialized.fe_names
     model.fe_levels_ = materialized.fe_levels
     model.cluster_levels_ = materialized.cluster_levels
+    model.cluster_names_ = materialized.cluster_names
+    model.se_type_ = _normalized_se_type(regressor_options)
+    model.var_labels_ = materialized.var_labels
     model.model_spec_ = materialized.model_spec
     model.data_index_ = materialized.data_index.copy()
     sample = np.asarray(model.sample_index_, dtype=np.int64)

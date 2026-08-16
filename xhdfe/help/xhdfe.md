@@ -162,7 +162,7 @@ The supported operators use standard R/Formulaic semantics. The closest common
 Stata factor-variable spellings are:
 
 | Purpose | Formula interface | Closest Stata spelling |
-|---|---|---|
+| --- | --- | --- |
 | Categorical main effect | `C(g)` | `i.g` |
 | Choose category 3 as reference | `C(g, Treatment(reference=3))` | `ib3.g` |
 | Continuous product only | `x:z` | `c.x#c.z` |
@@ -244,8 +244,13 @@ so every input stays positionally aligned.
 The returned object is a Python subclass of the native `HdfeRegressor`, so its
 coefficients, standard errors, diagnostics, retained fixed effects, and methods
 remain available. Formula metadata adds `formula_`, `coef_names_`, `fe_names_`,
-`fe_levels_`, `cluster_levels_`, `data_index_`, `estimation_index_`,
-`intercept_index_`, and `used_fast_path_`. The native core stores its intercept
+`fe_levels_`, `cluster_levels_`, `cluster_names_`, `se_type_`, `var_labels_`,
+`data_index_`, `estimation_index_`,
+`intercept_index_`, and `used_fast_path_`. `cluster_names_` records which
+variables were clustered on (`cluster_levels_` only records categorical ones),
+`se_type_` records the requested standard-error family with `unadjusted`
+normalized to `homoskedastic`, and `var_labels_` snapshots any descriptive
+variable labels the estimation frame carried. The native core stores its intercept
 last; `coef_names_` and `tidy()` use that same order. If a real regressor is
 itself named `Intercept`, the native intercept is labelled `Intercept [xhdfe]`
 to keep result keys unique.
@@ -514,6 +519,54 @@ After `fit`, the regressor exposes:
   `gpu_absorption_converged_`, `gpu_absorption_iterations_`.
 
 `summary()` returns a formatted text table.
+
+## Regression tables with maketables
+
+Fitted results implement the plug-in format of
+[maketables](https://github.com/py-econometrics/maketables), so a result can be
+passed straight to `ETable` with no registration step and no adapter:
+
+```python
+import maketables as mt
+import xhdfe
+
+m1 = xhdfe.feols("y ~ x1 | firm", data=d, se_type="cluster", clusters="firm")
+m2 = xhdfe.feols("y ~ x1 + x2 | firm + year", data=d, se_type="cluster",
+                 clusters="firm")
+
+print(mt.ETable([m1, m2], drop="Intercept").make(type="tex"))
+```
+
+maketables is **not** a dependency of xhdfe. The integration is a set of
+duck-typed `__maketables_*` attributes that maketables reads if it happens to be
+installed; xhdfe imports nothing from it.
+
+The absorbed fixed effects appear as their own indicator rows, and these
+model statistics are available through `model_stats=[...]`:
+
+| Key | Meaning |
+| --- | --- |
+| `N` | observations used, after singleton dropping |
+| `r2`, `r2_within` | overall and within R-squared |
+| `rmse` | `sqrt(RSS/N)` |
+| `n_clusters` | number of clusters, omitted when errors are not clustered |
+| `se_type` | `iid`, `robust`, or `by: firm+year` |
+| `N_full` | observations before singletons were dropped |
+| `n_singletons` | singleton observations dropped |
+| `df_absorbed` | degrees of freedom absorbed by the fixed effects |
+
+`N`, `r2` and `r2_within` are shown by default. The within R-squared is reported
+only when something was actually absorbed. Note that the native intercept is
+retained in the coefficient vector even under absorption, so `drop="Intercept"`
+is the usual spelling for a table that follows the `reghdfe` convention.
+
+Fits made through the array API tabulate too, but carry no names: their
+coefficients are reported as `b0`, `b1`, ... and the dependent variable as `y`.
+
+If the estimation frame carries descriptive variable labels under
+`df.attrs["variable_labels"]` — which is what `maketables.import_dta` writes when
+it reads a labelled Stata file — those labels are captured at fit time and used
+for the row and column headings automatically.
 
 ## GPU selection
 
