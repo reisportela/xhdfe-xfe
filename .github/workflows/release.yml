@@ -355,8 +355,10 @@ jobs:
           )
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install "${WHEELS[0]}[formula]"
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'formulaic==1.2.1'
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'maketables==0.1.8'
           /tmp/xhdfe-wheel-smoke/bin/python -m pip check
           cp tests/test_formula_frontend.py /tmp/test_formula_frontend.py
+          cp tests/test_maketables_integration.py /tmp/test_maketables_integration.py
           (
             cd /tmp
             /tmp/xhdfe-wheel-smoke/bin/python - <<'PY'
@@ -364,14 +366,16 @@ jobs:
           import pandas
           import unittest
 
-          suite = unittest.defaultTestLoader.loadTestsFromName("test_formula_frontend")
+          suite = unittest.TestSuite()
+          for name in ("test_formula_frontend", "test_maketables_integration"):
+              suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          if not result.wasSuccessful() or result.skipped or result.testsRun != 35:
+          if not result.wasSuccessful() or result.skipped or result.testsRun != 67:
               raise SystemExit(
-                  f"formula wheel gate expected 35 passing tests without skips; "
+                  f"formula/maketables wheel gate expected 67 passing tests without skips; "
                   f"ran={result.testsRun}, skipped={result.skipped}"
               )
-          print("PYTHON_WHEEL_FORMULA_SUITE_PASS")
+          print("PYTHON_WHEEL_FORMULA_MAKETABLES_SUITES_PASS")
           PY
           )
           python3 -m venv --system-site-packages /tmp/xhdfe-sdist-smoke

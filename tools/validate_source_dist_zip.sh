@@ -48,8 +48,10 @@ required_entries=(
   "xhdfe-src/third_party/licenses/dlfcn-win32-1.4.1-COPYING"
   "xhdfe-src/py_hdfe_v11.py"
   "xhdfe-src/xhdfe/_formula.py"
+  "xhdfe-src/xhdfe/_maketables.py"
   "xhdfe-src/xhdfe/help/xhdfe.md"
   "xhdfe-src/tests/test_formula_frontend.py"
+  "xhdfe-src/tests/test_maketables_integration.py"
   "xhdfe-src/tests/test_windows_runtime_packaging.py"
   "xhdfe-src/third_party/eigen-3.4.0/Eigen/Core"
   "xhdfe-src/third_party/pybind11-2.11.1/include/pybind11/pybind11.h"
@@ -101,7 +103,9 @@ command -v python3 >/dev/null 2>&1 || {
 }
 python3 -m py_compile \
   "${source_root}/xhdfe/_formula.py" \
+  "${source_root}/xhdfe/_maketables.py" \
   "${source_root}/tests/test_formula_frontend.py" \
+  "${source_root}/tests/test_maketables_integration.py" \
   "${source_root}/tests/test_windows_runtime_packaging.py" \
   "${source_root}/tests/test_corresponding_source_bundle.py" \
   "${source_root}/tools/validate_python_release_artifacts.py" \

@@ -91,7 +91,23 @@ def _load_core():
             "The xhdfe compiled extension is not available. Build or install the "
             "package with `python -m pip install .` from the repository root."
         ) from exc
+    _attach_maketables_hooks(core)
     return core
+
+
+def _attach_maketables_hooks(core):
+    """Attach optional table hooks without making core loading depend on them."""
+    regressor = getattr(core, "HdfeRegressor", None)
+    if regressor is None:
+        return
+    from . import _maketables
+
+    try:
+        _maketables.attach(regressor)
+    except (AttributeError, TypeError):
+        # Some extension-type builds may reject class attribute injection.  The
+        # formula subclass is still supported, and estimation must keep loading.
+        pass
 
 
 def __getattr__(name: str):

@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.24.1 | 16 August 2026 | [Direct maketables integration for Python results](RELEASE_NOTES_2.24.1.20260816.md) |
 | 2.24.0 | 15 August 2026 | [Python formula interface and generic Windows runtime closure](RELEASE_NOTES_2.24.0.20260815.md) |
 | 2.23.1 | 6 August 2026 | [Stata display and autonomous source-archive hotfix](RELEASE_NOTES_2.23.1.20260806.md) |
 | 2.23.0 | 6 August 2026 | [Functional contracts and scientific precision repair](RELEASE_NOTES_2.23.0.20260806.md) |

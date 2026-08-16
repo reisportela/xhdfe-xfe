@@ -216,7 +216,7 @@
 <h1 class="title">xhdfe Python help</h1>
 </header>
 <h1 id="xhdfe-python-help">xhdfe Python help</h1>
-<p>Package documentation version: 2.24.0.20260815. Use <code>python -m xhdfe --version</code> to inspect the installed package rather than relying on this static document.</p>
+<p>Package documentation version: 2.24.1.20260816. Use <code>python -m xhdfe --version</code> to inspect the installed package rather than relying on this static document.</p>
 <p><code>xhdfe</code> is the Python package wrapper around the v11 xhdfe C++ backend. It exposes the same compiled estimator that older scripts imported as <code>py_hdfe_v11</code>, while adding a package namespace, install metadata, and packaged help.</p>
 <p>The package is a proof of concept. Estimates, standard errors, and recovered fixed effects should be validated for the user’s research design, just as with the Stata package.</p>
 <h2 id="installation">Installation</h2>
@@ -351,7 +351,7 @@
 <span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>    se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>,</span>
 <span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div>
 <p>Missing values fail closed by default across the response, regressors, fixed effects, weights, and clusters. The first formula release supports only <code>na_action="raise"</code>; clean, drop, or impute rows explicitly before estimation so every input stays positionally aligned.</p>
-<p>The returned object is a Python subclass of the native <code>HdfeRegressor</code>, so its coefficients, standard errors, diagnostics, retained fixed effects, and methods remain available. Formula metadata adds <code>formula_</code>, <code>coef_names_</code>, <code>fe_names_</code>, <code>fe_levels_</code>, <code>cluster_levels_</code>, <code>data_index_</code>, <code>estimation_index_</code>, <code>intercept_index_</code>, and <code>used_fast_path_</code>. The native core stores its intercept last; <code>coef_names_</code> and <code>tidy()</code> use that same order. If a real regressor is itself named <code>Intercept</code>, the native intercept is labelled <code>Intercept [xhdfe]</code> to keep result keys unique.</p>
+<p>The returned object is a Python subclass of the native <code>HdfeRegressor</code>, so its coefficients, standard errors, diagnostics, retained fixed effects, and methods remain available. Formula metadata adds <code>formula_</code>, <code>coef_names_</code>, <code>fe_names_</code>, <code>fe_levels_</code>, <code>cluster_levels_</code>, <code>cluster_names_</code>, <code>se_type_</code>, <code>var_labels_</code>, <code>data_index_</code>, <code>estimation_index_</code>, <code>intercept_index_</code>, and <code>used_fast_path_</code>. <code>cluster_names_</code> records the cluster variables (<code>cluster_levels_</code> only records categorical levels), <code>se_type_</code> records the canonical standard-error family, and <code>var_labels_</code> snapshots descriptive labels carried by the estimation frame. The native core stores its intercept last; <code>coef_names_</code> and <code>tidy()</code> use that same order. If a real regressor is itself named <code>Intercept</code>, the native intercept is labelled <code>Intercept [xhdfe]</code> to keep result keys unique.</p>
 <p>Formula parsing and dataframe materialization necessarily add overhead. Simple numeric lookups and numeric <code>:</code> interactions use a direct NumPy construction path, promoting inputs to FP64 before interaction arithmetic; categories and transforms use Formulaic. Numeric columns referenced directly or inside Python transforms such as <code>I(x**2)</code>—on either side of <code>~</code>—are promoted before Formulaic evaluation, including in a mixed formula such as <code>C(g) + x:z</code>. If one non-FP64 column is used both as <code>C(g)</code> and as a numeric regressor, create a separate FP64 column for the numeric role; the wrapper rejects that ambiguous mixed use rather than risk collapsing large integer category IDs. For repeated fits of the exact same response/design/FE snapshot, prepare it once:</p>
 <div class="sourceCode" id="cb14"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>prepared <span class="op">=</span> xhdfe.prepare_formula(</span>
 <span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;y ~ x1 + x2 | firm + year&quot;</span>,</span>
@@ -492,27 +492,84 @@
 <li><p>Runtime diagnostics: <code>threads_requested_</code>, <code>threads_effective_</code>, <code>threads_used_</code> (largest team observed doing real work), <code>parallel_workers_active_</code> (largest useful-worker count in one region), <code>thread_capacity_</code>, <code>openmp_enabled_</code>, <code>thread_limit_code_</code>, <code>thread_limit_reason_</code>, <code>absorption_method_used</code>, <code>gpu_attempted_</code>, <code>gpu_used_</code>, <code>gpu_status_code_</code>, <code>gpu_absorption_converged_</code>, <code>gpu_absorption_iterations_</code>.</p></li>
 </ul>
 <p><code>summary()</code> returns a formatted text table.</p>
+<h2 id="regression-tables-with-maketables">Regression tables with maketables</h2>
+<p>Fitted results implement the plug-in format of <a href="https://github.com/py-econometrics/maketables">maketables</a>, so a result can be passed directly to <code>ETable</code> without registration or an adapter:</p>
+<div class="sourceCode" id="cb19"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> maketables <span class="im">as</span> mt</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>m1 <span class="op">=</span> xhdfe.feols(<span class="st">&quot;y ~ x1 | firm&quot;</span>, data<span class="op">=</span>d, se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>, clusters<span class="op">=</span><span class="st">&quot;firm&quot;</span>)</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>m2 <span class="op">=</span> xhdfe.feols(<span class="st">&quot;y ~ x1 + x2 | firm + year&quot;</span>, data<span class="op">=</span>d, se_type<span class="op">=</span><span class="st">&quot;cluster&quot;</span>,</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>                 clusters<span class="op">=</span><span class="st">&quot;firm&quot;</span>)</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(mt.ETable([m1, m2], drop<span class="op">=</span><span class="st">&quot;Intercept&quot;</span>).make(<span class="bu">type</span><span class="op">=</span><span class="st">&quot;tex&quot;</span>))</span></code></pre></div>
+<p>maketables is <strong>not</strong> an xhdfe dependency. The integration consists only of duck-typed <code>__maketables_*</code> attributes; xhdfe never imports maketables.</p>
+<p>Absorbed fixed effects appear as indicator rows. These model statistics are available through <code>model_stats=[...]</code>:</p>
+<table>
+<thead>
+<tr class="header">
+<th>Key</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>N</code></td>
+<td>observations used, after singleton dropping</td>
+</tr>
+<tr class="even">
+<td><code>r2</code>, <code>r2_within</code></td>
+<td>overall and within R-squared</td>
+</tr>
+<tr class="odd">
+<td><code>rmse</code></td>
+<td><code>sqrt(RSS/N)</code></td>
+</tr>
+<tr class="even">
+<td><code>n_clusters</code></td>
+<td>minimum cluster count used for multiway inference</td>
+</tr>
+<tr class="odd">
+<td><code>se_type</code></td>
+<td><code>iid</code>, <code>robust</code>, or <code>by: firm+year</code></td>
+</tr>
+<tr class="even">
+<td><code>N_full</code></td>
+<td>observations before singletons were dropped</td>
+</tr>
+<tr class="odd">
+<td><code>n_singletons</code></td>
+<td>singleton observations dropped</td>
+</tr>
+<tr class="even">
+<td><code>df_absorbed</code></td>
+<td>degrees of freedom absorbed by the fixed effects</td>
+</tr>
+</tbody>
+</table>
+<p><code>N</code>, <code>r2</code>, and <code>r2_within</code> are shown by default. The within R-squared is reported only when the fit absorbed a fixed effect. The coefficient table exposes estimates, standard errors, t statistics, and p-values. Confidence interval tokens are intentionally omitted because xhdfe supports arbitrary confidence levels and must not label a non-95% interval as <code>ci95l</code>/<code>ci95u</code>.</p>
+<p>The native intercept is retained in the coefficient vector under absorption, so <code>drop="Intercept"</code> is the usual spelling for a table following the <code>reghdfe</code> convention. Array-API fits also tabulate: coefficients use <code>b0</code>, <code>b1</code>, …; the dependent variable is <code>y</code>; and unnamed absorbed dimensions use <code>fe1</code>, <code>fe2</code>, … so their presence is not hidden.</p>
+<p>If the estimation frame carries labels under <code>df.attrs["variable_labels"]</code>—as frames read by <code>maketables.import_dta</code> do—xhdfe captures a read-only snapshot at fit time for table row and column labels.</p>
 <h2 id="gpu-selection">GPU selection</h2>
 <p>GPU acceleration targets the fixed-effect absorber. CPU remains the reference path.</p>
 <p>Runtime backend selection uses:</p>
-<div class="sourceCode" id="cb19"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cpu</span>
-<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cuda</span>
-<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>metal</span></code></pre></div>
+<div class="sourceCode" id="cb20"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cpu</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>cuda</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a><span class="va">XHDFE_GPU_BACKEND</span><span class="op">=</span>metal</span></code></pre></div>
 <p>CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device. Metal is currently reserved.</p>
 <h2 id="help-commands">Help commands</h2>
 <p>Print the packaged help:</p>
-<div class="sourceCode" id="cb20"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe</span>
-<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span></span></code></pre></div>
+<div class="sourceCode" id="cb21"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span></span></code></pre></div>
 <p>List or open companion topics:</p>
-<div class="sourceCode" id="cb21"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> <span class="at">--topics</span></span>
-<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> gelbach</span>
-<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe gelbach</span></code></pre></div>
+<div class="sourceCode" id="cb22"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> <span class="at">--topics</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a><span class="ex">xhdfe-help</span> gelbach</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe gelbach</span></code></pre></div>
 <p>Print the help resource path:</p>
-<div class="sourceCode" id="cb22"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe <span class="at">--path</span></span></code></pre></div>
+<div class="sourceCode" id="cb23"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="ex">python</span> <span class="at">-m</span> xhdfe <span class="at">--path</span></span></code></pre></div>
 <p>Inside Python:</p>
-<div class="sourceCode" id="cb23"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
-<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text())</span>
-<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text(<span class="st">&quot;gelbach&quot;</span>))</span></code></pre></div>
+<div class="sourceCode" id="cb24"><pre class="sourceCode python"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> xhdfe</span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text())</span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(xhdfe.help_text(<span class="st">&quot;gelbach&quot;</span>))</span></code></pre></div>
 </body>
 </html>

@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.24.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.24.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -48,6 +48,7 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 
 - **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
 - **Dual Python API** — low-overhead arrays or an optional R-style formula frontend with categories and interactions.
+- **Publication tables** — fitted Python results plug directly into `maketables.ETable` without an adapter or runtime dependency.
 - **Heterogeneous (group-specific) slopes** — `fe#c.x` and `fe##c.x` designs.
 - **IV / 2SLS** with absorbed fixed effects.
 - **Weights** — analytic, frequency, probability, and importance weights.
@@ -296,6 +297,22 @@ absorber, so they do not become dummy columns. The existing
 regressions in loops. See the packaged Python help for formula semantics,
 categorical reference levels, and `prepare_formula()`.
 
+Fitted results implement the duck-typed plug-in format of
+[maketables](https://github.com/py-econometrics/maketables), so publication
+tables need no adapter or registration step:
+
+```python
+import maketables as mt
+
+print(mt.ETable([model_a, model_b], drop="Intercept").make(type="tex"))
+```
+
+maketables is not an xhdfe dependency. Absorbed fixed effects become indicator
+rows, singleton counts and absorbed degrees of freedom are available as table
+statistics, and Stata variable labels carried on the estimation frame are
+picked up automatically. See the packaged Python help for the full statistic
+list.
+
 ### R
 
 Install from GitHub (the package lives in the `r/xhdfe` subdirectory). This
@@ -499,7 +516,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.24.0.
+> effects regression via a C++ backend.* Version 2.24.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

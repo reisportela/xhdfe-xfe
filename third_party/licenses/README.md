@@ -1,8 +1,9 @@
 # Redistributed runtime license texts
 
 These files are verbatim copies of the license texts attached to the pinned
-upstream versions used by the xhdfe 2.24.0.20260815 release toolchains. Their
-line endings are preserved, including CRLF in the dlfcn-win32 file.
+upstream versions used by the xhdfe 2.24-series release toolchains, beginning
+with 2.24.0.20260815. Their line endings are preserved, including CRLF in the
+dlfcn-win32 file.
 
 | File | Upstream path | SHA-256 |
 |---|---|---|

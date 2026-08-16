@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.24.0.20260815. Use `python -m xhdfe --version`
+Package documentation version: 2.24.1.20260816. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -244,8 +244,12 @@ so every input stays positionally aligned.
 The returned object is a Python subclass of the native `HdfeRegressor`, so its
 coefficients, standard errors, diagnostics, retained fixed effects, and methods
 remain available. Formula metadata adds `formula_`, `coef_names_`, `fe_names_`,
-`fe_levels_`, `cluster_levels_`, `data_index_`, `estimation_index_`,
-`intercept_index_`, and `used_fast_path_`. The native core stores its intercept
+`fe_levels_`, `cluster_levels_`, `cluster_names_`, `se_type_`, `var_labels_`,
+`data_index_`, `estimation_index_`, `intercept_index_`, and `used_fast_path_`.
+`cluster_names_` records the cluster variables (`cluster_levels_` only records
+categorical levels), `se_type_` records the canonical standard-error family,
+and `var_labels_` snapshots descriptive labels carried by the estimation
+frame. The native core stores its intercept
 last; `coef_names_` and `tidy()` use that same order. If a real regressor is
 itself named `Intercept`, the native intercept is labelled `Intercept [xhdfe]`
 to keep result keys unique.
@@ -514,6 +518,56 @@ After `fit`, the regressor exposes:
   `gpu_absorption_converged_`, `gpu_absorption_iterations_`.
 
 `summary()` returns a formatted text table.
+
+## Regression tables with maketables
+
+Fitted results implement the plug-in format of
+[maketables](https://github.com/py-econometrics/maketables), so a result can be
+passed directly to `ETable` without registration or an adapter:
+
+```python
+import maketables as mt
+import xhdfe
+
+m1 = xhdfe.feols("y ~ x1 | firm", data=d, se_type="cluster", clusters="firm")
+m2 = xhdfe.feols("y ~ x1 + x2 | firm + year", data=d, se_type="cluster",
+                 clusters="firm")
+
+print(mt.ETable([m1, m2], drop="Intercept").make(type="tex"))
+```
+
+maketables is **not** an xhdfe dependency. The integration consists only of
+duck-typed `__maketables_*` attributes; xhdfe never imports maketables.
+
+Absorbed fixed effects appear as indicator rows. These model statistics are
+available through `model_stats=[...]`:
+
+| Key | Meaning |
+| --- | --- |
+| `N` | observations used, after singleton dropping |
+| `r2`, `r2_within` | overall and within R-squared |
+| `rmse` | `sqrt(RSS/N)` |
+| `n_clusters` | minimum cluster count used for multiway inference |
+| `se_type` | `iid`, `robust`, or `by: firm+year` |
+| `N_full` | observations before singletons were dropped |
+| `n_singletons` | singleton observations dropped |
+| `df_absorbed` | degrees of freedom absorbed by the fixed effects |
+
+`N`, `r2`, and `r2_within` are shown by default. The within R-squared is
+reported only when the fit absorbed a fixed effect. The coefficient table
+exposes estimates, standard errors, t statistics, and p-values. Confidence
+interval tokens are intentionally omitted because xhdfe supports arbitrary
+confidence levels and must not label a non-95% interval as `ci95l`/`ci95u`.
+
+The native intercept is retained in the coefficient vector under absorption,
+so `drop="Intercept"` is the usual spelling for a table following the
+`reghdfe` convention. Array-API fits also tabulate: coefficients use `b0`,
+`b1`, ...; the dependent variable is `y`; and unnamed absorbed dimensions use
+`fe1`, `fe2`, ... so their presence is not hidden.
+
+If the estimation frame carries labels under
+`df.attrs["variable_labels"]`—as frames read by `maketables.import_dta` do—xhdfe
+captures a read-only snapshot at fit time for table row and column labels.
 
 ## GPU selection
 

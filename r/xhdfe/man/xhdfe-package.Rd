@@ -6,7 +6,7 @@
 \description{
 The \pkg{xhdfe} package estimates linear models with multiple
 high-dimensional fixed effects through a compiled C++ backend -- the very
-same estimator core (version 2.24.0) behind the Stata \code{xhdfe} command
+same estimator core (version 2.24.1) behind the Stata \code{xhdfe} command
 and the Python \code{xhdfe} package. CPU behavior is the reference
 implementation; the optional CUDA GPU absorber is validated against it and
 never silently replaces it. Where possible the package mirrors
@@ -111,7 +111,7 @@ acknowledged. The usual disclaimer applies.
 
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.24.0.
+effects regression via a C++ backend." Version 2.24.1.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear

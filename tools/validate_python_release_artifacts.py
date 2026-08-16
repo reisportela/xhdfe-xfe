@@ -925,6 +925,7 @@ def validate_wheel(
             archive.read(init_name).decode("utf-8"), "wheel xhdfe/__init__.py"
         )
         _member_with_suffix(names, "/xhdfe/_formula.py", "wheel")
+        _member_with_suffix(names, "/xhdfe/_maketables.py", "wheel")
         _member_with_suffix(names, "/xhdfe/help/xhdfe.md", "wheel")
         _wheel_notice_member(names, "LICENSE")
         notice_name = _wheel_notice_member(names, "NOTICE")
@@ -955,8 +956,10 @@ def validate_sdist(sdist: Path, expected_version: str) -> None:
             "/NOTICE",
             "/xhdfe/__init__.py",
             "/xhdfe/_formula.py",
+            "/xhdfe/_maketables.py",
             "/xhdfe/help/xhdfe.md",
             "/tests/test_formula_frontend.py",
+            "/tests/test_maketables_integration.py",
             "/tests/test_windows_runtime_packaging.py",
             "/tests/test_corresponding_source_bundle.py",
             "/tools/build_corresponding_source_bundle.py",
