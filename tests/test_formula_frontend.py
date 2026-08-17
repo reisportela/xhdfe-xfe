@@ -911,6 +911,354 @@ class FormulaFrontendTest(unittest.TestCase):
         pd.testing.assert_frame_equal(self.data, original, check_exact=True)
 
 
+@unittest.skipUnless(HAS_FORMULA_DEPENDENCIES, "formulaic extra is not installed")
+class FormulaIvTest(unittest.TestCase):
+    """The `y ~ exog | fe | endogenous ~ instruments` part, mirroring the R grammar."""
+
+    @classmethod
+    def setUpClass(cls):
+        rng = np.random.default_rng(20260816)
+        n = 900
+        firm = rng.integers(0, 40, size=n, dtype=np.int64)
+        year = rng.integers(0, 8, size=n, dtype=np.int64)
+        g = np.resize(np.array([0, 1, 2], dtype=np.int64), n)
+        rng.shuffle(g)
+        x = rng.normal(size=n)
+        z1 = rng.normal(size=n)
+        z2 = rng.normal(size=n)
+        confounder = rng.normal(size=n)
+        d1 = 0.9 * z1 - 0.45 * z2 + 0.3 * x + 0.6 * confounder + rng.normal(size=n)
+        d2 = 0.5 * z2 + 0.4 * z1 + 0.5 * confounder + rng.normal(size=n)
+        firm_effect = rng.normal(scale=0.6, size=40)
+        year_effect = rng.normal(scale=0.3, size=8)
+        y = (
+            0.4
+            + 1.5 * d1
+            - 0.8 * d2
+            + 0.5 * x
+            + 0.9 * confounder
+            + firm_effect[firm]
+            + year_effect[year]
+            + rng.normal(scale=0.4, size=n)
+        )
+        cls.data = pd.DataFrame(
+            {
+                "y": y,
+                "x": x,
+                "d1": d1,
+                "d2": d2,
+                "z1": z1,
+                "z2": z2,
+                "g": g,
+                "firm": firm,
+                "year": year,
+                "weight": rng.uniform(0.7, 1.8, size=n),
+            },
+            index=np.asarray([5_000 + (13 * i) % 401 for i in range(n)]),
+        )
+
+    def _fit_native_iv(self, X, fes, instruments, endogenous_idx, **options):
+        constructor_options = dict(REGRESSOR_OPTIONS)
+        constructor_options.update(options)
+        model = xhdfe.HdfeRegressor(**constructor_options)
+        model.fit(
+            np.ascontiguousarray(self.data["y"], dtype=np.float64),
+            np.asfortranarray(X, dtype=np.float64),
+            fes=[np.ascontiguousarray(fe, dtype=np.int64) for fe in fes],
+            instruments=np.asfortranarray(instruments, dtype=np.float64),
+            endogenous_idx=list(endogenous_idx),
+        )
+        return model
+
+    def test_single_endogenous_matches_array_api(self):
+        d = self.data
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"])),
+            [d["firm"], d["year"]],
+            np.column_stack((d["z1"], d["z2"])),
+            [1],
+        )
+        actual = xhdfe.feols(
+            "y ~ x | firm + year | d1 ~ z1 + z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, expected)
+        self.assertTrue(actual.used_fast_path_)
+        self.assertEqual(actual.coef_names_, ("x", "d1", "Intercept"))
+        self.assertEqual(actual.endog_names_, ("d1",))
+        self.assertEqual(actual.instrument_names_, ("z1", "z2"))
+        self.assertEqual(actual.endogenous_index_, (1,))
+        self.assertEqual(actual.fe_names_, ("firm", "year"))
+        np.testing.assert_array_equal(actual.estimation_index_, d.index.to_numpy())
+
+    def test_several_endogenous_regressors_match_array_api(self):
+        d = self.data
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"], d["d2"])),
+            [d["firm"], d["year"]],
+            np.column_stack((d["z1"], d["z2"], d["z1"] * d["z2"])),
+            [1, 2],
+        )
+        actual = xhdfe.feols(
+            "y ~ x | firm + year | d1 + d2 ~ z1 + z2 + z1:z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, expected)
+        self.assertEqual(actual.coef_names_, ("x", "d1", "d2", "Intercept"))
+        self.assertEqual(actual.endog_names_, ("d1", "d2"))
+        self.assertEqual(actual.instrument_names_, ("z1", "z2", "z1:z2"))
+        self.assertEqual(actual.endogenous_index_, (1, 2))
+
+    def test_iv_without_fixed_effects_matches_array_api(self):
+        d = self.data
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"])),
+            [],
+            np.column_stack((d["z1"], d["z2"])),
+            [1],
+        )
+        actual = xhdfe.feols("y ~ x | d1 ~ z1 + z2", d, **REGRESSOR_OPTIONS)
+
+        _assert_native_parity(self, actual, expected)
+        self.assertEqual(actual.coef_names_, ("x", "d1", "Intercept"))
+        self.assertEqual(actual.fe_names_, ())
+        self.assertEqual(actual.endogenous_index_, (1,))
+
+    def test_clustered_and_weighted_iv_match_array_api(self):
+        d = self.data
+        X = np.column_stack((d["x"], d["d1"]))
+        Z = np.column_stack((d["z1"], d["z2"]))
+        model = xhdfe.HdfeRegressor(
+            **{**REGRESSOR_OPTIONS, "se_type": "cluster"},
+        )
+        model.fit(
+            np.ascontiguousarray(d["y"], dtype=np.float64),
+            np.asfortranarray(X, dtype=np.float64),
+            fes=[np.ascontiguousarray(d["firm"], dtype=np.int64)],
+            weights=np.ascontiguousarray(d["weight"], dtype=np.float64),
+            clusters=[np.ascontiguousarray(d["firm"], dtype=np.int64)],
+            instruments=np.asfortranarray(Z, dtype=np.float64),
+            endogenous_idx=[1],
+        )
+        actual = xhdfe.feols(
+            "y ~ x | firm | d1 ~ z1 + z2",
+            d,
+            weights="weight",
+            clusters="firm",
+            se_type="cluster",
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, model)
+        self.assertEqual(actual.cluster_names_, ("firm",))
+        self.assertEqual(actual.endogenous_index_, (1,))
+
+    def test_endogenous_columns_follow_a_categorical_exogenous_block(self):
+        d = self.data
+        categories = np.column_stack(
+            tuple(np.asarray(d["g"] == level, dtype=np.float64) for level in (1, 2))
+        )
+        expected = self._fit_native_iv(
+            np.column_stack((categories, d["x"], d["d1"])),
+            [d["firm"]],
+            np.column_stack((d["z1"], d["z2"])),
+            [3],
+        )
+        actual = xhdfe.feols(
+            "y ~ C(g) + x | firm | d1 ~ z1 + z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, expected)
+        self.assertFalse(actual.used_fast_path_)
+        self.assertEqual(
+            actual.coef_names_,
+            ("C(g)[T.1]", "C(g)[T.2]", "x", "d1", "Intercept"),
+        )
+        self.assertEqual(actual.endogenous_index_, (3,))
+
+    def test_transformed_endogenous_and_instrument_terms_match_array_api(self):
+        d = self.data
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"], d["d1"] ** 2)),
+            [d["firm"]],
+            np.column_stack((d["z1"], d["z2"], d["z1"] ** 2)),
+            [1, 2],
+        )
+        actual = xhdfe.feols(
+            "y ~ x | firm | d1 + I(d1**2) ~ z1 + z2 + I(z1**2)",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, expected)
+        self.assertFalse(actual.used_fast_path_)
+        self.assertEqual(actual.endog_names_, ("d1", "I(d1 ** 2)"))
+        self.assertEqual(actual.instrument_names_, ("z1", "z2", "I(z1 ** 2)"))
+        self.assertEqual(actual.endogenous_index_, (1, 2))
+
+    def test_fast_path_and_formulaic_path_build_the_same_iv_design(self):
+        from xhdfe import _formula
+
+        for formula in (
+            "y ~ x | firm + year | d1 ~ z1 + z2",
+            "y ~ x | d1 + d2 ~ z1 + z2",
+            "y ~ 0 + x:z1 | firm | d1 ~ z1 + z2",
+        ):
+            with self.subTest(formula=formula):
+                arguments = {
+                    "weights": None,
+                    "clusters": None,
+                    "fweights": False,
+                    "na_action": "raise",
+                    "context": None,
+                }
+                fast = _formula._materialize_formula(formula, self.data, **arguments)
+                generic = _formula._materialize_formula(
+                    formula, self.data, force_formulaic=True, **arguments
+                )
+                self.assertTrue(fast.used_fast_path)
+                self.assertFalse(generic.used_fast_path)
+                np.testing.assert_array_equal(fast.X, generic.X)
+                np.testing.assert_array_equal(fast.instruments, generic.instruments)
+                self.assertEqual(fast.coef_names, generic.coef_names)
+                self.assertEqual(fast.endogenous_index, generic.endogenous_index)
+                self.assertEqual(fast.endog_names, generic.endog_names)
+                self.assertEqual(fast.instrument_names, generic.instrument_names)
+
+    def test_suppressed_intercept_keeps_the_endogenous_positions(self):
+        d = self.data
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"])),
+            [],
+            np.column_stack((d["z1"], d["z2"])),
+            [1],
+            fit_intercept=False,
+        )
+        actual = xhdfe.feols("y ~ 0 + x | d1 ~ z1 + z2", d, **REGRESSOR_OPTIONS)
+
+        _assert_native_parity(self, actual, expected)
+        self.assertEqual(actual.coef_names_, ("x", "d1"))
+        self.assertIsNone(actual.intercept_index_)
+        self.assertEqual(actual.endogenous_index_, (1,))
+
+    def test_iv_blocks_never_carry_their_own_constant(self):
+        d = self.data
+        plain = xhdfe.feols("y ~ x | firm | d1 ~ z1 + z2", d, **REGRESSOR_OPTIONS)
+        suppressed = xhdfe.feols(
+            "y ~ x | firm | 0 + d1 ~ 0 + z1 + z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        self.assertEqual(plain.coef_names_, suppressed.coef_names_)
+        np.testing.assert_array_equal(plain.coef_, suppressed.coef_)
+
+    def test_quoted_names_may_contain_the_formula_separators(self):
+        d = self.data
+        frame = pd.DataFrame(
+            {
+                "y": d["y"].to_numpy(),
+                "a|b": d["x"].to_numpy(),
+                "c~e": d["d1"].to_numpy(),
+                "z1": d["z1"].to_numpy(),
+                "z2": d["z2"].to_numpy(),
+                "firm": d["firm"].to_numpy(),
+            }
+        )
+        expected = self._fit_native_iv(
+            np.column_stack((d["x"], d["d1"])),
+            [d["firm"]],
+            np.column_stack((d["z1"], d["z2"])),
+            [1],
+        )
+        actual = xhdfe.feols(
+            "y ~ `a|b` | firm | `c~e` ~ z1 + z2",
+            frame,
+            **REGRESSOR_OPTIONS,
+        )
+
+        _assert_native_parity(self, actual, expected)
+        self.assertEqual(actual.coef_names_, ("a|b", "c~e", "Intercept"))
+        self.assertEqual(actual.endog_names_, ("c~e",))
+
+    def test_prepared_iv_formula_snapshots_the_instruments_read_only(self):
+        d = self.data
+        prepared = xhdfe.prepare_formula(
+            "y ~ x | firm + year | d1 ~ z1 + z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+
+        self.assertEqual(prepared.endogenous_index, (1,))
+        self.assertEqual(prepared.endog_names, ("d1",))
+        self.assertEqual(prepared.instrument_names, ("z1", "z2"))
+        self.assertFalse(prepared.instruments.flags.writeable)
+        self.assertFalse(prepared.X.flags.writeable)
+        np.testing.assert_array_equal(prepared.fit().coef_, prepared.fit().coef_)
+
+    def test_refit_clears_stale_iv_metadata(self):
+        d = self.data
+        model = xhdfe.feols(
+            "y ~ x | firm + year | d1 ~ z1 + z2",
+            d,
+            **REGRESSOR_OPTIONS,
+        )
+        self.assertEqual(model.endogenous_index_, (1,))
+
+        model.fit(
+            np.ascontiguousarray(d["y"], dtype=np.float64),
+            np.asfortranarray(np.column_stack((d["x"],)), dtype=np.float64),
+            fes=[np.ascontiguousarray(d["firm"], dtype=np.int64)],
+        )
+        for name in ("endogenous_index_", "endog_names_", "instrument_names_"):
+            self.assertFalse(hasattr(model, name), name)
+
+    def test_ols_formulas_report_no_iv_metadata(self):
+        model = xhdfe.feols("y ~ x + d1 | firm", self.data, **REGRESSOR_OPTIONS)
+
+        self.assertEqual(model.endogenous_index_, ())
+        self.assertEqual(model.endog_names_, ())
+        self.assertEqual(model.instrument_names_, ())
+
+    def test_malformed_iv_parts_have_stable_errors(self):
+        d = self.data
+        with self.assertRaisesRegex(NotImplementedError, "at most one"):
+            xhdfe.feols("y ~ x | firm | year", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(NotImplementedError, "at most two"):
+            xhdfe.feols("y ~ x | firm | year | d1 ~ z1", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "must come last"):
+            xhdfe.feols("y ~ x | d1 ~ z1 | firm", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "no endogenous regressor"):
+            xhdfe.feols("y ~ x | firm | ~ z1", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "no excluded instrument"):
+            xhdfe.feols("y ~ x | firm | d1 ~", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "more than one `~`"):
+            xhdfe.feols("y ~ ~ x | firm | d1 ~ z1", d, **REGRESSOR_OPTIONS)
+
+    def test_duplicated_iv_roles_are_rejected_before_estimation(self):
+        d = self.data
+        with self.assertRaisesRegex(ValueError, "exogenous regressor and as an endogenous"):
+            xhdfe.feols("y ~ x + d1 | firm | d1 ~ z1 + z2", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "regressor and as an instrument"):
+            xhdfe.feols("y ~ x | firm | d1 ~ z1 + x", d, **REGRESSOR_OPTIONS)
+        with self.assertRaisesRegex(ValueError, "regressor and as an instrument"):
+            xhdfe.feols("y ~ x | firm | d1 ~ z1 + d1", d, **REGRESSOR_OPTIONS)
+
+    def test_underidentified_iv_is_rejected_by_the_native_core(self):
+        with self.assertRaisesRegex(RuntimeError, "underidentified"):
+            xhdfe.feols(
+                "y ~ x | firm | d1 + d2 ~ z1",
+                self.data,
+                **REGRESSOR_OPTIONS,
+            )
+
+
 class FormulaLazyImportTest(unittest.TestCase):
     def _run_fresh_python(self, code):
         env = os.environ.copy()

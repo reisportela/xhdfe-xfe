@@ -57,7 +57,7 @@ formula.
 | Multiway cluster     | `cluster = ~ f1 + f2`               | `vcov = {"CRV1": "f1 + f2"}`            | `cluster = ~ f1 + f2`                    | `clusters=[f1, f2]`                                       |
 | Heterogeneous slopes | `y ~ x \| f1[s]`                    | `y ~ x \| f1[s]`                        | `y ~ x \| f1[s]` (slopes only: `f1[[s]]`)| `slopes=[{"fe_index": j, "values": s, "include_intercept": True}]` |
 | Interaction FE       | `y ~ x \| f1^f2`                    | `y ~ x \| f1^f2`                        | `y ~ x \| f1^f2`                         | pre-build the joint id and pass it in `fes`              |
-| IV / 2SLS            | `y ~ x \| f1 \| endo ~ inst`        | `y ~ x \| f1 \| endo ~ inst`            | `y ~ x \| f1 \| endo ~ inst`             | `instruments=Z, endogenous_idx=[j]`                      |
+| IV / 2SLS            | `y ~ x \| f1 \| endo ~ inst`        | `y ~ x \| f1 \| endo ~ inst`            | `y ~ x \| f1 \| endo ~ inst`             | `feols("y ~ x \| f1 \| endo ~ inst")` or `instruments=Z, endogenous_idx=[j]` |
 | Weights              | `weights = ~ w`                     | `weights = "w"`                         | `weights = ~ w`                          | `weights=w`                                              |
 | Recover fixed effects| `fixef(m)`                          | `m.fixef()`                             | `save_fe = TRUE` then `fixef(m)`         | `HdfeRegressor(retain_fes=True)` then `reg.fe_effects_`  |
 | Small-sample control | `ssc(...)`                          | `ssc(...)`                              | `ssc = ...`, `stats_style = ...`         | `ssc_k_adj=`, `ssc_k_fixef=`, `ssc_g_df=`, ...           |
