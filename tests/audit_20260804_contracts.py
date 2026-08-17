@@ -328,6 +328,71 @@ def main() -> int:
                                    rtol=0.0, atol=tolerance)
         assert weighted.df_resid_ == expanded_fit.df_resid_
 
+    # Frequency weights must also equal literal row expansion when an
+    # indefinite two-way-cluster covariance activates the CGM PSD repair.
+    # The repair uses raw-regressor sample standard deviations as its metric,
+    # so those moments must reflect the frequency-expanded sample.
+    psd_rng = np.random.default_rng(20260817)
+    psd_n = 720
+    psd_row = np.arange(psd_n)
+    psd_firm = np.repeat(np.arange(60, dtype=np.int64), 12)
+    psd_year = np.tile(np.arange(12, dtype=np.int64), 60)
+    psd_region = psd_firm % 9
+    psd_cohort = psd_year % 4
+    psd_x = psd_rng.normal(size=psd_n)
+    psd_z1 = psd_rng.normal(size=psd_n)
+    psd_z2 = psd_rng.normal(size=psd_n)
+    psd_v = psd_rng.normal(size=psd_n)
+    psd_d = (
+        0.8 * psd_z1 - 0.45 * psd_z2 + 0.25 * psd_x + 0.7 * psd_v
+        + psd_rng.normal(scale=0.6, size=psd_n)
+    )
+    psd_y = (
+        1.4 * psd_d + 0.5 * psd_x + 0.8 * psd_v
+        + psd_rng.normal(scale=0.7, size=psd_n)
+    )
+    psd_X = np.asfortranarray(np.column_stack((psd_x, psd_d)))
+    psd_Z = np.asfortranarray(np.column_stack((psd_z1, psd_z2)))
+    psd_fw = (1 + psd_row % 3).astype(np.float64)
+    psd_expanded = np.repeat(psd_row, psd_fw.astype(np.int64))
+
+    def psd_fweight_fit(expand_rows, use_iv):
+        selected = psd_expanded if expand_rows else psd_row
+        reg = mod.HdfeRegressor(
+            se_type="cluster", num_threads=1, drop_singletons=False,
+            tol=1e-12, max_iter=20_000,
+        )
+        fit_options = {}
+        if use_iv:
+            fit_options.update(
+                instruments=psd_Z[selected], endogenous_idx=[1],
+            )
+        if not expand_rows:
+            fit_options.update(weights=psd_fw, fweights=True)
+        reg.fit(
+            psd_y[selected], psd_X[selected],
+            [psd_firm[selected], psd_year[selected]],
+            clusters=[psd_region[selected], psd_cohort[selected]],
+            **fit_options,
+        )
+        return reg
+
+    for use_iv in (False, True):
+        weighted = psd_fweight_fit(False, use_iv)
+        expanded_fit = psd_fweight_fit(True, use_iv)
+        np.testing.assert_allclose(
+            weighted.coef_, expanded_fit.coef_, rtol=0.0, atol=2e-11,
+        )
+        np.testing.assert_allclose(
+            weighted.stderr_, expanded_fit.stderr_, rtol=0.0, atol=2e-10,
+        )
+        np.testing.assert_allclose(
+            weighted.covariance_, expanded_fit.covariance_,
+            rtol=0.0, atol=2e-10,
+        )
+        assert weighted.df_resid_ == expanded_fit.df_resid_
+        assert weighted.nobs_effective_ == expanded_fit.nobs_effective_
+
     expect_error(
         "fweights-without-vector",
         lambda: mod.HdfeRegressor().fit(y, X, [fe1, fe2], fweights=True),

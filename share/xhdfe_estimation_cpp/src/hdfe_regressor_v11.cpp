@@ -359,6 +359,46 @@ double weighted_mean(const Eigen::Ref<const Eigen::VectorXd>& values,
     return static_cast<double>(sum_yw.sum / denom);
 }
 
+double psd_scale_sample_standard_deviation(
+    const Eigen::Ref<const Eigen::VectorXd>& values,
+    const Eigen::VectorXd* weights,
+    bool weights_are_frequencies) {
+    const double n_rows = static_cast<double>(values.size());
+    if (!weights || !weights_are_frequencies) {
+        if (n_rows <= 1.0) {
+            return 0.0;
+        }
+        const double sum = values.sum();
+        const double sum_squares = values.squaredNorm();
+        return std::sqrt(std::max(
+            0.0,
+            (sum_squares - sum * sum / n_rows) / (n_rows - 1.0)));
+    }
+
+    const double* value_ptr = values.data();
+    const double* weight_ptr = weights->data();
+    KahanSum sum_weights;
+    KahanSum weighted_sum;
+    KahanSum weighted_sum_squares;
+    for (Eigen::Index i = 0; i < values.size(); ++i) {
+        const long double value = static_cast<long double>(value_ptr[i]);
+        const long double weight = static_cast<long double>(weight_ptr[i]);
+        sum_weights.add(weight);
+        weighted_sum.add(weight * value);
+        weighted_sum_squares.add(weight * value * value);
+    }
+    const long double expanded_n = sum_weights.sum;
+    if (!(expanded_n > 1.0L)) {
+        return 0.0;
+    }
+    const long double centered_sum_squares =
+        weighted_sum_squares.sum -
+        weighted_sum.sum * weighted_sum.sum / expanded_n;
+    const long double variance =
+        std::max(0.0L, centered_sum_squares / (expanded_n - 1.0L));
+    return std::sqrt(static_cast<double>(variance));
+}
+
 double fixed_chunk_weighted_mean(
     const Eigen::Ref<const Eigen::VectorXd>& values,
     const Eigen::VectorXd* weights,
@@ -9958,15 +9998,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             Eigen::VectorXd psd_scale = Eigen::VectorXd::Ones(std::max(cov_cols, 0));
             if (cov_cols > 0 &&
                 slope_cols <= static_cast<int>(kept_slope_cols.size())) {
-                const double n_sd = static_cast<double>(X_use.rows());
                 for (int j = 0; j < slope_cols; ++j) {
                     const auto col = X_use.col(kept_slope_cols[static_cast<std::size_t>(j)]);
-                    const double s = col.sum();
-                    const double ss = col.squaredNorm();
-                    double sd = 0.0;
-                    if (n_sd > 1.0) {
-                        sd = std::sqrt(std::max(0.0, (ss - s * s / n_sd) / (n_sd - 1.0)));
-                    }
+                    const double sd = psd_scale_sample_standard_deviation(
+                        col, w_ptr, tuned.weights_are_frequencies);
                     psd_scale(j) = std::max(sd, 1.0e-3);
                 }
             }
@@ -11896,15 +11931,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         Eigen::VectorXd psd_scale = Eigen::VectorXd::Ones(std::max(cov_cols, 0));
         if (cov_cols > 0 &&
             slope_cols <= static_cast<int>(kept_slope_cols.size())) {
-            const double n_sd = static_cast<double>(X_work.rows());
             for (int j = 0; j < slope_cols; ++j) {
                 const auto col = X_work.col(kept_slope_cols[static_cast<std::size_t>(j)]);
-                const double s = col.sum();
-                const double ss = col.squaredNorm();
-                double sd = 0.0;
-                if (n_sd > 1.0) {
-                    sd = std::sqrt(std::max(0.0, (ss - s * s / n_sd) / (n_sd - 1.0)));
-                }
+                const double sd = psd_scale_sample_standard_deviation(
+                    col, w_ptr, tuned.weights_are_frequencies);
                 psd_scale(j) = std::max(sd, 1.0e-3);
             }
         }
