@@ -311,6 +311,9 @@ reg.fit(
     instruments=z.reshape(-1, 1),
     endogenous_idx=[1],
 )
+
+# or, with the formula frontend, the same third part as in R
+reg = xhdfe.feols("y ~ x1 | firm + year | xe ~ z", data=d)
 ```
 
 **R**

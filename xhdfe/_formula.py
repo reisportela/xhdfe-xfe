@@ -35,6 +35,9 @@ _FORMULA_METADATA = (
     "data_index_",
     "estimation_index_",
     "used_fast_path_",
+    "endog_names_",
+    "instrument_names_",
+    "endogenous_index_",
 )
 
 
@@ -66,13 +69,14 @@ def _formula_dependencies():
     return Formula, pd
 
 
-def _top_level_pipe_count(formula: str) -> int:
-    """Count formula separators without splitting quoted or nested content."""
+def _split_top_level(text: str, separator: str) -> list[str]:
+    """Split on a separator that sits outside quotes and bracket nesting."""
     depth = 0
     quote: Optional[str] = None
     escaped = False
-    count = 0
-    for char in formula:
+    parts: list[str] = []
+    start = 0
+    for index, char in enumerate(text):
         if quote is not None:
             if escaped:
                 escaped = False
@@ -87,27 +91,99 @@ def _top_level_pipe_count(formula: str) -> int:
             depth += 1
         elif char in ")]}":
             depth = max(0, depth - 1)
-        elif char == "|" and depth == 0:
-            count += 1
-    return count
+        elif char == separator and depth == 0:
+            parts.append(text[start:index])
+            start = index + 1
+    parts.append(text[start:])
+    return parts
 
 
-def _parse_formula(formula: str):
+_IV_FORMULA_HINT = "`y ~ exog | fe1 + fe2 | endogenous ~ instruments`"
+
+
+def _split_iv_parts(formula: str) -> tuple[str, Optional[str], Optional[str]]:
+    """Peel an `endogenous ~ instruments` part off the last `|` segment.
+
+    The grammar matches the R frontend: the IV part is the final `|` segment
+    and is the only place a second top-level `~` may appear.  The fixed-effect
+    segment is optional, so both `y ~ x | d ~ z` and `y ~ x | fe | d ~ z` parse.
+    Formulaic cannot represent the second `~`, so the split happens on the raw
+    string before any side is handed to Formulaic.
+    """
+    segments = _split_top_level(formula, "|")
+    if len(_split_top_level(segments[0], "~")) > 2:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: the response part carries more "
+            f"than one `~`. The IV form is {_IV_FORMULA_HINT}"
+        )
+    iv_segments = [
+        index
+        for index, segment in enumerate(segments)
+        if index > 0 and len(_split_top_level(segment, "~")) > 1
+    ]
+    if not iv_segments:
+        if len(segments) > 2:
+            raise NotImplementedError(
+                "Without an IV part the formula supports at most one `|` "
+                f"separator (`y ~ x | fe1 + fe2`); for instruments use "
+                f"{_IV_FORMULA_HINT}"
+            )
+        return formula, None, None
+    if len(iv_segments) > 1:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: only one `endogenous ~ "
+            f"instruments` part is allowed. The IV form is {_IV_FORMULA_HINT}"
+        )
+    iv_index = iv_segments[0]
+    if iv_index != len(segments) - 1:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: the `endogenous ~ instruments` "
+            f"part must come last. The IV form is {_IV_FORMULA_HINT}"
+        )
+    if len(segments) > 3:
+        raise NotImplementedError(
+            "With an IV part the formula supports at most two `|` separators "
+            f"({_IV_FORMULA_HINT})"
+        )
+    sides = _split_top_level(segments[iv_index], "~")
+    if len(sides) != 2:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: the IV part must have the form "
+            "`endogenous ~ instruments`"
+        )
+    endogenous, instruments = (side.strip() for side in sides)
+    if not endogenous:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: the IV part names no endogenous "
+            f"regressor. The IV form is {_IV_FORMULA_HINT}"
+        )
+    if not instruments:
+        raise ValueError(
+            f"Invalid xhdfe formula {formula!r}: the IV part names no excluded "
+            f"instrument. The IV form is {_IV_FORMULA_HINT}"
+        )
+    return "|".join(segments[:iv_index]), endogenous, instruments
+
+
+@dataclass(frozen=True)
+class _ParsedFormula:
+    """The parsed sides of an xhdfe formula; IV sides are None without an IV part."""
+
+    main: Any
+    endogenous: Optional[Any]
+    instruments: Optional[Any]
+
+
+def _parse_formula(formula: str) -> _ParsedFormula:
     if not isinstance(formula, str) or not formula.strip():
         raise TypeError("formula must be a non-empty string")
     return _parse_formula_string(formula)
 
 
-@lru_cache(maxsize=128)
-def _parse_formula_string(formula: str):
-    if _top_level_pipe_count(formula) > 1:
-        raise NotImplementedError(
-            "The first formula release supports at most one `|` separator. "
-            "Use the array API for IV specifications."
-        )
+def _parse_side(text: str, formula: str):
     Formula, _ = _formula_dependencies()
     try:
-        parsed = Formula(formula)
+        return Formula(text)
     except Exception as exc:
         if "`.` operator" in str(exc):
             raise NotImplementedError(
@@ -115,9 +191,27 @@ def _parse_formula_string(formula: str):
                 "release; list the regression columns explicitly"
             ) from exc
         raise ValueError(f"Invalid xhdfe formula {formula!r}: {exc}") from exc
+
+
+@lru_cache(maxsize=128)
+def _parse_formula_string(formula: str) -> _ParsedFormula:
+    main_text, endogenous_text, instruments_text = _split_iv_parts(formula)
+    parsed = _parse_side(main_text, formula)
     if not hasattr(parsed, "lhs") or not hasattr(parsed, "rhs"):
         raise ValueError("formula must have the form `response ~ regressors [| fixed effects]`")
-    return parsed
+    return _ParsedFormula(
+        main=parsed,
+        endogenous=(
+            _parse_side(endogenous_text, formula)
+            if endogenous_text is not None
+            else None
+        ),
+        instruments=(
+            _parse_side(instruments_text, formula)
+            if instruments_text is not None
+            else None
+        ),
+    )
 
 
 def _is_intercept_term(term: Any) -> bool:
@@ -454,17 +548,30 @@ def _resolve_clusters(clusters: Any, data: Any, n_rows: int, pd: Any):
     return encoded, levels, tuple(labels)
 
 
-def _simple_numeric_matrix(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
-    lhs_terms = list(lhs)
-    if len(lhs_terms) != 1:
-        return None
-    lhs_factor = _lookup_factor(lhs_terms[0])
-    if lhs_factor is None:
-        return None
-    y_source = _column(data, str(lhs_factor.expr))
-    if not _is_plain_numeric(y_source, pd):
-        return None
+@dataclass(frozen=True)
+class _Design:
+    """Materialized formula sides before the IV blocks are concatenated."""
 
+    y: np.ndarray
+    exog: np.ndarray
+    exog_names: tuple[str, ...]
+    fit_intercept: bool
+    endog: np.ndarray
+    endog_names: tuple[str, ...]
+    instruments: np.ndarray
+    instrument_names: tuple[str, ...]
+    model_spec: Any
+    used_fast_path: bool
+
+
+def _stack_columns(columns: Sequence[np.ndarray], n_rows: int) -> np.ndarray:
+    if not columns:
+        return np.empty((n_rows, 0), dtype=np.float64, order="F")
+    return np.asfortranarray(np.column_stack(columns), dtype=np.float64)
+
+
+def _simple_numeric_columns(rhs: Any, data: Any, n_rows: int, pd: Any):
+    """Materialize one RHS from plain float columns, or None if Formulaic is needed."""
     has_intercept = False
     term_sources: list[tuple[Any, list[tuple[str, Any]]]] = []
     for term in rhs:
@@ -484,7 +591,6 @@ def _simple_numeric_matrix(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
             return None
         term_sources.append((term, sources))
 
-    y = _numeric_vector(y_source, n_rows, "response", pd)
     columns: list[np.ndarray] = []
     names: list[str] = []
     converted_sources: dict[str, np.ndarray] = {}
@@ -498,12 +604,59 @@ def _simple_numeric_matrix(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
             column *= values
         columns.append(column)
         names.append(str(term))
-    X = (
-        np.asfortranarray(np.column_stack(columns), dtype=np.float64)
-        if columns
-        else np.empty((n_rows, 0), dtype=np.float64, order="F")
+    return columns, tuple(names), has_intercept
+
+
+def _fast_design(
+    lhs: Any,
+    rhs: Any,
+    endogenous_rhs: Optional[Any],
+    instrument_rhs: Optional[Any],
+    data: Any,
+    n_rows: int,
+    pd: Any,
+) -> Optional[_Design]:
+    """Build every formula side from plain float columns, or None to fall back."""
+    lhs_terms = list(lhs)
+    if len(lhs_terms) != 1:
+        return None
+    lhs_factor = _lookup_factor(lhs_terms[0])
+    if lhs_factor is None:
+        return None
+    y_source = _column(data, str(lhs_factor.expr))
+    if not _is_plain_numeric(y_source, pd):
+        return None
+
+    exog = _simple_numeric_columns(rhs, data, n_rows, pd)
+    if exog is None:
+        return None
+    endogenous_columns: list[np.ndarray] = []
+    endogenous_names: tuple[str, ...] = ()
+    instrument_columns: list[np.ndarray] = []
+    instrument_names: tuple[str, ...] = ()
+    if endogenous_rhs is not None:
+        endogenous = _simple_numeric_columns(endogenous_rhs, data, n_rows, pd)
+        if endogenous is None:
+            return None
+        instruments = _simple_numeric_columns(instrument_rhs, data, n_rows, pd)
+        if instruments is None:
+            return None
+        endogenous_columns, endogenous_names, _ = endogenous
+        instrument_columns, instrument_names, _ = instruments
+
+    exog_columns, exog_names, fit_intercept = exog
+    return _Design(
+        y=_numeric_vector(y_source, n_rows, "response", pd),
+        exog=_stack_columns(exog_columns, n_rows),
+        exog_names=exog_names,
+        fit_intercept=fit_intercept,
+        endog=_stack_columns(endogenous_columns, n_rows),
+        endog_names=endogenous_names,
+        instruments=_stack_columns(instrument_columns, n_rows),
+        instrument_names=instrument_names,
+        model_spec=None,
+        used_fast_path=True,
     )
-    return y, X, tuple(names), has_intercept
 
 
 _BACKTICK_NAME_RE = re.compile(r"`([^`]+)`")
@@ -589,7 +742,7 @@ def _python_factor_columns(
     return referenced, categorical, has_derived_categorical
 
 
-def _formulaic_input_data(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
+def _formulaic_input_data(sides: Sequence[Any], data: Any, n_rows: int, pd: Any):
     if isinstance(data, Mapping):
         columns: dict[Any, np.ndarray] = {}
         for name, value in data.items():
@@ -607,7 +760,7 @@ def _formulaic_input_data(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
     available_columns = {str(name) for name in formula_data.columns}
     numeric_candidates: set[str] = set()
     categorical_candidates: set[str] = set()
-    for formula_side in (lhs, rhs):
+    for formula_side in sides:
         for term in formula_side:
             for factor in term.factors:
                 method = getattr(factor.eval_method, "name", "")
@@ -659,11 +812,73 @@ def _formulaic_input_data(lhs: Any, rhs: Any, data: Any, n_rows: int, pd: Any):
     return promoted
 
 
-def _formulaic_matrix(lhs: Any, rhs: Any, data: Any, context: Mapping[str, Any]):
+def _drop_intercept_columns(matrix: Any, label: str):
+    """Split a materialized RHS into slope columns plus an intercept flag."""
+    array = np.asarray(matrix)
+    if np.iscomplexobj(array):
+        raise ValueError(f"The formula {label} must be real-valued")
+    model_spec = matrix.model_spec
+    column_names = list(model_spec.column_names)
+    intercept_indices: list[int] = []
+    for term, indices in model_spec.term_indices.items():
+        if _is_intercept_term(term):
+            intercept_indices.extend(int(index) for index in indices)
+    intercept_set = set(intercept_indices)
+    keep = [index for index in range(array.shape[1]) if index not in intercept_set]
+    try:
+        columns = np.asfortranarray(array[:, keep], dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"The formula {label} did not materialize to numeric columns. Wrap "
+            "categorical variables explicitly in C(...)."
+        ) from exc
+    names = tuple(column_names[index] for index in keep)
+    return columns, names, bool(intercept_indices)
+
+
+def _formulaic_side(
+    side_formula: Any,
+    formula_data: Any,
+    context: Mapping[str, Any],
+    label: str,
+):
+    """Materialize a one-sided formula the way R's `model.matrix` does.
+
+    Formulaic adds an intercept to the side, which lets `ensure_full_rank`
+    pick a reference level for any category, and the intercept column is then
+    dropped: an IV block never carries its own constant.
+    """
+    try:
+        matrix = side_formula.get_model_matrix(
+            formula_data,
+            context=dict(context),
+            output="numpy",
+            na_action="raise",
+            ensure_full_rank=True,
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"Could not materialize the xhdfe formula's {label}: {exc}"
+        ) from exc
+    columns, names, _ = _drop_intercept_columns(matrix, label)
+    return columns, names
+
+
+def _formulaic_design(
+    lhs: Any,
+    rhs: Any,
+    endogenous_rhs: Optional[Any],
+    instrument_rhs: Optional[Any],
+    data: Any,
+    context: Mapping[str, Any],
+) -> _Design:
     Formula, pd = _formula_dependencies()
     regression_formula = Formula({"lhs": lhs, "rhs": rhs})
     n_rows = _data_length(data)
-    formula_data = _formulaic_input_data(lhs, rhs, data, n_rows, pd)
+    sides = [lhs, rhs]
+    if endogenous_rhs is not None:
+        sides.extend((endogenous_rhs, instrument_rhs))
+    formula_data = _formulaic_input_data(sides, data, n_rows, pd)
     try:
         matrices = regression_formula.get_model_matrix(
             formula_data,
@@ -685,25 +900,30 @@ def _formulaic_matrix(lhs: Any, rhs: Any, data: Any, context: Mapping[str, Any])
     except (TypeError, ValueError) as exc:
         raise ValueError("The formula response must be numeric") from exc
 
-    rhs_matrix = np.asarray(matrices.rhs)
-    if np.iscomplexobj(rhs_matrix):
-        raise ValueError("The formula RHS must be real-valued")
-    column_names = list(matrices.rhs.model_spec.column_names)
-    intercept_indices: list[int] = []
-    for term, indices in matrices.rhs.model_spec.term_indices.items():
-        if _is_intercept_term(term):
-            intercept_indices.extend(int(index) for index in indices)
-    intercept_set = set(intercept_indices)
-    keep = [index for index in range(rhs_matrix.shape[1]) if index not in intercept_set]
-    try:
-        X = np.asfortranarray(rhs_matrix[:, keep], dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "The formula RHS did not materialize to numeric columns. Wrap "
-            "categorical variables explicitly in C(...)."
-        ) from exc
-    names = tuple(column_names[index] for index in keep)
-    return y, X, names, bool(intercept_indices), matrices.model_spec
+    X_exog, exog_names, fit_intercept = _drop_intercept_columns(matrices.rhs, "RHS")
+    endogenous = _stack_columns((), n_rows)
+    endogenous_names: tuple[str, ...] = ()
+    instruments = _stack_columns((), n_rows)
+    instrument_names: tuple[str, ...] = ()
+    if endogenous_rhs is not None:
+        endogenous, endogenous_names = _formulaic_side(
+            endogenous_rhs, formula_data, context, "endogenous part"
+        )
+        instruments, instrument_names = _formulaic_side(
+            instrument_rhs, formula_data, context, "instrument part"
+        )
+    return _Design(
+        y=y,
+        exog=X_exog,
+        exog_names=exog_names,
+        fit_intercept=fit_intercept,
+        endog=endogenous,
+        endog_names=endogenous_names,
+        instruments=instruments,
+        instrument_names=instrument_names,
+        model_spec=matrices.model_spec,
+        used_fast_path=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -726,6 +946,40 @@ class _MaterializedFormula:
     model_spec: Any
     data_index: np.ndarray
     used_fast_path: bool
+    instruments: Optional[np.ndarray] = None
+    endogenous_index: tuple[int, ...] = ()
+    endog_names: tuple[str, ...] = ()
+    instrument_names: tuple[str, ...] = ()
+
+
+def _require_disjoint_iv_names(
+    exog_names: Sequence[str],
+    endog_names: Sequence[str],
+    instrument_names: Sequence[str],
+) -> None:
+    """Reject the two IV spellings that would silently produce a singular design.
+
+    Repeating an endogenous regressor before the last `|` duplicates a column of
+    X, and listing an exogenous regressor as an instrument duplicates a column of
+    the instrument matrix.  Both are rank failures deep inside the estimator, so
+    they are named here instead.
+    """
+    exogenous = set(exog_names)
+    repeated = [name for name in endog_names if name in exogenous]
+    if repeated:
+        raise ValueError(
+            f"{repeated[0]!r} is listed both as an exogenous regressor and as an "
+            "endogenous regressor; name each endogenous regressor only in the "
+            "`endogenous ~ instruments` part"
+        )
+    regressors = exogenous | set(endog_names)
+    shared = [name for name in instrument_names if name in regressors]
+    if shared:
+        raise ValueError(
+            f"{shared[0]!r} is listed both as a regressor and as an instrument; "
+            "the instrument part takes only the excluded instruments, because "
+            "the exogenous regressors join the instrument matrix automatically"
+        )
 
 
 def _materialize_formula(
@@ -751,23 +1005,47 @@ def _materialize_formula(
     fweights = bool(fweights)
 
     parsed = _parse_formula(formula)
-    lhs, rhs, fixed_effect_rhs = _formula_parts(parsed)
+    lhs, rhs, fixed_effect_rhs = _formula_parts(parsed.main)
     fe_names = _fixed_effect_names(fixed_effect_rhs)
     _, pd = _formula_dependencies()
     n_rows = _data_length(data)
     if n_rows == 0:
         raise ValueError("data contains no observations")
 
-    simple = None if force_formulaic else _simple_numeric_matrix(lhs, rhs, data, n_rows, pd)
-    if simple is None:
-        y, X, slope_names, fit_intercept, model_spec = _formulaic_matrix(
-            lhs, rhs, data, context or {}
+    design = (
+        None
+        if force_formulaic
+        else _fast_design(
+            lhs, rhs, parsed.endogenous, parsed.instruments, data, n_rows, pd
         )
-        used_fast_path = False
+    )
+    if design is None:
+        design = _formulaic_design(
+            lhs, rhs, parsed.endogenous, parsed.instruments, data, context or {}
+        )
+
+    y = design.y
+    fit_intercept = design.fit_intercept
+    slope_names = design.exog_names + design.endog_names
+    endogenous_index: tuple[int, ...] = ()
+    instruments: Optional[np.ndarray] = None
+    if parsed.endogenous is not None:
+        _require_disjoint_iv_names(
+            design.exog_names, design.endog_names, design.instrument_names
+        )
+        if not design.endog_names:
+            raise ValueError(
+                "The endogenous part of the formula materialized to no columns"
+            )
+        if not design.instrument_names:
+            raise ValueError(
+                "The instrument part of the formula materialized to no columns"
+            )
+        X = np.asfortranarray(np.hstack((design.exog, design.endog)))
+        endogenous_index = tuple(range(design.exog.shape[1], X.shape[1]))
+        instruments = design.instruments
     else:
-        y, X, slope_names, fit_intercept = simple
-        model_spec = None
-        used_fast_path = True
+        X = design.exog
 
     fes: list[np.ndarray] = []
     fe_levels: dict[str, np.ndarray] = {}
@@ -816,9 +1094,13 @@ def _materialize_formula(
         cluster_levels=MappingProxyType(cluster_levels),
         cluster_names=cluster_names,
         var_labels=_variable_labels(data),
-        model_spec=model_spec,
+        model_spec=design.model_spec,
         data_index=_data_index(data, n_rows),
-        used_fast_path=used_fast_path,
+        used_fast_path=design.used_fast_path,
+        instruments=instruments,
+        endogenous_index=endogenous_index,
+        endog_names=design.endog_names,
+        instrument_names=design.instrument_names,
     )
 
 
@@ -850,6 +1132,11 @@ def _freeze_materialized(materialized: _MaterializedFormula) -> _MaterializedFor
         clusters=(
             tuple(_readonly_copy(cluster) for cluster in materialized.clusters)
             if materialized.clusters is not None
+            else None
+        ),
+        instruments=(
+            _readonly_copy(materialized.instruments, order="F")
+            if materialized.instruments is not None
             else None
         ),
         fe_levels=MappingProxyType(levels),
@@ -923,6 +1210,9 @@ def _fit_materialized(
     }
     if materialized.fweights:
         fit_options["fweights"] = True
+    if materialized.endogenous_index:
+        fit_options["instruments"] = materialized.instruments
+        fit_options["endogenous_idx"] = list(materialized.endogenous_index)
     model.fit(materialized.y, materialized.X, **fit_options)
     if len(materialized.coef_names) != len(model.coef_):
         raise RuntimeError(
@@ -938,6 +1228,9 @@ def _fit_materialized(
     model.se_type_ = _normalized_se_type(regressor_options)
     model.var_labels_ = materialized.var_labels
     model.model_spec_ = materialized.model_spec
+    model.endog_names_ = materialized.endog_names
+    model.instrument_names_ = materialized.instrument_names
+    model.endogenous_index_ = materialized.endogenous_index
     model.data_index_ = materialized.data_index.copy()
     sample = np.asarray(model.sample_index_, dtype=np.int64)
     model.estimation_index_ = materialized.data_index[sample].copy()
@@ -973,6 +1266,23 @@ class PreparedFormula:
     @property
     def fes(self) -> tuple[np.ndarray, ...]:
         return self._materialized.fes
+
+    @property
+    def instruments(self) -> Optional[np.ndarray]:
+        return self._materialized.instruments
+
+    @property
+    def endogenous_index(self) -> tuple[int, ...]:
+        """Positions in `X` of the endogenous regressors; empty without an IV part."""
+        return self._materialized.endogenous_index
+
+    @property
+    def endog_names(self) -> tuple[str, ...]:
+        return self._materialized.endog_names
+
+    @property
+    def instrument_names(self) -> tuple[str, ...]:
+        return self._materialized.instrument_names
 
     @property
     def coef_names(self) -> tuple[str, ...]:
@@ -1031,6 +1341,12 @@ def feols(
     The supported fixed-effect syntax is ``y ~ x1 + x2 | firm + year``.
     Formulaic handles RHS categories and interactions; the fixed-effect branch
     accepts bare column names and is passed to the unchanged native absorber.
+
+    A third part requests 2SLS, matching the R frontend's grammar:
+    ``y ~ x1 | firm + year | d1 + d2 ~ z1 + z2``.  Its left side lists the
+    endogenous regressors and its right side the *excluded* instruments; the
+    exogenous regressors join the instrument matrix automatically.  The
+    fixed-effect part is optional, so ``y ~ x1 | d ~ z`` is also accepted.
     """
     materialized = _materialize_formula(
         formula,

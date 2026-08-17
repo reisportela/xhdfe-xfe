@@ -292,7 +292,15 @@ print(model.tidy())
 `C(g)` is the R-style counterpart of Stata's `i.g`; `x:z` is a product-only
 interaction and `x*z` expands to `x + z + x:z`. Fixed effects after `|` are
 read as identifier columns, encoded as group IDs, and passed to the native
-absorber, so they do not become dummy columns. The existing
+absorber, so they do not become dummy columns. A third part requests 2SLS with
+the same spelling as the R frontend, its left side naming the endogenous
+regressors and its right side the excluded instruments:
+
+```python
+model = xhdfe.feols("y ~ x1 | firm + year | d ~ z1 + z2", data=d)
+```
+
+The existing
 `HdfeRegressor.fit(y, X, ...)` API remains the lowest-overhead route for small
 regressions in loops. See the packaged Python help for formula semantics,
 categorical reference levels, and `prepare_formula()`.
