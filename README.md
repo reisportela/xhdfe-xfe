@@ -534,7 +534,7 @@ software. The roles of the principal packages were distinct:
 | [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
 | [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
 
-The last point deserves an explicit statement. `xhdfe` did **not** develop the
+The last point deserves an explicit statement. `xhdfe` did not develop the
 graph-preconditioned MLSMR/additive-Schwarz architecture independently of
 Fischer and Schröder. Their public `within` materials were the starting point
 for the `xhdfe` route based on factor-pair graph subdomains, a bipartite-
@@ -543,12 +543,7 @@ combination as an additive-Schwarz preconditioner inside modified LSMR. The
 underlying algorithmic architecture is their contribution and should be cited
 as such, not treated merely as general inspiration.
 
-This graph-preconditioned route is separate from the earlier `xhdfe` MAP/
-Irons-Tuck and CUDA demeaning paths, which predate the March 2026 exchange with
-Fischer and Schröder. The headline GPU benchmarks use Irons-Tuck-accelerated MAP,
-as in `fixest`; the CUDA kernels are a native `xhdfe` implementation of that
-algorithmic route and do not implement the Fischer–Schröder graph
-preconditioner.
+The headline GPU benchmarks use Irons-Tuck-accelerated MAP, as in `fixest`; the CUDA kernels are a native `xhdfe` implementation of that algorithmic route and do not implement the Fischer–Schröder graph preconditioner.
 
 ### What `xhdfe` contributes
 
