@@ -505,18 +505,74 @@ decisions.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.
 
-## Validation & accuracy
+## Validation, development provenance, and contributions
+
+### Validation and accuracy
 
 Under the default `reghdfe-comparable` tolerance mode, `xhdfe` coefficients,
-standard errors, and recovered fixed effects match `reghdfe` at the same nominal
-tolerance (down to the conditioning of the problem). The three packages are
-cross-checked against each other and against the wider ecosystem —
-[`reghdfe`](https://github.com/sergiocorreia/reghdfe) (Stata),
-[`fixest`](https://github.com/lrberge/fixest) (R),
-[`pyfixest`](https://github.com/py-econometrics/pyfixest) (Python), and
-[`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl)
-(Julia). This software is released as a **proof of concept**: please validate
-estimates for your own research design. See [`DISCLAIMER.md`](DISCLAIMER.md).
+standard errors, and recovered fixed effects are validated against `reghdfe` at
+the same nominal tolerance, subject to the conditioning of each problem. The
+current core acceptance battery contains 23 dataset-specification pairs crossed
+with eight `xhdfe` cells: C++ and Stata, CPU and CUDA, and fast and
+`reghdfe`-comparable modes. Each affected cell is checked for convergence,
+numerical agreement, correct backend use, and runtime non-regression. These
+checks certify the exact builds and cases tested; they are not a claim of
+universal equivalence for every possible research design. This software remains
+a **proof of concept**, and users should validate their own specifications. See
+[`DISCLAIMER.md`](DISCLAIMER.md).
+
+### Algorithmic and software provenance
+
+`xhdfe` was developed within an existing ecosystem of HDFE algorithms and
+software. The roles of the principal packages were distinct:
+
+| Project | Role in the development of `xhdfe` |
+| --- | --- |
+| [`reghdfe`](https://github.com/sergiocorreia/reghdfe), by Sergio Correia | Canonical econometric and Stata-behaviour reference for the estimator, defaults, reporting, and validation. |
+| [`fixest`](https://github.com/lrberge/fixest), by Laurent Bergé and contributors | Algorithmic and performance reference for accelerated MAP, including the Irons-Tuck route used by the headline `xhdfe` GPU benchmarks. |
+| [`pyfixest`](https://github.com/py-econometrics/pyfixest), by Alexander Fischer and contributors | Public code and documentation studied during development, plus interface, DGP, numerical, and cross-language benchmark references. |
+| [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
+| [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
+
+The last point deserves an explicit statement. `xhdfe` did **not** develop the
+graph-preconditioned MLSMR/additive-Schwarz architecture independently of
+Fischer and Schröder. Their public `within` materials were the starting point
+for the `xhdfe` route based on factor-pair graph subdomains, a bipartite-
+Laplacian representation, approximate-Cholesky local solves, and their
+combination as an additive-Schwarz preconditioner inside modified LSMR. The
+underlying algorithmic architecture is their contribution and should be cited
+as such, not treated merely as general inspiration.
+
+This graph-preconditioned route is separate from the earlier `xhdfe` MAP/
+Irons-Tuck and CUDA demeaning paths, which predate the March 2026 exchange with
+Fischer and Schröder. The headline GPU benchmarks use Irons-Tuck-accelerated MAP,
+as in `fixest`; the CUDA kernels are a native `xhdfe` implementation of that
+algorithmic route and do not implement the Fischer–Schröder graph
+preconditioner.
+
+### What `xhdfe` contributes
+
+The `xhdfe` contribution lies in the design, implementation, and validation of
+an integrated estimator and package, rather than in claiming independent
+invention of its algorithmic inputs. That work includes the compiled C++/
+OpenMP core; native CUDA kernels; Stata, Python, and R integration; fixed-effect
+recovery and the wider supported feature surface; and the `xhdfe`-specific
+implementation of the Fischer–Schröder architecture, including execution and
+batching details, adaptive routing and fallbacks, interfaces, diagnostics,
+precision certification, and validation across the affected CPU and CUDA
+workflows. These engineering and integration contributions do not alter the
+credit for the underlying algorithms on which they build.
+
+### AI-assisted development record
+
+AI-assisted work operated against public software and documentation in the
+development environment. The project record documents direct inspection of
+public `within` and `pyfixest` materials. `reghdfe`, `fixest`, and
+`FixedEffectModels.jl` were also used as numerical and performance references;
+this statement does not imply that every model inspected every source tree.
+Source-code inspection, documentation study, and black-box benchmarking are
+therefore treated as distinct forms of evidence. The listed human authors
+retain authorship and responsibility for `xhdfe` and its documentation.
 
 ## Citation
 
@@ -547,13 +603,9 @@ author or co-author.
 
 ## Acknowledgements
 
-`xhdfe` validates against and interoperates with prior HDFE software. Full
-credit goes to [`reghdfe`](https://github.com/sergiocorreia/reghdfe) by Sergio
-Correia (Stata), [`fixest`](https://github.com/lrberge/fixest) by Laurent
-Berge (R), [`pyfixest`](https://github.com/py-econometrics/pyfixest) by
-Alexander Fischer and collaborators (Python), and
-[`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl)
-by Matthieu Gomez and collaborators (Julia).
+The roles of the prior HDFE packages, the direct Fischer–Schröder algorithmic
+credit, and the distinct `xhdfe` contribution are documented in
+[Validation, development provenance, and contributions](#validation-development-provenance-and-contributions).
 
 By design, `xhdfe` is first and foremost a high-performance replica of
 `reghdfe`: it mirrors reghdfe's estimator, defaults, and reporting, and
@@ -583,13 +635,9 @@ against `b1x2` by Jonah Gelbach. Full credit to their authors.
 We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
 workshop collaboration around earlier versions of the project. We especially
 thank Sergio Correia for feedback on benchmarking, tolerances, and
-`reghdfe`-comparable validation. We also warmly thank Alexander Fischer for
-sharing the latest updates on his and Kristof Schröder's novel graph-based
-fixed-effects demeaning strategy — a modified LSMR solver with an
-additive-Schwarz preconditioner built from the worker-firm bipartite graph (the
-[`within`](https://github.com/py-econometrics/within) project) — which has been
-very helpful for our ongoing work on high-dimensional demeaning. All remaining
-errors are ours.
+`reghdfe`-comparable validation. We thank Alexander Fischer and Kristof Schröder
+for making the `within` materials available and for direct discussion of their
+graph-preconditioned fixed-effects solver. All remaining errors are ours.
 
 ## References
 
