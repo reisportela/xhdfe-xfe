@@ -566,7 +566,7 @@ public `within` and `pyfixest` materials. `reghdfe`, `fixest`, and
 `FixedEffectModels.jl` were also used as numerical and performance references;
 this statement does not imply that every model inspected every source tree.
 Source-code inspection, documentation study, and black-box benchmarking are
-therefore treated as distinct forms of evidence. The listed human authors
+therefore treated as distinct forms of evidence. The authors
 retain authorship and responsibility for `xhdfe` and its documentation.
 
 ## Citation
@@ -592,9 +592,7 @@ R package's offline build dependency; see
 - **Miguel Portela** — NIPE / Universidade do Minho and BPLIM / Banco de Portugal.
 - **Tiago Tavares** — NIPE / Universidade do Minho.
 
-*Development note:* `xhdfe` was built with AI-assisted tooling, but only the two
-listed humans are authors; no software tool or AI system is credited as an
-author or co-author.
+Repository: [https://github.com/reisportela/xhdfe-xfe](https://github.com/reisportela/xhdfe-xfe)
 
 ## Acknowledgements
 
