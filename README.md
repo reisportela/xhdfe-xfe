@@ -536,7 +536,9 @@ software. The roles of the principal packages were distinct:
 
 The last point deserves an explicit statement. `xhdfe` did not develop the
 graph-preconditioned MLSMR/additive-Schwarz architecture independently of
-Fischer and Schröder. Their public `within` materials were the starting point
+Fischer and Schröder. Their public `within` materials and their 2026 mimeo,
+*Graph Preconditioning for High-Dimensional Fixed Effects Regression*, were
+the starting point
 for the `xhdfe` route based on factor-pair graph subdomains, a bipartite-
 Laplacian representation, approximate-Cholesky local solves, and their
 combination as an additive-Schwarz preconditioner inside modified LSMR. The
@@ -646,6 +648,8 @@ High-dimensional fixed effects — the `reghdfe` universe `xhdfe` replicates:
   effects. Stata Conference, Stata Users Group.
 - Correia, S., P. Guimaraes, and T. Zylkin. 2020. Fast Poisson estimation with
   high-dimensional fixed effects. *Stata Journal* 20(1): 95-115.
+- Fischer, A., and K. Schröder. 2026. *Graph Preconditioning for
+  High-Dimensional Fixed Effects Regression*. Mimeo.
 
 Worker-firm (AKM) leave-out layer — what `xhdfe` borrows from the `pytwoway`
 literature (see [Acknowledgements](#acknowledgements)):
