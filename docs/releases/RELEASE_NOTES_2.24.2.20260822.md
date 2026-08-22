@@ -1,8 +1,41 @@
 # xhdfe 2.24.2 / xfe 1.11.0 - 22aug2026
 
-Stata correctness and Windows installation hotfix. The estimator definition,
-objective, numerical tolerances, convergence criteria, C++/CUDA absorption
-kernels, Python API, R API, and default output formatting are unchanged.
+Correctness, interface, and Windows installation release. The estimator
+definition, objective, numerical tolerances, convergence criteria, absorption
+kernels, CUDA orchestration, and default output formatting are unchanged. The
+release also incorporates the Python formula IV frontend and the corrected
+frequency-weight scale used by multiway PSD covariance repair that entered the
+public main after 2.24.1.
+
+## Python formula IV/2SLS
+
+The Python formula frontend now accepts the same three-part IV grammar as the R
+frontend:
+
+```text
+y ~ exogenous | fixed_effects | endogenous ~ excluded_instruments
+```
+
+The implementation parses quoted and nested separators safely, supports both
+the numeric fast path and Formulaic path, passes the named endogenous positions
+to the existing native 2SLS estimator, and exposes frozen instrument/design
+metadata. Sixteen regression tests cover single and multiple endogenous
+regressors, clustering, weights, transformed terms, categorical blocks,
+intercept handling, prepared formulas, and malformed specifications.
+
+This feature was contributed by fqueiro in public PR #8. The release preserves
+that authorship and credit.
+
+## Frequency-weight scaling in multiway PSD repair
+
+The scale used to repair a non-PSD multiway-cluster covariance matrix now
+computes sample standard deviations under `fweights` as literal row
+replication. The correction uses compensated wide accumulation and applies in
+the shared core and all maintained C++/Stata/R mirrors. It does not alter
+unweighted or analytic-weight paths.
+
+This correction was contributed by Tiago Tavares in public PR #9. The release
+preserves that authorship and credit.
 
 ## Large individual identifiers in Stata
 
