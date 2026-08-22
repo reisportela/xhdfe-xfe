@@ -1,4 +1,4 @@
-*! version 1.0.0  16aug2026
+*! version 1.0.0  22aug2026
 *! Identity-preserving waterfall plot for the most recent Gelbach result.
 
 program define xhdfegelbachcoefplot

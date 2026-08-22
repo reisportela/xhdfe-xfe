@@ -10,8 +10,8 @@
         "msvcrt.dll"
       ],
       "member": "xfe.plugin.windows",
-      "member_sha256": "76befeb09b187cafbfce83a1cfdf94fd341bb7a1268e10fdfffeda5956971fb7",
-      "size": 4680192
+      "member_sha256": "d3217ce5db4c039832c966b9fe5458bb2b4cd38d4746e9767e23f04e7abede16",
+      "size": 4677120
     },
     {
       "architecture": "pei-x86-64",
@@ -22,8 +22,8 @@
         "msvcrt.dll"
       ],
       "member": "xhdfe.plugin.windows",
-      "member_sha256": "845a9557a3254b05e7b12d34a193c188b1649f3c28bafb1dc5ae3774ef5e32d4",
-      "size": 6093824
+      "member_sha256": "9e1bd7152e06942651a12ab108e9777d93783be967718e084d60c14e1f2f8309",
+      "size": 6090752
     }
   ],
   "runtimes": [

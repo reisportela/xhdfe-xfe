@@ -54,7 +54,7 @@ MinGW runtime and compatibility libraries (binary artifacts when required)
 
   The exact corresponding sources and build recipes for redistributed GNU /
   MinGW runtime binaries are supplied in the versioned release asset:
-    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.24.1.20260816/xhdfe-2.24.1.20260816-corresponding-source.zip
+    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.24.2.20260822/xhdfe-2.24.2.20260822-corresponding-source.zip
   That asset includes a machine-readable provenance manifest and SHA-256
   manifest over the source archives actually supplied to the release job.
 

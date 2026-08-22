@@ -25,9 +25,9 @@ g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
 g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
 g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
 g WIN64 xfe.win64.plugin xfe.plugin
-g WIN64 libgcc_s_seh-1.dll libgcc_s_seh-1.dll
-g WIN64 libgomp-1.dll libgomp-1.dll
-g WIN64 libwinpthread-1.dll libwinpthread-1.dll
+G WIN64 libgcc_s_seh-1.dll libgcc_s_seh-1.dll
+G WIN64 libgomp-1.dll libgomp-1.dll
+G WIN64 libwinpthread-1.dll libwinpthread-1.dll
 g WIN64 windows-stata-provider-ledger.json windows-stata-provider-ledger.json
 g WIN64 windows-stata-runtime-ledger.json windows-stata-runtime-ledger.json
 h xfe.plugin
