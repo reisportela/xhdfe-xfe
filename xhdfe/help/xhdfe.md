@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.24.1.20260816. Use `python -m xhdfe --version`
+Package documentation version: 2.24.2.20260822. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -170,7 +170,6 @@ Stata factor-variable spellings are:
 | Category main effects plus explicit slope interactions | `C(g)*x` | `i.g##c.x` |
 | Arithmetic square | `I(x**2)` | `c.x#c.x` |
 | Remove the intercept | `0 + x` or `x - 1` | `noconstant` |
-| Endogenous regressors and their instruments | `... \| d ~ z1 + z2` | `endogenous(d) instruments(z1 z2)` |
 
 Use `C(...)` explicitly for categorical variables, especially numeric category
 codes and pandas nullable strings. Object and pandas categorical columns are
@@ -206,36 +205,10 @@ Those columns are encoded as identifiers and passed to the unchanged HDFE
 absorber. They are never materialized as a dense Formulaic dummy matrix. Put a
 high-cardinality effect such as `firm` after `|`; `C(firm)` on the regression
 RHS intentionally creates explicit dummy columns and can require substantial
-memory. FE interactions or transforms after `|` and the `.` shorthand are
-rejected explicitly in this first version; list RHS columns or use the array
-API for `group`, `individual`, or native heterogeneous-slope workflows.
-
-### Instrumental variables / 2SLS
-
-A third formula part requests 2SLS, using the same grammar as the R frontend:
-
-```python
-reg = xhdfe.feols("y ~ x1 | firm + year | d ~ z1 + z2", data=d)
-```
-
-Its left side lists the endogenous regressors and its right side the
-**excluded** instruments; both sides accept several terms joined with `+`, and
-both go through Formulaic, so transforms and interactions such as
-`I(z1**2)` or `z1:z2` are available there too. The exogenous regressors are
-added to the instrument matrix by the core, so they must not be repeated after
-the second `~`. The fixed-effect part is optional, which makes `y ~ x1 | d ~ z1`
-a fixed-effect-free 2SLS fit.
-
-The endogenous columns are appended to the design after the exogenous ones, so
-`coef_names_` reads exogenous terms first, then endogenous terms, then the
-recovered intercept; `endogenous_index_` records their positions. Estimation is
-the same compiled 2SLS path the array API reaches through `instruments` and
-`endogenous_idx`, including its residual convention: coefficients are solved on
-the instrumented design while inference uses residuals from the actual
-regressors. Two spellings are rejected before estimation because they would
-otherwise surface as a rank failure deep in the core: repeating an endogenous
-regressor before the last `|`, and listing an exogenous regressor as an
-instrument.
+memory. FE interactions or transforms after `|`, multi-part/IV formulas, and
+the `.` shorthand are rejected explicitly in this first version; list RHS
+columns or use the array API for existing `instruments`, `group`, `individual`,
+or native heterogeneous-slope workflows.
 
 Numeric FE and cluster arrays follow the native nonnegative-ID contract: a
 negative value such as pandas' `-1` missing-category sentinel is rejected, as
@@ -272,9 +245,7 @@ The returned object is a Python subclass of the native `HdfeRegressor`, so its
 coefficients, standard errors, diagnostics, retained fixed effects, and methods
 remain available. Formula metadata adds `formula_`, `coef_names_`, `fe_names_`,
 `fe_levels_`, `cluster_levels_`, `cluster_names_`, `se_type_`, `var_labels_`,
-`data_index_`, `estimation_index_`, `intercept_index_`, `used_fast_path_`, and,
-for an IV formula, `endog_names_`, `instrument_names_`, and
-`endogenous_index_` (all three empty for a formula without an IV part).
+`data_index_`, `estimation_index_`, `intercept_index_`, and `used_fast_path_`.
 `cluster_names_` records the cluster variables (`cluster_levels_` only records
 categorical levels), `se_type_` records the canonical standard-error family,
 and `var_labels_` snapshots descriptive labels carried by the estimation

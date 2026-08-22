@@ -822,7 +822,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             self.assertEqual(validated.returncode, 0, validated.stderr)
             package = (site / "xhdfe.pkg").read_text(encoding="utf-8")
             for runtime in sorted(path.name for path in runtime_dir.iterdir()):
-                self.assertIn(f"g WIN64 {runtime} {runtime}\n", package)
+                self.assertIn(f"G WIN64 {runtime} {runtime}\n", package)
             self.assertIn(
                 "g WIN64 windows-stata-provider-ledger.json "
                 "windows-stata-provider-ledger.json\n",
@@ -904,7 +904,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                 lines = [
                     line
                     for line in pkg.read_text(encoding="utf-8").splitlines()
-                    if not line.startswith("g WIN64 ")
+                    if not line.startswith(("g WIN64 ", "G WIN64 "))
                 ]
                 plugin_names = (
                     ("xhdfe.plugin", "xfe.plugin")
@@ -944,7 +944,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertIn("runtime DLL lacks one exact platform mapping", rejected.stderr)
+            self.assertIn("runtime DLL lacks one exact installable platform mapping", rejected.stderr)
 
 
 if __name__ == "__main__":

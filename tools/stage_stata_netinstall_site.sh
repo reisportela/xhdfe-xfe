@@ -422,7 +422,10 @@ EOF
   fi
   if [[ "$has_windows" -eq 1 ]]; then
     for runtime_name in "${windows_runtime_names[@]}"; do
-      printf 'g WIN64 %s %s\n' "$runtime_name" "$runtime_name" >> "$pkg"
+      # Runtime DLLs are not Stata installation-file suffixes.  Lowercase `g`
+      # treats them as ancillary files, so `net install` silently skips them.
+      # Uppercase `G` forces installation into the Stata system directories.
+      printf 'G WIN64 %s %s\n' "$runtime_name" "$runtime_name" >> "$pkg"
     done
     printf '%s\n' \
       'g WIN64 windows-stata-provider-ledger.json windows-stata-provider-ledger.json' \
@@ -490,8 +493,8 @@ The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
 file is installed under the canonical runtime name xhdfe.plugin or xfe.plugin.
-Windows packages install every colocated runtime DLL named and hashed by the
-release's windows-stata-provider-ledger.json. The independent PE graph is in
+Windows packages download every runtime DLL named and hashed by the release's
+windows-stata-provider-ledger.json into the Stata system directories. The independent PE graph is in
 windows-stata-runtime-ledger.json; the dependency set is not hard-coded here.
 Every package installs the exact GNU/MinGW and Eigen license texts. When the
 two NVIDIA license inputs are supplied, their CUDA 12.6/CCCL 2.5.0 materials

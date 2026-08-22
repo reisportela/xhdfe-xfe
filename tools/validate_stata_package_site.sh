@@ -270,12 +270,12 @@ for pkg in "$site"/*.pkg; do
     fi
     for name in "${windows_runtime_names[@]}"; do
       mapping_count="$(awk -v name="$name" '
-        ($1 == "g" && $2 == "WIN64" && $3 == name && $4 == name) ||
+        ($1 == "G" && $2 == "WIN64" && $3 == name && $4 == name) ||
         ($1 == "f" && $2 == name) { n++ }
         END { print n+0 }
       ' "$pkg")"
       [[ "$mapping_count" -eq 1 ]] || {
-        echo "$(basename "$pkg"): runtime DLL lacks one exact platform mapping: $name" >&2
+        echo "$(basename "$pkg"): runtime DLL lacks one exact installable platform mapping: $name" >&2
         exit 1
       }
     done
@@ -303,8 +303,8 @@ for pkg in "$site"/*.pkg; do
         echo "$(basename "$pkg"): WIN64 DLL mapping is absent from ledger: $source" >&2
         exit 1
       }
-    done < <(awk '$1 == "g" && $2 == "WIN64" && tolower($3) ~ /\.dll$/ { print $3, $4 }' "$pkg")
-  elif awk '$1 == "g" && $2 == "WIN64" { found=1 } END { exit !found }' "$pkg"; then
+    done < <(awk '$1 == "G" && $2 == "WIN64" && tolower($3) ~ /\.dll$/ { print $3, $4 }' "$pkg")
+  elif awk '($1 == "g" || $1 == "G") && $2 == "WIN64" { found=1 } END { exit !found }' "$pkg"; then
     echo "$(basename "$pkg"): WIN64 mappings exist without a runtime ledger" >&2
     exit 1
   fi

@@ -2230,6 +2230,10 @@ STDLL stata_call(int argc, char* argv[]) {
         const bool has_weight = parse_bool(args.get_required("has_weight"), "has_weight");
         const bool group_mode = parse_bool(args.get_required("group_mode"), "group_mode");
         const bool has_individual = parse_bool(args.get_required("has_individual"), "has_individual");
+        const int individual_fe_pos =
+            has_individual
+                ? parse_int(args.get_required("individual_fe_pos"), "individual_fe_pos")
+                : 0;
 
         const bool store_resid = parse_bool(args.get_required("store_resid"), "store_resid");
         const bool store_groupvar = parse_bool(args.get_required("store_groupvar"), "store_groupvar");
@@ -2361,6 +2365,10 @@ STDLL stata_call(int argc, char* argv[]) {
         if (p < 0 || nfe < 0 || nslope < 0 || nclust < 0 || ninst < 0) {
             throw_with_prefix("xhdfe plugin: ", "negative dimension argument");
         }
+        if (has_individual && (individual_fe_pos < 1 || individual_fe_pos > nfe)) {
+            throw_with_prefix("xhdfe plugin: ",
+                              "individual_fe_pos must identify a 1-based absorb() dimension");
+        }
         if (opts.se_type == StandardErrorType::Cluster && nclust <= 0) {
             throw_with_prefix("xhdfe plugin: ", "se_type=cluster requires nclust>0");
         }
@@ -2454,7 +2462,9 @@ STDLL stata_call(int argc, char* argv[]) {
             out = candidate;
             return true;
         };
-        auto read_categorical_numeric = [&](int var_idx, const char* what) {
+        constexpr double kMaxExactIntegerId = 9007199254740992.0;  // 2^53
+        auto read_categorical_numeric = [&](int var_idx, const char* what,
+                                            bool validate_individual_id = false) {
             Eigen::VectorXi ids(n);
             // Most FE/cluster variables already fit int32 exactly. Fill ids
             // directly in that case and only materialize the raw double column
@@ -2464,6 +2474,21 @@ STDLL stata_call(int argc, char* argv[]) {
             bool all_int = true;
             for (int i = 0; i < n; ++i) {
                 const double z = read_numeric(var_idx, obs.obs_no(i));
+                if (validate_individual_id) {
+                    if (z < 0.0) {
+                        throw_with_prefix("xhdfe plugin: ",
+                                          "individual identifier must be nonnegative");
+                    }
+                    if (std::trunc(z) != z) {
+                        throw_with_prefix("xhdfe plugin: ",
+                                          "individual identifier must be integer-valued");
+                    }
+                    if (z > kMaxExactIntegerId) {
+                        throw_with_prefix(
+                            "xhdfe plugin: ",
+                            "individual identifier exceeds the exact integer range of a double");
+                    }
+                }
                 if (all_int) {
                     int id = 0;
                     if (exact_int32_id(z, id)) {
@@ -2547,6 +2572,15 @@ STDLL stata_call(int argc, char* argv[]) {
                 throw_with_prefix("xhdfe plugin: ", "fe_dup_map length must equal nfe");
             }
         }
+        int individual_fe_read_index = individual_fe_pos - 1;
+        while (has_individual && !fe_dup_map.empty() &&
+               fe_dup_map[static_cast<std::size_t>(individual_fe_read_index)] >= 0) {
+            const int dup = fe_dup_map[static_cast<std::size_t>(individual_fe_read_index)];
+            if (dup >= individual_fe_read_index) {
+                throw_with_prefix("xhdfe plugin: ", "fe_dup_map entry out of range");
+            }
+            individual_fe_read_index = dup;
+        }
         std::vector<Eigen::VectorXi> fes;
         fes.reserve(static_cast<std::size_t>(nfe));
         for (int d = 0; d < nfe; ++d) {
@@ -2563,7 +2597,8 @@ STDLL stata_call(int argc, char* argv[]) {
                 continue;
             }
             const int var_idx = idx_fe_start + d;
-            Eigen::VectorXi v = read_categorical_numeric(var_idx, "fes");
+            Eigen::VectorXi v = read_categorical_numeric(
+                var_idx, "fes", has_individual && d == individual_fe_read_index);
             fes.push_back(std::move(v));
         }
         plugin_cpu_profile_log_elapsed("read_fes", read_fes_t0);
@@ -2979,11 +3014,8 @@ STDLL stata_call(int argc, char* argv[]) {
             }
 
             // Full group/individual mode.
-            Eigen::VectorXi individual_ids(n);
-            for (int i = 0; i < n; ++i) {
-                individual_ids(i) = to_int_checked(
-                    read_numeric(idx_individual, obs.obs_no(i)), "individual");
-            }
+            const Eigen::VectorXi& individual_ids =
+                fes[static_cast<std::size_t>(individual_fe_pos - 1)];
 
             const GroupAggregation agg = parse_aggregation(args.get_required("aggregation"));
 
