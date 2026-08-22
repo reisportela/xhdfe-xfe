@@ -72,6 +72,8 @@ libwinpthread-1.dll
 - Negative, fractional, and above-`2^53` identifiers returned `r(198)` with
   specific diagnostics.
 - The Stata site/corresponding-source suite passed 21 of 21 tests.
+- The installed-wheel formula/maketables gate passed 83 of 83 tests without
+  skips, including the post-2.24.1 IV formula coverage.
 - A real Stata package-semantics probe showed lowercase `g` reporting
   `nothing to install` for a `.dll`, while uppercase `G` installed the same
   file into `PLUS`.

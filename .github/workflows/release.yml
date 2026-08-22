@@ -370,9 +370,9 @@ jobs:
           for name in ("test_formula_frontend", "test_maketables_integration"):
               suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
           result = unittest.TextTestRunner(verbosity=2).run(suite)
-          if not result.wasSuccessful() or result.skipped or result.testsRun != 67:
+          if not result.wasSuccessful() or result.skipped or result.testsRun != 83:
               raise SystemExit(
-                  f"formula/maketables wheel gate expected 67 passing tests without skips; "
+                  f"formula/maketables wheel gate expected 83 passing tests without skips; "
                   f"ran={result.testsRun}, skipped={result.skipped}"
               )
           print("PYTHON_WHEEL_FORMULA_MAKETABLES_SUITES_PASS")
