@@ -28,7 +28,7 @@ attached to GitHub **Releases**, not stored in the tree. See the top-level
 
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
-net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+net install xfepout,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 ```
 
 The online package uses Stata platform-specific `g` lines to select the plugin
@@ -38,7 +38,7 @@ repository's `stata/` folder:
 
 ```stata
 net install xhdfe, from("/path/to/xhdfe/stata") replace
-net install xfe,   from("/path/to/xhdfe/stata") replace
+net install xfepout,   from("/path/to/xhdfe/stata") replace
 ```
 
 The online net-install site provides CPU plugins. Certified releases may also
@@ -48,9 +48,11 @@ run `xhdfegpu` after `net install`, or clone the repository and build directly:
 ```bash
 # CPU (OpenMP recommended)
 bash stata/tools/build-plugin.sh --linux --openmp     # produces stata/xhdfe.plugin
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp  # produces stata/xfepout.plugin
 
 # GPU (Linux + NVIDIA only): auto-detect the local GPU architecture
 bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp --cuda auto
 ```
 
 `xhdfegpu` can use the self-contained `xhdfe-src.zip` published with the
@@ -470,7 +472,7 @@ of compute capability `sm_75` or newer; set the target with `XHDFE_CUDA_ARCH`
 
 ## Full documentation
 
-- **Stata:** `help xhdfe` (and `help xfe`); source in `stata/xhdfe.sthlp`.
+- **Stata:** `help xhdfe` (and `help xfepout`); source in `stata/xhdfe.sthlp`.
 - **Python:** `python -m xhdfe`, the `xhdfe-help` console script, or
   `xhdfe.help_text()` in a session; source in `xhdfe/help/xhdfe.md`.
 - **R:** `?xhdfe` (mirrors the Stata help section by section) and `r/README.md`;

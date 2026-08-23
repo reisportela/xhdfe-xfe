@@ -1,7 +1,7 @@
 * ===========================================================================
 * reghdfe FEATURE-surface parity: weights, IV/2SLS, fixed-effect recovery,
 * heterogeneous slopes, multiway clustering, factor variables, postestimation
-* and xfe partial-out.
+* and xfepout partial-out.
 *
 * Companion to part1/reghdfe-convention-parity.do, which covers the baseline
 * surface (FE dimensions, plain weights, plain factor variables, the standard
@@ -1440,9 +1440,9 @@ preserve
 restore
 
 * ===========================================================================
-* I. xfe versus reghdfe's partial-out
+* I. xfepout versus reghdfe's partial-out
 * ===========================================================================
-di as text _n "-- I. xfe partial-out ----------------------------------------"
+di as text _n "-- I. xfepout partial-out ----------------------------------------"
 
 preserve
     capture drop pf_*
@@ -1458,9 +1458,13 @@ preserve
         scalar pfr_N_`v'   = e(N)
         scalar pfr_dfa_`v' = e(df_a)
     }
-    quietly xfe y x1 x2, absorb(firm year) generate(pf_x_) tolerance(1e-12) keepsingletons
-    xpf_eq, id("I01") left(e(N))    right(pfr_N_y)   exact what("xfe e(N)")
-    xpf_eq, id("I01") left(e(df_a)) right(pfr_dfa_y) exact what("xfe e(df_a)")
+    quietly xfepout y x1 x2, absorb(firm year) generate(pf_x_) tolerance(1e-12) keepsingletons
+    if ("`e(cmd)'" != "xfepout") {
+        di as error "I01: xfepout must store e(cmd)=xfepout; got `e(cmd)'"
+        exit 9
+    }
+    xpf_eq, id("I01") left(e(N))    right(pfr_N_y)   exact what("xfepout e(N)")
+    xpf_eq, id("I01") left(e(df_a)) right(pfr_dfa_y) exact what("xfepout e(df_a)")
     foreach v in y x1 x2 {
         xcert_assert_var_close pf_r_`v' pf_x_`v', tol(1e-8) name("I01 partial-out `v'")
     }
@@ -1470,7 +1474,7 @@ preserve
         quietly reghdfe `v' [aw = w], absorb(firm year) residuals(pf_rw_`v') ///
             tolerance(1e-12) keepsingletons
     }
-    quietly xfe y x1 x2 [aw = w], absorb(firm year) generate(pf_xw_) ///
+    quietly xfepout y x1 x2 [aw = w], absorb(firm year) generate(pf_xw_) ///
         tolerance(1e-12) keepsingletons
     foreach v in y x1 x2 {
         xcert_assert_var_close pf_rw_`v' pf_xw_`v', tol(1e-8) ///
@@ -1483,21 +1487,21 @@ preserve
     scalar pfr_b2 = _b[x2]
     quietly regress pf_x_y pf_x_x1 pf_x_x2, noconstant
     xpf_eq, id("I03") left(_b[pf_x_x1]) right(pfr_b1) tol(1e-8) ///
-        what("second stage on xfe output reproduces b[x1]")
+        what("second stage on xfepout output reproduces b[x1]")
     xpf_eq, id("I03") left(_b[pf_x_x2]) right(pfr_b2) tol(1e-8) ///
-        what("second stage on xfe output reproduces b[x2]")
+        what("second stage on xfepout output reproduces b[x2]")
 
     * sample construction with missing values must match reghdfe exactly
     capture drop pf_r_* pf_x_*
     quietly replace x1 = . in 1/17
     quietly reghdfe y, absorb(firm year) residuals(pf_r_y) tolerance(1e-12) keepsingletons
     scalar pfr_Ny = e(N)
-    quietly xfe y x1, absorb(firm year) generate(pf_x_) tolerance(1e-12) keepsingletons
+    quietly xfepout y x1, absorb(firm year) generate(pf_x_) tolerance(1e-12) keepsingletons
     xpf_eq, id("I04") left(e(N)) right(`= pfr_Ny - 17') exact ///
-        what("xfe drops the rows with a missing regressor")
+        what("xfepout drops the rows with a missing regressor")
     quietly count if !missing(pf_x_y)
     xpf_eq, id("I04") left(r(N)) right(e(N)) exact ///
-        what("xfe writes exactly e(N) non-missing values")
+        what("xfepout writes exactly e(N) non-missing values")
 restore
 
 * ===========================================================================

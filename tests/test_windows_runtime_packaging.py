@@ -577,7 +577,7 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
 
     def test_generic_pe_ledger_builder_copies_and_revalidates_stata_bundle(self):
         roots = {
-            "xfe.plugin": (b"xfe-plugin", ["KERNEL32.dll"]),
+            "xfepout.plugin": (b"xfepout-plugin", ["KERNEL32.dll"]),
             "xhdfe.plugin": (
                 b"xhdfe-plugin",
                 ["KERNEL32.dll", "libgomp-1.dll"],

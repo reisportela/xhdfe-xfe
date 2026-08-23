@@ -40,12 +40,12 @@ mata: st_numscalar("dV", max(abs(st_matrix("V_cpu") :- st_matrix("V_cuda"))))
 assert scalar(db) <= 1e-10
 assert scalar(dV) <= 1e-8
 
-xfe y x1 x2, absorb(fe1 fe2) generate(cpu_) sample(cpu_sample) ///
+xfepout y x1 x2, absorb(fe1 fe2) generate(cpu_) sample(cpu_sample) ///
     keepsingletons numthreads(1) gpubackend(cpu) tolerance(1e-12)
 assert e(converged) == 1
 assert e(gpu_used) == 0
 
-xfe y x1 x2, absorb(fe1 fe2) generate(cuda_) sample(cuda_sample) ///
+xfepout y x1 x2, absorb(fe1 fe2) generate(cuda_) sample(cuda_sample) ///
     keepsingletons numthreads(1) gpubackend(cuda) tolerance(1e-12)
 assert e(converged) == 1
 assert e(gpu_used) == 1
@@ -58,7 +58,7 @@ foreach v in y x1 x2 {
     generate double diff_`v' = abs(cpu_`v' - cuda_`v')
     quietly summarize diff_`v', meanonly
     scalar maxdiff_`v' = r(max)
-    display as txt "xfe max |CPU-CUDA| (`v') = " %12.4e scalar(maxdiff_`v')
+    display as txt "xfepout max |CPU-CUDA| (`v') = " %12.4e scalar(maxdiff_`v')
     assert scalar(maxdiff_`v') <= 1e-8
 }
 

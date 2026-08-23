@@ -21,6 +21,8 @@ if [[ "${XHDFE_BUILD_STATA_PLUGIN:-0}" == "1" ]]; then
     cd "${REPO_ROOT}/stata"
     # shellcheck disable=SC2086
     bash tools/build-plugin.sh ${XHDFE_STATA_BUILD_ARGS:-}
+    # shellcheck disable=SC2086
+    bash tools/build-xfepout-plugin.sh ${XHDFE_STATA_BUILD_ARGS:-}
   )
 fi
 

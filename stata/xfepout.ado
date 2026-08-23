@@ -1,8 +1,8 @@
 *! version 1.11.0 22aug2026
-program define xfe, eclass sortpreserve
+program define xfepout, eclass sortpreserve
     version 16.0
 
-    // xfe: hdfe-style partialling-out using the xhdfe C++ backend (CPU/GPU).
+    // xfepout: hdfe-style partialling-out using the xhdfe C++ backend (CPU/GPU).
     // Notes:
     // - This is a building block (like hdfe), so it intentionally prints no table by default.
     // - We require explicit numeric variables in varlist (no factor/time-series operators in the varlist).
@@ -17,7 +17,7 @@ program define xfe, eclass sortpreserve
     }
 
     if replay() {
-        if ("`e(cmd)'" != "xfe") error 301
+        if ("`e(cmd)'" != "xfepout") error 301
         exit
     }
 
@@ -33,7 +33,7 @@ program define xfe, eclass sortpreserve
 
     local cmdline : copy local 0
 
-    // Normalize hdfe/reghdfe-style aliases to keep xfe drop-in friendly.
+    // Normalize hdfe/reghdfe-style aliases to keep xfepout drop-in friendly.
     local optline : copy local 0
     local optline : subinstr local optline ",a(" ", absorb(", all
     local optline : subinstr local optline ", a(" ", absorb(", all
@@ -111,7 +111,7 @@ program define xfe, eclass sortpreserve
 
     // Mode selection: clear vs generate().
     if (("`clear'" == "") + ("`generate'" == "") != 1) {
-        di as err "xfe error: specify one and only one of: clear or generate(...)"
+        di as err "xfepout error: specify one and only one of: clear or generate(...)"
         exit 198
     }
     if ("`clear'" != "" & "`sample'" != "") {
@@ -132,7 +132,7 @@ program define xfe, eclass sortpreserve
         exit 198
     }
     local unsupported_het_slopes_msg ///
-        "heterogeneous slopes (i.var##c.x, var#c.x) not yet supported in xfe"
+        "heterogeneous slopes (i.var##c.x, var#c.x) not yet supported in xfepout"
 
     // Expand keepvars (in clear mode) to a concrete varlist early.
     if ("`keepvars'" != "") {
@@ -243,7 +243,7 @@ program define xfe, eclass sortpreserve
             exit 198
         }
     }
-    // acceleration() and poolsize() are accepted for hdfe compatibility; xfe uses the xhdfe absorber.
+    // acceleration() and poolsize() are accepted for hdfe compatibility; xfepout uses the xhdfe absorber.
 
     // Mobility profile cache (same semantics as xhdfe).
     local mobility_profile ""
@@ -254,7 +254,7 @@ program define xfe, eclass sortpreserve
     }
     if ("`mobilityprofile'" != "") {
         if ("`mobility_profile'" == "") {
-            local mobility_profile "xfe_mobility_profile.txt"
+            local mobility_profile "xfepout_mobility_profile.txt"
         }
         local mobility_profile_mode "write"
     }
@@ -321,16 +321,16 @@ program define xfe, eclass sortpreserve
             exit 198
         }
         local ado_path ""
-        capture findfile xfe.ado
+        capture findfile xfepout.ado
         if (!_rc) local ado_path "`r(fn)'"
         local cache_dir ""
         if ("`ado_path'" != "") {
-            local cache_dir = substr("`ado_path'", 1, strlen("`ado_path'") - strlen("xfe.ado"))
+            local cache_dir = substr("`ado_path'", 1, strlen("`ado_path'") - strlen("xfepout.ado"))
         }
         if ("`cache_dir'" == "") {
             local cache_dir "`c(pwd)'/"
         }
-        local fe_structure_cache "`cache_dir'xfe_fe_structure_cache.bin"
+        local fe_structure_cache "`cache_dir'xfepout_fe_structure_cache.bin"
         if ("`fe_structure_cache_mode'" == "") {
             local fe_structure_cache_mode "auto"
         }
@@ -366,7 +366,7 @@ program define xfe, eclass sortpreserve
         local absorb_opts = strtrim("`absorb_opts'")
     }
     if ("`absorb_opts'" != "") {
-        di as err "absorb() suboptions are not supported in xfe"
+        di as err "absorb() suboptions are not supported in xfepout"
         exit 198
     }
     if ("`absorb_vars'" != "") {
@@ -561,7 +561,7 @@ program define xfe, eclass sortpreserve
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
-        di as txt "ado_profile label=xfe_sample_marking ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=xfepout_sample_marking ms=" %12.3f (1000 * r(t99))
         timer clear 99
         timer on 99
     }
@@ -695,7 +695,7 @@ program define xfe, eclass sortpreserve
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
-        di as txt "ado_profile label=xfe_fe_cluster_ids ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=xfepout_fe_cluster_ids ms=" %12.3f (1000 * r(t99))
         timer clear 99
         timer on 99
     }
@@ -757,7 +757,7 @@ program define xfe, eclass sortpreserve
     scalar `sGpuAbsIter' = .
     scalar `sMeth' = .
 
-    // Assemble plugin varlist in the exact order expected by the plugin's xfe mode.
+    // Assemble plugin varlist in the exact order expected by the plugin's xfepout mode.
     local plugin_varlist "`varlist' `fe_ids' `clust_ids'"
     if (`has_weight') local plugin_varlist "`plugin_varlist' `wvar'"
     local plugin_varlist "`plugin_varlist' `out_vars'"
@@ -821,11 +821,11 @@ program define xfe, eclass sortpreserve
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
     local cfg "`cfg's_method_used=`sMeth';"
 
-    // Bind the plugin to the same directory as the active xfe.ado so we do not
+    // Bind the plugin to the same directory as the active xfepout.ado so we do not
     // silently pick up a stale CPU-only plugin from another adopath entry.
-    quietly findfile xfe.ado
+    quietly findfile xfepout.ado
     local plugin_path "`r(fn)'"
-    local plugin_path : subinstr local plugin_path "xfe.ado" "xfe.plugin", all
+    local plugin_path : subinstr local plugin_path "xfepout.ado" "xfepout.plugin", all
     // `program ... , plugin using()' does not expand a leading ~ the way
     // `confirm file' does, so a tilde'd PLUS dir (the Unix default ~/ado/plus)
     // makes the load fail with r(601). Expand it here so the confirm, the
@@ -838,21 +838,21 @@ program define xfe, eclass sortpreserve
     }
     capture confirm file "`plugin_path'"
     if (_rc) {
-        di as err "xfe.plugin not found next to xfe.ado; rebuild the plugin in `plugin_path'"
+        di as err "xfepout.plugin not found next to xfepout.ado; rebuild the plugin in `plugin_path'"
         exit 198
     }
-    local plugin_prog "__xfe_plugin_dispatch"
-    if ("$XFE_PLUGIN_PATH_INTERNAL" != "" & "$XFE_PLUGIN_PATH_INTERNAL" != "`plugin_path'") {
-        di as err "xfe: the active session is still bound to an older xfe.plugin path"
-        di as err "xfe: run discard (with no arguments) and rerun the command so Stata reloads the current plugin"
+    local plugin_prog "__xfepout_plugin_dispatch"
+    if ("$XFEPOUT_PLUGIN_PATH_INTERNAL" != "" & "$XFEPOUT_PLUGIN_PATH_INTERNAL" != "`plugin_path'") {
+        di as err "xfepout: the active session is still bound to an older xfepout.plugin path"
+        di as err "xfepout: run discard (with no arguments) and rerun the command so Stata reloads the current plugin"
         exit 498
     }
     capture program `plugin_prog', plugin using("`plugin_path'")
     if (_rc & _rc != 110) {
-        di as err "xfe.plugin could not be loaded from `plugin_path'"
+        di as err "xfepout.plugin could not be loaded from `plugin_path'"
         exit _rc
     }
-    global XFE_PLUGIN_PATH_INTERNAL "`plugin_path'"
+    global XFEPOUT_PLUGIN_PATH_INTERNAL "`plugin_path'"
 
     // Clear previous results.
     ereturn clear
@@ -860,7 +860,7 @@ program define xfe, eclass sortpreserve
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
-        di as txt "ado_profile label=xfe_pre_plugin ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=xfepout_pre_plugin ms=" %12.3f (1000 * r(t99))
         timer clear 99
         timer on 99
     }
@@ -873,13 +873,13 @@ program define xfe, eclass sortpreserve
     if ("`timeit'" != "") {
         timer off 91
         quietly timer list 91
-        di as txt "xfe: plugin time = " %9.3f r(t91) " seconds"
+        di as txt "xfepout: plugin time = " %9.3f r(t91) " seconds"
         timer clear 91
     }
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
-        di as txt "ado_profile label=xfe_plugin_call ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=xfepout_plugin_call ms=" %12.3f (1000 * r(t99))
         timer clear 99
         timer on 99
     }
@@ -887,10 +887,10 @@ program define xfe, eclass sortpreserve
         if (`rc' == 2000) {
             quietly count if `touse'
             if (r(N) == 0) {
-                di as err "xfe: no observations after applying if/in and removing missing values"
+                di as err "xfepout: no observations after applying if/in and removing missing values"
             }
             else {
-                di as err "xfe: no observations left for estimation (all observations may have been dropped as singletons)"
+                di as err "xfepout: no observations left for estimation (all observations may have been dropped as singletons)"
             }
         }
         exit `rc'
@@ -910,41 +910,41 @@ program define xfe, eclass sortpreserve
     if ("`gpu_backend'" != "" & "`gpu_backend'" != "cpu" & scalar(`sGpuUsed') < 0.5) {
         local gpu_backend_disp = upper("`gpu_backend'")
         if ("`gpu_status'" == "backend_unavailable") {
-            di as err "xfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' was not available at runtime"
-            di as err "xfe: check the GPU device/runtime and that xfe.plugin was built with `gpu_backend' support"
-            di as err "xfe: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
+            di as err "xfepout: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' was not available at runtime"
+            di as err "xfepout: check the GPU device/runtime and that xfepout.plugin was built with `gpu_backend' support"
+            di as err "xfepout: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
         }
         else if ("`gpu_status'" == "gpu_absorption_not_converged") {
-            di as err "xfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption did not converge"
+            di as err "xfepout: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption did not converge"
             if (scalar(`sGpuAbsIter') < .) {
-                di as err "xfe: `gpu_backend_disp' absorption reached " %9.0g scalar(`sGpuAbsIter') " iterations without convergence"
+                di as err "xfepout: `gpu_backend_disp' absorption reached " %9.0g scalar(`sGpuAbsIter') " iterations without convergence"
             }
             if (scalar(`sConv') == 0 & scalar(`sIt') < .) {
-                di as err "xfe: CPU fallback also failed to converge in " %9.0g scalar(`sIt') " iterations"
+                di as err "xfepout: CPU fallback also failed to converge in " %9.0g scalar(`sIt') " iterations"
             }
             else {
-                di as err "xfe: CPU fallback produced a result, but it was rejected because a GPU backend was explicitly requested"
+                di as err "xfepout: CPU fallback produced a result, but it was rejected because a GPU backend was explicitly requested"
             }
         }
         else if ("`gpu_status'" == "gpu_backend_failed") {
-            di as err "xfe: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption failed before producing a converged result"
-            di as err "xfe: CPU fallback was rejected because a GPU backend was explicitly requested"
+            di as err "xfepout: requested gpubackend(`gpu_backend'), but `gpu_backend_disp' absorption failed before producing a converged result"
+            di as err "xfepout: CPU fallback was rejected because a GPU backend was explicitly requested"
         }
         else if ("`gpu_status'" == "cpu_cache_or_profile_result") {
-            di as err "xfe: requested gpubackend(`gpu_backend'), but the effective absorption result came from CPU cache/profile state"
-            di as err "xfe: rerun with matching GPU cache/profile state, disable absorption cache, or clear stale mobility/profile files"
+            di as err "xfepout: requested gpubackend(`gpu_backend'), but the effective absorption result came from CPU cache/profile state"
+            di as err "xfepout: rerun with matching GPU cache/profile state, disable absorption cache, or clear stale mobility/profile files"
         }
         else {
-            di as err "xfe: requested gpubackend(`gpu_backend') but the effective backend was CPU"
-            di as err "xfe: rebuild the plugin with `gpu_backend' support and ensure the requested backend is available at runtime"
-            di as err "xfe: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
+            di as err "xfepout: requested gpubackend(`gpu_backend') but the effective backend was CPU"
+            di as err "xfepout: rebuild the plugin with `gpu_backend' support and ensure the requested backend is available at runtime"
+            di as err "xfepout: if you recently rebuilt or switched plugins, run discard (with no arguments) and rerun the command"
         }
         exit 498
     }
 
     // Convergence gate.
     if (scalar(`sConv') != 1) {
-        di as err "xfe: absorber did not converge"
+        di as err "xfepout: absorber did not converge"
         exit 430
     }
 
@@ -984,7 +984,7 @@ program define xfe, eclass sortpreserve
             label var `out' "Residuals: `label'"
         }
         if ("`sample'" != "") {
-            label var `sample' "[XFE Sample]"
+            label var `sample' "[XFEPOUT Sample]"
         }
 
         // Drop plugin-only id variables (keepids is not allowed with generate()).
@@ -1036,12 +1036,12 @@ program define xfe, eclass sortpreserve
         else ereturn local gpu_backend "cpu"
     }
     ereturn local version "1.11.0 22aug2026"
-    ereturn local cmd "xfe"
+    ereturn local cmd "xfepout"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
-        di as txt "ado_profile label=xfe_post_plugin ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=xfepout_post_plugin ms=" %12.3f (1000 * r(t99))
         timer clear 99
     }
 end

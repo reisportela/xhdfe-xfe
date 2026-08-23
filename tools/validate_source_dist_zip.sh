@@ -56,7 +56,7 @@ required_entries=(
   "xhdfe-src/third_party/eigen-3.4.0/Eigen/Core"
   "xhdfe-src/third_party/pybind11-2.11.1/include/pybind11/pybind11.h"
   "xhdfe-src/stata/tools/build-plugin.sh"
-  "xhdfe-src/stata/tools/build-xfe-plugin.sh"
+  "xhdfe-src/stata/tools/build-xfepout-plugin.sh"
   "xhdfe-src/stata/tools/cuda-common.sh"
   "xhdfe-src/stata/tools/_deps/eigen-3.4.0.tar.gz"
   "xhdfe-src/stata/tools/_deps/stplugin.h"
@@ -93,7 +93,7 @@ source_root="${TMP_DIR}/unpacked/xhdfe-src"
 
 bash -n \
   "${source_root}/stata/tools/build-plugin.sh" \
-  "${source_root}/stata/tools/build-xfe-plugin.sh" \
+  "${source_root}/stata/tools/build-xfepout-plugin.sh" \
   "${source_root}/stata/tools/cuda-common.sh" \
   "${source_root}/tools/check_verifier_device_fma.sh"
 

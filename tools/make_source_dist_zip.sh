@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build xhdfe-src.zip: a complete, self-contained source distribution that
-# compiles ALL xhdfe/xfe components --- the C++ core, the Stata plugins, the
+# compiles ALL xhdfe/xfepout components --- the C++ core, the Stata plugins, the
 # Python package, and the R package --- for CPU and GPU (CUDA), on a machine
 # WITHOUT internet access.
 #
@@ -59,7 +59,7 @@ copy_tree "${ROOT_DIR}/tests" "${PKG}/tests"
 copy_tree "${ROOT_DIR}/stata/src"     "${PKG}/stata/src"
 copy_tree "${ROOT_DIR}/stata/include" "${PKG}/stata/include"
 mkdir -p "${PKG}/stata/tools/_deps"
-for f in build-plugin.sh build-xfe-plugin.sh cuda-common.sh mingw_stdio_shim.h; do
+for f in build-plugin.sh build-xfepout-plugin.sh cuda-common.sh mingw_stdio_shim.h; do
   cp -a "${ROOT_DIR}/stata/tools/${f}" "${PKG}/stata/tools/${f}"
 done
 # Vendored Stata plugin dependencies (offline): Eigen tarball + stplugin SDK.
@@ -105,7 +105,7 @@ cp -a "${ROOT_DIR}/third_party/Rcpp_1.1.2.tar.gz" \
 printf '%s\n' "${VERSION}" > "${PKG}/VERSION"
 
 cat > "${PKG}/BUILD_OFFLINE.md" <<EOF
-# xhdfe / xfe --- offline source distribution (version ${VERSION})
+# xhdfe / xfepout --- offline source distribution (version ${VERSION})
 
 Self-contained sources to build every native component for CPU and GPU with
 **no internet access**. Native package dependencies are vendored (Eigen,
@@ -130,13 +130,13 @@ inputs). Python runtime dependencies must be present in the local environment.
 \`\`\`bash
 # CPU (OpenMP recommended)
 bash stata/tools/build-plugin.sh     --linux --openmp
-bash stata/tools/build-xfe-plugin.sh --linux --openmp
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 # GPU (auto-detect the local NVIDIA architecture)
 XHDFE_ENABLE_CUDA=auto bash stata/tools/build-plugin.sh     --linux --openmp
-XHDFE_ENABLE_CUDA=auto bash stata/tools/build-xfe-plugin.sh --linux --openmp
+XHDFE_ENABLE_CUDA=auto bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 \`\`\`
 
-Produces \`stata/xhdfe.plugin\` and \`stata/xfe.plugin\`. Put them on the Stata
+Produces \`stata/xhdfe.plugin\` and \`stata/xfepout.plugin\`. Put them on the Stata
 adopath (next to \`xhdfe.ado\`). The \`xhdfegpu\` command automates the GPU case.
 
 ## Python package

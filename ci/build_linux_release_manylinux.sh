@@ -15,8 +15,8 @@
 #   docker run --rm -v "$PWD:/w" -w /w -e XHDFE_CUDA_ARCHS \
 #     quay.io/pypa/manylinux_2_28_x86_64 bash ci/build_linux_release_manylinux.sh
 #
-# Produces (in artifacts/): xhdfe.plugin.linux-cpu, xfe.plugin.linux-cpu,
-# xhdfe.plugin.linux-cuda, xfe.plugin.linux-cuda, xhdfe-*.whl, xhdfe-*.tar.gz,
+# Produces (in artifacts/): xhdfe.plugin.linux-cpu, xfepout.plugin.linux-cpu,
+# xhdfe.plugin.linux-cuda, xfepout.plugin.linux-cuda, xhdfe-*.whl, xhdfe-*.tar.gz,
 # CUDA/wheel provenance ledgers, exact nvcc link traces, license copies, and
 # the exact libgomp source RPM required by the repaired wheel.
 # Every ELF is gated by tools/check_binary_floor.sh before this script exits;
@@ -75,18 +75,18 @@ export NVCC=xhdfe_release_nvcc
 echo "== linux-cpu plugins =="
 bash stata/tools/build-plugin.sh --linux --openmp
 cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cpu
-bash stata/tools/build-xfe-plugin.sh --linux --openmp
-cp stata/xfe.plugin artifacts/xfe.plugin.linux-cpu
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp
+cp stata/xfepout.plugin artifacts/xfepout.plugin.linux-cpu
 bash tools/check_binary_floor.sh --max-glibc "$FLOOR_GLIBC" --max-glibcxx "$FLOOR_GLIBCXX" \
-  artifacts/xhdfe.plugin.linux-cpu artifacts/xfe.plugin.linux-cpu
+  artifacts/xhdfe.plugin.linux-cpu artifacts/xfepout.plugin.linux-cpu
 
 echo "== linux-cuda fatbin plugins =="
 XHDFE_ENABLE_CUDA=ON bash stata/tools/build-plugin.sh --linux --openmp
 cp stata/xhdfe.plugin artifacts/xhdfe.plugin.linux-cuda
-XHDFE_ENABLE_CUDA=ON bash stata/tools/build-xfe-plugin.sh --linux --openmp
-cp stata/xfe.plugin artifacts/xfe.plugin.linux-cuda
+XHDFE_ENABLE_CUDA=ON bash stata/tools/build-xfepout-plugin.sh --linux --openmp
+cp stata/xfepout.plugin artifacts/xfepout.plugin.linux-cuda
 bash tools/check_binary_floor.sh --max-glibc "$FLOOR_GLIBC" --max-glibcxx "$FLOOR_GLIBCXX" \
-  artifacts/xhdfe.plugin.linux-cuda artifacts/xfe.plugin.linux-cuda
+  artifacts/xhdfe.plugin.linux-cuda artifacts/xfepout.plugin.linux-cuda
 
 echo "== CUDA static-link provenance gate =="
 "$PYBIN" tools/record_linux_release_provenance.py cuda-ledger \
@@ -94,7 +94,7 @@ echo "== CUDA static-link provenance gate =="
   --trace-jsonl "$XHDFE_NVCC_INVOCATIONS" \
   --link-dryrun "$XHDFE_NVCC_LINK_DRYRUN" \
   --plugin artifacts/xhdfe.plugin.linux-cuda \
-  --plugin artifacts/xfe.plugin.linux-cuda \
+  --plugin artifacts/xfepout.plugin.linux-cuda \
   --toolkit-eula "$CUDA_EULA_INPUT" \
   --license-dir artifacts/cuda-license-files \
   --output artifacts/linux-cuda-provenance.json

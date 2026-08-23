@@ -413,7 +413,7 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
         for index, item in enumerate(argv[:-1]):
             if item == "-o":
                 link_outputs.add(Path(argv[index + 1]).name)
-    if link_outputs != {"xhdfe.plugin", "xfe.plugin"}:
+    if link_outputs != {"xhdfe.plugin", "xfepout.plugin"}:
         raise ProvenanceError(f"unexpected nvcc link outputs: {sorted(link_outputs)}")
 
     dryrun_path = Path(args.link_dryrun).resolve(strict=True)
@@ -455,7 +455,7 @@ def _cuda_ledger(args: argparse.Namespace) -> int:
         )
     if {Path(record["path"]).name for record in plugin_records} != {
         "xhdfe.plugin.linux-cuda",
-        "xfe.plugin.linux-cuda",
+        "xfepout.plugin.linux-cuda",
     }:
         raise ProvenanceError("CUDA ledger must cover exactly the two staged CUDA plugins")
 

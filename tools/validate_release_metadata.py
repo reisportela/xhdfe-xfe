@@ -129,12 +129,38 @@ def validate(expected_version: str) -> None:
         "stata/xhdfe.pkg version is not aligned",
     )
     _require(
-        _capture("stata/xfe.pkg", r"^v\s+(\S+)") == "1.11.0",
-        "stata/xfe.pkg must remain at version 1.11.0",
+        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.11.0",
+        "stata/xfepout.pkg must remain at version 1.11.0",
+    )
+    for retired in (
+        "stata/xfe.ado",
+        "stata/xfe.sthlp",
+        "stata/xfe.pkg",
+        "stata/tools/build-xfe-plugin.sh",
+    ):
+        _require(
+            not (ROOT / retired).exists(),
+            f"retired Stata frontend file must not be shipped: {retired}",
+        )
+    xfepout_ado = _read("stata/xfepout.ado")
+    _require(
+        re.search(r"^program define xfepout\b", xfepout_ado, re.MULTILINE)
+        is not None,
+        "stata/xfepout.ado does not define the xfepout command",
+    )
+    _require(
+        'ereturn local cmd "xfepout"' in xfepout_ado,
+        "stata/xfepout.ado does not store e(cmd)=xfepout",
+    )
+    stata_toc = _read("stata/stata.toc")
+    _require(
+        re.search(r"^p\s+xfepout\b", stata_toc, re.MULTILINE) is not None
+        and re.search(r"^p\s+xfe\b", stata_toc, re.MULTILINE) is None,
+        "stata/stata.toc must publish xfepout and must not publish xfe",
     )
 
     production_text = _package_text_files("stata/xhdfe.pkg")
-    production_text.update(_package_text_files("stata/xfe.pkg"))
+    production_text.update(_package_text_files("stata/xfepout.pkg"))
     _require(production_text, "Stata package manifests contain no text files")
     for relative in sorted(production_text):
         header = "\n".join(_read(relative).splitlines()[:12]).lower()
@@ -144,11 +170,11 @@ def validate(expected_version: str) -> None:
         )
 
     package_files = _package_files("stata/xhdfe.pkg")
-    package_files.update(_package_files("stata/xfe.pkg"))
+    package_files.update(_package_files("stata/xfepout.pkg"))
     # The public source tree deliberately omits compiled plugins. Their names
     # remain mandatory here; the staged net-install validator checks the actual
     # CI-built binaries after platform assembly.
-    generated_plugins = {"stata/xhdfe.plugin", "stata/xfe.plugin"}
+    generated_plugins = {"stata/xhdfe.plugin", "stata/xfepout.plugin"}
     _require(
         generated_plugins.issubset(package_files),
         "Stata package manifests must reference both generated plugins",

@@ -20,11 +20,11 @@ is on PATH, and target your GPU's compute capability — read it with
 ```bash
 # example: compute capability 9.0 (H100 -> sm_90); use your own value
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash tools/build-plugin.sh --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash tools/build-xfe-plugin.sh --linux --openmp
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash tools/build-xfepout-plugin.sh --linux --openmp
 
 # Multi-architecture fatbin for redistribution
 XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCHS="75,80,86,89,90" bash tools/build-plugin.sh --linux --openmp
-XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCHS="75,80,86,89,90" bash tools/build-xfe-plugin.sh --linux --openmp
+XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCHS="75,80,86,89,90" bash tools/build-xfepout-plugin.sh --linux --openmp
 ```
 
 To confirm Stata is actually using CUDA instead of silently falling back to CPU:
@@ -32,7 +32,7 @@ To confirm Stata is actually using CUDA instead of silently falling back to CPU:
 ```stata
 discard
 which xhdfe
-which xfe
+which xfepout
 
 webuse nlswork, clear
 xhdfe ln_wage ttl_exp tenure, absorb(idcode year) gpubackend(cuda) numthreads(8) tolerance(1e-8)
@@ -40,7 +40,7 @@ di e(gpu_used)
 di "`e(gpu_backend)'"
 
 webuse nlswork, clear
-xfe ln_wage ttl_exp tenure, absorb(idcode year) gpubackend(cuda) numthreads(8) tolerance(1e-8) clear
+xfepout ln_wage ttl_exp tenure, absorb(idcode year) gpubackend(cuda) numthreads(8) tolerance(1e-8) clear
 di e(gpu_used)
 di "`e(gpu_backend)'"
 ```
@@ -48,7 +48,7 @@ di "`e(gpu_backend)'"
 Expected result: `e(gpu_used) == 1` and `e(gpu_backend) == "cuda"`.
 If `gpubackend(cuda)` was requested but CUDA is unavailable, the commands now stop with an error instead of silently
 returning CPU output.
-If you rebuilt or switched plugin binaries in the same Stata session, run `discard` with no arguments before rerunning the command. Do not use `discard xhdfe` or `discard xfe`. Ordinary repeated `xhdfe`/`xfe` calls in the same session do not require `discard` when the plugin binary itself has not changed.
+If you rebuilt or switched plugin binaries in the same Stata session, run `discard` with no arguments before rerunning the command. Do not use `discard xhdfe` or `discard xfepout`. Ordinary repeated `xhdfe`/`xfepout` calls in the same session do not require `discard` when the plugin binary itself has not changed.
 
 For a more detailed local build checklist, see `BUILD_CUDA.md` in this folder.
 
@@ -59,8 +59,12 @@ net-install site:
 
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
-net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+net install xfepout,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 ```
+
+`xfepout` replaces the former `xfe` command. Existing standalone `xfe`
+installations can be removed with `ado uninstall xfe` before installing
+`xfepout`; no compatibility alias is shipped.
 
 That site uses Stata platform-specific `g` lines so Linux, macOS, and Windows
 users receive the matching CPU plugin binary when it exists in the release.
@@ -72,7 +76,7 @@ bundle, point `net install` at the folder containing `stata.toc` and the
 
 ```stata
 net install xhdfe, from("/path/to/xhdfe/stata") replace
-net install xfe,   from("/path/to/xhdfe/stata") replace
+net install xfepout,   from("/path/to/xhdfe/stata") replace
 ```
 
 Alternatively, make sure this folder is on your Stata `adopath` (or copy

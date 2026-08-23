@@ -18,10 +18,11 @@ a Stata command, a Python package, and an R package — all sitting on a **singl
 compiled C++ core**. CPU is the reference backend; an optional CUDA GPU absorber
 is available for large problems.
 
-The package also ships **`xfe`** (hence the repository name *xhdfe-xfe*), a
-companion Stata command that partials out — residualizes — variables against
-multiple high-dimensional fixed effects on the same core, without fitting a
-regression. See [Stata](#stata) below and `help xfe`.
+The package also ships **`xfepout`**. The repository retains its historical
+*xhdfe-xfe* name, but the public Stata partialling-out command is now
+`xfepout`. It residualizes variables against multiple high-dimensional fixed
+effects on the same core, without fitting a regression. See [Stata](#stata)
+below and `help xfepout`.
 
 As an illustration, the table below reports median estimator-call runtimes for
 an AKM-style wage regression using Portuguese matched employer-employee data.
@@ -80,7 +81,7 @@ with the GPU feature, requesting it, and verifying it in Stata, Python, and R.
 ### Stata
 
 **One command installs everything.** `net install xhdfe` installs the estimator
-*and* every companion command — `xfe`, `xhdfeakm`, `xhdfeconnected`,
+*and* every companion command — `xfepout`, `xhdfeakm`, `xhdfeconnected`,
 `xhdfegelbach`, `xhdfegelbachbootstrap`, `xhdfegelbachetable`,
 `xhdfegelbachcoefplot`, and `xhdfegpu` — together with the CPU plugin for your
 OS:
@@ -94,7 +95,7 @@ That is all most users need. The commands you get:
 | Command | What it does |
 | --- | --- |
 | `xhdfe` | HDFE linear regression — the estimator (`help xhdfe`). |
-| `xfe` | Partials out / residualizes variables against the fixed effects, no regression (`help xfe`). |
+| `xfepout` | Partials out / residualizes variables against the fixed effects, no regression (`help xfepout`). |
 | `xhdfeakm` | Worker-firm (AKM) leave-out (KSS) variance decomposition (`help xhdfeakm`). |
 | `xhdfeconnected` | Largest leave-one-out connected set — KSS sample prep (`help xhdfeconnected`). |
 | `xhdfegelbach` | Gelbach (2016) decomposition of coefficient movements (`help xhdfegelbach`). |
@@ -103,10 +104,16 @@ That is all most users need. The commands you get:
 | `xhdfegelbachcoefplot` | Identity-preserving Gelbach waterfall plot (`help xhdfegelbachcoefplot`). |
 | `xhdfegpu` | Builds and installs a CUDA GPU plugin for this machine (`help xhdfegpu`). |
 
-If you want *only* the standalone `xfe` partial-out tool, you can install it by
-itself with `net install xfe, from("…") replace`. The online package uses Stata
+If you want *only* the standalone `xfepout` partial-out tool, you can install it by
+itself with `net install xfepout, from("…") replace`. The online package uses Stata
 platform-specific `g` lines for Linux, macOS Apple Silicon/Intel, and Windows
 when a Windows plugin artifact exists.
+
+> **Stata command rename.** `xfepout` replaces the former `xfe` command. The
+> numerical implementation and syntax are otherwise unchanged, and no Python
+> or R API was renamed. If a previous standalone installation still provides
+> `xfe`, run `ado uninstall xfe` before installing `xfepout`; the new package
+> deliberately does not ship a permanent `xfe` alias.
 
 #### Turn on the GPU (NVIDIA/CUDA) — one command
 
@@ -121,7 +128,7 @@ xhdfegpu
 ```
 
 `xhdfegpu` detects the GPU, compiles a plugin for its exact architecture, and
-installs it *over* the CPU plugin in place — same `xhdfe.plugin` / `xfe.plugin`,
+installs it *over* the CPU plugin in place — same `xhdfe.plugin` / `xfepout.plugin`,
 no renaming, no extra files. Then reload the plugin and request the GPU as usual:
 
 ```stata
@@ -148,7 +155,7 @@ the package-side build needs no further downloads.
 Download the distribution ZIP from the
 [Releases](https://github.com/reisportela/xhdfe-xfe/releases) page, unzip it,
 and point `net install` at the folder that contains `xhdfe.pkg` and `stata.toc`
-(this also installs xfe and the companions):
+(this also installs xfepout and the companions):
 
 ```stata
 net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
@@ -164,10 +171,10 @@ git clone https://github.com/reisportela/xhdfe-xfe.git
 cd xhdfe-xfe
 # CPU build (Linux + GCC; OpenMP recommended)
 bash stata/tools/build-plugin.sh     --linux --openmp     # produces stata/xhdfe.plugin
-bash stata/tools/build-xfe-plugin.sh --linux --openmp     # produces stata/xfe.plugin
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp     # produces stata/xfepout.plugin
 # GPU build (Linux + NVIDIA; auto-detects the local architecture)
 bash stata/tools/build-plugin.sh     --linux --openmp --cuda auto
-bash stata/tools/build-xfe-plugin.sh --linux --openmp --cuda auto
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp --cuda auto
 ```
 
 For an explicit target use `--cuda 90`; for a shareable multi-GPU binary,
@@ -482,7 +489,7 @@ decisions.
 | `src/`, `include/`, `third_party/` | The shared C++ core and vendored build inputs: Eigen and pybind11 sources plus the pinned official Rcpp source archive used by autonomous offline release media. |
 | `python/`, `xhdfe/` | Python package (`import xhdfe`; the `HdfeRegressor` class). |
 | `r/` | R package (`r/xhdfe/`), examples, and helper tools. |
-| `stata/` | Stata package: `xhdfe.ado`, `xfe.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
+| `stata/` | Stata package: `xhdfe.ado`, `xfepout.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
 | `tests/` | `tests/stata/`: Stata certification and smoke tests; `tests/validation/`: Python oracle and cross-frontend validators; `tests/benchmarks/`: public benchmark replication. |
 | `docs/` | Quickstart and overview. |
 | `CMakeLists.txt`, `pyproject.toml`, `setup.py` | Build configuration for the C++ core and Python bindings. |
@@ -501,7 +508,7 @@ decisions.
 - **Release workflow:** [`docs/release-workflow.md`](docs/release-workflow.md).
 - **Release history and certification:** [`docs/releases/`](docs/releases/),
   [`docs/certification/`](docs/certification/).
-- **Stata:** `help xhdfe`, `help xfe`.
+- **Stata:** `help xhdfe`, `help xfepout`.
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.
 

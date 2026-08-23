@@ -7,7 +7,7 @@
 {vieweralsosee "ivreghdfe" "help ivreghdfe"}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "" "--"}{...}
-{vieweralsosee "xfe" "help xfe"}{...}
+{vieweralsosee "xfepout" "help xfepout"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -1205,7 +1205,7 @@ Gelbach, Jonah B. 2016. "When do covariates matter? And which ones, and how much
 {title:Also see}
 
 {psee}
-Companion command in the same package: {helpb xfe} (partials out / residualizes
+Companion command in the same package: {helpb xfepout} (partials out / residualizes
 variables against multiple high-dimensional fixed effects on the same C++ core;
 no coefficient table).{p_end}
 

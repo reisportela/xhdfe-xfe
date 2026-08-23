@@ -484,7 +484,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
         site_name: str,
     ) -> subprocess.CompletedProcess[str]:
         xhdfe_plugin = self._file(root, "plugins/xhdfe.plugin", b"xhdfe PE fixture\n")
-        xfe_plugin = self._file(root, "plugins/xfe.plugin", b"xfe PE fixture\n")
+        xfe_plugin = self._file(root, "plugins/xfepout.plugin", b"xfepout PE fixture\n")
         return subprocess.run(
             [
                 "bash",
@@ -492,7 +492,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                 str(root / site_name),
                 "--windows-xhdfe",
                 str(xhdfe_plugin),
-                "--windows-xfe",
+                "--windows-xfepout",
                 str(xfe_plugin),
                 "--windows-runtime-dir",
                 str(runtime_dir),
@@ -892,14 +892,14 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             )
             self.assertEqual(staged.returncode, 0, staged.stderr)
             site = root / "static-site"
-            for cmd in ("xhdfe", "xfe"):
+            for cmd in ("xhdfe", "xfepout"):
                 (site / f"{cmd}.win64.plugin").replace(site / f"{cmd}.plugin")
             runtime_names = sorted(path.name for path in runtime_dir.iterdir())
             additions = runtime_names + [
                 "windows-stata-provider-ledger.json",
                 "windows-stata-runtime-ledger.json",
             ]
-            for pkg_name in ("xhdfe.pkg", "xfe.pkg"):
+            for pkg_name in ("xhdfe.pkg", "xfepout.pkg"):
                 pkg = site / pkg_name
                 lines = [
                     line
@@ -907,9 +907,9 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
                     if not line.startswith(("g WIN64 ", "G WIN64 "))
                 ]
                 plugin_names = (
-                    ("xhdfe.plugin", "xfe.plugin")
+                    ("xhdfe.plugin", "xfepout.plugin")
                     if pkg_name == "xhdfe.pkg"
-                    else ("xfe.plugin",)
+                    else ("xfepout.plugin",)
                 )
                 lines.extend(f"f {name}" for name in plugin_names)
                 lines.extend(f"f {name}" for name in additions)
@@ -927,7 +927,7 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             )
             self.assertEqual(validated.returncode, 0, validated.stderr)
 
-            xfe_pkg = site / "xfe.pkg"
+            xfe_pkg = site / "xfepout.pkg"
             omitted = f"f {runtime_names[0]}\n"
             xfe_pkg.write_text(
                 xfe_pkg.read_text(encoding="utf-8").replace(omitted, ""),

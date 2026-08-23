@@ -55,7 +55,7 @@ xhdfegpu
 
 It gates on `nvidia-smi` (so it only builds when a GPU is present), compiles a
 plugin for the local architecture, and installs it *over* the CPU plugin in
-place (same `xhdfe.plugin` / `xfe.plugin`). On a machine without internet, fetch
+place (same `xhdfe.plugin` / `xfepout.plugin`). On a machine without internet, fetch
 the source zip elsewhere and pass it in: `xhdfegpu, zip("/path/to/xhdfe-src.zip")`.
 See `help xhdfegpu`. Then `discard` and use `gpubackend(cuda)` (Step 3).
 
@@ -64,7 +64,7 @@ To build the plugin by hand instead, from a clone:
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe
 bash stata/tools/build-plugin.sh     --linux --openmp --cuda auto
-bash stata/tools/build-xfe-plugin.sh --linux --openmp --cuda auto
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp --cuda auto
 ```
 
 Then add the folder to your adopath (this writes nothing outside it):
@@ -110,7 +110,7 @@ For an explicit target, set `XHDFE_CUDA_ARCH=90`.
 
 | Version | How to request the GPU |
 |---------|------------------------|
-| Stata   | add the option `gpubackend(cuda)` to the `xhdfe` / `xfe` command |
+| Stata   | add the option `gpubackend(cuda)` to the `xhdfe` / `xfepout` command |
 | Python  | set `os.environ["XHDFE_GPU_BACKEND"] = "cuda"` before `.fit()` |
 | R       | pass `backend = "cuda"` to `xhdfe(...)` |
 

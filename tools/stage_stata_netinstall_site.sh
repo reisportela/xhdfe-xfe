@@ -8,11 +8,11 @@ Usage:
 
 Plugin options:
   --linux-xhdfe PATH       Linux x86_64 xhdfe.plugin source
-  --linux-xfe PATH         Linux x86_64 xfe.plugin source
+  --linux-xfepout PATH         Linux x86_64 xfepout.plugin source
   --macos-xhdfe PATH       macOS universal/ARM xhdfe.plugin source
-  --macos-xfe PATH         macOS universal/ARM xfe.plugin source
+  --macos-xfepout PATH         macOS universal/ARM xfepout.plugin source
   --windows-xhdfe PATH     Windows x86_64 xhdfe.plugin source
-  --windows-xfe PATH       Windows x86_64 xfe.plugin source
+  --windows-xfepout PATH       Windows x86_64 xfepout.plugin source
   --windows-runtime-dir PATH
                            Directory containing exactly the validated Windows
                            runtime DLL closure
@@ -27,7 +27,7 @@ Plugin options:
 
 The output directory is a Stata net-install site.  The generated .pkg files use
 Stata platform-specific g lines, so each OS downloads the matching plugin and
-installs it under the canonical runtime name xhdfe.plugin or xfe.plugin.
+installs it under the canonical runtime name xhdfe.plugin or xfepout.plugin.
 EOF
 }
 
@@ -54,11 +54,11 @@ nvidia_cccl_license=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --linux-xhdfe) linux_xhdfe="${2:?}"; shift 2 ;;
-    --linux-xfe) linux_xfe="${2:?}"; shift 2 ;;
+    --linux-xfepout) linux_xfe="${2:?}"; shift 2 ;;
     --macos-xhdfe) macos_xhdfe="${2:?}"; shift 2 ;;
-    --macos-xfe) macos_xfe="${2:?}"; shift 2 ;;
+    --macos-xfepout) macos_xfe="${2:?}"; shift 2 ;;
     --windows-xhdfe) windows_xhdfe="${2:?}"; shift 2 ;;
-    --windows-xfe) windows_xfe="${2:?}"; shift 2 ;;
+    --windows-xfepout) windows_xfe="${2:?}"; shift 2 ;;
     --windows-runtime-dir) windows_runtime_dir="${2:?}"; shift 2 ;;
     --windows-runtime-provider-ledger) windows_runtime_provider_ledger="${2:?}"; shift 2 ;;
     --windows-runtime-closure-ledger) windows_runtime_closure_ledger="${2:?}"; shift 2 ;;
@@ -113,8 +113,8 @@ shared=(
   stata/xhdfegelbachcoefplot.sthlp
   stata/xhdfegpu.ado
   stata/xhdfegpu.sthlp
-  stata/xfe.ado
-  stata/xfe.sthlp
+  stata/xfepout.ado
+  stata/xfepout.sthlp
 )
 
 for rel in "${shared[@]}"; do
@@ -152,11 +152,11 @@ has_linux=0
 has_macos=0
 has_windows=0
 copy_optional_pair "$linux_xhdfe" "$linux_xfe" \
-  xhdfe.linux64.plugin xfe.linux64.plugin && has_linux=1
+  xhdfe.linux64.plugin xfepout.linux64.plugin && has_linux=1
 copy_optional_pair "$macos_xhdfe" "$macos_xfe" \
-  xhdfe.macos-universal.plugin xfe.macos-universal.plugin && has_macos=1
+  xhdfe.macos-universal.plugin xfepout.macos-universal.plugin && has_macos=1
 copy_optional_pair "$windows_xhdfe" "$windows_xfe" \
-  xhdfe.win64.plugin xfe.win64.plugin && has_windows=1
+  xhdfe.win64.plugin xfepout.win64.plugin && has_windows=1
 
 windows_runtime_names=()
 if [[ "$has_windows" -eq 1 ]]; then
@@ -327,7 +327,9 @@ shutil.copyfile(
 )
 PY
 )"
-  mapfile -t windows_runtime_names <<< "$runtime_names_output"
+  while IFS= read -r runtime_name; do
+    [[ -z "$runtime_name" ]] || windows_runtime_names+=("$runtime_name")
+  done <<< "$runtime_names_output"
   [[ "${#windows_runtime_names[@]}" -gt 0 && -n "${windows_runtime_names[0]}" ]] || {
     echo "Windows runtime ledger produced an empty closure." >&2
     exit 1
@@ -340,11 +342,11 @@ fi
 
 cat > "$outdir/stata.toc" <<'EOF'
 v 3
-d xhdfe / xfe: High-dimensional fixed effects via a C++ plugin
+d xhdfe / xfepout: High-dimensional fixed effects via a C++ plugin
 d
 d Online install site with platform-specific Stata plugins.
 p xhdfe High-dimensional fixed effects regression via a C++ plugin
-p xfe Partial-out variables with multiple fixed effects via a C++ plugin
+p xfepout Partial-out variables with multiple fixed effects via a C++ plugin
 EOF
 
 write_pkg() {
@@ -378,15 +380,15 @@ f xhdfegelbachcoefplot.ado
 f xhdfegelbachcoefplot.sthlp
 f xhdfegpu.ado
 f xhdfegpu.sthlp
-f xfe.ado
-f xfe.sthlp
+f xfepout.ado
+f xfepout.sthlp
 f LICENSE
 f NOTICE
 EOF
   else
     cat >> "$pkg" <<'EOF'
-f xfe.ado
-f xfe.sthlp
+f xfepout.ado
+f xfepout.sthlp
 f LICENSE
 f NOTICE
 EOF
@@ -414,11 +416,11 @@ EOF
 
   # Emit the platform-specific g lines that map a per-OS plugin file to the
   # canonical runtime name. The xhdfe package ships BOTH plugins so that a
-  # single `net install xhdfe` delivers xfe too; the standalone xfe package
-  # ships only xfe.plugin.
+  # single `net install xhdfe` delivers xfepout too; the standalone xfepout package
+  # ships only xfepout.plugin.
   emit_plugin_g_lines "$pkg" "$plugin_prefix" "$cmd.plugin"
   if [[ "$cmd" == "xhdfe" ]]; then
-    emit_plugin_g_lines "$pkg" "xfe" "xfe.plugin"
+    emit_plugin_g_lines "$pkg" "xfepout" "xfepout.plugin"
   fi
   if [[ "$has_windows" -eq 1 ]]; then
     for runtime_name in "${windows_runtime_names[@]}"; do
@@ -438,7 +440,7 @@ h $cmd.plugin
 EOF
   if [[ "$cmd" == "xhdfe" ]]; then
     cat >> "$pkg" <<EOF
-h xfe.plugin
+h xfepout.plugin
 EOF
   fi
 }
@@ -472,27 +474,27 @@ package_version() {
 }
 
 xhdfe_version="$(package_version xhdfe)"
-xfe_version="$(package_version xfe)"
+xfe_version="$(package_version xfepout)"
 [[ -n "$xhdfe_version" && -n "$xfe_version" ]] || {
   echo "Could not read package versions from stata/*.pkg" >&2
   exit 1
 }
 
 write_pkg xhdfe "$xhdfe_version" "xhdfe: High-dimensional fixed effects regression via a C++ plugin" xhdfe
-write_pkg xfe "$xfe_version" "xfe: Partial-out variables with multiple fixed effects via a C++ plugin" xfe
+write_pkg xfepout "$xfe_version" "xfepout: Partial-out variables with multiple fixed effects via a C++ plugin" xfepout
 
 cat > "$outdir/README.txt" <<'EOF'
-xhdfe / xfe Stata net-install site
+xhdfe / xfepout Stata net-install site
 
 Install from Stata with:
 
   net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
-  net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+  net install xfepout,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 
 The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
-file is installed under the canonical runtime name xhdfe.plugin or xfe.plugin.
+file is installed under the canonical runtime name xhdfe.plugin or xfepout.plugin.
 Windows packages download every runtime DLL named and hashed by the release's
 windows-stata-provider-ledger.json into the Stata system directories. The independent PE graph is in
 windows-stata-runtime-ledger.json; the dependency set is not hard-coded here.
@@ -502,4 +504,4 @@ are also listed in both package manifests.
 EOF
 
 echo "Staged Stata net-install site in $outdir"
-find "$outdir" -maxdepth 1 -type f -printf '%f\n' | sort
+find "$outdir" -maxdepth 1 -type f -exec basename {} \; | sort

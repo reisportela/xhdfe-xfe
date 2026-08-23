@@ -43,7 +43,7 @@ using hdfe::StandardErrorType;
 using hdfe::v11::HdfeRegressorV11;
 using hdfe::v11::ThreadingOptions;
 
-constexpr const char* kPluginPrefix = "xfe plugin: ";
+constexpr const char* kPluginPrefix = "xfepout plugin: ";
 constexpr double kGroupConstantTol = 1e-12;
 
 [[noreturn]] void throw_with_prefix(const std::string& msg) {
@@ -630,7 +630,7 @@ STDLL stata_call(int argc, char* argv[]) {
         }
 
         if (k <= 0 || nfe < 0 || nclust < 0) {
-            throw_with_prefix("invalid xfe dimension arguments");
+            throw_with_prefix("invalid xfepout dimension arguments");
         }
 
         // varlist layout:
@@ -645,7 +645,7 @@ STDLL stata_call(int argc, char* argv[]) {
             k + nfe + nclust + (has_weight ? 1 : 0) + k + (store_groupvar ? 1 : 0) + 1;
         const int have_vars = SF_nvars();
         if (have_vars != expected_vars) {
-            throw_with_prefix("xfe varlist has wrong length (have " + std::to_string(have_vars) +
+            throw_with_prefix("xfepout varlist has wrong length (have " + std::to_string(have_vars) +
                               ", want " + std::to_string(expected_vars) + ")");
         }
 
@@ -888,13 +888,13 @@ STDLL stata_call(int argc, char* argv[]) {
             {
                 const ST_retcode rc = SF_vstore(idx_out_start, obs_no, absorption.y_tilde(i));
                 if (rc) {
-                    throw_with_prefix("failed to store xfe output");
+                    throw_with_prefix("failed to store xfepout output");
                 }
             }
             for (int j = 1; j < k; ++j) {
                 const ST_retcode rc = SF_vstore(idx_out_start + j, obs_no, absorption.X_tilde(i, j - 1));
                 if (rc) {
-                    throw_with_prefix("failed to store xfe output");
+                    throw_with_prefix("failed to store xfepout output");
                 }
             }
 
@@ -942,7 +942,7 @@ STDLL stata_call(int argc, char* argv[]) {
         SF_error(const_cast<char*>(msg.c_str()));
         return static_cast<ST_retcode>(198);
     } catch (...) {
-        const char* msg = "xfe plugin: unknown error\n";
+        const char* msg = "xfepout plugin: unknown error\n";
         SF_error(const_cast<char*>(msg));
         return static_cast<ST_retcode>(198);
     }

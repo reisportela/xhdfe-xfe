@@ -1,0 +1,11 @@
+v 1.11.0
+d xfepout: Partial-out variables with multiple fixed effects via a C++ plugin
+d
+d This package ships the `xfepout` command plus a platform-specific plugin binary.
+d If the bundled plugin is not compatible with your platform, build it from source in the repo:
+d   `bash stata/tools/build-xfepout-plugin.sh`
+f xfepout.ado
+f xfepout.sthlp
+f LICENSE
+f NOTICE
+f xfepout.plugin

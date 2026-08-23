@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assemble a Stata net-install bundle ZIP for one platform.
 # Usage: make_stata_bundle.sh <platform-tag>   e.g. linux-x86_64-cpu
-# Expects stata/xhdfe.plugin and stata/xfe.plugin to already be built.
+# Expects stata/xhdfe.plugin and stata/xfepout.plugin to already be built.
 set -euo pipefail
 
 PLATFORM="${1:?platform tag required, e.g. linux-x86_64-cpu}"
@@ -16,19 +16,19 @@ cp stata/xhdfe.ado stata/xhdfe_estat.ado stata/xhdfe_p.ado stata/xhdfe.sthlp \
    stata/xhdfeakm.ado stata/xhdfeakm.sthlp stata/xhdfeconnected.ado \
    stata/xhdfeconnected.sthlp stata/xhdfegelbach.ado stata/xhdfegelbach.sthlp \
    stata/xhdfegpu.ado stata/xhdfegpu.sthlp \
-   stata/xhdfe.pkg stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg stata/stata.toc \
+   stata/xhdfe.pkg stata/xfepout.ado stata/xfepout.sthlp stata/xfepout.pkg stata/stata.toc \
    "${STAGE}/"
 cp stata/xhdfe_hetero.ado stata/xhdfe_hetero.sthlp "${STAGE}/" 2>/dev/null || true
 cp stata/xhdfe.plugin "${STAGE}/xhdfe.plugin"
-cp stata/xfe.plugin "${STAGE}/xfe.plugin"
+cp stata/xfepout.plugin "${STAGE}/xfepout.plugin"
 
 cat > "${STAGE}/INSTALL.txt" <<EOF
-xhdfe / xfe -- Stata package (${PLATFORM})
+xhdfe / xfepout -- Stata package (${PLATFORM})
 
 From Stata, point net install at this unzipped folder:
 
     net install xhdfe, from("/path/to/this/folder") replace
-    net install xfe,   from("/path/to/this/folder") replace
+    net install xfepout,   from("/path/to/this/folder") replace
 
 This is the CPU reference build. For GPU (NVIDIA/CUDA) acceleration on a
 machine with an NVIDIA GPU, just run the companion command once after install:
@@ -41,6 +41,8 @@ zip and pass it in: xhdfegpu, zip("/path/to/xhdfe-src.zip"). To build by hand:
 
     XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=<your card, e.g. 90> \\
       bash stata/tools/build-plugin.sh --linux --openmp
+    XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=<your card, e.g. 90> \\
+      bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 EOF
 
 ( cd _bundle && zip -qr "../${OUT}" "${NAME}" )

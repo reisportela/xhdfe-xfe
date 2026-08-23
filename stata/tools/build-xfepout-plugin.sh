@@ -61,13 +61,13 @@ if [[ ! -f "${EIGEN_DIR}/Eigen/Dense" ]]; then
   rmdir "${tmp_extract}" 2>/dev/null || true
 fi
 
-OUT_PLUGIN="${STATA_DIR}/xfe.plugin"
+OUT_PLUGIN="${STATA_DIR}/xfepout.plugin"
 
 usage() {
   cat <<'EOF'
-Usage: build-xfe-plugin.sh [--windows|--linux] [--openmp|--no-openmp] [--cuda [auto|ARCH]|--cuda-arch ARCH|--cuda-archs LIST]
+Usage: build-xfepout-plugin.sh [--windows|--linux] [--openmp|--no-openmp] [--cuda [auto|ARCH]|--cuda-arch ARCH|--cuda-archs LIST]
 
-Builds the Stata plugin `xfe.plugin` in the repository root.
+Builds the Stata plugin `xfepout.plugin` in the repository root.
 
 Targets:
   --windows    Build a Windows (PE/DLL) plugin using mingw-w64.
@@ -524,8 +524,8 @@ compile_plugin() {
 
 if [[ "${UNAME_S}" == "Darwin" && "${TARGET}" != "windows" ]]; then
   echo "Building ${OUT_PLUGIN} (universal: x86_64 + arm64)"
-  tmp_x86="${BUILD_DIR}/xfe.plugin.x86_64"
-  tmp_arm="${BUILD_DIR}/xfe.plugin.arm64"
+  tmp_x86="${BUILD_DIR}/xfepout.plugin.x86_64"
+  tmp_arm="${BUILD_DIR}/xfepout.plugin.arm64"
   compile_plugin "${tmp_x86}" -target x86_64-apple-macos10.12 "${metal_flags[@]+${metal_flags[@]}}"
   compile_plugin "${tmp_arm}" -target arm64-apple-macos11 "${metal_flags[@]+${metal_flags[@]}}"
   lipo -create -output "${OUT_PLUGIN}" "${tmp_x86}" "${tmp_arm}"

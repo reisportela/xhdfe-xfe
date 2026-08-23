@@ -36,7 +36,7 @@ env:
 jobs:
   # ---------------------------------------------------------------------------
   # Linux runner: builds linux-cpu, linux-cuda-fatbin, and Windows x86_64
-  # OpenMP plugins (mingw cross) for xhdfe and xfe. CI proves COMPILE + LINK only:
+  # OpenMP plugins (mingw cross) for xhdfe and xfepout. CI proves COMPILE + LINK only:
   # GitHub-hosted runners have NO GPU and NO Stata license.
   # ---------------------------------------------------------------------------
   build-linux:
@@ -142,8 +142,8 @@ jobs:
         run: |
           set -euo pipefail
           bash tools/check_binary_floor.sh \
-            artifacts/xhdfe.plugin.linux-cpu artifacts/xfe.plugin.linux-cpu \
-            artifacts/xhdfe.plugin.linux-cuda artifacts/xfe.plugin.linux-cuda
+            artifacts/xhdfe.plugin.linux-cpu artifacts/xfepout.plugin.linux-cpu \
+            artifacts/xhdfe.plugin.linux-cuda artifacts/xfepout.plugin.linux-cuda
           WHEELS=(artifacts/xhdfe-*.whl)
           test "${#WHEELS[@]}" -eq 1
           STAGE="$(mktemp -d)"
@@ -154,7 +154,7 @@ jobs:
       - name: Verify linux-cpu plugins (ELF + libgomp)
         run: |
           set -euo pipefail
-          for f in artifacts/xhdfe.plugin.linux-cpu artifacts/xfe.plugin.linux-cpu; do
+          for f in artifacts/xhdfe.plugin.linux-cpu artifacts/xfepout.plugin.linux-cpu; do
             test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
             ls -la "$f"; file "$f"
             file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
@@ -175,7 +175,7 @@ jobs:
           elif [ -x "${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump" ]; then
             CUOBJDUMP="${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump"
           fi
-          for f in artifacts/xhdfe.plugin.linux-cuda artifacts/xfe.plugin.linux-cuda; do
+          for f in artifacts/xhdfe.plugin.linux-cuda artifacts/xfepout.plugin.linux-cuda; do
             test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
             ls -la "$f"; file "$f"
             file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
@@ -209,13 +209,13 @@ jobs:
       # OpenMP is mandatory for production plugins. The recursively resolved
       # non-system runtime closure is shipped beside the plugins so Windows'
       # loader does not depend on a machine-wide MinGW installation.
-      - name: Build windows-cpu OpenMP (xhdfe + xfe, mingw cross)
+      - name: Build windows-cpu OpenMP (xhdfe + xfepout, mingw cross)
         run: |
           set -euo pipefail
           bash stata/tools/build-plugin.sh --windows --openmp
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
-          bash stata/tools/build-xfe-plugin.sh --windows --openmp
-          cp stata/xfe.plugin artifacts/xfe.plugin.windows
+          bash stata/tools/build-xfepout-plugin.sh --windows --openmp
+          cp stata/xfepout.plugin artifacts/xfepout.plugin.windows
           LIBGOMP="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libgomp-1.dll)")"
           LIBWINPTHREAD="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)")"
           test -f "$LIBGOMP"
@@ -224,7 +224,7 @@ jobs:
           mkdir -p artifacts/windows-stata-runtime
           python3 tools/validate_python_release_artifacts.py \
             --pe-binary artifacts/xhdfe.plugin.windows \
-            --pe-binary artifacts/xfe.plugin.windows \
+            --pe-binary artifacts/xfepout.plugin.windows \
             --runtime-search-dir "$(dirname "$LIBGOMP")" \
             --runtime-search-dir "$(dirname "$LIBWINPTHREAD")" \
             --runtime-dir artifacts/windows-stata-runtime \
@@ -301,7 +301,7 @@ jobs:
       - name: Verify windows-cpu plugins (PE32+ + OpenMP runtime)
         run: |
           set -euo pipefail
-          for f in artifacts/xhdfe.plugin.windows artifacts/xfe.plugin.windows; do
+          for f in artifacts/xhdfe.plugin.windows artifacts/xfepout.plugin.windows; do
             test -f "$f"
             file "$f" | grep -Eq 'PE32\+|PE32 '
             file "$f" | grep -q 'ELF' && {
@@ -322,7 +322,7 @@ jobs:
           done
           python3 tools/validate_python_release_artifacts.py \
             --pe-binary artifacts/xhdfe.plugin.windows \
-            --pe-binary artifacts/xfe.plugin.windows \
+            --pe-binary artifacts/xfepout.plugin.windows \
             --runtime-dir artifacts/windows-stata-runtime \
             --runtime-ledger artifacts/windows-stata-runtime-ledger.json \
             --mingw-objdump "$(command -v x86_64-w64-mingw32-objdump)"
@@ -404,11 +404,11 @@ jobs:
           name: plugins-linux            # MUST be unique per job (v4 artifacts are immutable)
           path: |
             artifacts/xhdfe.plugin.linux-cpu
-            artifacts/xfe.plugin.linux-cpu
+            artifacts/xfepout.plugin.linux-cpu
             artifacts/xhdfe.plugin.linux-cuda
-            artifacts/xfe.plugin.linux-cuda
+            artifacts/xfepout.plugin.linux-cuda
             artifacts/xhdfe.plugin.windows
-            artifacts/xfe.plugin.windows
+            artifacts/xfepout.plugin.windows
             artifacts/windows-stata-runtime
             artifacts/windows-stata-runtime-ledger.json
             artifacts/windows-stata-provider-ledger.json
@@ -580,10 +580,10 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # macOS Apple Silicon runner: builds a universal (x86_64 + arm64) Mach-O
-  # bundle for both xhdfe and xfe. No OpenMP (Apple clang rejects bare -fopenmp;
-  # the script forces OpenMP OFF on Darwin). The xfe script is run under Homebrew
+  # bundle for both xhdfe and xfepout. No OpenMP (Apple clang rejects bare -fopenmp;
+  # the script forces OpenMP OFF on Darwin). The xfepout script is run under Homebrew
   # bash 5.x to dodge a `set -u` empty `metal_flags[@]` bug present only in
-  # build-xfe-plugin.sh (breaks under macOS stock bash 3.2).
+  # build-xfepout-plugin.sh (breaks under macOS stock bash 3.2).
   # ---------------------------------------------------------------------------
   build-macos:
     name: Build macOS universal (CPU, no OpenMP)
@@ -601,7 +601,7 @@ jobs:
           path: stata/tools/_deps
           key: xhdfe-deps-${{ runner.os }}-eigen340-v1
 
-      - name: Install bash 5.x (for the xfe build script's empty-array safety)
+      - name: Install bash 5.x (for the xfepout build script's empty-array safety)
         run: |
           set -euo pipefail
           brew install bash
@@ -617,32 +617,32 @@ jobs:
       # it to the Unix path but the Darwin-specific -bundle/lipo/APPLEMAC branches
       # still fire because they key on `uname -s == Darwin`. Always builds a
       # universal x86_64+arm64 bundle.
-      - name: Build macos universal (xhdfe + xfe)
+      - name: Build macos universal (xhdfe + xfepout)
         run: |
           set -euo pipefail
           bash stata/tools/build-plugin.sh --linux
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.macos
-          # Run xfe under Homebrew bash 5.x if available, else fall back to /bin/bash.
+          # Run xfepout under Homebrew bash 5.x if available, else fall back to /bin/bash.
           BREW_BASH="${BREW_BASH:-$(brew --prefix)/bin/bash}"
           if [ -x "$BREW_BASH" ]; then
             echo "Using Homebrew bash: $BREW_BASH"
-            "$BREW_BASH" stata/tools/build-xfe-plugin.sh --linux
+            "$BREW_BASH" stata/tools/build-xfepout-plugin.sh --linux
           else
             echo "WARN: Homebrew bash not found; falling back to system bash (3.2 metal_flags bug risk)"
-            bash stata/tools/build-xfe-plugin.sh --linux
+            bash stata/tools/build-xfepout-plugin.sh --linux
           fi
-          cp stata/xfe.plugin artifacts/xfe.plugin.macos
+          cp stata/xfepout.plugin artifacts/xfepout.plugin.macos
 
       - name: Ad-hoc codesign (cosmetic; not notarized)
         run: |
           set -euo pipefail
           codesign -s - --force artifacts/xhdfe.plugin.macos || true
-          codesign -s - --force artifacts/xfe.plugin.macos || true
+          codesign -s - --force artifacts/xfepout.plugin.macos || true
 
       - name: "Verify macos universal plugins (Mach-O fat: x86_64 + arm64)"
         run: |
           set -euo pipefail
-          for f in artifacts/xhdfe.plugin.macos artifacts/xfe.plugin.macos; do
+          for f in artifacts/xhdfe.plugin.macos artifacts/xfepout.plugin.macos; do
             test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
             ls -la "$f"; file "$f"
             file "$f" | grep -q 'Mach-O' \
@@ -662,7 +662,7 @@ jobs:
           name: plugins-macos            # unique per job (v4 immutability)
           path: |
             artifacts/xhdfe.plugin.macos
-            artifacts/xfe.plugin.macos
+            artifacts/xfepout.plugin.macos
           if-no-files-found: error
           retention-days: 7
 
@@ -705,9 +705,9 @@ jobs:
           ls -la dl
           # Required set: Linux CPU + Linux CUDA + Windows/OpenMP + macOS.
           for f in \
-            dl/xhdfe.plugin.linux-cpu dl/xfe.plugin.linux-cpu \
-            dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda \
-            dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
+            dl/xhdfe.plugin.linux-cpu dl/xfepout.plugin.linux-cpu \
+            dl/xhdfe.plugin.linux-cuda dl/xfepout.plugin.linux-cuda \
+            dl/xhdfe.plugin.windows dl/xfepout.plugin.windows \
             dl/windows-stata-runtime-ledger.json \
             dl/windows-stata-provider-ledger.json \
             dl/windows-python-provider-runtimes/_windows_runtime_manifest.json \
@@ -715,7 +715,7 @@ jobs:
             dl/cuda-nvcc-invocations.jsonl \
             dl/cuda-nvcc-link-dryrun.log \
             dl/linux-wheel-runtime-ledger.json \
-            dl/xhdfe.plugin.macos dl/xfe.plugin.macos ; do
+            dl/xhdfe.plugin.macos dl/xfepout.plugin.macos ; do
             test -f "$f" || { echo "MISSING required plugin: $f" >&2; exit 1; }
           done
           STATA_RUNTIME_DLLS=(dl/windows-stata-runtime/*.dll)
@@ -768,7 +768,7 @@ jobs:
           set -euo pipefail
           python3 tools/validate_python_release_artifacts.py \
             --pe-binary dl/xhdfe.plugin.windows \
-            --pe-binary dl/xfe.plugin.windows \
+            --pe-binary dl/xfepout.plugin.windows \
             --runtime-dir dl/windows-stata-runtime \
             --runtime-ledger dl/windows-stata-runtime-ledger.json \
             --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
@@ -1122,7 +1122,7 @@ jobs:
             stata/xhdfegelbachetable.ado stata/xhdfegelbachetable.sthlp
             stata/xhdfegelbachcoefplot.ado stata/xhdfegelbachcoefplot.sthlp
             stata/xhdfegpu.ado stata/xhdfegpu.sthlp
-            stata/xfe.ado stata/xfe.sthlp stata/xfe.pkg
+            stata/xfepout.ado stata/xfepout.sthlp stata/xfepout.pkg
             stata/stata.toc
           )
           LICENSE_MATERIALS=(
@@ -1142,9 +1142,9 @@ jobs:
             test -f "$s" || { echo "MISSING shared Stata file: $s" >&2; exit 1; }
           done
 
-          # bundle <zipname> <xhdfe-plugin-src> <xfe-plugin-src>
+          # bundle <zipname> <xhdfe-plugin-src> <xfepout-plugin-src>
           # Stages the platform plugins under canonical names + the shared files,
-          # then zips. The canonical names (xhdfe.plugin / xfe.plugin) are what
+          # then zips. The canonical names (xhdfe.plugin / xfepout.plugin) are what
           # Stata loads at runtime.
           bundle() {
             local zipname="$1" xhdfe_src="$2" xfe_src="$3"
@@ -1153,7 +1153,7 @@ jobs:
             test -f "$xfe_src"   || { echo "MISSING plugin src: $xfe_src"   >&2; exit 1; }
             local stage; stage="$(mktemp -d)"
             cp "$xhdfe_src" "$stage/xhdfe.plugin"
-            cp "$xfe_src"   "$stage/xfe.plugin"
+            cp "$xfe_src"   "$stage/xfepout.plugin"
             local s
             for s in "${SHARED[@]}"; do cp "$s" "$stage/"; done
             for s in "${LICENSE_MATERIALS[@]}"; do
@@ -1241,7 +1241,7 @@ jobs:
           for name in additions:
               if not (stage / name).is_file():
                   raise SystemExit(f"Windows ZIP package input is missing: {name}")
-          for pkg_name in ("xhdfe.pkg", "xfe.pkg"):
+          for pkg_name in ("xhdfe.pkg", "xfepout.pkg"):
               pkg = stage / pkg_name
               lines = pkg.read_text(encoding="utf-8").splitlines()
               existing = {line[2:] for line in lines if line.startswith("f ")}
@@ -1256,19 +1256,19 @@ jobs:
             unzip -l "release_assets/$zipname"
           }
 
-          bundle xhdfe_xfe-stata-linux-cpu.zip       dl/xhdfe.plugin.linux-cpu  dl/xfe.plugin.linux-cpu
+          bundle xhdfe_xfe-stata-linux-cpu.zip       dl/xhdfe.plugin.linux-cpu  dl/xfepout.plugin.linux-cpu
           bundle xhdfe_xfe-stata-linux-cuda.zip \
-            dl/xhdfe.plugin.linux-cuda dl/xfe.plugin.linux-cuda \
+            dl/xhdfe.plugin.linux-cuda dl/xfepout.plugin.linux-cuda \
             "$NVIDIA_LICENSE_DIR/NVIDIA-CUDA-12.6-EULA.pdf" \
             "$NVIDIA_LICENSE_DIR/NVIDIA-CCCL-2.5.0-LICENSE" \
             dl/linux-cuda-provenance.json \
             dl/cuda-nvcc-invocations.jsonl \
             dl/cuda-nvcc-link-dryrun.log
-          bundle xhdfe_xfe-stata-macos-universal.zip dl/xhdfe.plugin.macos      dl/xfe.plugin.macos
+          bundle xhdfe_xfe-stata-macos-universal.zip dl/xhdfe.plugin.macos      dl/xfepout.plugin.macos
           WINDOWS_RUNTIME_FILES=(dl/windows-stata-runtime/*.dll)
           test "${#WINDOWS_RUNTIME_FILES[@]}" -ge 2
           bundle xhdfe_xfe-stata-windows-cpu.zip \
-            dl/xhdfe.plugin.windows dl/xfe.plugin.windows \
+            dl/xhdfe.plugin.windows dl/xfepout.plugin.windows \
             "${WINDOWS_RUNTIME_FILES[@]}" \
             dl/windows-stata-runtime-ledger.json \
             dl/windows-stata-provider-ledger.json
@@ -1293,17 +1293,17 @@ jobs:
           mkdir -p "$OFFLINE_STAGE/prebuilt/linux_x86_64"
           cp dl/xhdfe.plugin.linux-cpu \
             "$OFFLINE_STAGE/prebuilt/linux_x86_64/xhdfe_cpu.plugin"
-          cp dl/xfe.plugin.linux-cpu \
-            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfe_cpu.plugin"
+          cp dl/xfepout.plugin.linux-cpu \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfepout_cpu.plugin"
           cp dl/xhdfe.plugin.linux-cuda \
             "$OFFLINE_STAGE/prebuilt/linux_x86_64/xhdfe_cuda_fatbin.plugin"
-          cp dl/xfe.plugin.linux-cuda \
-            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfe_cuda_fatbin.plugin"
+          cp dl/xfepout.plugin.linux-cuda \
+            "$OFFLINE_STAGE/prebuilt/linux_x86_64/xfepout_cuda_fatbin.plugin"
           mkdir -p "$OFFLINE_STAGE/prebuilt/windows_x86_64"
           cp dl/xhdfe.plugin.windows \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/xhdfe.plugin"
-          cp dl/xfe.plugin.windows \
-            "$OFFLINE_STAGE/prebuilt/windows_x86_64/xfe.plugin"
+          cp dl/xfepout.plugin.windows \
+            "$OFFLINE_STAGE/prebuilt/windows_x86_64/xfepout.plugin"
           cp dl/windows-stata-runtime/*.dll \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
           cp dl/windows-stata-runtime-ledger.json \
@@ -1312,8 +1312,8 @@ jobs:
           mkdir -p "$OFFLINE_STAGE/prebuilt/macos_universal"
           cp dl/xhdfe.plugin.macos \
             "$OFFLINE_STAGE/prebuilt/macos_universal/xhdfe.plugin"
-          cp dl/xfe.plugin.macos \
-            "$OFFLINE_STAGE/prebuilt/macos_universal/xfe.plugin"
+          cp dl/xfepout.plugin.macos \
+            "$OFFLINE_STAGE/prebuilt/macos_universal/xfepout.plugin"
           mkdir -p "$OFFLINE_STAGE/packages/python" "$OFFLINE_STAGE/packages/R"
           cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz \
             "$OFFLINE_STAGE/packages/python/"
@@ -1331,7 +1331,7 @@ jobs:
             "$NVIDIA_LICENSE_DIR/NVIDIA-CCCL-2.5.0-LICENSE" \
             "$OFFLINE_STAGE/third_party/licenses/"
           cp dl/xhdfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xhdfe.plugin"
-          cp dl/xfe.plugin.linux-cpu "$OFFLINE_STAGE/stata/xfe.plugin"
+          cp dl/xfepout.plugin.linux-cpu "$OFFLINE_STAGE/stata/xfepout.plugin"
           cat > "$OFFLINE_STAGE/OFFLINE_ARTIFACT_SCOPE.md" <<'EOF'
           # Offline artifact scope
 
@@ -1341,7 +1341,7 @@ jobs:
           inputs required by the documented offline build paths. It also contains
           the release Python wheel/source distribution and R source package.
 
-          `stata/xhdfe.plugin` and `stata/xfe.plugin` are portable Linux CPU/OpenMP
+          `stata/xhdfe.plugin` and `stata/xfepout.plugin` are portable Linux CPU/OpenMP
           defaults. `prebuilt/` also contains the exact Linux CUDA fatbins,
           Windows x86_64 OpenMP plugins and runtime DLLs, and macOS universal
           plugins from the release workflow. The root-level corresponding-source
@@ -1372,11 +1372,11 @@ jobs:
           # artifacts are present.
           bash tools/stage_stata_netinstall_site.sh "$GITHUB_WORKSPACE/netinstall_site/stata" \
             --linux-xhdfe dl/xhdfe.plugin.linux-cpu \
-            --linux-xfe   dl/xfe.plugin.linux-cpu \
+            --linux-xfepout   dl/xfepout.plugin.linux-cpu \
             --macos-xhdfe dl/xhdfe.plugin.macos \
-            --macos-xfe   dl/xfe.plugin.macos \
+            --macos-xfepout   dl/xfepout.plugin.macos \
             --windows-xhdfe dl/xhdfe.plugin.windows \
-            --windows-xfe   dl/xfe.plugin.windows \
+            --windows-xfepout   dl/xfepout.plugin.windows \
             --windows-runtime-dir dl/windows-stata-runtime \
             --windows-runtime-provider-ledger dl/windows-stata-provider-ledger.json \
             --windows-runtime-closure-ledger dl/windows-stata-runtime-ledger.json
@@ -1432,7 +1432,7 @@ jobs:
 
           \`\`\`stata
           net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
-          net install xfe,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+          net install xfepout,   from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
           \`\`\`
 
           The online \`.pkg\` files use Stata's platform-specific \`g\` lines:
@@ -1442,11 +1442,11 @@ jobs:
 
           ## Assets
 
-          ### Per-platform Stata bundles (plugin renamed to canonical \`xhdfe.plugin\` / \`xfe.plugin\` + shared ado/sthlp/pkg/stata.toc)
+          ### Per-platform Stata bundles (plugin renamed to canonical \`xhdfe.plugin\` / \`xfepout.plugin\` + shared ado/sthlp/pkg/stata.toc)
           - \`xhdfe_xfe-stata-linux-cpu.zip\` — **Linux x86_64, CPU/OpenMP** (portable ELF, links libgomp; no \`-march=native\`).
           - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; incorporates the static CUDA runtime/device runtime and dynamically links libgomp). CI compile-verifies this path; publication additionally requires the external H100 runtime gate.
           - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows x86_64, CPU/OpenMP** (PE32+ plugins plus their validated MinGW runtime closure; intended for 64-bit Windows 10/11).
-          - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfe.plugin\` before Stata loads them.
+          - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfepout.plugin\` before Stata loads them.
 
           ### Python and R packages
           - \`xhdfe-${EXPECTED_VERSION}-*manylinux*.whl\` — Linux x86_64 CPU

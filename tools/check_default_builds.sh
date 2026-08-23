@@ -79,7 +79,7 @@ check_plugin() {
 }
 
 check_plugin xhdfe "$repo_root/stata/xhdfe.plugin"
-check_plugin xfe "$repo_root/stata/xfe.plugin"
+check_plugin xfepout "$repo_root/stata/xfepout.plugin"
 
 if [[ "$failed" -ne 0 ]]; then
     if [[ "$allow_nonstandard" == 1 ]]; then

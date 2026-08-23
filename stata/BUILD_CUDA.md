@@ -1,6 +1,6 @@
 # Stata CUDA Build Instructions
 
-This note is for the Stata plugins in this folder: `xhdfe.plugin` and `xfe.plugin`.
+This note is for the Stata plugins in this folder: `xhdfe.plugin` and `xfepout.plugin`.
 For the cross-language walkthrough (Stata, Python, and R), see
 [`../docs/gpu.md`](../docs/gpu.md).
 
@@ -26,21 +26,21 @@ cd stata/tools
 
 # Local build: auto-detect the GPU architecture
 bash build-plugin.sh --linux --openmp --cuda auto
-bash build-xfe-plugin.sh --linux --openmp --cuda auto
+bash build-xfepout-plugin.sh --linux --openmp --cuda auto
 
 # Explicit single-architecture build, e.g. H100 / sm_90
 bash build-plugin.sh --linux --openmp --cuda 90
-bash build-xfe-plugin.sh --linux --openmp --cuda 90
+bash build-xfepout-plugin.sh --linux --openmp --cuda 90
 
 # Multi-architecture distribution build
 bash build-plugin.sh --linux --openmp --cuda-archs "75,80,86,89,90"
-bash build-xfe-plugin.sh --linux --openmp --cuda-archs "75,80,86,89,90"
+bash build-xfepout-plugin.sh --linux --openmp --cuda-archs "75,80,86,89,90"
 ```
 
 Outputs:
 
 - `stata/xhdfe.plugin`
-- `stata/xfe.plugin`
+- `stata/xfepout.plugin`
 
 ## Stata-side verification
 
@@ -50,7 +50,7 @@ Always check which ado/plugin is being used:
 discard
 adopath ++ "/PATH/TO/xhdfe/stata"
 which xhdfe
-which xfe
+which xfepout
 ```
 
 `which` should point to this repository's `stata/` folder.
@@ -61,7 +61,7 @@ If you rebuilt or switched plugin binaries in the same Stata session, run:
 discard
 ```
 
-before rerunning `xhdfe` or `xfe`.
+before rerunning `xhdfe` or `xfepout`.
 
 Then verify CUDA usage:
 
@@ -73,7 +73,7 @@ di "`e(gpu_backend)'"
 di "`e(gpu_backend_requested)'"
 
 webuse nlswork, clear
-xfe ln_wage ttl_exp tenure, absorb(idcode year) gpubackend(cuda) numthreads(8) tolerance(1e-8) clear
+xfepout ln_wage ttl_exp tenure, absorb(idcode year) gpubackend(cuda) numthreads(8) tolerance(1e-8) clear
 di e(gpu_used)
 di "`e(gpu_backend)'"
 di "`e(gpu_backend_requested)'"
@@ -85,7 +85,7 @@ Expected result:
 - `e(gpu_backend) == "cuda"`
 - `e(gpu_backend_requested) == "cuda"`
 
-If `gpubackend(cuda)` was requested but CUDA is unavailable, `xhdfe`/`xfe` now stop with an error instead of
+If `gpubackend(cuda)` was requested but CUDA is unavailable, `xhdfe`/`xfepout` now stop with an error instead of
 silently returning CPU output.
 
 Typical causes:
@@ -97,7 +97,7 @@ Typical causes:
 
 ## Notes
 
-- `xhdfe` and `xfe` have separate plugin binaries; rebuild both if you want both commands to use CUDA.
+- `xhdfe` and `xfepout` have separate plugin binaries; rebuild both if you want both commands to use CUDA.
 - For local use, prefer `--cuda auto`.
 - For explicit H100-only use, pass `--cuda 90`.
 - For shared distribution bundles, prefer `--cuda-archs "75,80,86,89,90"`.

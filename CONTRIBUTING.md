@@ -102,7 +102,7 @@ first run, so the first build needs network access):
 
 ```bash
 bash tools/build-plugin.sh --linux --openmp        # -> stata/xhdfe.plugin
-bash tools/build-xfe-plugin.sh --linux --openmp    # -> stata/xfe.plugin
+bash tools/build-xfepout-plugin.sh --linux --openmp    # -> stata/xfepout.plugin
 ```
 
 Production plugin builds must use OpenMP. For CUDA, add

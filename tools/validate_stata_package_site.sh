@@ -5,6 +5,22 @@ site="${1:?usage: validate_stata_package_site.sh SITE_DIR}"
 [[ -d "$site" ]] || { echo "missing site directory: $site" >&2; exit 1; }
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+for retired in xfe.ado xfe.sthlp xfe.pkg xfe.plugin; do
+  [[ ! -e "$site/$retired" ]] || {
+    echo "retired Stata frontend file is still published: $retired" >&2
+    exit 1
+  }
+done
+[[ -f "$site/stata.toc" ]] || { echo "missing stata.toc" >&2; exit 1; }
+grep -Eq '^p[[:space:]]+xfepout([[:space:]]|$)' "$site/stata.toc" || {
+  echo "stata.toc does not publish xfepout" >&2
+  exit 1
+}
+if grep -Eq '^p[[:space:]]+xfe([[:space:]]|$)' "$site/stata.toc"; then
+  echo "stata.toc still publishes the retired xfe command" >&2
+  exit 1
+fi
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
@@ -200,7 +216,9 @@ for key, provider in by_name.items():
         raise SystemExit(f"provider and PE-closure ledgers disagree for {provider['name']}")
 PY
 )"
-  mapfile -t windows_runtime_names <<< "$runtime_names_output"
+  while IFS= read -r runtime_name; do
+    [[ -z "$runtime_name" ]] || windows_runtime_names+=("$runtime_name")
+  done <<< "$runtime_names_output"
   [[ "${#windows_runtime_names[@]}" -gt 0 && -n "${windows_runtime_names[0]}" ]] || {
     echo "Windows runtime ledger produced an empty closure." >&2
     exit 1
@@ -214,7 +232,7 @@ else
   done < <(find "$site" -maxdepth 1 -type f -iname '*.dll' -print)
 fi
 
-for cmd in xhdfe xfe; do
+for cmd in xhdfe xfepout; do
   expected="$(awk '$1 == "v" { print $2; exit }' "$repo_root/stata/$cmd.pkg")"
   actual="$(awk '$1 == "v" { print $2; exit }' "$site/$cmd.pkg")"
   [[ -n "$expected" && "$actual" == "$expected" ]] || {
@@ -264,7 +282,7 @@ for pkg in "$site"/*.pkg; do
   fi
   if [[ -f "$windows_runtime_provider_ledger" ]]; then
     if ! awk '$1 == "g" && $2 == "WIN64" && $3 ~ /\.win64\.plugin$/ && $4 ~ /\.plugin$/ { found=1 } END { exit !found }' "$pkg" \
-      && ! awk '$1 == "f" && $2 ~ /^(xhdfe|xfe)\.plugin$/ { found=1 } END { exit !found }' "$pkg"; then
+      && ! awk '$1 == "f" && $2 ~ /^(xhdfe|xfepout)\.plugin$/ { found=1 } END { exit !found }' "$pkg"; then
       echo "$(basename "$pkg"): runtime ledgers exist without an installable Windows plugin" >&2
       exit 1
     fi
