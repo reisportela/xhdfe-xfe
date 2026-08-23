@@ -280,7 +280,19 @@ else
   pthread_flag=()
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
-common_compile_flags+=( -ffast-math -funroll-loops )
+common_compile_flags+=( -ffast-math -fno-finite-math-only -funroll-loops )
+
+# Keep this direct build under the same native non-finite contract as CMake and
+# the xhdfe plugin. Cross-built Windows executables cannot be run on the build
+# host; their source gate remains part of the package validation workflow.
+if [[ "${TARGET}" != "windows" ]]; then
+  liveness_source="${STATA_DIR}/../tests/ieee_bits_liveness.cpp"
+  liveness_bin="${BUILD_DIR}/xfepout_ieee_bits_liveness"
+  echo "Checking fast-math non-finite guard liveness..."
+  "${CXX}" "${common_compile_flags[@]}" "${pthread_flag[@]}" \
+    "${liveness_source}" -o "${liveness_bin}"
+  "${liveness_bin}"
+fi
 if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" != "windows" ]]; then
   # NOTE: with CUDA-enabled plugin builds we've observed runtime instability when compiling host
   # code with -march=native. Keep it CPU-only unless explicitly requested by disabling CUDA.

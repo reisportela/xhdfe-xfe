@@ -18,6 +18,12 @@ gen double y = 1.2 * x1 - 0.7 * x2 + 0.03 * fe + rnormal()
 * calls must restore OpenMP/Eigen state on every return path.
 xhdfeconnected worker firm, generate(keep_default_before)
 scalar companion_default_threads = r(threads_used)
+local companion_openmp = r(openmp_enabled)
+local companion_thread_capacity = max(1, floor(r(thread_capacity)))
+local companion_test_threads = cond(`companion_openmp' == 1, ///
+    min(4, `companion_thread_capacity'), 1)
+di as text "             companion thread gate: OpenMP=`companion_openmp'" ///
+    " capacity=`companion_thread_capacity' request=`companion_test_threads'"
 
 * xhdfeakm verbose must expose progress without changing the estimator.
 xhdfeakm y, worker(worker) firm(firm) leverages(jla) draws(8) seed(42)
@@ -37,18 +43,18 @@ assert akm_var_psi_verbose == akm_var_psi_quiet
 assert akm_cov_verbose == akm_cov_quiet
 
 * The two phases expose their effective teams separately.  The stronger
-* restoration assertion (forced four-thread KSS team) lives in
+* restoration assertion (forced bounded KSS team) lives in
 * tests/validation/VALIDATE_AKM_KSS.py, where the process environment can be scoped safely.
 xhdfeakm y, worker(worker) firm(firm) controls(x1) leverages(jla) draws(2) ///
-    seed(42) threads(4)
+    seed(42) threads(`companion_test_threads')
 local akm_controls_converged = r(converged)
 local akm_fwl_threads = r(fwl_threads_used)
 local akm_kss_threads = r(threads_used)
 assert `akm_controls_converged' == 1
 assert `akm_fwl_threads' >= 1
 local akm_team_env : environment XHDFE_AKM_TEAM
-if ("`akm_team_env'" == "0") assert `akm_kss_threads' == 4
-else assert inrange(`akm_kss_threads', 1, 4)
+if ("`akm_team_env'" == "0") assert `akm_kss_threads' == `companion_test_threads'
+else assert inrange(`akm_kss_threads', 1, `companion_test_threads')
 
 * Canonical leave_out_COMPLETE reports only psi/cov component inference at
 * match level, even on this movers-only sample.  The unsupported var(alpha)
@@ -77,7 +83,7 @@ assert strpos("`akm_drop_notes'", "control column(s) 2 omitted") > 0
 * Gelbach must be invariant to exact categorical relabelling, including raw
 * identifiers outside the plugin's int32 transport range.
 xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///
-    vce(cluster) cluster(cluster) threads(4)
+    vce(cluster) cluster(cluster) threads(`companion_test_threads')
 local gel_estimand_compact "`r(estimand)'"
 local gel_causal_compact "`r(causal_interpretation)'"
 local gel_gpu_requested_compact = r(gpu_requested)
@@ -472,7 +478,7 @@ assert _rc == 198
 * its split SE is tolerance/rounding sensitive; require an audible note.
 gen double x2_near = x2 + 1.2e-6 * rnormal()
 xhdfegelbach y, x1(x1) x2groups("near = x2 x2_near") fes(fe) ///
-    vce(cluster) cluster(cluster) threads(4)
+    vce(cluster) cluster(cluster) threads(`companion_test_threads')
 local gel_near_converged = r(converged)
 local gel_near_notes "`r(notes)'"
 assert `gel_near_converged' == 1
@@ -492,7 +498,7 @@ assert strpos("`r(notes)'", "near-FE-collinear focal") > 0
 * Verbose is output-only: same configuration must preserve every returned
 * number, including the certified FE split and covariance.
 xhdfegelbach y, x1(x1) x2groups("observables = x2") fes(fe) ///
-    vce(cluster) cluster(cluster) threads(4) verbose
+    vce(cluster) cluster(cluster) threads(`companion_test_threads') verbose
 matrix gel_delta_verbose = r(delta)
 matrix gel_se_verbose = r(se)
 matrix gel_total_verbose = r(total)
@@ -629,21 +635,21 @@ restore
 * xhdfeconnected has the same public categorical contract.
 capture noisily xhdfeconnected worker firm, generate(keep_bad_threads) threads(-1)
 assert _rc == 198
-xhdfeconnected worker firm, generate(keep_compact) threads(4)
+xhdfeconnected worker firm, generate(keep_compact) threads(`companion_test_threads')
 scalar connected_n_compact = r(n_obs)
 local connected_threads_compact = r(threads_used)
 local connected_gpu_used_compact = r(gpu_used)
 local connected_gpu_status_compact "`r(gpu_status)'"
-assert `connected_threads_compact' == 4
+assert `connected_threads_compact' == `companion_test_threads'
 assert `connected_gpu_used_compact' == 0
 assert "`connected_gpu_status_compact'" == "not_requested"
-xhdfeconnected worker firm, generate(keep_verbose) threads(4) verbose
+xhdfeconnected worker firm, generate(keep_verbose) threads(`companion_test_threads') verbose
 local connected_n_verbose = r(n_obs)
 assert keep_compact == keep_verbose
 assert `connected_n_verbose' == connected_n_compact
 * Small samples stay on the faster CPU graph path even when GPU is requested;
 * the fallback is explicit in diagnostics rather than silently labelled CUDA.
-xhdfeconnected worker firm, generate(keep_gpu_small) threads(4) gpu
+xhdfeconnected worker firm, generate(keep_gpu_small) threads(`companion_test_threads') gpu
 local connected_gpu_requested_small = r(gpu_requested)
 local connected_gpu_used_small = r(gpu_used)
 local connected_gpu_code_small = r(gpu_status_code)

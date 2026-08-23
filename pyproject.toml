@@ -34,6 +34,12 @@ formula = [
   "formulaic>=1.2.1,<2",
   "pandas>=1.3",
 ]
+test = [
+  "formulaic>=1.2.1,<2",
+  "pandas>=1.3",
+  "setuptools>=69",
+  "maketables>=0.1.7",
+]
 
 [project.urls]
 Homepage = "https://github.com/reisportela/xhdfe-xfe"

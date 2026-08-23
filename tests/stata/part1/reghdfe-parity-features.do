@@ -502,14 +502,13 @@ global PFEAT_FAILS = $PFEAT_FAILS + r(fails)
 *
 * On the design below the raw three-way CGM variance of (x1, x2, _cons) has
 * eigenvalues of both signs, and Var(x1) is negative before any repair, so the
-* estimator itself is degenerate. Both engines announce the Cameron-Gelbach-
-* Miller adjustment; they then disagree completely about what to report:
-* reghdfe returns an all-zero e(V) and no standard errors at all, xhdfe returns
-* a finite positive-definite matrix.
+* estimator itself is degenerate. xhdfe's policy is stable: project onto the
+* PSD cone and expose the repair. reghdfe's observed result varies across
+* Stata/platform combinations: either an all-zero e(V), or a finite PSD repair.
 *
-* There is no unique canonical repair. xhdfe's documented policy is to project
-* the matrix onto the PSD cone and expose e(vcv_psd_fixed)==1. This cell asserts
-* the raw degeneracy, the repair diagnostic, and both engines' stated policies.
+* There is no unique canonical repair. This cell asserts the raw degeneracy and
+* xhdfe's documented policy. reghdfe is diagnostic here, not the oracle: record
+* its environment-dependent output without pinning it as scientific truth.
 * ---------------------------------------------------------------------------
 preserve
     * A design where the raw three-way CGM estimator is genuinely indefinite:
@@ -567,6 +566,18 @@ preserve
         symeigensystem(M, Q = ., L = .)
         st_numscalar("pf_negeig", sum(L :< 0))
         st_numscalar("pf_rawv11", M[1, 1])
+        RV = st_matrix("pfr_V")
+        st_numscalar("pfr_missing", sum(RV :>= .))
+        st_numscalar("pfr_asym", max(abs(RV - RV')))
+        rscale = max(abs(RV))
+        st_numscalar("pfr_scale", rscale < 1 ? 1 : rscale)
+        if (st_numscalar("pfr_missing") == 0) {
+            symeigensystem((RV + RV') / 2, RQ = ., RL = .)
+            st_numscalar("pfr_mineig", min(RL))
+        }
+        else {
+            st_numscalar("pfr_mineig", .)
+        }
     end
 
     di as text "             raw 3-way CGM: " pf_negeig ///
@@ -583,11 +594,27 @@ preserve
         "  reghdfe Var(x1)=" %21.9g pfr_V[1, 1]
     xpf_eq, id("B07/C-1") left(pfx_psd) right(1) exact ///
         what("xhdfe exposes the PSD repair")
-    xpf_eq, id("B07/C-1") left(`rzero') right(1) exact ///
-        what("reghdfe reports the raw non-PSD case as zero e(V)")
     xpf_eq, id("B07/C-1") left(`xzero') right(0) exact ///
         what("xhdfe reports its documented PSD projection")
-    di as text "XHDFE_POLICY_DIVERGENCE|B07/C-1|documented PSD repair versus raw reghdfe convention"
+    if (`rzero') {
+        di as text "XHDFE_ORACLE_VARIATION|B07/C-1|reghdfe returned all-zero e(V)"
+    }
+    else if (pfr_missing > 0) {
+        di as text "XHDFE_ORACLE_VARIATION|B07/C-1|reghdfe e(V) contains " ///
+            %9.0g pfr_missing " missing entries"
+    }
+    else if (pfr_asym > 1e-10 * pfr_scale) {
+        di as text "XHDFE_ORACLE_VARIATION|B07/C-1|reghdfe returned asymmetric e(V)|" ///
+            "max asymmetry=" %21.9g pfr_asym
+    }
+    else if (pfr_mineig < -1e-10 * pfr_scale) {
+        di as text "XHDFE_ORACLE_VARIATION|B07/C-1|reghdfe returned finite non-PSD e(V)|" ///
+            "min eigenvalue=" %21.9g pfr_mineig
+    }
+    else {
+        di as text "XHDFE_ORACLE_VARIATION|B07/C-1|reghdfe returned a finite PSD repair|" ///
+            "min eigenvalue=" %21.9g pfr_mineig
+    }
 restore
 
 * ===========================================================================

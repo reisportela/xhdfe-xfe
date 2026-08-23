@@ -13,7 +13,9 @@ An object of class \code{xhdfe_info}: a list with
   \code{-march} target the binary was compiled for; \code{"portable"} means
   no package-level \code{-march} override and \code{"native"} means
   machine-specific), \code{cuda_arch} (e.g. \code{"sm_90"}, empty on CPU
-  builds), \code{optimized}, \code{fast_math}, and \code{gpu_backend_env}.
+  builds), \code{optimized}, \code{fast_math} (the compiler's full
+  fast-math macro), \code{reference_math_contract} (the package's optimized,
+  non-finite-safe relaxed-math contract), and \code{gpu_backend_env}.
 }
 \description{
 Reports the package version and how the compiled backend was built:

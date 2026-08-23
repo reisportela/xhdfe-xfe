@@ -157,7 +157,10 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                 "api-ms-win-crt-runtime-l1-1-0.dll"
             )
         )
-        self.assertTrue(SETUP_MODULE._is_windows_host_dll("python312.dll"))
+        active_python_dll = (
+            f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+        )
+        self.assertTrue(SETUP_MODULE._is_windows_host_dll(active_python_dll))
         self.assertFalse(SETUP_MODULE._is_windows_host_dll("python999.dll"))
         self.assertFalse(SETUP_MODULE._is_windows_host_dll("libdl.dll"))
         self.assertFalse(SETUP_MODULE._is_windows_host_dll("vcruntime999.dll"))
@@ -282,7 +285,7 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                     SETUP_MODULE._compiler_runtime_path(
                         Path(tmp) / "g++.exe", "libgomp-1.dll"
                     ),
-                    runtime,
+                    runtime.resolve(),
                 )
 
     def test_adjacent_runtime_is_used_when_compiler_reports_only_its_name(self):
@@ -303,7 +306,7 @@ class WindowsRuntimePackagingTest(unittest.TestCase):
                     SETUP_MODULE._compiler_runtime_path(
                         compiler, "libstdc++-6.dll"
                     ),
-                    runtime,
+                    runtime.resolve(),
                 )
 
     def test_recursive_runtime_closure_is_copied_beside_extension(self):

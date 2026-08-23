@@ -217,6 +217,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(xhdfe PRIVATE
         -O3
         -ffast-math
+        -fno-finite-math-only
         -funroll-loops
         -ftree-vectorize
         -fomit-frame-pointer
@@ -246,6 +247,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(xhdfe_ieee_bits_liveness PRIVATE
             -O3
             -ffast-math
+            -fno-finite-math-only
             -funroll-loops
             -ftree-vectorize
             -fomit-frame-pointer
@@ -282,6 +284,7 @@ if(BUILD_TESTING)
         target_compile_options(xhdfe_fail_closed_entrypoints PRIVATE
             -O3
             -ffast-math
+            -fno-finite-math-only
             -funroll-loops
             -ftree-vectorize
             -fomit-frame-pointer
@@ -326,6 +329,7 @@ if(XHDFE_BUILD_PYTHON)
         target_compile_options(py_hdfe_v11 PRIVATE
             -O3
             -ffast-math
+            -fno-finite-math-only
             -funroll-loops
             -ftree-vectorize
             -fomit-frame-pointer

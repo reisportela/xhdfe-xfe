@@ -55,6 +55,12 @@ copy_tree "${ROOT_DIR}/include" "${PKG}/include"
 copy_tree "${ROOT_DIR}/tools" "${PKG}/tools"
 copy_tree "${ROOT_DIR}/tests" "${PKG}/tests"
 
+# The included R/Stata certification suites and the documented cross-frontend
+# examples depend on these small tracked fixtures. Keep them in the autonomous
+# archive so its test surface is as complete as the repository checkout.
+copy_tree "${ROOT_DIR}/data"     "${PKG}/data"
+copy_tree "${ROOT_DIR}/examples" "${PKG}/examples"
+
 # ---- Stata plugin sources + build scripts + vendored deps -----------------
 copy_tree "${ROOT_DIR}/stata/src"     "${PKG}/stata/src"
 copy_tree "${ROOT_DIR}/stata/include" "${PKG}/stata/include"

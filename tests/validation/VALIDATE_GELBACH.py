@@ -1157,9 +1157,8 @@ def main():
         FAILURES.append("diagnostic:near-collinear-x2-block-is-audible")
 
     # `tol` used to be accepted by the Python wrapper but silently omitted
-    # from the compiled call. A slow-mode two-FE graph makes the setting
-    # observably consequential: the deliberately loose solve is rejected by
-    # the identity/convergence gate while the tight solve certifies.
+    # from the compiled call. Spy on that boundary directly: convergence of a
+    # particular well-conditioned graph is not a stable proxy for forwarding.
     rngt = np.random.default_rng(8)
     mt = 200
     wt = np.repeat(np.arange(mt), 3)
@@ -1170,19 +1169,35 @@ def main():
     zt = 0.3 * xt + rngt.normal(size=nt)
     yt = (0.7 * xt + 0.5 * zt + rngt.normal(size=mt)[wt] +
           rngt.normal(size=mt + 1)[ft] + rngt.normal(scale=0.1, size=nt))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        loose = gb.decompose(yt, xt, {"z": zt}, {"worker": wt, "firm": ft},
-                             tol=1e-2)
-        tight = gb.decompose(yt, xt, {"z": zt}, {"worker": wt, "firm": ft},
-                             tol=1e-12)
-    tol_effect = abs(float(loose["b_full"][0] - tight["b_full"][0]))
-    if (not loose["converged"] and tight["converged"] and tol_effect > 1e-8):
-        print(f"[PASS] api:tol-is-active: |b_loose-b_tight|={tol_effect:.2e}")
-    else:
-        print(f"[FAIL] api:tol-is-active: |b_loose-b_tight|={tol_effect:.2e}, "
-              f"converged=({loose['converged']},{tight['converged']})")
-        FAILURES.append("api:tol-is-active")
+    class _TolSpyCore:
+        def __init__(self, core):
+            self.core = core
+            self.forwarded = []
+
+        def __getattr__(self, name):
+            return getattr(self.core, name)
+
+        def gelbach_decompose(self, *args, **kwargs):
+            self.forwarded.append(kwargs.get("tol"))
+            return self.core.gelbach_decompose(*args, **kwargs)
+
+    original_core = gb._core
+    tol_spy = _TolSpyCore(original_core())
+    gb._core = lambda: tol_spy
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            gb.decompose(yt, xt, {"z": zt}, {"worker": wt, "firm": ft},
+                         tol=1e-2)
+            gb.decompose(yt, xt, {"z": zt}, {"worker": wt, "firm": ft},
+                         tol=1e-12)
+    finally:
+        gb._core = original_core
+    check_condition(
+        "api:tol-is-forwarded",
+        tol_spy.forwarded == [1e-2, 1e-12],
+        f"compiled-call values={tol_spy.forwarded!r}",
+    )
 
     # ---- absorbed-target allocation (distinct opt-in estimand) -----------
     ya, x1a, za, workera = absorbed_target_fixture()

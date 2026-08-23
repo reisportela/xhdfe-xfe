@@ -72,12 +72,16 @@ R CMD INSTALL xhdfe
 ```
 
 The build replicates the reference CMake Release flags of the C++ core
-(`-O3 -ffast-math` plus the platform's available OpenMP flags; see
+(`-O3 -ffast-math -fno-finite-math-only` plus the platform's available OpenMP flags; see
 `xhdfe/src/Makevars` and `xhdfe/src/Makevars.win`). The default build is
 portable for the architecture selected by R. For a local machine-specific
 benchmark build, set `XHDFE_MARCH=native`; for a shareable Linux x86-64 build,
 set a portable psABI level such as `XHDFE_MARCH=x86-64-v3`. Verify any install
-with `xhdfe_info()` (reports compiler, `-march`, fast-math and CUDA arch).
+with `xhdfe_info()` (reports compiler, `-march`, the reference math contract and
+CUDA arch). Its separate `fast_math` field reflects the compiler's
+all-or-nothing `__FAST_MATH__` macro and may therefore be false while the
+non-finite-safe reference contract is active: `-fno-finite-math-only`
+deliberately preserves IEEE non-finite guards.
 
 Known `R CMD check` results on the supported platform: 1 WARNING (the
 `.cu`/`.hpp` sources in `src/` — kept intentionally so tarball installs can

@@ -15,7 +15,9 @@
 #'   \code{-march} target the binary was compiled for; \code{"portable"} means
 #'   no package-level \code{-march} override and \code{"native"} means
 #'   machine-specific), \code{cuda_arch} (e.g. \code{"sm_90"}, empty on CPU
-#'   builds), \code{optimized}, \code{fast_math}, and \code{gpu_backend_env}.
+#'   builds), \code{optimized}, \code{fast_math} (the compiler's full
+#'   fast-math macro), \code{reference_math_contract} (the package's optimized,
+#'   non-finite-safe relaxed-math contract), and \code{gpu_backend_env}.
 #' @examples
 #' xhdfe_info()
 #' @seealso \code{\link{xhdfe}} (section \emph{GPU backends})
@@ -32,6 +34,7 @@ xhdfe_info <- function() {
     cuda_arch = info$cuda_arch,
     optimized = info$optimized,
     fast_math = info$fast_math,
+    reference_math_contract = info$reference_math_contract,
     gpu_backend_env = Sys.getenv("XHDFE_GPU_BACKEND", unset = "")
   )
   class(out) <- "xhdfe_info"
@@ -47,8 +50,8 @@ print.xhdfe_info <- function(x, ...) {
   cat("  Default backend:", x$default_backend, "\n")
   cat("  Compiler:", x$compiler, "| -march:", x$march, "\n")
   cat("  Reference flags:",
-      ifelse(isTRUE(x$optimized) && isTRUE(x$fast_math),
-             "yes (-O3, fast-math)",
+      ifelse(isTRUE(x$optimized) && isTRUE(x$reference_math_contract),
+             "yes (-O3, non-finite-safe relaxed math)",
              "NO -- not a reference-grade build"), "\n")
   if (nzchar(x$gpu_backend_env)) {
     cat("  XHDFE_GPU_BACKEND:", x$gpu_backend_env, "\n")

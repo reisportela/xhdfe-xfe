@@ -280,7 +280,20 @@ else
   pthread_flag=()
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
-common_compile_flags+=( -ffast-math -funroll-loops )
+common_compile_flags+=( -ffast-math -fno-finite-math-only -funroll-loops )
+
+# The direct Stata build bypasses CMake, so run the same native code-generation
+# probe before producing an installable plugin. In particular, AppleClang must
+# not fold the IEEE bit-level predicates under -ffast-math. Foreign Windows
+# cross-builds retain the source gate exercised by the CMake/package workflow.
+if [[ "${TARGET}" != "windows" ]]; then
+  liveness_source="${STATA_DIR}/../tests/ieee_bits_liveness.cpp"
+  liveness_bin="${BUILD_DIR}/xhdfe_ieee_bits_liveness"
+  echo "Checking fast-math non-finite guard liveness..."
+  "${CXX}" "${common_compile_flags[@]}" "${pthread_flag[@]}" \
+    "${liveness_source}" -o "${liveness_bin}"
+  "${liveness_bin}"
+fi
 if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" != "windows" ]]; then
   # NOTE: with CUDA-enabled plugin builds we've observed runtime instability on some toolchains.
   # Keep this opt-in only, but allow an explicit override when requested.

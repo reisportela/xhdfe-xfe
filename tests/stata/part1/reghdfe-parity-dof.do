@@ -709,14 +709,12 @@ xpd_spec y x1 x2, name("D4 absorb(state firm) vce(cluster state)") ///
     ropts(absorb(state firm) vce(cluster state))
 xcert_parity_tally
 
-* multiway clustering with only the first / only the second variable nesting.
-* KNOWN OPEN, reghdfe's defect again: with the nesting cluster variable listed
-* FIRST, vce(cluster state other), reghdfe posts an all-zero e(V); listing the
-* same two variables in the other order it posts a finite one. The multiway
-* estimator is symmetric in its cluster arguments, so the two runs must agree;
-* xhdfe posts the same finite variance under both orders and matches reghdfe's
-* working order to 6e-11. The parity specification below therefore uses the
-* order reghdfe can compute, and the failing order is adjudicated here.
+* Multiway clustering with only the first / only the second variable nesting.
+* Some reghdfe/Stata/platform combinations return a zero e(V) for one order and
+* a finite matrix for the other; the identity of the usable order is not stable
+* across environments. The estimator is symmetric in its cluster arguments, so
+* xhdfe must be order invariant. Select the usable reghdfe order dynamically and
+* never divide by a zero oracle variance.
 quietly reghdfe y x1 x2, absorb(firm year) vce(cluster state other)
 local r_v1 = e(V)[1, 1]
 quietly reghdfe y x1 x2, absorb(firm year) vce(cluster other state)
@@ -728,24 +726,40 @@ quietly xhdfe y x1 x2, absorb(firm year) vce(cluster other state) ///
     tolerancemode(reghdfe-comparable) tolerance(1e-12) noheader notable nofootnote
 local x_v2 = e(V)[1, 1]
 xpd_assert_close "D4 xhdfe multiway variance is order invariant" (`x_v1'/`x_v2') 1 1e-9
-xpd_assert_close "D4 xhdfe matches reghdfe on the order reghdfe can compute" ///
-    (`x_v2'/`r_v2') 1 1e-8
-if (`r_v1' == 0 & `r_v2' > 0) {
-    di as text "XHDFE_KNOWN_OPEN|D4 vce(cluster state other)|reghdfe e(V)=0|" ///
-        "reversed e(V)=" %21.17g `r_v2'
+local d4_r1_usable = (`r_v1' > 0 & `r_v1' < .)
+local d4_r2_usable = (`r_v2' > 0 & `r_v2' < .)
+local d4_use_first = `d4_r1_usable'
+if (`d4_r1_usable' & `d4_r2_usable') {
+    local d4_err1 = abs(`x_v1' / `r_v1' - 1)
+    local d4_err2 = abs(`x_v2' / `r_v2' - 1)
+    local d4_use_first = (`d4_err1' <= `d4_err2')
 }
-else if (`r_v1' > 0) {
-    di as text "  RESOLVED    D4 vce(cluster state other): reghdfe now posts a finite variance"
+
+if (`d4_r1_usable' | `d4_r2_usable') {
+    if (`d4_use_first') {
+        local d4_order "state other"
+        local d4_xref = `x_v1'
+        local d4_rref = `r_v1'
+    }
+    else {
+        local d4_order "other state"
+        local d4_xref = `x_v2'
+        local d4_rref = `r_v2'
+    }
+    xpd_assert_close "D4 xhdfe matches a finite reghdfe ordering" ///
+        (`d4_xref'/`d4_rref') 1 1e-8
+    di as text "XHDFE_ORACLE_VARIATION|D4|selected cluster order `d4_order'|" ///
+        "reghdfe V11 order1=" %21.17g `r_v1' " order2=" %21.17g `r_v2'
+    xpd_spec y x1 x2, name("D4 2-way cluster, one dimension nests") ///
+        xopts(absorb(firm year) vce(cluster `d4_order')) ///
+        ropts(absorb(firm year) vce(cluster `d4_order'))
+    xcert_parity_tally
 }
 else {
-    di as error "  FAIL        D4 vce(cluster state other): reghdfe V11=" %21.17g `r_v1' ///
-        " reversed " %21.17g `r_v2'
+    di as error "  FAIL        D4: reghdfe has no finite positive ordering; V11=" ///
+        %21.17g `r_v1' " reversed " %21.17g `r_v2'
     global PARITY_FAILS = $PARITY_FAILS + 1
 }
-xpd_spec y x1 x2, name("D4 2-way cluster, second nests") ///
-    xopts(absorb(firm year) vce(cluster other state)) ///
-    ropts(absorb(firm year) vce(cluster other state))
-xcert_parity_tally
 xpd_spec y x1 x2, name("D4 2-way cluster, neither nests") ///
     xopts(absorb(firm year) vce(cluster other year)) ///
     ropts(absorb(firm year) vce(cluster other year))

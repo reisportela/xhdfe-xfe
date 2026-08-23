@@ -107,6 +107,27 @@ def validate(expected_version: str) -> None:
         re.search(r'pandas>=1\.3', pyproject) is not None,
         "pyproject.toml is missing the pandas formula-extra dependency",
     )
+    test_extra = re.search(r"(?ms)^test\s*=\s*\[(.*?)^\]", pyproject)
+    _require(test_extra is not None, "pyproject.toml is missing the test extra")
+    for requirement in (
+        '"formulaic>=1.2.1,<2"',
+        '"pandas>=1.3"',
+        '"setuptools>=69"',
+        '"maketables>=0.1.7"',
+    ):
+        _require(
+            requirement in test_extra.group(1),
+            f"pyproject.toml test extra is missing {requirement}",
+        )
+    readme = _read("README.md")
+    _require(
+        f"`Version {base_version}`" in readme,
+        f"README.md header must record version {base_version}",
+    )
+    _require(
+        f"* Version {base_version}." in readme,
+        f"README.md citation must record version {base_version}",
+    )
     _require(
         "if(APPLE OR WIN32)" in _read("CMakeLists.txt"),
         "CMakeLists.txt must disable native CPU tuning by default on Windows",
@@ -119,11 +140,6 @@ def validate(expected_version: str) -> None:
         f"xhdfe {expected_version}" in _read("xhdfe/help/gelbach.md"),
         "xhdfe/help/gelbach.md has a stale shared version",
     )
-    html_help = _read("xhdfe_py_hdfe_v11_help.html")
-    _require(expected_version in html_help, "legacy HTML help has a stale version")
-    _require("Optional formula interface" in html_help, "legacy HTML help omits formulas")
-    _require("pandas&gt;=1.3" in html_help, "legacy HTML help omits the pandas formula dependency")
-
     _require(
         _capture("stata/xhdfe.pkg", r"^v\s+(\S+)") == base_version,
         "stata/xhdfe.pkg version is not aligned",

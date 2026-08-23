@@ -8009,6 +8009,21 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         ConvergenceCriterion::Reghdfe;
                 }
             };
+            auto run_weighted_strict_cuda_repair = [&]() {
+                HdfeOptions strict_options = tuned;
+                strict_options.tolerance_mode = ToleranceMode::StrictResidual;
+                strict_options.convergence_criterion =
+                    ConvergenceCriterion::Auto;
+                if (strict_options.tol > 0.0) {
+                    strict_options.tol = std::min(strict_options.tol, 1.0e-10);
+                }
+                detail::AbsorptionResult candidate =
+                    detail::absorb_fixed_effects_v6(
+                        y_use, design, fes_use, w_ptr, strict_options,
+                        requested_method, slope_terms);
+                certify_public_contract(candidate);
+                return candidate;
+            };
 
             // strict-residual's absolute max-mean polish is not scale invariant
             // and can exhaust max_iter after the independent backward-error
@@ -8029,6 +8044,25 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (strict_gpu.gpu_used && strict_gpu.converged &&
                     strict_gpu.precision_certified) {
                     return finalize_backend_status(std::move(strict_gpu));
+                }
+                // Weighted CUDA can satisfy the native update criterion while
+                // still missing the independent residual certificate.  Retry
+                // with the strict device-side residual polish before failing
+                // closed; this remains a CUDA solve and is reached only after
+                // the cheaper native repair was insufficient.
+                if (w_ptr != nullptr && strict_gpu.gpu_used) {
+                    detail::AbsorptionResult strict_retry =
+                        run_weighted_strict_cuda_repair();
+                    strict_retry.iterations += strict_gpu.iterations;
+                    strict_retry.gpu_absorption_iterations =
+                        strict_retry.iterations;
+                    if (strict_retry.gpu_used && strict_retry.converged &&
+                        strict_retry.precision_certified) {
+                        return finalize_backend_status(std::move(strict_retry));
+                    }
+                    strict_retry.converged = false;
+                    strict_retry.precision_certified = false;
+                    return finalize_backend_status(std::move(strict_retry));
                 }
                 if (!strict_gpu.gpu_used && strict_gpu.gpu_status_code == 2) {
                     // CUDA is not compiled or no device is visible.  Preserve
@@ -8115,6 +8149,21 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         repaired.gpu_absorption_iterations = repaired.iterations;
                     }
                     return finalize_backend_status(std::move(repaired));
+                }
+                if (w_ptr != nullptr && repaired.gpu_used) {
+                    detail::AbsorptionResult strict_retry =
+                        run_weighted_strict_cuda_repair();
+                    strict_retry.iterations +=
+                        primary.iterations + repaired.iterations;
+                    strict_retry.gpu_absorption_iterations =
+                        strict_retry.iterations;
+                    if (strict_retry.gpu_used && strict_retry.converged &&
+                        strict_retry.precision_certified) {
+                        return finalize_backend_status(std::move(strict_retry));
+                    }
+                    strict_retry.converged = false;
+                    strict_retry.precision_certified = false;
+                    return finalize_backend_status(std::move(strict_retry));
                 }
                 repaired.converged = false;
                 repaired.precision_certified = false;

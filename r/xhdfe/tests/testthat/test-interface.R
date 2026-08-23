@@ -132,6 +132,14 @@ test_that("backend argument fails closed when CUDA is unavailable", {
   }
 })
 
+test_that("build info recognizes the non-finite-safe reference math contract", {
+  info <- xhdfe_info()
+  expect_true(info$optimized)
+  expect_true(info$reference_math_contract)
+  expect_type(info$fast_math, "logical")
+  expect_output(print(info), "yes \\(-O3, non-finite-safe relaxed math\\)")
+})
+
 test_that("CUDA backend reports real GPU use and matches CPU", {
   skip_if_not(isTRUE(xhdfe_info()$cuda_enabled), "CPU-only build")
   m_cpu <- xhdfe(y ~ x1 + x2 | f1 + f2, dd, backend = "cpu")

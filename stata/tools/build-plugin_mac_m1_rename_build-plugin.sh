@@ -167,7 +167,7 @@ else
   pthread_flag=()
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
-common_compile_flags+=( -ffast-math -funroll-loops )
+common_compile_flags+=( -ffast-math -fno-finite-math-only -funroll-loops )
 common_link_flags=( "${link_flag}" )
 
 stplugin_src="${STPLUGIN_C}"

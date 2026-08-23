@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.24.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.24.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -213,6 +213,26 @@ python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python -m pip install .
 ```
 
+For Python development and source validation, the `test` extra installs the
+optional formula/table integrations and `setuptools`, which the complete unit
+suite exercises:
+
+```bash
+python -m pip install -e '.[test]'
+python -m unittest discover -v -s tests -p 'test_*.py'
+```
+
+On macOS, the standard AppleClang source build is supported but has no OpenMP
+threading. For the reference multi-threaded validators, install Homebrew GCC
+and use its versioned C++ compiler (replace `15` below if Homebrew reports a
+different major version):
+
+```bash
+brew install gcc
+CXX=g++-15 python -m pip install -e '.[test]'
+python -m unittest discover -v -s tests -p 'test_*.py'
+```
+
 **With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
 `nvcc` and always builds from source — never a prebuilt wheel). Set
 `XHDFE_ENABLE_CUDA=auto`: the build detects your GPU with `nvidia-smi` (the same
@@ -322,8 +342,9 @@ import maketables as mt
 print(mt.ETable([model_a, model_b], drop="Intercept").make(type="tex"))
 ```
 
-maketables is not an xhdfe dependency. Absorbed fixed effects become indicator
-rows, singleton counts and absorbed degrees of freedom are available as table
+maketables is not an xhdfe runtime dependency; the `test` extra installs it
+only for integration testing. Absorbed fixed effects become indicator rows,
+singleton counts and absorbed degrees of freedom are available as table
 statistics, and Stata variable labels carried on the estimation frame are
 picked up automatically. See the packaged Python help for the full statistic
 list.
@@ -584,7 +605,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.24.1.
+> effects regression via a C++ backend.* Version 2.24.2.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

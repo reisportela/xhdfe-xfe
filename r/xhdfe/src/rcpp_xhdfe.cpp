@@ -846,6 +846,11 @@ Rcpp::List xhdfe_cpp_build_info() {
 #else
     out["fast_math"] = false;
 #endif
+#ifdef XHDFE_REFERENCE_MATH_CONTRACT
+    out["reference_math_contract"] = true;
+#else
+    out["reference_math_contract"] = false;
+#endif
     return out;
 }
 

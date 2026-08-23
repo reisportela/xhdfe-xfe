@@ -70,7 +70,7 @@ XHDFE_ENABLE_CUDA=ON CMAKE_CUDA_ARCHITECTURES=90 python -m pip install .
 ```
 
 The core is compiled with fast-math Release flags
-(`-O3 -march=native -ffast-math -funroll-loops -fopenmp`), and OpenMP is
+(`-O3 -march=native -ffast-math -fno-finite-math-only -funroll-loops -fopenmp`), and OpenMP is
 required for the reference threading behavior. These are deliberate: a plain
 `-O2` / generic-`-march` build is **not** the reference numerical behavior.
 
