@@ -111,6 +111,18 @@ net install xfepout, from("https://raw.githubusercontent.com/reisportela/xhdfe-x
 > `xfe`, run `ado uninstall xfe` before installing `xfepout`; the new package
 > deliberately does not ship a permanent `xfe` alias.
 
+#### Minimal example
+
+This example uses public data shipped with Stata:
+
+```stata
+sysuse auto, clear
+xhdfe price weight length, absorb(rep78) vce(cluster rep78)
+
+webuse nlswork, clear
+xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)
+```
+
 #### Optional CUDA build
 
 On Linux with an NVIDIA GPU and the CUDA toolkit, run this once after
@@ -168,16 +180,6 @@ Use `--cuda 90` for an explicit target or
 `--cuda-archs "75,80,86,89,90"` for a multi-GPU build. Then add the `stata/`
 folder to `adopath`. See [`stata/BUILD_CUDA.md`](stata/BUILD_CUDA.md).
 
-Minimal example (public data shipped with Stata):
-
-```stata
-sysuse auto, clear
-xhdfe price weight length, absorb(rep78) vce(cluster rep78)
-
-webuse nlswork, clear
-xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)
-```
-
 ### Python
 
 Python builds from source and requires CMake, a C++ compiler, and matching
@@ -192,6 +194,26 @@ git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python
 
 Contributor setup and the complete test suite are documented in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+#### Minimal example
+
+```python
+import numpy as np
+import xhdfe
+
+n = 2000
+rng = np.random.default_rng(0)
+y = rng.normal(size=n)
+X = rng.normal(size=(n, 3))
+firm_id = rng.integers(0, 200, size=n)
+year_id = rng.integers(0, 20, size=n)
+
+reg = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
+reg.fit(y, X, fes=[firm_id, year_id])
+
+print(reg.coef_)
+print(reg.summary())
+```
 
 On macOS, the standard AppleClang source build is supported but has no OpenMP
 threading. For a multi-threaded build, install Homebrew GCC and use its
@@ -214,26 +236,6 @@ For an explicit target, set `XHDFE_CUDA_ARCH=90` or
 `CMAKE_CUDA_ARCHITECTURES=90`. At runtime set
 `XHDFE_GPU_BACKEND=cuda` and confirm `reg.gpu_used_ == 1`; see the
 [GPU guide](docs/gpu.md).
-
-Minimal example:
-
-```python
-import numpy as np
-import xhdfe
-
-n = 2000
-rng = np.random.default_rng(0)
-y = rng.normal(size=n)
-X = rng.normal(size=(n, 3))
-firm_id = rng.integers(0, 200, size=n)
-year_id = rng.integers(0, 20, size=n)
-
-reg = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
-reg.fit(y, X, fes=[firm_id, year_id])
-
-print(reg.coef_)
-print(reg.summary())
-```
 
 The optional R-style formula frontend uses the same native estimator while
 adding named dataframe designs. Install the extra from a source checkout:
@@ -260,7 +262,8 @@ model = xhdfe.feols("y ~ x1 | firm + year | d ~ z1 + z2", data=d)
 ```
 
 The array API remains the lowest-overhead route for repeated small regressions.
-See the packaged Python help for formula semantics and `prepare_formula()`.
+See the [Python formula interface](xhdfe/help/xhdfe.md#optional-formula-interface)
+for formula syntax, categorical terms, interactions, and IV/2SLS.
 
 Fitted results implement the duck-typed plug-in format of
 [maketables](https://github.com/py-econometrics/maketables), so publication
@@ -286,6 +289,28 @@ gives you the **CPU** build:
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
+#### Minimal example
+
+This example uses a small simulated worker–firm panel:
+
+```r
+library(xhdfe)
+
+set.seed(2026)
+n <- 600
+d <- data.frame(
+  worker = sample(80, n, replace = TRUE),
+  firm   = sample(30, n, replace = TRUE),
+  x1     = rnorm(n),
+  x2     = rnorm(n)
+)
+d$y <- 0.5 * d$x1 - 0.2 * d$x2 + 0.05 * d$worker + 0.03 * d$firm + rnorm(n)
+
+# Two-way fixed effects (worker + firm), clustered by firm
+m <- xhdfe(y ~ x1 + x2 | worker + firm, data = d, cluster = ~ firm)
+summary(m)
+```
+
 For CUDA on Linux, set `XHDFE_ENABLE_CUDA=auto` before installation. The build
 requires the NVIDIA toolkit and fails if the requested GPU path is unavailable:
 
@@ -309,29 +334,6 @@ R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \
 R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \
   R_LIBS_USER="$PWD/r/Rlib" XHDFE_ENABLE_CUDA=OFF \
   R CMD INSTALL --library="$PWD/r/Rlib" r/xhdfe
-```
-
-The Rcpp archive's provenance and SHA-256 are recorded in
-[`third_party/RCPP_SOURCE_PROVENANCE.md`](third_party/RCPP_SOURCE_PROVENANCE.md).
-
-Minimal example (a small simulated worker–firm panel):
-
-```r
-library(xhdfe)
-
-set.seed(2026)
-n <- 600
-d <- data.frame(
-  worker = sample(80, n, replace = TRUE),
-  firm   = sample(30, n, replace = TRUE),
-  x1     = rnorm(n),
-  x2     = rnorm(n)
-)
-d$y <- 0.5 * d$x1 - 0.2 * d$x2 + 0.05 * d$worker + 0.03 * d$firm + rnorm(n)
-
-# Two-way fixed effects (worker + firm), clustered by firm
-m <- xhdfe(y ~ x1 + x2 | worker + firm, data = d, cluster = ~ firm)
-summary(m)
 ```
 
 The R formula grammar is fixest-style: `y ~ x | fe1 + fe2` for absorbed FEs,
@@ -485,8 +487,6 @@ R package's offline build dependency; see
 - **Miguel Portela** — NIPE / Universidade do Minho and BPLIM / Banco de Portugal.
 - **Tiago Tavares** — NIPE / Universidade do Minho.
 
-Repository: [https://github.com/reisportela/xhdfe-xfe](https://github.com/reisportela/xhdfe-xfe)
-
 ## Acknowledgements
 
 `xhdfe` is a high-performance, `reghdfe`-compatible implementation: the
@@ -555,10 +555,7 @@ Contributions, bug reports, and validation cases are welcome — see
 
 ## Platform support
 
-The C++ core, Python bindings, and R package target Linux x86-64, Windows
-x86-64, and macOS Apple Silicon/Intel source builds with the local platform
-toolchain. CUDA GPU acceleration is optional on Linux with the NVIDIA toolkit.
-The online Stata net-install site provides CPU plugins. Certified releases may
-also provide separate Linux CUDA fatbin plugins alongside Linux CPU/OpenMP,
-Windows x86-64 CPU/OpenMP, and macOS universal assets. Machine-specific CUDA
-plugins can be built from source on Linux with the NVIDIA toolkit.
+`xhdfe` supports CPU builds on Linux x86-64, Windows x86-64, and macOS Apple
+Silicon/Intel. CUDA acceleration is available on Linux with the NVIDIA toolkit;
+see the [GPU guide](docs/gpu.md) for installation and verification across Stata,
+Python, and R.
