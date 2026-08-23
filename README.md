@@ -2,7 +2,12 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.24.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.24.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU` · `Unreleased changes pending review`
+
+> **Development status.** This branch contains changes prepared after the
+> 2.24.2 release, including the Stata-only rename from `xfe` to `xfepout`. The
+> release owner will choose the next version and publish matching packages and
+> installation metadata after review.
 
 ---
 
@@ -10,19 +15,13 @@
 
 `xhdfe` estimates linear models with any number of high-dimensional fixed
 effects (HDFE) — the worker–firm, patent–inventor, and multi-way panel designs
-common in applied economics. It mirrors the defaults and reporting of
-[`reghdfe`](https://github.com/sergiocorreia/reghdfe) (Correia 2016): under the
-default `reghdfe-comparable` tolerance mode, coefficients match `reghdfe` at the
-same nominal tolerance. The same estimator is exposed through three front-ends —
-a Stata command, a Python package, and an R package — all sitting on a **single
-compiled C++ core**. CPU is the reference backend; an optional CUDA GPU absorber
-is available for large problems.
-
-The package also ships **`xfepout`**. The repository retains its historical
-*xhdfe-xfe* name, but the public Stata partialling-out command is now
-`xfepout`. It residualizes variables against multiple high-dimensional fixed
-effects on the same core, without fitting a regression. See [Stata](#stata)
-below and `help xfepout`.
+common in applied economics. It follows the defaults and reporting conventions
+of [`reghdfe`](https://github.com/sergiocorreia/reghdfe) (Correia 2016). Under
+the default `reghdfe-comparable` tolerance mode, the certification suite checks
+coefficients and inference against `reghdfe` at the same nominal tolerance. A
+Stata command, a Python package, and an R package all call the **same compiled
+C++ core**. CPU is the reference backend; an optional CUDA GPU absorber is
+available for large problems.
 
 As an illustration, the table below reports median estimator-call runtimes for
 an AKM-style wage regression using Portuguese matched employer-employee data.
@@ -59,38 +58,34 @@ The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 - **Group-level outcomes with individual fixed effects** — the `group()` / `individual()` machinery.
 - **Mobility groups** and connected-component diagnostics.
 - **Optional GPU** — CUDA absorber with explicit request and status reporting; fail-closed (never a silent CPU fallback).
-- **AKM / worker-firm post-estimation** — leave-out (KSS) variance decomposition with plug-in, AGSU and KSS corrections, exact and Johnson-Lindenstrauss leverages, component standard errors, Andrews-Mikusheva weak-identification confidence intervals, fweights, and a leave-one-out connected-set utility (`xhdfeakm` / `xhdfeconnected` in Stata, `xhdfe.akm` in Python, `xhdfe_akm_kss()` in R); validated against Saggio's LeaveOutTwoWay (the canonical KSS implementation) and pytwoway. See [`docs/akm-kss.md`](docs/akm-kss.md).
+- **AKM / worker-firm post-estimation** — plug-in, AGSU, and KSS leave-out
+  variance decompositions; exact or Johnson-Lindenstrauss leverages; component
+  inference; and leave-one-out connected-set preparation. See
+  [`docs/akm-kss.md`](docs/akm-kss.md).
 - **Gelbach decomposition** — `xhdfegelbach` / `xhdfe.gelbach` /
-  `xhdfe_gelbach()`, validated against Gelbach's `b1x2` on overlapping classic
-  OLS specifications, with multiple focal coefficients, multiple observed
-  blocks, common and added HDFEs, and
-  explicitly declared absorbed targets. Version 1.6.0 includes retained-sample
-  provenance, connectivity and regularity diagnostics, joint-covariance
-  inference, full-refit pairs bootstrap, and table and plot helpers. See
-  [`docs/releases/RELEASE_NOTES_2.23.0.20260806.md`](docs/releases/RELEASE_NOTES_2.23.0.20260806.md).
+  `xhdfe_gelbach()`, with multiple focal coefficients and covariate blocks,
+  common and added HDFEs, explicitly declared absorbed targets,
+  joint-covariance inference, bootstrap, tables, and plots. See the
+  [companion documentation](#worker-firm-akm-and-gelbach-post-estimation).
 
 ---
 
 ## Choose your language
 
-The three packages call the same C++ estimator, so results agree across
-languages. Pick your front-end below. **For GPU (CUDA) acceleration in any of
-them, see the [GPU (CUDA) guide](docs/gpu.md)** — it walks through installing
-with the GPU feature, requesting it, and verifying it in Stata, Python, and R.
+The three frontends call the same C++ estimator and are tested for agreement on
+shared specifications. Pick your language below. For CUDA installation,
+selection, and verification, see the [GPU guide](docs/gpu.md).
 
 ### Stata
 
-**One command installs everything.** `net install xhdfe` installs the estimator
-*and* every companion command — `xfepout`, `xhdfeakm`, `xhdfeconnected`,
-`xhdfegelbach`, `xhdfegelbachbootstrap`, `xhdfegelbachetable`,
-`xhdfegelbachcoefplot`, and `xhdfegpu` — together with the CPU plugin for your
-OS:
+Once the pending release is published, one command will install the estimator,
+the CPU plugin for the current OS, and every companion command:
 
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 ```
 
-That is all most users need. The commands you get:
+The installed commands are:
 
 | Command | What it does |
 | --- | --- |
@@ -104,10 +99,11 @@ That is all most users need. The commands you get:
 | `xhdfegelbachcoefplot` | Identity-preserving Gelbach waterfall plot (`help xhdfegelbachcoefplot`). |
 | `xhdfegpu` | Builds and installs a CUDA GPU plugin for this machine (`help xhdfegpu`). |
 
-If you want *only* the standalone `xfepout` partial-out tool, you can install it by
-itself with `net install xfepout, from("…") replace`. The online package uses Stata
-platform-specific `g` lines for Linux, macOS Apple Silicon/Intel, and Windows
-when a Windows plugin artifact exists.
+To install only the standalone partial-out tool after publication:
+
+```stata
+net install xfepout, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
+```
 
 > **Stata command rename.** `xfepout` replaces the former `xfe` command. The
 > numerical implementation and syntax are otherwise unchanged, and no Python
@@ -115,21 +111,17 @@ when a Windows plugin artifact exists.
 > `xfe`, run `ado uninstall xfe` before installing `xfepout`; the new package
 > deliberately does not ship a permanent `xfe` alias.
 
-#### Turn on the GPU (NVIDIA/CUDA) — one command
+#### Optional CUDA build
 
-The online net-install site provides the CPU plugin. Certified releases may
-also publish separate Linux CUDA plugin assets on the
-[Releases](https://github.com/reisportela/xhdfe-xfe/releases) page. On a Linux
-machine with an NVIDIA GPU, the most direct way to build for that machine is to
-run the companion command **once**, right after `net install`:
+On Linux with an NVIDIA GPU and the CUDA toolkit, run this once after
+`net install`:
 
 ```stata
 xhdfegpu
 ```
 
-`xhdfegpu` detects the GPU, compiles a plugin for its exact architecture, and
-installs it *over* the CPU plugin in place — same `xhdfe.plugin` / `xfepout.plugin`,
-no renaming, no extra files. Then reload the plugin and request the GPU as usual:
+`xhdfegpu` detects the GPU, compiles for its architecture, and replaces the CPU
+plugins in place. Reload Stata, request CUDA, and verify that it was used:
 
 ```stata
 discard
@@ -137,25 +129,21 @@ xhdfe price weight length, absorb(rep78) gpubackend(cuda)
 display e(gpu_used)          // 1
 ```
 
-On a machine **without internet access**, download the self-contained source
-zip (`xhdfe-src.zip`, attached to each release and served from the net-install
-site) on another machine, copy it over, and hand it to `xhdfegpu`:
+For an offline machine, copy the release's self-contained `xhdfe-src.zip` and
+pass it directly to the builder:
 
 ```stata
 xhdfegpu, zip("/path/to/xhdfe-src.zip")
 ```
 
-`xhdfegpu` needs the NVIDIA CUDA toolkit (`nvcc`) and a C++ compiler; see
-`help xhdfegpu`. The zip is self-contained: Eigen, pybind11, the official
-version-pinned Rcpp source archive, and Stata's plugin inputs are vendored, so
-the package-side build needs no further downloads.
+The command requires `nvcc` and a C++ compiler. See `help xhdfegpu` and the
+[GPU guide](docs/gpu.md).
 
 #### Install from a release ZIP (offline, no GitHub)
 
-Download the distribution ZIP from the
-[Releases](https://github.com/reisportela/xhdfe-xfe/releases) page, unzip it,
-and point `net install` at the folder that contains `xhdfe.pkg` and `stata.toc`
-(this also installs xfepout and the companions):
+Download and unzip a distribution from
+[Releases](https://github.com/reisportela/xhdfe-xfe/releases), then point Stata
+at the folder containing `xhdfe.pkg` and `stata.toc`:
 
 ```stata
 net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
@@ -163,49 +151,38 @@ net install xhdfe, from("/path/to/unzipped/xhdfe/stata") replace
 
 #### Build the plugin by hand (advanced)
 
-`xhdfegpu` automates the GPU build; to do it yourself, get the source (clone the
-repo, or download `xhdfe-src.zip`) and build, then add the folder to `adopath`:
+For a manual build, clone the repository or unpack `xhdfe-src.zip`:
 
 ```bash
 git clone https://github.com/reisportela/xhdfe-xfe.git
 cd xhdfe-xfe
-# CPU build (Linux + GCC; OpenMP recommended)
-bash stata/tools/build-plugin.sh     --linux --openmp     # produces stata/xhdfe.plugin
-bash stata/tools/build-xfepout-plugin.sh --linux --openmp     # produces stata/xfepout.plugin
-# GPU build (Linux + NVIDIA; auto-detects the local architecture)
-bash stata/tools/build-plugin.sh     --linux --openmp --cuda auto
+# CPU/OpenMP
+bash stata/tools/build-plugin.sh --linux --openmp
+bash stata/tools/build-xfepout-plugin.sh --linux --openmp
+# CUDA, with architecture auto-detection
+bash stata/tools/build-plugin.sh --linux --openmp --cuda auto
 bash stata/tools/build-xfepout-plugin.sh --linux --openmp --cuda auto
 ```
 
-For an explicit target use `--cuda 90`; for a shareable multi-GPU binary,
-`--cuda-archs "75,80,86,89,90"`. See `stata/BUILD_CUDA.md`. Then
-`adopath + "/path/to/xhdfe/stata"`.
+Use `--cuda 90` for an explicit target or
+`--cuda-archs "75,80,86,89,90"` for a multi-GPU build. Then add the `stata/`
+folder to `adopath`. See [`stata/BUILD_CUDA.md`](stata/BUILD_CUDA.md).
 
 Minimal example (public data shipped with Stata):
 
 ```stata
 sysuse auto, clear
-xhdfe price weight length, absorb(rep78)
 xhdfe price weight length, absorb(rep78) vce(cluster rep78)
 
 webuse nlswork, clear
-xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)
 xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)
-
-* GPU (after xhdfegpu, or a CUDA-enabled plugin): request CUDA and verify
-xhdfe ln_wage grade age ttl_exp tenure, absorb(idcode year) gpubackend(cuda)
-display e(gpu_used)                 // must be 1
-display "`e(gpu_backend)'"          // must be "cuda"
 ```
 
 ### Python
 
-Install from the repository. Python source builds require CMake, a C++ compiler,
-and the Python development headers for the Python you are using (`Python.h`).
-On Linux, install the matching system package first, for example
-`python3-dev` on Debian/Ubuntu or `python3-devel` on Fedora/RHEL/Rocky. On
-clusters without sudo, use a conda/mamba environment or a Python module that
-includes development headers.
+Python builds from source and requires CMake, a C++ compiler, and matching
+Python development headers (`python3-dev` on Debian/Ubuntu or `python3-devel`
+on Fedora/RHEL/Rocky):
 
 ```bash
 python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
@@ -213,50 +190,34 @@ python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 git clone https://github.com/reisportela/xhdfe-xfe.git && cd xhdfe-xfe && python -m pip install .
 ```
 
-For Python development and source validation, the `test` extra installs the
-optional formula/table integrations and `setuptools`, which the complete unit
-suite exercises:
-
-```bash
-python -m pip install -e '.[test]'
-python -m unittest discover -v -s tests -p 'test_*.py'
-```
+Contributor setup and the complete test suite are documented in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 On macOS, the standard AppleClang source build is supported but has no OpenMP
-threading. For the reference multi-threaded validators, install Homebrew GCC
-and use its versioned C++ compiler (replace `15` below if Homebrew reports a
-different major version):
+threading. For a multi-threaded build, install Homebrew GCC and use its
+versioned C++ compiler (replace `15` below if Homebrew reports a different
+major version):
 
 ```bash
 brew install gcc
-CXX=g++-15 python -m pip install -e '.[test]'
-python -m unittest discover -v -s tests -p 'test_*.py'
+CXX=g++-15 python -m pip install .
 ```
 
-**With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source — never a prebuilt wheel). Set
-`XHDFE_ENABLE_CUDA=auto`: the build detects your GPU with `nvidia-smi` (the same
-check Stata's `xhdfegpu` uses) and compiles for that exact architecture. If no
-GPU or `nvidia-smi` is found it stops with a clear error — it never silently
-builds CPU-only when you asked for CUDA (CPU stays the default, plain
-`pip install .`).
+For CUDA on Linux, install from source with the NVIDIA toolkit available. An
+explicit request fails rather than silently producing a CPU-only build:
 
 ```bash
-# from a clone:
 XHDFE_ENABLE_CUDA=auto python -m pip install .
-# or straight from GitHub:
-XHDFE_ENABLE_CUDA=auto python -m pip install "git+https://github.com/reisportela/xhdfe-xfe.git"
 ```
 
 For an explicit target, set `XHDFE_CUDA_ARCH=90` or
-`CMAKE_CUDA_ARCHITECTURES=90`.
-At runtime request the GPU with `os.environ["XHDFE_GPU_BACKEND"] = "cuda"` (see
-the example below) and confirm with `reg.gpu_used_ == 1`.
+`CMAKE_CUDA_ARCHITECTURES=90`. At runtime set
+`XHDFE_GPU_BACKEND=cuda` and confirm `reg.gpu_used_ == 1`; see the
+[GPU guide](docs/gpu.md).
 
 Minimal example:
 
 ```python
-import os
 import numpy as np
 import xhdfe
 
@@ -272,28 +233,7 @@ reg.fit(y, X, fes=[firm_id, year_id])
 
 print(reg.coef_)
 print(reg.summary())
-
-# Optional: request CUDA after installing a CUDA-enabled build
-os.environ["XHDFE_GPU_BACKEND"] = "cuda"
-reg_gpu = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
-reg_gpu.fit(y, X, fes=[firm_id, year_id])
-assert reg_gpu.gpu_used_ == 1
-assert reg_gpu.gpu_status_code_ == 1
-os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
-
-On Windows, a GNU/MinGW build recursively bundles every detected non-system DLL
-dependency beside the extension. The package registers that internal directory
-before loading the native module and retains the Windows DLL-directory handle,
-so an installed wheel does not depend on the build toolchain remaining on
-`PATH` and does not require a user-side `os.add_dll_directory(...)` call. The
-build fails closed if the active toolchain cannot supply a matching x86-64
-binary for any detected dependency. Machine-specific instruction tuning is
-disabled by default on Windows, so source-built artefacts do not inherit the
-build host's instruction set; explicitly local-only builds may opt in. The
-prebuilt Windows asset in this release
-is for CPython 3.12 x86-64; other Python ABIs require a source build and were
-not separately Windows-certified for this release.
 
 The optional R-style formula frontend uses the same native estimator while
 adding named dataframe designs. Install the extra from a source checkout:
@@ -301,10 +241,6 @@ adding named dataframe designs. Install the extra from a source checkout:
 ```bash
 python -m pip install '.[formula]'
 ```
-
-If `xhdfe` is already installed from a GitHub release asset, install its
-optional formula dependency with
-`python -m pip install 'formulaic>=1.2.1,<2' 'pandas>=1.3'`.
 
 ```python
 model = xhdfe.feols(
@@ -316,21 +252,15 @@ model = xhdfe.feols(
 print(model.tidy())
 ```
 
-`C(g)` is the R-style counterpart of Stata's `i.g`; `x:z` is a product-only
-interaction and `x*z` expands to `x + z + x:z`. Fixed effects after `|` are
-read as identifier columns, encoded as group IDs, and passed to the native
-absorber, so they do not become dummy columns. A third part requests 2SLS with
-the same spelling as the R frontend, its left side naming the endogenous
-regressors and its right side the excluded instruments:
+`C(g)` corresponds to Stata's `i.g`; fixed effects after `|` remain identifier
+columns rather than dummy variables. A third formula part requests 2SLS:
 
 ```python
 model = xhdfe.feols("y ~ x1 | firm + year | d ~ z1 + z2", data=d)
 ```
 
-The existing
-`HdfeRegressor.fit(y, X, ...)` API remains the lowest-overhead route for small
-regressions in loops. See the packaged Python help for formula semantics,
-categorical reference levels, and `prepare_formula()`.
+The array API remains the lowest-overhead route for repeated small regressions.
+See the packaged Python help for formula semantics and `prepare_formula()`.
 
 Fitted results implement the duck-typed plug-in format of
 [maketables](https://github.com/py-econometrics/maketables), so publication
@@ -342,12 +272,9 @@ import maketables as mt
 print(mt.ETable([model_a, model_b], drop="Intercept").make(type="tex"))
 ```
 
-maketables is not an xhdfe runtime dependency; the `test` extra installs it
-only for integration testing. Absorbed fixed effects become indicator rows,
-singleton counts and absorbed degrees of freedom are available as table
-statistics, and Stata variable labels carried on the estimation frame are
-picked up automatically. See the packaged Python help for the full statistic
-list.
+`maketables` is not an `xhdfe` runtime dependency; install it separately if you
+want this integration. The packaged Python help lists the available
+coefficient and model statistics.
 
 ### R
 
@@ -359,22 +286,17 @@ gives you the **CPU** build:
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
-**With the GPU (CUDA) feature** (Linux + NVIDIA only; needs the CUDA toolkit
-`nvcc` and always builds from source). Set `XHDFE_ENABLE_CUDA=auto`: the build
-detects your GPU with `nvidia-smi` (the same check Stata's `xhdfegpu` uses) and
-compiles for that exact architecture, failing with a clear error if no GPU or
-`nvidia-smi` is found rather than silently building CPU-only (CPU is the default
-`install_github`):
+For CUDA on Linux, set `XHDFE_ENABLE_CUDA=auto` before installation. The build
+requires the NVIDIA toolkit and fails if the requested GPU path is unavailable:
 
 ```r
 Sys.setenv(XHDFE_ENABLE_CUDA = "auto")
 remotes::install_github("reisportela/xhdfe-xfe", subdir = "r/xhdfe")
 ```
 
-or, from a clone: `XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`. For an
-explicit target, set `XHDFE_CUDA_ARCH=90`.
-GPU use is then per call via `backend = "cuda"` (fail-closed if unavailable);
-`xhdfe_info()` reports the CUDA arch the package was built for.
+From a clone, use `XHDFE_ENABLE_CUDA=auto R CMD INSTALL r/xhdfe`; set
+`XHDFE_CUDA_ARCH=90` for an explicit target. Select CUDA per call with
+`backend = "cuda"` and verify the build with `xhdfe_info()`.
 
 For a network-disabled installation from `xhdfe-src.zip` or the autonomous
 offline bundle, install the pinned Rcpp source into a local library first:
@@ -389,8 +311,8 @@ R_PROFILE_USER=/dev/null R_ENVIRON_USER=/dev/null \
   R CMD INSTALL --library="$PWD/r/Rlib" r/xhdfe
 ```
 
-The unmodified CRAN archive's URL, license, version, and SHA-256 are recorded
-in `third_party/RCPP_SOURCE_PROVENANCE.md`.
+The Rcpp archive's provenance and SHA-256 are recorded in
+[`third_party/RCPP_SOURCE_PROVENANCE.md`](third_party/RCPP_SOURCE_PROVENANCE.md).
 
 Minimal example (a small simulated worker–firm panel):
 
@@ -410,11 +332,6 @@ d$y <- 0.5 * d$x1 - 0.2 * d$x2 + 0.05 * d$worker + 0.03 * d$firm + rnorm(n)
 # Two-way fixed effects (worker + firm), clustered by firm
 m <- xhdfe(y ~ x1 + x2 | worker + firm, data = d, cluster = ~ firm)
 summary(m)
-
-# Optional: request CUDA after installing a CUDA-enabled build
-m_gpu <- xhdfe(y ~ x1 + x2 | worker + firm, data = d,
-               cluster = ~ firm, backend = "cuda")
-stopifnot(m_gpu$gpu_used == 1, m_gpu$gpu_status == "used")
 ```
 
 The R formula grammar is fixest-style: `y ~ x | fe1 + fe2` for absorbed FEs,
@@ -459,61 +376,24 @@ g   <- xhdfe_gelbach(y, x1 = educ, x2_groups = list(skill = ability),
                      fes = list(firm = firm))
 ```
 
-Gelbach's standard mode accounts for the movement from one base linear model
-to one full model. The separate absorbed-target mode covers a declared X1
-target that belongs to an added FE span: its full coefficient is imposed at
-zero and explicitly labelled, never treated as an estimated within-FE effect.
-Inference for that target must be clustered at the absorbing FE dimension.
+The AKM layer reports plug-in, AGSU, and KSS leave-out components for worker and
+firm effects, their covariance, and sorting. Exact and
+Johnson-Lindenstrauss leverages, frequency weights, component inference,
+weak-identification confidence intervals, and an optional CUDA solver are
+available. It is validated against Saggio's `LeaveOutTwoWay` and `pytwoway`.
 
-Version 1.5.0 supports multiple focal coefficients, multiple observed blocks,
-HDFEs common to both models, and any number of added FE dimensions. Its
-joint-covariance inference includes denominator uncertainty and the
-cross-covariance term in `shares(base)` in Stata and `share = "base"` in
-Python/R; the earlier `base_fixed` convention remains available as descriptive
-fixed-denominator scaling. Results expose retained-sample provenance,
-mobility-connectivity checks for supported two-way designs, weak-denominator
-and regularity diagnostics, observed-block full-model coefficients, and
-truthful CUDA-use metadata.
+Gelbach's standard mode decomposes the movement from a base model to a full
+model. Its separate absorbed-target mode covers a declared focal variable that
+belongs to an added FE span, with inference clustered at that FE dimension.
+The current interfaces support multiple focal coefficients and covariate
+blocks, common and added HDFEs, joint-covariance inference, retained-sample and
+regularity diagnostics, full-refit pairs bootstrap, tables, and plots. The
+decomposition is specification accounting, not evidence of causal mediation.
 
-The reporting layer can fully refit the model under iid- or cluster-pairs
-bootstrap draws and produce tables, coefficient plots, and waterfall data.
-Use `xhdfegelbachbootstrap`, `xhdfegelbachetable`, and
-`xhdfegelbachcoefplot` in Stata; `gelbach.bootstrap`, `gelbach.etable`,
-`gelbach.waterfall_data`, and `gelbach.coefplot` in Python; or the corresponding
-`xhdfe_gelbach_*` functions in R.
-
-Run `help xhdfegelbach`, `python -m xhdfe gelbach`, or
-`?xhdfe_gelbach` for the complete estimands, covariance layout, warnings,
-reporting helpers, examples, and deliberate limits. The decomposition is
-specification accounting, not evidence of causal mediation.
-
-The plug-in, AGSU (homoskedastic) and KSS (heteroskedasticity-robust leave-out)
-decompositions report the variance of worker effects, of firm effects, their
-covariance and correlation, and the shares of wage variance; with `se`/`ci`
-they add component standard errors and Andrews-Mikusheva weak-identification
-confidence intervals. Exact and Johnson-Lindenstrauss leverages, frequency
-weights and an optional CUDA solver are supported. Runnable examples in all
-three languages live in [`examples/`](examples/); a felsdvsimul walkthrough is
-in [`docs/akm-kss.md`](docs/akm-kss.md).
-
-In Stata, `xhdfeakm` 1.7.2 reports a single affected-row count when many
-non-stayer observations hit the unit-leverage guard. This is a bounded
-diagnostic change; it does not alter KSS estimates, tolerances, or convergence
-decisions.
-
----
-
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `src/`, `include/`, `third_party/` | The shared C++ core and vendored build inputs: Eigen and pybind11 sources plus the pinned official Rcpp source archive used by autonomous offline release media. |
-| `python/`, `xhdfe/` | Python package (`import xhdfe`; the `HdfeRegressor` class). |
-| `r/` | R package (`r/xhdfe/`), examples, and helper tools. |
-| `stata/` | Stata package: `xhdfe.ado`, `xfepout.ado`, help files, plugin sources (`src/`), and build scripts (`tools/`). |
-| `tests/` | `tests/stata/`: Stata certification and smoke tests; `tests/validation/`: Python oracle and cross-frontend validators; `tests/benchmarks/`: public benchmark replication. |
-| `docs/` | Quickstart and overview. |
-| `CMakeLists.txt`, `pyproject.toml`, `setup.py` | Build configuration for the C++ core and Python bindings. |
+Run `help xhdfeakm`, `help xhdfegelbach`, `python -m xhdfe gelbach`, or
+`?xhdfe_gelbach` for the complete contracts. Runnable examples live in
+[`examples/`](examples/), with an AKM walkthrough in
+[`docs/akm-kss.md`](docs/akm-kss.md).
 
 ---
 
@@ -539,14 +419,11 @@ decisions.
 
 Under the default `reghdfe-comparable` tolerance mode, `xhdfe` coefficients,
 standard errors, and recovered fixed effects are validated against `reghdfe` at
-the same nominal tolerance, subject to the conditioning of each problem. The
-current core acceptance battery contains 23 dataset-specification pairs crossed
-with eight `xhdfe` cells: C++ and Stata, CPU and CUDA, and fast and
-`reghdfe`-comparable modes. Each affected cell is checked for convergence,
-numerical agreement, correct backend use, and runtime non-regression. These
-checks certify the exact builds and cases tested; they are not a claim of
-universal equivalence for every possible research design. This software remains
-a **proof of concept**, and users should validate their own specifications. See
+the same nominal tolerance, subject to the conditioning of each problem.
+Certification covers convergence, numerical agreement, backend use, and
+cross-frontend parity on tested CPU and CUDA builds. It certifies those builds
+and cases, not every possible research design. Users should validate their own
+specifications; see [`docs/certification/`](docs/certification/) and
 [`DISCLAIMER.md`](DISCLAIMER.md).
 
 ### Algorithmic and software provenance
@@ -562,42 +439,28 @@ software. The roles of the principal packages were distinct:
 | [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
 | [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
 
-The last point deserves an explicit statement. `xhdfe` did not develop the
-graph-preconditioned MLSMR/additive-Schwarz architecture independently of
-Fischer and Schröder. Their public `within` materials and their 2026 mimeo,
-*Graph Preconditioning for High-Dimensional Fixed Effects Regression*, were
-the starting point
-for the `xhdfe` route based on factor-pair graph subdomains, a bipartite-
-Laplacian representation, approximate-Cholesky local solves, and their
-combination as an additive-Schwarz preconditioner inside modified LSMR. The
-underlying algorithmic architecture is their contribution and should be cited
-as such, not treated merely as general inspiration.
+Fischer and Schröder's public `within` materials and their 2026 mimeo,
+*Graph Preconditioning for High-Dimensional Fixed Effects Regression*, were the
+direct starting point for `xhdfe`'s graph-preconditioned
+MLSMR/additive-Schwarz route. The factor-pair graph decomposition,
+bipartite-Laplacian representation, approximate-Cholesky local solves, and
+additive-Schwarz preconditioner inside modified LSMR are their underlying
+algorithmic contribution and should be cited as such.
 
-The headline GPU benchmarks use Irons-Tuck-accelerated MAP, as in `fixest`; the CUDA kernels are a native `xhdfe` implementation of that algorithmic route and do not implement the Fischer–Schröder graph preconditioner.
-
-### What `xhdfe` contributes
-
-The `xhdfe` contribution lies in the design, implementation, and validation of
-an integrated estimator and package, rather than in claiming independent
-invention of its algorithmic inputs. That work includes the compiled C++/
-OpenMP core; native CUDA kernels; Stata, Python, and R integration; fixed-effect
-recovery and the wider supported feature surface; and the `xhdfe`-specific
-implementation of the Fischer–Schröder architecture, including execution and
-batching details, adaptive routing and fallbacks, interfaces, diagnostics,
-precision certification, and validation across the affected CPU and CUDA
-workflows. These engineering and integration contributions do not alter the
-credit for the underlying algorithms on which they build.
+The headline GPU benchmarks instead use Irons-Tuck-accelerated MAP, as in
+`fixest`; the native CUDA kernels do not implement the Fischer–Schröder graph
+preconditioner. `xhdfe` contributes the integrated C++/OpenMP and CUDA
+implementation, three language frontends, broader feature surface, execution
+and batching choices, routing and fallbacks, diagnostics, precision
+certification, and cross-platform validation. These contributions do not alter
+the credit for the algorithms on which they build.
 
 ### AI-assisted development record
 
-AI-assisted work operated against public software and documentation in the
-development environment. The project record documents direct inspection of
-public `within` and `pyfixest` materials. `reghdfe`, `fixest`, and
-`FixedEffectModels.jl` were also used as numerical and performance references;
-this statement does not imply that every model inspected every source tree.
-Source-code inspection, documentation study, and black-box benchmarking are
-therefore treated as distinct forms of evidence. The authors
-retain authorship and responsibility for `xhdfe` and its documentation.
+AI-assisted work used public software and documentation in the development
+environment, with source inspection, documentation study, and black-box
+benchmarking recorded as distinct forms of evidence. The authors retain
+authorship and responsibility for `xhdfe` and its documentation.
 
 ## Citation
 
@@ -626,34 +489,21 @@ Repository: [https://github.com/reisportela/xhdfe-xfe](https://github.com/reispo
 
 ## Acknowledgements
 
+`xhdfe` is a high-performance, `reghdfe`-compatible implementation: the
+`reghdfe` estimator, defaults, and reporting conventions remain its reference.
 The roles of the prior HDFE packages, the direct Fischer–Schröder algorithmic
-credit, and the distinct `xhdfe` contribution are documented in
+credit, and the distinct `xhdfe` contribution are summarized in
 [Validation, development provenance, and contributions](#validation-development-provenance-and-contributions).
 
-By design, `xhdfe` is first and foremost a high-performance replica of
-`reghdfe`: it mirrors reghdfe's estimator, defaults, and reporting, and
-reghdfe-comparable results are its reference. From the worker-firm (AKM)
-literature and from [`pytwoway`](https://github.com/tlamadon/pytwoway) — Thibaut
-Lamadon and Adam A. Oppenheimer's reference Python toolkit for two-way worker-firm
-models (AKM and the leave-out, CRE and BLM estimators) — `xhdfe` adopts *only*
-what adds value inside that reghdfe universe: the leave-out (KSS) bias-corrected
-variance decomposition, the leave-out connected set, and the Gelbach
-decomposition, implemented natively on the same C++ core. It does not attempt to
-reproduce `pytwoway`.
-
-`xhdfe` links to `pytwoway` in two concrete ways. First, **validation**: its
-leave-out decomposition is checked at machine precision against `pytwoway` and
-against [`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay) by
-Raffaele Saggio, the canonical Kline-Saggio-Sølvsten (2020) implementation.
-Second, **interoperability**: `xhdfe` exports the leave-out sample to the
-`pytwoway` / `bipartitepandas` format, so a cleaned two-way sample moves between
-the two tools. The combination is most useful in labour economics with large
-linked employer-employee data: run the fast HDFE regression and the leave-out
-variance decomposition (variance of worker and firm effects, their covariance,
-and worker-firm sorting) inside a familiar `reghdfe` workflow with `xhdfe`, and
-reach for `pytwoway` when you need its broader structural models (CRE, BLM) that
-are deliberately outside `xhdfe`'s scope. The Gelbach decomposition is validated
-against `b1x2` by Jonah Gelbach. Full credit to their authors.
+The AKM layer builds on the worker-firm literature and on
+[`pytwoway`](https://github.com/tlamadon/pytwoway) by Thibaut Lamadon and Adam
+A. Oppenheimer. Its leave-out decomposition is validated against `pytwoway` and
+against Raffaele Saggio's canonical
+[`LeaveOutTwoWay`](https://github.com/rsaggio87/LeaveOutTwoWay)
+implementation. `xhdfe` also exports its leave-out sample in the
+`pytwoway`/`bipartitepandas` format, while leaving structural CRE and BLM models
+to `pytwoway`. The Gelbach decomposition is validated against Jonah Gelbach's
+`b1x2`.
 
 We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
 workshop collaboration around earlier versions of the project. We especially

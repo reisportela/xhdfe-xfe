@@ -112,6 +112,26 @@ See `stata/BUILD_CUDA.md` for the GPU build and Stata-side verification steps.
 
 ## Running the tests
 
+### Python
+
+Install the package in editable mode with the test-only optional integrations,
+then run the complete Python unit suite:
+
+```bash
+python -m pip install -e '.[test]'
+python -m unittest discover -v -s tests -p 'test_*.py'
+```
+
+On macOS, use Homebrew GCC for the reference OpenMP build (replace `15` if a
+different compiler major is installed):
+
+```bash
+CXX=g++-15 python -m pip install -e '.[test]'
+python -m unittest discover -v -s tests -p 'test_*.py'
+```
+
+### R
+
 The primary automated suite is the R package's `testthat` (edition 3) tests in
 `r/xhdfe/tests/testthat/`:
 
@@ -130,6 +150,8 @@ Rscript -e 'testthat::test_local("r/xhdfe")'
   `r/tools/gen_parity_fixture.py` and **requires a built reference Python
   module** — you need not regenerate it for a normal change; the committed
   fixture is used as-is.
+
+### Stata
 
 The Stata package has a certification-test harness under `tests/stata/`,
 adapted from Sergio Correia's `reghdfe` test-suite style. It runs built-in
