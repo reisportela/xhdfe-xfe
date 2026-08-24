@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.24.2 22aug2026}{...}
+{* *! version 2.25.0 24aug2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -7,7 +7,7 @@
 {vieweralsosee "ivreghdfe" "help ivreghdfe"}{...}
 {vieweralsosee "ppmlhdfe" "help ppmlhdfe"}{...}
 {vieweralsosee "" "--"}{...}
-{vieweralsosee "xfe" "help xfe"}{...}
+{vieweralsosee "xfepout" "help xfepout"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -1124,7 +1124,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.24.2.
+regression via a C++ backend." Version 2.25.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
@@ -1205,7 +1205,7 @@ Gelbach, Jonah B. 2016. "When do covariates matter? And which ones, and how much
 {title:Also see}
 
 {psee}
-Companion command in the same package: {helpb xfe} (partials out / residualizes
+Companion command in the same package: {helpb xfepout} (partials out / residualizes
 variables against multiple high-dimensional fixed effects on the same C++ core;
 no coefficient table).{p_end}
 

@@ -9,9 +9,9 @@
         "libwinpthread-1.dll",
         "msvcrt.dll"
       ],
-      "member": "xfe.plugin.windows",
-      "member_sha256": "d3217ce5db4c039832c966b9fe5458bb2b4cd38d4746e9767e23f04e7abede16",
-      "size": 4677120
+      "member": "xfepout.plugin.windows",
+      "member_sha256": "f4beb0edfc8ec4b222e4cfb18d8150cda1a23d6f17849db7af0010cb7a3b3307",
+      "size": 4683264
     },
     {
       "architecture": "pei-x86-64",
@@ -22,8 +22,8 @@
         "msvcrt.dll"
       ],
       "member": "xhdfe.plugin.windows",
-      "member_sha256": "9e1bd7152e06942651a12ab108e9777d93783be967718e084d60c14e1f2f8309",
-      "size": 6090752
+      "member_sha256": "2b92ee5a0186cf8fd6adae2c92cab35ccbf169cae3969a4b820b6fe3198eb8fd",
+      "size": 6113792
     }
   ],
   "runtimes": [

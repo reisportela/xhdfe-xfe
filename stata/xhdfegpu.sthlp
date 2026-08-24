@@ -1,11 +1,11 @@
 {smcl}
-{* *! version 2.24.2  22aug2026}{...}
+{* *! version 2.25.0  24aug2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
-{vieweralsosee "xfe" "help xfe"}{...}
+{vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
 
 {p2colset 5 18 20 2}{...}
-{p2col :{cmd:xhdfegpu} {hline 2}}build and install a CUDA (GPU) xhdfe/xfe plugin for this machine{p_end}
+{p2col :{cmd:xhdfegpu} {hline 2}}build and install a CUDA (GPU) xhdfe/xfepout plugin for this machine{p_end}
 {p2colreset}{...}
 
 
@@ -34,9 +34,9 @@ H100) instead of auto-detecting it with {cmd:nvidia-smi}{p_end}
 
 {pstd}
 {cmd:xhdfegpu} compiles a CUDA (NVIDIA GPU) plugin for {cmd:xhdfe} and
-{cmd:xfe} matched to this machine's GPU, and installs it {it:over} the CPU
+{cmd:xfepout} matched to this machine's GPU, and installs it {it:over} the CPU
 plugin that {cmd:net install} placed on the adopath. The runtime file names do
-not change: the same {cmd:xhdfe.plugin} and {cmd:xfe.plugin} are replaced in
+not change: the same {cmd:xhdfe.plugin} and {cmd:xfepout.plugin} are replaced in
 place, so nothing else in your setup changes — GPU runs are then requested the
 usual way with {cmd:gpubackend(cuda)}.
 
@@ -115,5 +115,5 @@ available, this command is how you build the matching plugin.
 {title:Also see}
 
 {p 4 13 2}
-{helpb xhdfe}, {helpb xfe}
+{helpb xhdfe}, {helpb xfepout}
 {p_end}

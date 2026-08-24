@@ -1,5 +1,5 @@
-*! version 2.24.2  22aug2026
-*! xhdfegpu: build and install a CUDA (GPU) xhdfe/xfe plugin for this machine.
+*! version 2.25.0  24aug2026
+*! xhdfegpu: build and install a CUDA (GPU) xhdfe/xfepout plugin for this machine.
 *!
 *! net install ships CPU-only plugins. On a machine with an NVIDIA GPU, run
 *! xhdfegpu once to compile a CUDA plugin for the local architecture and
@@ -145,7 +145,7 @@ program define xhdfegpu, rclass
         file open `vf' using "`srcdir'/VERSION", read
         file read `vf' zver
         file close `vf'
-        di as txt "xhdfegpu: building xhdfe/xfe " as res "`zver'" as txt " from source."
+        di as txt "xhdfegpu: building xhdfe/xfepout " as res "`zver'" as txt " from source."
     }
 
     * ---- 5. Build the CUDA plugins -----------------------------------------
@@ -153,7 +153,7 @@ program define xhdfegpu, rclass
     tempfile blog
     capture shell cd "`srcdir'" && XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=`cc' bash stata/tools/build-plugin.sh --linux --openmp > "`blog'" 2>&1
     local rc_xhdfe = _rc
-    capture shell cd "`srcdir'" && XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=`cc' bash stata/tools/build-xfe-plugin.sh --linux --openmp >> "`blog'" 2>&1
+    capture shell cd "`srcdir'" && XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=`cc' bash stata/tools/build-xfepout-plugin.sh --linux --openmp >> "`blog'" 2>&1
     local rc_xfe = _rc
     if (`rc_xhdfe' | !fileexists("`srcdir'/stata/xhdfe.plugin")) {
         di as err "xhdfegpu: the CUDA build failed. Build log:"
@@ -171,10 +171,10 @@ program define xhdfegpu, rclass
     }
     local didx 1
     local didxfe 0
-    if (`rc_xfe' == 0 & fileexists("`srcdir'/stata/xfe.plugin")) {
-        capture findfile xfe.plugin
+    if (`rc_xfe' == 0 & fileexists("`srcdir'/stata/xfepout.plugin")) {
+        capture findfile xfepout.plugin
         if (!_rc) {
-            capture copy "`srcdir'/stata/xfe.plugin" "`r(fn)'", replace public
+            capture copy "`srcdir'/stata/xfepout.plugin" "`r(fn)'", replace public
             if (!_rc) local didxfe 1
         }
     }
@@ -185,7 +185,7 @@ program define xhdfegpu, rclass
     di as txt ""
     di as txt "xhdfegpu: {res}CUDA plugin installed{txt} (sm_`cc') over the CPU plugin:"
     di as txt "  xhdfe.plugin -> " as res "`dest'"
-    if (`didxfe') di as txt "  xfe.plugin   -> installed"
+    if (`didxfe') di as txt "  xfepout.plugin   -> installed"
     di as txt ""
     di as txt "Restart Stata (or type {stata discard}) to load the new plugin, then request the GPU:"
     di as txt `"  . xhdfe y x, absorb(fe1 fe2) gpubackend(cuda)"'

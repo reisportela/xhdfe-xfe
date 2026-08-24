@@ -1,10 +1,10 @@
-v 1.11.0
-d xfe: Partial-out variables with multiple fixed effects via a C++ plugin
+v 1.12.0
+d xfepout: Partial-out variables with multiple fixed effects via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
-d The installed runtime plugin is always named xfe.plugin.
-f xfe.ado
-f xfe.sthlp
+d The installed runtime plugin is always named xfepout.plugin.
+f xfepout.ado
+f xfepout.sthlp
 f LICENSE
 f NOTICE
 f GCC-13.2.0-COPYING3
@@ -18,16 +18,16 @@ f Eigen-3.4.0-COPYING.LGPL
 f Eigen-3.4.0-COPYING.MINPACK
 f Eigen-3.4.0-COPYING.MPL2
 f Eigen-3.4.0-COPYING.README
-g LINUX64 xfe.linux64.plugin xfe.plugin
-g LINUX64P xfe.linux64.plugin xfe.plugin
-g MACARM64 xfe.macos-universal.plugin xfe.plugin
-g OSX.ARM64 xfe.macos-universal.plugin xfe.plugin
-g MACINTEL64 xfe.macos-universal.plugin xfe.plugin
-g OSX.X8664 xfe.macos-universal.plugin xfe.plugin
-g WIN64 xfe.win64.plugin xfe.plugin
+g LINUX64 xfepout.linux64.plugin xfepout.plugin
+g LINUX64P xfepout.linux64.plugin xfepout.plugin
+g MACARM64 xfepout.macos-universal.plugin xfepout.plugin
+g OSX.ARM64 xfepout.macos-universal.plugin xfepout.plugin
+g MACINTEL64 xfepout.macos-universal.plugin xfepout.plugin
+g OSX.X8664 xfepout.macos-universal.plugin xfepout.plugin
+g WIN64 xfepout.win64.plugin xfepout.plugin
 G WIN64 libgcc_s_seh-1.dll libgcc_s_seh-1.dll
 G WIN64 libgomp-1.dll libgomp-1.dll
 G WIN64 libwinpthread-1.dll libwinpthread-1.dll
 g WIN64 windows-stata-provider-ledger.json windows-stata-provider-ledger.json
 g WIN64 windows-stata-runtime-ledger.json windows-stata-runtime-ledger.json
-h xfe.plugin
+h xfepout.plugin
