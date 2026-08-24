@@ -2,12 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.24.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU` · `Unreleased changes pending review`
-
-> **Development status.** This branch contains changes prepared after the
-> 2.24.2 release, including the Stata-only rename from `xfe` to `xfepout`. The
-> release owner will choose the next version and publish matching packages and
-> installation metadata after review.
+`Version 2.25.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -78,8 +73,8 @@ selection, and verification, see the [GPU guide](docs/gpu.md).
 
 ### Stata
 
-Once the pending release is published, one command will install the estimator,
-the CPU plugin for the current OS, and every companion command:
+One command installs the estimator, the CPU plugin for the current OS, and
+every companion command:
 
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
@@ -470,7 +465,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.24.2.
+> effects regression via a C++ backend.* Version 2.25.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

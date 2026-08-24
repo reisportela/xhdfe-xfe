@@ -128,6 +128,18 @@ def validate(expected_version: str) -> None:
         f"* Version {base_version}." in readme,
         f"README.md citation must record version {base_version}",
     )
+    for required_credit in (
+        "by Alexander Fischer and Kristof Schröder",
+        "Direct algorithmic starting point for `xhdfe`'s "
+        "graph-preconditioned MLSMR/additive-Schwarz route.",
+        "algorithmic contribution and should be cited as such.",
+        "We thank Alexander Fischer and Kristof Schröder",
+    ):
+        _require(
+            required_credit in readme,
+            "README.md is missing the required Fischer-Schroder credit: "
+            + required_credit,
+        )
     _require(
         "if(APPLE OR WIN32)" in _read("CMakeLists.txt"),
         "CMakeLists.txt must disable native CPU tuning by default on Windows",
@@ -145,8 +157,8 @@ def validate(expected_version: str) -> None:
         "stata/xhdfe.pkg version is not aligned",
     )
     _require(
-        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.11.0",
-        "stata/xfepout.pkg must remain at version 1.11.0",
+        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.12.0",
+        "stata/xfepout.pkg must remain at version 1.12.0",
     )
     for retired in (
         "stata/xfe.ado",
