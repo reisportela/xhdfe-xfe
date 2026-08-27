@@ -500,9 +500,23 @@ implementation. `xhdfe` also exports its leave-out sample in the
 to `pytwoway`. The Gelbach decomposition is validated against Jonah Gelbach's
 `b1x2`.
 
-We thank Paulo Guimaraes, Marta Silva, and Nelson Areal for discussions and
-workshop collaboration around earlier versions of the project. We especially
-thank Sergio Correia for feedback on benchmarking, tolerances, and
+We thank Paulo Guimaraes and Nelson Areal for discussions and workshop
+collaboration around earlier versions of the project.
+
+We are especially grateful to Marta Silva, whose sustained and rigorous testing
+has been fundamental to the development and validation of `xhdfe`. Her
+contribution goes well beyond reporting individual bugs: she has systematically
+tested whether features are present and work as intended, scrutinized numerical
+precision and the accuracy of the estimates, and compared `xhdfe` results with
+`reghdfe` across demanding empirical specifications. Her careful reports —
+including recent evidence on convergence and residual-sum-of-squares
+discrepancies in `group()` / `individual()` models — have helped us reproduce
+problems, identify their numerical origins, and validate the resulting
+solutions. The reliability, precision, and `reghdfe` compatibility of `xhdfe`
+have materially benefited from her persistence, judgement, and detailed
+feedback.
+
+We especially thank Sergio Correia for feedback on benchmarking, tolerances, and
 `reghdfe`-comparable validation. We thank Alexander Fischer and Kristof Schröder
 for making the `within` materials available and for direct discussion of their
 graph-preconditioned fixed-effects solver. All remaining errors are ours.
