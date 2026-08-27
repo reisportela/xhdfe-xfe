@@ -9736,6 +9736,599 @@ void demean_individual_inplace(Eigen::VectorXd& y,
     }
 }
 
+// Matrix-free LSMR for the joint group()/individual() design.  The ordinary
+// LSMR absorber cannot represent a group row that loads on several individual
+// coefficients, so treating this path as another MAP sweep leaves sparse or
+// nearly disconnected incidence graphs vulnerable to extremely slow
+// convergence.  This operator keeps the collapsed group rows implicit:
+// standard FEs contribute one indicator per row and the individual term
+// contributes group_scale[g] for every incident individual.
+AbsorptionResult absorb_group_individual_lsmr_cpu(
+    const Eigen::VectorXd& y,
+    const Eigen::MatrixXd& X,
+    const std::vector<FeIndexer>& indexers,
+    const GroupIndividualStructure& gi,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    int threads) {
+    const int n = static_cast<int>(y.size());
+    const int dims = static_cast<int>(indexers.size());
+    const bool unit_weights = (weights == nullptr);
+    const double* weight_ptr = unit_weights ? nullptr : weights->data();
+
+    AbsorptionResult result;
+    result.y_tilde = y;
+    result.X_tilde = X;
+    // Internal Krylov-route marker. Grouped fit() interprets this as LSMR;
+    // ordinary absorption retains its existing MLSMR interpretation.
+    result.mlsmr_used = true;
+    result.fe_levels.reserve(static_cast<std::size_t>(dims) + 1U);
+
+    std::vector<int> offsets(static_cast<std::size_t>(dims) + 2U, 0);
+    std::vector<int> groups_per_dim(static_cast<std::size_t>(dims), 0);
+    std::vector<StableGroupTraversal> traversals(
+        static_cast<std::size_t>(dims));
+    for (int d = 0; d < dims; ++d) {
+        const FeIndexer& indexer = indexers[static_cast<std::size_t>(d)];
+        groups_per_dim[static_cast<std::size_t>(d)] = indexer.num_groups;
+        if (indexer.num_groups < 0 ||
+            offsets[static_cast<std::size_t>(d)] >
+                std::numeric_limits<int>::max() - indexer.num_groups) {
+            throw std::runtime_error(
+                "group/individual LSMR fixed-effect dimension overflow");
+        }
+        offsets[static_cast<std::size_t>(d + 1)] =
+            offsets[static_cast<std::size_t>(d)] + indexer.num_groups;
+        result.fe_levels.push_back(indexer.num_levels_present);
+        traversals[static_cast<std::size_t>(d)].prepare(indexer, n);
+    }
+    const int individual_offset = offsets[static_cast<std::size_t>(dims)];
+    if (gi.num_individuals < 0 ||
+        individual_offset >
+            std::numeric_limits<int>::max() - gi.num_individuals) {
+        throw std::runtime_error(
+            "group/individual LSMR total coefficient count overflow");
+    }
+    offsets[static_cast<std::size_t>(dims + 1)] =
+        individual_offset + gi.num_individuals;
+    const int total_fe = offsets.back();
+    result.fe_levels.push_back(gi.num_individuals);
+
+    Eigen::VectorXd diagonal = Eigen::VectorXd::Zero(total_fe);
+    for (int d = 0; d < dims; ++d) {
+        const FeIndexer& indexer = indexers[static_cast<std::size_t>(d)];
+        diagonal.segment(offsets[static_cast<std::size_t>(d)],
+                         indexer.num_groups) =
+            compute_weight_sums(indexer, weight_ptr, unit_weights, n, threads);
+    }
+
+    ParallelWorkObserver* diag_observer = observer_if_needed(
+        options.parallel_observer, threads, gi.num_individuals);
+    if (diag_observer) {
+        diag_observer->begin_region(threads);
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel num_threads(threads)
+    {
+        bool did_work = false;
+#pragma omp for schedule(static)
+        for (int individual = 0; individual < gi.num_individuals; ++individual) {
+            did_work = true;
+            double value = 0.0;
+            const int begin =
+                gi.individual_ptr[static_cast<std::size_t>(individual)];
+            const int end =
+                gi.individual_ptr[static_cast<std::size_t>(individual + 1)];
+            for (int pos = begin; pos < end; ++pos) {
+                const int group =
+                    gi.individual_group[static_cast<std::size_t>(pos)];
+                const double scale =
+                    gi.group_scale[static_cast<std::size_t>(group)];
+                const double weight = unit_weights ? 1.0 : weight_ptr[group];
+                value += weight * scale * scale;
+            }
+            diagonal[individual_offset + individual] = value;
+        }
+        if (diag_observer && did_work) {
+            diag_observer->observe_work();
+        }
+    }
+#else
+    if (diag_observer) {
+        diag_observer->observe_work();
+    }
+    for (int individual = 0; individual < gi.num_individuals; ++individual) {
+        double value = 0.0;
+        const int begin =
+            gi.individual_ptr[static_cast<std::size_t>(individual)];
+        const int end =
+            gi.individual_ptr[static_cast<std::size_t>(individual + 1)];
+        for (int pos = begin; pos < end; ++pos) {
+            const int group =
+                gi.individual_group[static_cast<std::size_t>(pos)];
+            const double scale = gi.group_scale[static_cast<std::size_t>(group)];
+            const double weight = unit_weights ? 1.0 : weight_ptr[group];
+            value += weight * scale * scale;
+        }
+        diagonal[individual_offset + individual] = value;
+    }
+#endif
+    if (diag_observer) {
+        diag_observer->end_region();
+    }
+
+    Eigen::VectorXd column_scale(total_fe);
+    for (int column = 0; column < total_fe; ++column) {
+        const double value = diagonal[column];
+        column_scale[column] = value > 0.0 ? 1.0 / std::sqrt(value) : 0.0;
+    }
+
+    Eigen::VectorXd sqrt_weights;
+    if (!unit_weights) {
+        sqrt_weights.resize(n);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+        for (int row = 0; row < n; ++row) {
+            sqrt_weights[row] = std::sqrt(std::max(0.0, weight_ptr[row]));
+        }
+    }
+
+    Eigen::VectorXd scaled_coefficients(total_fe);
+    auto apply_A = [&](const Eigen::VectorXd& beta, Eigen::VectorXd& out) {
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+        for (int column = 0; column < total_fe; ++column) {
+            scaled_coefficients[column] = column_scale[column] * beta[column];
+        }
+        out.resize(n);
+        ParallelWorkObserver* observer = observer_if_needed(
+            options.parallel_observer, threads, n);
+        if (observer) {
+            observer->begin_region(threads);
+        }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel num_threads(threads)
+        {
+            bool did_work = false;
+#pragma omp for schedule(static)
+            for (int group = 0; group < n; ++group) {
+                did_work = true;
+                double fitted = 0.0;
+                for (int d = 0; d < dims; ++d) {
+                    const int level = indexers[static_cast<std::size_t>(d)]
+                                          .group_ids[static_cast<std::size_t>(group)];
+                    fitted += scaled_coefficients[
+                        offsets[static_cast<std::size_t>(d)] + level];
+                }
+                double individual_sum = 0.0;
+                const int begin = gi.group_ptr[static_cast<std::size_t>(group)];
+                const int end = gi.group_ptr[static_cast<std::size_t>(group + 1)];
+                for (int pos = begin; pos < end; ++pos) {
+                    const int individual =
+                        gi.group_individual[static_cast<std::size_t>(pos)];
+                    individual_sum +=
+                        scaled_coefficients[individual_offset + individual];
+                }
+                fitted += gi.group_scale[static_cast<std::size_t>(group)] *
+                          individual_sum;
+                out[group] = (unit_weights ? 1.0 : sqrt_weights[group]) * fitted;
+            }
+            if (observer && did_work) {
+                observer->observe_work();
+            }
+        }
+#else
+        if (observer) {
+            observer->observe_work();
+        }
+        for (int group = 0; group < n; ++group) {
+            double fitted = 0.0;
+            for (int d = 0; d < dims; ++d) {
+                const int level = indexers[static_cast<std::size_t>(d)]
+                                      .group_ids[static_cast<std::size_t>(group)];
+                fitted += scaled_coefficients[
+                    offsets[static_cast<std::size_t>(d)] + level];
+            }
+            double individual_sum = 0.0;
+            const int begin = gi.group_ptr[static_cast<std::size_t>(group)];
+            const int end = gi.group_ptr[static_cast<std::size_t>(group + 1)];
+            for (int pos = begin; pos < end; ++pos) {
+                const int individual =
+                    gi.group_individual[static_cast<std::size_t>(pos)];
+                individual_sum +=
+                    scaled_coefficients[individual_offset + individual];
+            }
+            fitted += gi.group_scale[static_cast<std::size_t>(group)] *
+                      individual_sum;
+            out[group] = (unit_weights ? 1.0 : sqrt_weights[group]) * fitted;
+        }
+#endif
+        if (observer) {
+            observer->end_region();
+        }
+    };
+
+    auto apply_At = [&](const Eigen::VectorXd& u, Eigen::VectorXd& out) {
+        // Every standard-FE and individual segment is assigned below; avoid a
+        // redundant serial clear of the full coefficient vector per iteration.
+        out.resize(total_fe);
+        for (int d = 0; d < dims; ++d) {
+            const StableGroupTraversal& traversal =
+                traversals[static_cast<std::size_t>(d)];
+            const int groups = groups_per_dim[static_cast<std::size_t>(d)];
+            const int offset = offsets[static_cast<std::size_t>(d)];
+            ParallelWorkObserver* observer = observer_if_needed(
+                options.parallel_observer, threads, groups);
+            if (observer) {
+                observer->begin_region(threads);
+            }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel num_threads(threads)
+            {
+                bool did_work = false;
+#pragma omp for schedule(static)
+                for (int level = 0; level < groups; ++level) {
+                    did_work = true;
+                    double value = 0.0;
+                    const int begin = traversal.group_begin(level);
+                    const int end = traversal.group_end(level);
+                    for (int pos = begin; pos < end; ++pos) {
+                        const int row = traversal.observation_at(pos);
+                        value += (unit_weights ? 1.0 : sqrt_weights[row]) * u[row];
+                    }
+                    out[offset + level] = column_scale[offset + level] * value;
+                }
+                if (observer && did_work) {
+                    observer->observe_work();
+                }
+            }
+#else
+            if (observer) {
+                observer->observe_work();
+            }
+            for (int level = 0; level < groups; ++level) {
+                double value = 0.0;
+                const int begin = traversal.group_begin(level);
+                const int end = traversal.group_end(level);
+                for (int pos = begin; pos < end; ++pos) {
+                    const int row = traversal.observation_at(pos);
+                    value += (unit_weights ? 1.0 : sqrt_weights[row]) * u[row];
+                }
+                out[offset + level] = column_scale[offset + level] * value;
+            }
+#endif
+            if (observer) {
+                observer->end_region();
+            }
+        }
+
+        ParallelWorkObserver* observer = observer_if_needed(
+            options.parallel_observer, threads, gi.num_individuals);
+        if (observer) {
+            observer->begin_region(threads);
+        }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel num_threads(threads)
+        {
+            bool did_work = false;
+#pragma omp for schedule(static)
+            for (int individual = 0; individual < gi.num_individuals; ++individual) {
+                did_work = true;
+                double value = 0.0;
+                const int begin =
+                    gi.individual_ptr[static_cast<std::size_t>(individual)];
+                const int end = gi.individual_ptr[
+                    static_cast<std::size_t>(individual + 1)];
+                for (int pos = begin; pos < end; ++pos) {
+                    const int group =
+                        gi.individual_group[static_cast<std::size_t>(pos)];
+                    const double sw = unit_weights ? 1.0 : sqrt_weights[group];
+                    value += sw *
+                             gi.group_scale[static_cast<std::size_t>(group)] *
+                             u[group];
+                }
+                out[individual_offset + individual] =
+                    column_scale[individual_offset + individual] * value;
+            }
+            if (observer && did_work) {
+                observer->observe_work();
+            }
+        }
+#else
+        if (observer) {
+            observer->observe_work();
+        }
+        for (int individual = 0; individual < gi.num_individuals; ++individual) {
+            double value = 0.0;
+            const int begin =
+                gi.individual_ptr[static_cast<std::size_t>(individual)];
+            const int end =
+                gi.individual_ptr[static_cast<std::size_t>(individual + 1)];
+            for (int pos = begin; pos < end; ++pos) {
+                const int group =
+                    gi.individual_group[static_cast<std::size_t>(pos)];
+                const double sw = unit_weights ? 1.0 : sqrt_weights[group];
+                value += sw * gi.group_scale[static_cast<std::size_t>(group)] *
+                         u[group];
+            }
+            out[individual_offset + individual] =
+                column_scale[individual_offset + individual] * value;
+        }
+#endif
+        if (observer) {
+            observer->end_region();
+        }
+    };
+
+    struct Rotation {
+        double c = 1.0;
+        double s = 0.0;
+        double r = 0.0;
+    };
+    auto sym_ortho_local = [](double a, double b) {
+        Rotation rotation;
+        if (b == 0.0) {
+            rotation.c = a < 0.0 ? -1.0 : 1.0;
+            rotation.r = std::abs(a);
+        } else if (a == 0.0) {
+            rotation.c = 0.0;
+            rotation.s = b < 0.0 ? -1.0 : 1.0;
+            rotation.r = std::abs(b);
+        } else if (std::abs(b) > std::abs(a)) {
+            const double tau = a / b;
+            rotation.s = (b < 0.0 ? -1.0 : 1.0) /
+                         std::sqrt(1.0 + tau * tau);
+            rotation.c = rotation.s * tau;
+            rotation.r = b / rotation.s;
+        } else {
+            const double tau = b / a;
+            rotation.c = (a < 0.0 ? -1.0 : 1.0) /
+                         std::sqrt(1.0 + tau * tau);
+            rotation.s = rotation.c * tau;
+            rotation.r = a / rotation.c;
+        }
+        return rotation;
+    };
+
+    auto solve_one = [&](const Eigen::Ref<const Eigen::VectorXd>& raw,
+                         int& iterations,
+                         bool& converged) {
+        Eigen::VectorXd b(n);
+        if (unit_weights) {
+            b = raw;
+        } else {
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+            for (int row = 0; row < n; ++row) {
+                b[row] = sqrt_weights[row] * raw[row];
+            }
+        }
+
+        const double norm_b = b.norm();
+        Eigen::VectorXd solution = Eigen::VectorXd::Zero(total_fe);
+        if (norm_b == 0.0) {
+            iterations = 0;
+            converged = true;
+            return solution;
+        }
+
+        Eigen::VectorXd u = b / norm_b;
+        Eigen::VectorXd v(total_fe);
+        apply_At(u, v);
+        double alpha = v.norm();
+        if (alpha == 0.0) {
+            iterations = 0;
+            converged = true;
+            return solution;
+        }
+        v /= alpha;
+
+        double beta = norm_b;
+        double zetabar = alpha * beta;
+        double alphabar = alpha;
+        double rho = 1.0;
+        double rhobar = 1.0;
+        double cbar = 1.0;
+        double sbar = 0.0;
+        Eigen::VectorXd h = v;
+        Eigen::VectorXd hbar = Eigen::VectorXd::Zero(total_fe);
+        Eigen::VectorXd Av(n);
+        Eigen::VectorXd Atu(total_fe);
+
+        double betadd = beta;
+        double betad = 0.0;
+        double rhodold = 1.0;
+        double tautildeold = 0.0;
+        double thetatilde = 0.0;
+        double zeta = 0.0;
+        double dnorm = 0.0;
+        double norm_a_sq = alpha * alpha;
+        double max_rbar = 0.0;
+        double min_rbar = 1.0e100;
+        double norm_a = std::sqrt(norm_a_sq);
+        double condition = 1.0;
+        double norm_r = beta;
+        const double tolerance = effective_absorption_tolerance(options);
+        const double condition_limit = 1.0e12;
+
+        converged = false;
+        int k = 0;
+        for (; k < options.max_iter; ++k) {
+            apply_A(v, Av);
+            u = Av - alpha * u;
+            beta = u.norm();
+            if (beta > 0.0) {
+                u /= beta;
+                apply_At(u, Atu);
+                v = Atu - beta * v;
+                alpha = v.norm();
+                if (alpha > 0.0) {
+                    v /= alpha;
+                } else {
+                    v.setZero();
+                }
+            } else {
+                v.setZero();
+                alpha = 0.0;
+            }
+
+            const Rotation qhat = sym_ortho_local(alphabar, 0.0);
+            const double alphahat = qhat.r;
+            const double rho_old = rho;
+            const Rotation q = sym_ortho_local(alphahat, beta);
+            rho = q.r;
+            if (rho == 0.0) {
+                break;
+            }
+            const double theta_new = q.s * alpha;
+            alphabar = q.c * alpha;
+
+            const double rhobar_old = rhobar;
+            const double zeta_old = zeta;
+            const double theta_bar = sbar * rho;
+            const double rho_temp = cbar * rho;
+            const Rotation qbar = sym_ortho_local(rho_temp, theta_new);
+            cbar = qbar.c;
+            sbar = qbar.s;
+            rhobar = qbar.r;
+            if (rhobar == 0.0 || rhobar_old == 0.0 || rho_old == 0.0) {
+                break;
+            }
+            zeta = cbar * zetabar;
+            zetabar = -sbar * zetabar;
+
+            hbar *= -(theta_bar * rho / (rho_old * rhobar_old));
+            hbar += h;
+            solution.noalias() += (zeta / (rho * rhobar)) * hbar;
+            h *= -(theta_new / rho);
+            h += v;
+
+            const double beta_acute = qhat.c * betadd;
+            const double beta_check = -qhat.s * betadd;
+            const double beta_hat = q.c * beta_acute;
+            betadd = -q.s * beta_acute;
+            const double theta_tilde_old = thetatilde;
+            const Rotation qtilde = sym_ortho_local(rhodold, theta_bar);
+            if (qtilde.r == 0.0) {
+                break;
+            }
+            thetatilde = qtilde.s * rhobar;
+            rhodold = qtilde.c * rhobar;
+            if (rhodold == 0.0) {
+                break;
+            }
+            betad = -qtilde.s * betad + qtilde.c * beta_hat;
+            tautildeold =
+                (zeta_old - theta_tilde_old * tautildeold) / qtilde.r;
+            const double taud =
+                (zeta - thetatilde * tautildeold) / rhodold;
+            dnorm += beta_check * beta_check;
+            norm_r = std::sqrt(std::max(
+                0.0, dnorm + (betad - taud) * (betad - taud) +
+                         betadd * betadd));
+
+            norm_a_sq += beta * beta;
+            norm_a = std::sqrt(norm_a_sq);
+            norm_a_sq += alpha * alpha;
+            max_rbar = std::max(max_rbar, rhobar_old);
+            if (k > 0) {
+                min_rbar = std::min(min_rbar, rhobar_old);
+            }
+            const double condition_denom = std::min(min_rbar, rho_temp);
+            condition = condition_denom > 0.0
+                            ? std::max(max_rbar, rho_temp) / condition_denom
+                            : std::numeric_limits<double>::infinity();
+
+            const double norm_ar = std::abs(zetabar);
+            const double norm_x = solution.norm();
+            const double test1 = norm_r / norm_b;
+            const double test2 = norm_a * norm_r != 0.0
+                                     ? norm_ar / (norm_a * norm_r)
+                                     : std::numeric_limits<double>::infinity();
+            const double residual_tolerance =
+                tolerance + tolerance * norm_a * norm_x / norm_b;
+            if (test1 <= residual_tolerance || test2 <= tolerance ||
+                alpha == 0.0) {
+                converged = true;
+                ++k;
+                break;
+            }
+            if (condition >= condition_limit) {
+                ++k;
+                break;
+            }
+        }
+
+        iterations = k;
+        if (!hdfe::detail::ieee_all_finite(solution)) {
+            converged = false;
+        }
+        return solution;
+    };
+
+    auto subtract_projection = [&](Eigen::Ref<Eigen::VectorXd> values,
+                                   const Eigen::VectorXd& beta) {
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+        for (int column = 0; column < total_fe; ++column) {
+            scaled_coefficients[column] = column_scale[column] * beta[column];
+        }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+        for (int group = 0; group < n; ++group) {
+            double fitted = 0.0;
+            for (int d = 0; d < dims; ++d) {
+                const int level = indexers[static_cast<std::size_t>(d)]
+                                      .group_ids[static_cast<std::size_t>(group)];
+                fitted += scaled_coefficients[
+                    offsets[static_cast<std::size_t>(d)] + level];
+            }
+            double individual_sum = 0.0;
+            const int begin = gi.group_ptr[static_cast<std::size_t>(group)];
+            const int end = gi.group_ptr[static_cast<std::size_t>(group + 1)];
+            for (int pos = begin; pos < end; ++pos) {
+                const int individual =
+                    gi.group_individual[static_cast<std::size_t>(pos)];
+                individual_sum +=
+                    scaled_coefficients[individual_offset + individual];
+            }
+            fitted += gi.group_scale[static_cast<std::size_t>(group)] *
+                      individual_sum;
+            values[group] -= fitted;
+        }
+    };
+
+    int max_iterations = 0;
+    bool all_converged = true;
+    int y_iterations = 0;
+    bool y_converged = false;
+    const Eigen::VectorXd y_beta =
+        solve_one(result.y_tilde, y_iterations, y_converged);
+    subtract_projection(result.y_tilde, y_beta);
+    max_iterations = y_iterations;
+    all_converged = y_converged;
+
+    for (int column = 0; column < result.X_tilde.cols(); ++column) {
+        int x_iterations = 0;
+        bool x_converged = false;
+        const Eigen::VectorXd x_beta =
+            solve_one(result.X_tilde.col(column), x_iterations, x_converged);
+        subtract_projection(result.X_tilde.col(column), x_beta);
+        max_iterations = std::max(max_iterations, x_iterations);
+        all_converged = all_converged && x_converged;
+    }
+
+    result.iterations = max_iterations;
+    result.converged = all_converged;
+    result.precision_certified = false;
+    return result;
+}
+
 }  // namespace
 
 AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
@@ -9799,8 +10392,14 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
     // Validate absorption method.
     const AbsorptionMethod selected =
         choose_absorption_method(standard_fes.size() + 1, threads, options, method);
-    if (selected == AbsorptionMethod::Jacobi) {
-        throw std::runtime_error("Jacobi absorption is not supported with group/individual FEs");
+    if (selected == AbsorptionMethod::Jacobi ||
+        selected == AbsorptionMethod::Schwarz ||
+        selected == AbsorptionMethod::Mlsmr ||
+        selected == AbsorptionMethod::AutoMlsmr) {
+        throw std::runtime_error(
+            "The requested absorption method is not supported with "
+            "group/individual FEs; use auto, lsmr, gauss-seidel, or "
+            "symmetric-gauss-seidel");
     }
 
     const bool unit_weights = (weights == nullptr);
@@ -9808,13 +10407,20 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
 
     const GpuBackend gpu_backend = resolve_gpu_backend();
     const bool gpu_cuda = (gpu_backend == GpuBackend::Cuda && cuda_backend_available());
+    if (selected == AbsorptionMethod::Lsmr &&
+        gpu_backend == GpuBackend::Cuda &&
+        gpu_backend_requested(gpu_backend)) {
+        throw std::runtime_error(
+            "absorptionmethod(lsmr) is CPU-only with group/individual FEs; "
+            "use gpubackend(cpu) or absorptionmethod(auto)");
+    }
     if (gpu_backend_requested(gpu_backend) && !gpu_cuda) {
         result.converged = false;
         mark_gpu_unavailable(result);
         record_diagnostics(result);
         return result;
     }
-    if (gpu_cuda) {
+    if (gpu_cuda && selected != AbsorptionMethod::Lsmr) {
         // For group()/individual() absorption, a CUDA backend can be substantially faster.
         // Fall back silently if the backend fails (OOM, missing device, etc.).
         std::vector<Eigen::VectorXd> weight_sums;
@@ -9871,13 +10477,18 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
         const bool ok = absorb_fixed_effects_group_individual_cuda(
             y, X, fe_inputs, gi, weights, order, gpu_opts, selected, result);
         if (ok && result.converged) {
-            result.gpu_used = true;
-            result.gpu_status_code = 1;
-            result.gpu_attempted = true;
-            result.gpu_absorption_converged = true;
-            result.gpu_absorption_iterations = result.iterations;
-            record_diagnostics(result);
-            return result;
+            const bool certified = certify_group_individual_candidate(
+                y, X, standard_fes, gi, weights, options, result);
+            if (certified) {
+                result.gpu_used = true;
+                result.gpu_status_code = 1;
+                result.gpu_attempted = true;
+                result.gpu_absorption_converged = true;
+                result.gpu_absorption_iterations = result.iterations;
+                return result;
+            }
+            result.converged = false;
+            result.precision_certified = false;
         }
         result.gpu_used = false;
         result.gpu_status_code = ok ? 3 : 4;
@@ -9889,6 +10500,72 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             record_diagnostics(result);
             return result;
         }
+    }
+
+    const bool auto_cpu_lsmr =
+        options.from_auto ||
+        (method == AbsorptionMethod::Auto &&
+         options.absorption_method == AbsorptionMethod::Auto);
+    if (selected == AbsorptionMethod::Lsmr || auto_cpu_lsmr) {
+        AbsorptionResult lsmr = absorb_group_individual_lsmr_cpu(
+            y, X, indexers, gi, weights, options, threads);
+        const bool solver_converged = lsmr.converged;
+        if (solver_converged) {
+            const bool certified = certify_group_individual_candidate(
+                y, X, standard_fes, gi, weights, options, lsmr);
+            lsmr.converged = certified;
+            lsmr.precision_certified = certified;
+        } else {
+            record_diagnostics(lsmr);
+            lsmr.converged = false;
+            lsmr.precision_certified = false;
+        }
+        if (!lsmr.converged && solver_converged &&
+            strict_residual_tolerance_mode(options)) {
+            // Strict mode certifies maximum weighted FE means, which is
+            // stronger than LSMR's normalized stopping test. Retry only when
+            // the nominal solve misses that independent gate; ordinary strict
+            // cases avoid unconditional oversolving.
+            HdfeOptions retry_options = options;
+            retry_options.tol = std::max(
+                64.0 * std::numeric_limits<double>::epsilon(),
+                std::max(0.0, options.tol) * 1.0e-4);
+            AbsorptionResult retry = absorb_group_individual_lsmr_cpu(
+                y, X, indexers, gi, weights, retry_options, threads);
+            const bool retry_solver_converged = retry.converged;
+            if (retry_solver_converged) {
+                const bool retry_certified = certify_group_individual_candidate(
+                    y, X, standard_fes, gi, weights, options, retry);
+                retry.converged = retry_certified;
+                retry.precision_certified = retry_certified;
+            } else {
+                record_diagnostics(retry);
+                retry.converged = false;
+                retry.precision_certified = false;
+            }
+            lsmr = std::move(retry);
+        }
+        if (lsmr.converged || !auto_cpu_lsmr) {
+            return lsmr;
+        }
+
+        // Auto must not reduce feature coverage when LSMR encounters a
+        // numerical breakdown, condition stop, or failed certificate. Retry
+        // the previous sweep path from the original data; explicit LSMR stays
+        // fail-closed and never changes algorithm behind the user's back.
+        const AbsorptionMethod fallback_method =
+            selected == AbsorptionMethod::SymmetricGaussSeidel
+                ? AbsorptionMethod::SymmetricGaussSeidel
+                : AbsorptionMethod::GaussSeidel;
+        HdfeOptions fallback_options = options;
+        fallback_options.from_auto = false;
+        fallback_options.absorption_method = fallback_method;
+        fallback_options.symmetric_sweep =
+            fallback_method == AbsorptionMethod::SymmetricGaussSeidel;
+        ScopedGpuBackendOverride force_cpu_fallback(GpuBackend::Cpu);
+        return absorb_fixed_effects_group_individual(
+            y, X, standard_fes, gi, weights, fallback_options,
+            fallback_method);
     }
 
     std::vector<FeWorkspace> workspaces;
@@ -10102,8 +10779,12 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
         certified = certify_group_individual_candidate(
             y, X, standard_fes, gi, weights, options, result);
     }
-    result.converged = certified;
-    result.precision_certified = certified;
+    // A certificate must never resurrect a MAP solve that exhausted max_iter
+    // without hitting its own stopping proxy.  Conversely, a proxy reached on
+    // the final allowed sweep is a legitimate convergence event and must not
+    // be rejected merely because iterations == max_iter.
+    result.converged = converged && certified;
+    result.precision_certified = result.converged;
     return result;
 }
 

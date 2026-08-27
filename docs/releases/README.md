@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.25.1 | 27 August 2026 | [`group()` / `individual()` joint-LSMR correctness hotfix](RELEASE_NOTES_2.25.1.20260827.md) |
 | 2.25.0 | 24 August 2026 | [`xfepout` rename and source/release hardening](RELEASE_NOTES_2.25.0.20260824.md) |
 | 2.24.2 | 22 August 2026 | [Stata large-ID ingestion and Windows net-install runtime delivery](RELEASE_NOTES_2.24.2.20260822.md) |
 | 2.24.1 | 16 August 2026 | [Direct maketables integration for Python results](RELEASE_NOTES_2.24.1.20260816.md) |

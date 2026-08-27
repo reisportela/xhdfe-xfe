@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.25.0). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.25.1). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.25.0) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.25.1) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is validated against it and
 #' never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.25.0.
+#' effects regression via a C++ backend." Version 2.25.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -440,9 +440,12 @@ NULL
 #'       gate/sweep path so that the 200,000-row sampling probe cannot
 #'       over-promote (raise the cap with the environment variable
 #'       \code{XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}; an explicit
-#'       \code{"auto-mlsmr"} is uncapped). Ineligible paths (GPU backends,
-#'       \code{save_fe}, heterogeneous slopes, \code{group}/
-#'       \code{individual}) resolve directly to the sweep fallback. Gate
+#'       \code{"auto-mlsmr"} is uncapped). GPU backends, \code{save_fe},
+#'       and heterogeneous-slope paths resolve to their existing eligible
+#'       fallbacks. Combined \code{group}/\code{individual} fits use joint
+#'       LSMR for CPU \code{"auto"}, the existing certified solver for CUDA
+#'       \code{"auto"}, and a certified sweep fallback if automatic CPU LSMR
+#'       cannot be accepted. Gate
 #'       promotions to MLSMR can be disabled entirely with
 #'       \code{XHDFE_MLSMR_AUTO_GATE=0}.
 #'     \item \code{"gauss-seidel"} (aliases \code{"gs"},
@@ -464,10 +467,12 @@ NULL
 #'       MLSMR selector explicitly (uncapped in the number of fixed
 #'       effects).
 #'   }
-#'   The LSMR/MLSMR family are matrix-free additive-Schwarz Krylov
-#'   absorbers; they are \emph{CPU-only} for standard fixed-effect designs
-#'   and do not support \code{save_fe}, heterogeneous slopes, or
-#'   \code{group}/\code{individual}. The method effectively used is
+#'   The LSMR/MLSMR family are matrix-free Krylov absorbers and are
+#'   \emph{CPU-only}. For standard fixed-effect designs they do not support
+#'   \code{save_fe} or heterogeneous slopes. In combined
+#'   \code{group}/\code{individual} mode, plain \code{"lsmr"} is supported
+#'   on CPU; \code{"mlsmr"}, \code{"auto-mlsmr"}, \code{"schwarz"}, and
+#'   \code{"jacobi"} are rejected. The method effectively used is
 #'   reported in the \code{absorption_method_used} and
 #'   \code{absorption_method_code} fields (same code table as Stata's
 #'   \code{e(absorption_method_used)}).
@@ -695,9 +700,10 @@ NULL
 #' variable around the fit and is the recommended interface.
 #' \code{backend = "cpu"} forces the CPU path even when the environment
 #' variable is set. \code{"metal"} is reserved for Metal builds and errors
-#' where unavailable. CPU behavior is the reference implementation; the
-#' LSMR-family absorption methods are CPU-only, and GPU-ineligible paths
-#' under \code{absorption_method = "auto"} resolve to the sweep fallback.
+#' where unavailable. CPU behavior is the reference implementation. The joint
+#' group/individual LSMR route is CPU-only; CUDA \code{"auto"} retains the
+#' existing GPU solver and now requires the authoritative certificate, while
+#' explicit LSMR with CUDA is rejected.
 #'
 #' @section Group-level outcomes with individual fixed effects:
 #' \code{xhdfe()} supports individual fixed effects with group-level
@@ -727,6 +733,16 @@ NULL
 #' \code{num_singletons} can differ from \code{reghdfe}'s pre-collapse row
 #' count even when the effective estimation sample is identical.
 #'
+#' On CPU, \code{absorption_method = "auto"} uses joint matrix-free LSMR
+#' for the standard and individual dimensions; explicit \code{"lsmr"} selects
+#' the same CPU route. If an automatic LSMR solve cannot pass its independent
+#' certificate, the previous sweep path is retried from the original data and
+#' the effective method is reported. CUDA \code{"auto"} keeps the existing
+#' group/individual GPU solver and accepts it only after the authoritative
+#' certificate passes. Explicit \code{"gauss-seidel"} and
+#' \code{"symmetric-gauss-seidel"} remain supported; \code{"jacobi"},
+#' \code{"schwarz"}, \code{"mlsmr"}, and \code{"auto-mlsmr"} are not.
+#'
 #' IV/2SLS, heterogeneous slopes, and (with both \code{group} and
 #' \code{individual}) \code{save_fe} are not supported in group mode.
 #'
@@ -734,14 +750,15 @@ NULL
 #' \itemize{
 #'   \item Heterogeneous slopes are not supported together with
 #'     \code{group}/\code{individual}, nor with the LSMR-family absorption
-#'     methods (\code{"lsmr"}, \code{"mlsmr"}, \code{"auto-mlsmr"}).
+#'     methods on standard FE designs.
 #'   \item \code{save_fe} is not supported when both \code{group} and
 #'     \code{individual} are specified.
 #'   \item IV/2SLS is not supported in \code{group} mode.
 #'   \item \code{tolerance_mode = "strict-residual"} is not supported with
 #'     heterogeneous slopes (an error is raised before estimation).
 #'   \item The LSMR-family absorption methods are CPU-only and do not
-#'     support \code{save_fe}.
+#'     support \code{save_fe}; only plain LSMR is supported for combined
+#'     \code{group}/\code{individual} fits.
 #'   \item No HAC or Driscoll-Kraay standard errors (see \code{ivreghdfe}
 #'     in the \code{reghdfe} ecosystem).
 #' }
@@ -1066,7 +1083,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.25.0.
+#' effects regression via a C++ backend." Version 2.25.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

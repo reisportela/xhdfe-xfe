@@ -149,4 +149,161 @@ preserve
     }
 restore
 
+// A cycle has no singletons but an O(1/N^2) spectral gap. Plain MAP can reach
+// maxiter() with a small backward residual while the regression coefficient is
+// still wrong; automatic group/individual absorption must use joint LSMR.
+clear
+set obs 1000
+gen long group = _n - 1
+gen int ntrab = floor((_n - 1) / 2)
+gen byte edge = mod(_n - 1, 2)
+gen int p_ntrab = cond(edge == 0, ntrab, mod(ntrab + 1, 500))
+gen double x = sin(group / 13) + cos(group / 29) + mod(group, 7) / 11
+gen double y = .7 * x + sin(ntrab / 17) + cos(p_ntrab / 23) + .01 * sin(group / 5)
+
+quietly reghdfe y x, absorb(p_ntrab ntrab) group(group) ///
+    individual(p_ntrab) aggregation(sum) keepsingletons tolerance(1e-8) ///
+    residuals(res_ref)
+scalar cycle_ref_b = _b[x]
+scalar cycle_ref_cons = _b[_cons]
+scalar cycle_ref_rss = e(rss)
+
+quietly xhdfe y x, absorb(p_ntrab ntrab) group(group) ///
+    individual(p_ntrab) aggregation(sum) keepsingletons tolerance(1e-8) ///
+    residuals(res_xhdfe) numthreads(2) noheader notable nofootnote
+assert e(converged) == 1
+assert e(precision_certified) == 1
+assert e(absorption_method_used) == 5
+assert e(iterations) < 100000
+assert e(threads_requested) == 2
+assert e(threads_used) == 2
+assert abs(_b[x] - cycle_ref_b) <= 1e-10
+assert abs(_b[_cons] - cycle_ref_cons) <= 1e-10
+assert abs(e(rss) - cycle_ref_rss) <= 1e-16
+tempvar residual_diff
+gen double `residual_diff' = abs(res_xhdfe - res_ref)
+quietly summarize `residual_diff', meanonly
+assert r(max) <= 1e-10
+
+capture noisily xhdfe y x, absorb(p_ntrab ntrab) group(group) ///
+    individual(p_ntrab) aggregation(sum) keepsingletons tolerance(1e-8) ///
+    absorptionmethod(gauss-seidel) maxiter(1000) ///
+    noheader notable nofootnote
+if (_rc != 498) {
+    di as error "group/individual Gauss-Seidel must fail closed at maxiter()"
+    exit 9
+}
+
+// Unequal group sizes make aggregation(mean) and aggregation(sum) distinct.
+// Exercise the multi-incidence adjoint, analytic weights, and explicit LSMR
+// against an explicit group-level dummy-design oracle for both estimands.
+clear
+set obs 300
+gen long group = _n - 1
+gen int standard_fe = mod(group * 7 + floor(group / 9), 23)
+gen byte group_size = 2 + mod(group, 3)
+gen double x = sin(group / 17) + cos(group / 31) + mod(group, 11) / 13
+gen double aw = .5 + mod(group, 9) / 7
+gen byte fw = 1 + mod(group, 3)
+expand group_size
+bysort group: gen byte member = _n - 1
+gen int individual = mod(group * 17 + member * 29 + floor(group / 11), 83)
+gen double individual_signal = sin(individual / 19)
+bysort group: egen double individual_sum = total(individual_signal)
+gen double y = .63 * x + sin(standard_fe / 7) + individual_sum + .02 * cos(group / 13)
+
+foreach agg in mean sum {
+    preserve
+        quietly tabulate individual, generate(__inc_)
+        collapse (sum) __inc_* (firstnm) y x standard_fe aw fw group_size, by(group)
+        if ("`agg'" == "mean") {
+            foreach v of varlist __inc_* {
+                quietly replace `v' = `v' / group_size
+            }
+        }
+        quietly regress y x i.standard_fe __inc_* [aw=aw]
+        scalar varying_ref_b_`agg' = _b[x]
+        scalar varying_ref_rss_`agg' = e(rss)
+        predict double oracle_residual, residuals
+        keep group oracle_residual
+        tempfile oracle
+        save "`oracle'", replace
+    restore
+    merge m:1 group using "`oracle'", assert(match) nogen
+    rename oracle_residual res_ref_`agg'
+
+    quietly xhdfe y x [aw=aw], absorb(standard_fe individual) group(group) ///
+        individual(individual) aggregation(`agg') keepsingletons ///
+        tolerancemode(strict-residual) tolerance(1e-10) ///
+        absorptionmethod(lsmr) numthreads(2) ///
+        residuals(res_xhdfe_`agg') noheader notable nofootnote
+    assert e(converged) == 1
+    assert e(precision_certified) == 1
+    assert e(absorption_method_used) == 5
+    assert abs(_b[x] - varying_ref_b_`agg') <= 1e-9
+    assert abs(e(rss) - varying_ref_rss_`agg') <= 1e-9 * max(1, varying_ref_rss_`agg')
+    tempvar varying_diff
+    gen double `varying_diff' = abs(res_xhdfe_`agg' - res_ref_`agg')
+    quietly summarize `varying_diff', meanonly
+    assert r(max) <= 1e-8
+
+    scalar varying_xhdfe_b_`agg' = _b[x]
+    scalar varying_xhdfe_cons_`agg' = _b[_cons]
+    scalar varying_xhdfe_rss_`agg' = e(rss)
+    quietly xhdfe y x [aw=aw], absorb(standard_fe individual) group(group) ///
+        individual(individual) aggregation(`agg') keepsingletons ///
+        tolerancemode(strict-residual) tolerance(1e-10) ///
+        absorptionmethod(lsmr) numthreads(1) ///
+        residuals(res_xhdfe_1t_`agg') noheader notable nofootnote
+    assert e(threads_used) == 1
+    assert abs(_b[x] - varying_xhdfe_b_`agg') <= 1e-14
+    assert abs(_b[_cons] - varying_xhdfe_cons_`agg') <= 1e-14
+    assert abs(e(rss) - varying_xhdfe_rss_`agg') <= 1e-14
+    tempvar thread_diff
+    gen double `thread_diff' = abs(res_xhdfe_1t_`agg' - res_xhdfe_`agg')
+    quietly summarize `thread_diff', meanonly
+    assert r(max) <= 1e-14
+}
+assert abs(varying_ref_b_mean - varying_ref_b_sum) > 1e-6
+
+preserve
+    quietly tabulate individual, generate(__inc_)
+    collapse (sum) __inc_* (firstnm) y x standard_fe fw, by(group)
+    quietly regress y x i.standard_fe __inc_* [fw=fw]
+    scalar varying_fw_ref_b = _b[x]
+    scalar varying_fw_ref_rss = e(rss)
+    scalar varying_fw_ref_N = e(N)
+restore
+quietly xhdfe y x [fw=fw], absorb(standard_fe individual) group(group) ///
+    individual(individual) aggregation(sum) keepsingletons ///
+    tolerancemode(strict-residual) tolerance(1e-10) numthreads(2) ///
+    noheader notable nofootnote
+assert e(converged) == 1 & e(precision_certified) == 1
+assert abs(_b[x] - varying_fw_ref_b) <= 1e-9
+assert abs(e(rss) - varying_fw_ref_rss) <= 1e-9 * max(1, varying_fw_ref_rss)
+assert e(N) == varying_fw_ref_N
+
+foreach method in jacobi schwarz mlsmr auto-mlsmr {
+    capture noisily xhdfe y x, absorb(standard_fe individual) group(group) ///
+        individual(individual) aggregation(sum) keepsingletons ///
+        absorptionmethod(`method') noheader notable nofootnote
+    if (_rc != 198) {
+        di as error "unsupported group/individual method `method' should fail with r(198)"
+        exit 9
+    }
+}
+
+// Convergence reached and certified on the final allowed sweep is valid.
+clear
+input double(y x) byte(group individual)
+-1 -1 1 1
+ 1  1 2 1
+end
+xhdfe y x, absorb(individual) group(group) individual(individual) ///
+    aggregation(sum) keepsingletons absorptionmethod(gauss-seidel) ///
+    maxiter(1) noheader notable nofootnote
+assert e(converged) == 1
+assert e(precision_certified) == 1
+assert e(iterations) == 1
+
 exit

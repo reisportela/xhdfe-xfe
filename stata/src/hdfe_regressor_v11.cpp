@@ -11049,6 +11049,9 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         threads, thread_resolution.capacity);
 
     HdfeOptions tuned = options_;
+    tuned.from_auto =
+        options_.absorption_method == AbsorptionMethod::Auto &&
+        !options_.symmetric_sweep;
     tuned.num_threads_explicit = options_.num_threads > 0;
     tuned.parallel_observer = parallel_observer_.get();
     tuned.num_threads = threads;
@@ -11090,6 +11093,11 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         !options_.symmetric_sweep) {
         tuned.symmetric_sweep = true;
     }
+    // A matching, explicitly requested mobility profile remains authoritative.
+    // Without a profile, auto uses the joint LSMR default below.
+    if (have_mobility_hint) {
+        tuned.from_auto = false;
+    }
 
     const bool allow_profile_write =
         mobility_cfg.mode == "write" ||
@@ -11130,7 +11138,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     bool absorption_ready = false;
     if (benchmark_methods) {
         std::vector<AbsorptionMethod> candidates;
-        candidates.reserve(2);
+        candidates.reserve(3);
+        candidates.push_back(AbsorptionMethod::Lsmr);
         candidates.push_back(AbsorptionMethod::GaussSeidel);
         candidates.push_back(AbsorptionMethod::SymmetricGaussSeidel);
 
@@ -11138,6 +11147,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         AbsorptionMethod best_method = AbsorptionMethod::Auto;
         for (const auto method : candidates) {
             HdfeOptions bench_opts = tuned;
+            bench_opts.from_auto = false;
             bench_opts.absorption_method = method;
             bench_opts.symmetric_sweep = (method == AbsorptionMethod::SymmetricGaussSeidel);
 
@@ -11167,6 +11177,14 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     if (!absorption_ready) {
         absorption = detail::absorb_fixed_effects_group_individual(
             y_work, design, standard_fes_work, gi_work, w_ptr, tuned, method_used_);
+    }
+    if (tuned.from_auto && !absorption.gpu_used) {
+        method_used_ = absorption.mlsmr_used
+                           ? AbsorptionMethod::Lsmr
+                           : (method_used_ == AbsorptionMethod::SymmetricGaussSeidel
+                                  ? AbsorptionMethod::SymmetricGaussSeidel
+                                  : AbsorptionMethod::GaussSeidel);
+        tuned.absorption_method = method_used_;
     }
     gpu_used_ = absorption.gpu_used;
     gpu_status_code_ = absorption.gpu_status_code;

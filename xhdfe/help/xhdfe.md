@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.25.0.20260824. Use `python -m xhdfe --version`
+Package documentation version: 2.25.1.20260827. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -482,6 +482,17 @@ collapsed sample.
 identifier must also be present among `fes`. This mode does not support IV or
 heterogeneous slopes. Fixed-effect recovery through `retain_fes` is not
 available for the combined group/individual path.
+
+On CPU, `absorption_method="auto"` uses a joint matrix-free LSMR operator for
+the standard and individual fixed effects; `absorption_method="lsmr"` selects
+it explicitly. An automatic LSMR result that cannot pass the independent
+certificate falls back to the previous certified sweep route, and
+`absorption_method_used` reports which result was retained. On CUDA, `auto`
+keeps the existing group/individual GPU solver and accepts it only when the
+authoritative certificate passes. Explicit LSMR with CUDA is rejected because
+the joint LSMR implementation is CPU-only. Explicit `gauss-seidel` and
+`symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
+`auto-mlsmr` are unsupported for combined group/individual fits.
 
 ## Fixed-effect recovery
 
