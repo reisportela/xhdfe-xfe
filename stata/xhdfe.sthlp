@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.25.0 24aug2026}{...}
+{* *! version 2.25.1 27aug2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -320,6 +320,16 @@ Singleton bookkeeping in this mode is done after the group-level representative-
 {cmd:e(num_singletons)} can differ from reghdfe's pre-collapse row count even when the effective estimation
 sample is the same.{p_end}
 
+{pstd}On CPU, {cmd:absorptionmethod(auto)} uses a joint matrix-free LSMR operator for the
+combined standard and individual fixed effects. {cmd:absorptionmethod(lsmr)} selects that
+CPU path explicitly. If an automatic LSMR solve cannot pass its independent certificate,
+{cmd:auto} retries the previous sweep path from the original data; the reported method code
+always identifies the result actually used. On CUDA, {cmd:auto} retains the GPU group/individual
+solver and accepts it only when the authoritative certificate passes. Explicit LSMR with CUDA
+is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-seidel} and
+{cmd:symmetric-gauss-seidel} remain available; {cmd:jacobi}, {cmd:schwarz}, {cmd:mlsmr}, and
+{cmd:auto-mlsmr} are not supported in group/individual mode.{p_end}
+
 
 {marker links}{...}
 {title:Links to online documentation}
@@ -633,8 +643,7 @@ forces recovery sweeps on the partial residual.
 {cmd:mlsmr}/{cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive};
 {cmd:lsmr}/{cmd:plain-lsmr}/{cmd:plain_lsmr}; and
 {cmd:auto-mlsmr}/{cmd:auto_mlsmr}/{cmd:mlsmr-auto}/{cmd:mlsmr_auto}.
-The LSMR/MLSMR family uses matrix-free additive-Schwarz Krylov absorbers and is CPU-only for standard
-FE designs.
+The LSMR/MLSMR family uses matrix-free Krylov absorbers and is CPU-only.
 {cmd:auto} first uses the probe-based auto-MLSMR selector on eligible CPU, standard-FE designs with up to three
 fixed-effect dimensions. It promotes
 slow-converging large designs to {cmd:mlsmr}; otherwise it resolves to a sweep fallback ({cmd:gauss-seidel} by
@@ -643,11 +652,15 @@ Schwarz/Jacobi-PCG gate after the selector has already chosen a sweep. Under {cm
 MLSMR promotion is limited to large, many-RHS, multi-way moderate-rho designs. Designs with four or more fixed
 effects stay on the full-data gate/sweep path so the 200k-sample probe cannot over-promote large, well-connected
 many-way graphs (raise the cap with {cmd:XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}; {cmd:absorptionmethod(auto-mlsmr)}
-is uncapped). Ineligible paths (GPU, savefe,
-heterogeneous slopes, {cmd:group()}/{cmd:individual()}) resolve directly to the sweep fallback. Disable MLSMR gate
+is uncapped). GPU, savefe, and heterogeneous-slope paths resolve directly to their existing
+eligible fallback. Combined {cmd:group()}/{cmd:individual()} fits use their dedicated routing:
+joint LSMR for CPU {cmd:auto}, the existing certified solver for CUDA {cmd:auto}, and an optional
+certified sweep fallback if automatic CPU LSMR cannot be accepted. Disable MLSMR gate
 promotions with {cmd:XHDFE_MLSMR_AUTO_GATE=0}. {cmd:absorptionmethod(mlsmr)} forces MLSMR; {cmd:auto-mlsmr}
-runs the same probe-based selector explicitly. {cmd:mlsmr}/{cmd:lsmr}/{cmd:auto-mlsmr} are CPU-only and do not support
-{cmd:savefe}/heterogeneous slopes/{cmd:group()}/{cmd:individual()}.
+runs the same probe-based selector explicitly. For standard FE designs,
+{cmd:mlsmr}/{cmd:lsmr}/{cmd:auto-mlsmr} do not support {cmd:savefe} or heterogeneous slopes.
+In group/individual mode only plain {cmd:lsmr} is supported, and only on CPU; explicit
+{cmd:mlsmr}/{cmd:auto-mlsmr}/{cmd:schwarz}/{cmd:jacobi} requests are rejected.
 
 {phang}
 {opt sym:metricsweep} performs a forward + backward sweep per iteration for Gauss-Seidel methods
@@ -1124,7 +1137,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.25.0.
+regression via a C++ backend." Version 2.25.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
