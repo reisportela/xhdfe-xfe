@@ -600,8 +600,19 @@ inline Real solve_normal_two_sided(Real target) {
                 candidate = newton;
             }
         }
-        if (!(candidate > low && candidate < high) || !finite_value(candidate)) {
+        if (!finite_value(candidate)) {
             throw std::runtime_error("normal inverse iterate is invalid");
+        }
+        if (!(candidate > low && candidate < high)) {
+            const Real next = std::nextafter(low, high);
+            if (!(next > low && next <= high) || !finite_value(next)) {
+                throw std::runtime_error("normal inverse bracket is invalid");
+            }
+            // The bracket has reached the platform's effective arithmetic
+            // resolution. The strict probability postcondition below remains
+            // authoritative.
+            converged = true;
+            break;
         }
         value = candidate;
     }
@@ -800,8 +811,18 @@ inline double positive_quantile_from_two_sided_target(Real target, Real df) {
                 candidate = newton;
             }
         }
-        if (!(candidate > low && candidate < high) || !finite_value(candidate)) {
+        if (!finite_value(candidate)) {
             throw std::runtime_error("Student-t inverse iterate is invalid");
+        }
+        if (!(candidate > low && candidate < high)) {
+            const Real next = std::nextafter(low, high);
+            if (!(next > low && next <= high) || !finite_value(next)) {
+                throw std::runtime_error("Student-t inverse bracket is invalid");
+            }
+            // nearest_double_quantile performs the final bracket and
+            // relative-tail certification after arithmetic stalls here.
+            converged = true;
+            break;
         }
         value = candidate;
     }

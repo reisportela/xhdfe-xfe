@@ -1,7 +1,4 @@
-# xhdfe 2.26.0 / xfepout 1.13.0 - 02sep2026
-
-> Unissued candidate: its tagged workflow stopped at the Windows Python wheel
-> runtime gate before release creation. Version 2.26.1 supersedes it.
+# xhdfe 2.26.1 / xfepout 1.13.0 - 02sep2026
 
 Precision and cache-contract hardening for ordinary and grouped absorption,
 heterogeneous slopes, inference, and the `xfepout` partial-out frontend. The estimator
@@ -9,6 +6,17 @@ definition, public tolerance, supported coefficient/inference outputs, and
 default formatting remain unchanged. Failed precision or backend checks remain
 fail-closed; this release does not introduce a silent CPU fallback for an
 explicit CUDA request.
+
+## Windows Student-t inverse portability fix
+
+The safeguarded normal and Student-t inverse solvers now terminate cleanly
+when a valid bracket reaches the effective arithmetic resolution of the
+platform. Final bracket and relative-tail postconditions remain authoritative;
+no inference tolerance or estimator definition changed. This fixes the
+CPython 3.12 wheel on Strawberry MinGW GCC 13.2, including a perfect-fit smoke
+with 28 residual degrees of freedom. The tagged `2.26.0.20260902` workflow
+stopped at this Windows gate and produced no public release; 2.26.1 supersedes
+that unissued candidate.
 
 ## Ordinary Krylov parity floor
 
@@ -160,8 +168,8 @@ from the tagged CI workflow, not local runtime execution.
 
 ## Version scope
 
-- Shared C++/Python/R package and release tag: `2.26.0.20260902`.
-- Stata `xhdfe`, `xhdfe_p`, `xhdfe_estat`, and `xhdfegpu`: `2.26.0`.
+- Shared C++/Python/R package and release tag: `2.26.1.20260902`.
+- Stata `xhdfe`, `xhdfe_p`, `xhdfe_estat`, and `xhdfegpu`: `2.26.1`.
 - Stata `xfepout`: `1.13.0`.
 - Companion feature versions remain unchanged.
 - All production Stata text files carry `02sep2026`.

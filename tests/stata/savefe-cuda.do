@@ -10,7 +10,7 @@ discard
 
 which xhdfe
 quietly xhdfe, version
-assert "`e(version)'" == "2.26.0 02sep2026"
+assert "`e(version)'" == "2.26.1 02sep2026"
 
 local N 24000
 local fit_tol 1e-10
@@ -141,7 +141,7 @@ assert fe_total_diff <= fe_total_bound
 assert cpu_reconstruction_max <= reconstruction_bound
 assert gpu_reconstruction_max <= reconstruction_bound
 
-di as text "plugin=2.26.0 02sep2026 N=" `N' " gamma_n=" %21.15g gamma_n
+di as text "plugin=2.26.1 02sep2026 N=" `N' " gamma_n=" %21.15g gamma_n
 di as text "b max/bound=" %21.15g b_diff " / " %21.15g b_bound
 di as text "V max/bound=" %21.15g V_diff " / " %21.15g V_bound
 di as text "residual max/bound=" %21.15g residual_diff " / " %21.15g residual_bound

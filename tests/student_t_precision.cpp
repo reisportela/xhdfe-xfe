@@ -261,8 +261,8 @@ int selftest() {
     }
 
     stage = "ordinary adversarial grid";
-    constexpr std::array<double, 18> dfs = {
-        0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0,
+    constexpr std::array<double, 19> dfs = {
+        0.5, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 28.0, 30.0, 100.0,
         581.0, 4999.0, 49347.0, 206623.0, 999999.0, 1e6,
         1000001.0, 1e8, 1e12};
     constexpr std::array<double, 17> ts = {

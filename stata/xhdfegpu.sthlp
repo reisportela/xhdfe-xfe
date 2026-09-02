@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.26.0  02sep2026}{...}
+{* *! version 2.26.1  02sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
@@ -82,7 +82,7 @@ new CUDA plugin is loaded, then verify a GPU run:
 
 {pstd}
 CPU behavior is the numerical reference. A successful CUDA status proves GPU
-execution, not universal numerical equivalence: version 2.26.0 does not certify
+execution, not universal numerical equivalence: version 2.26.1 does not certify
 the complete results on eleven difficult ordinary FE graphs, and some also
 failed coefficient or standard-error gates. See
 {helpb xhdfe##opt_gpu:help xhdfe, GPU option}; use CPU when those outputs or

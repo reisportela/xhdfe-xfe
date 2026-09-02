@@ -13,7 +13,7 @@
 
 {pstd}
 {bf:Version 1.6.0 (02sep2026), distributed with shared package
-2.26.0.20260902.} This release adds common HDFE, selectable connectivity
+2.26.1.20260902.} This release adds common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 

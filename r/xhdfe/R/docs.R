@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.26.0). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.26.1). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.26.0) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.26.1) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.26.0.
+#' effects regression via a C++ backend." Version 2.26.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -686,7 +686,7 @@ NULL
 #' \code{e(gpu_backend)=="cuda"}, \code{e(gpu_status)=="used"}). The status
 #' taxonomy (\code{gpu_status_code} / \code{gpu_status}) is:
 #'
-#' \strong{Version 2.26.0 certification boundary.} A successful GPU-use
+#' \strong{Version 2.26.1 certification boundary.} A successful GPU-use
 #' diagnostic proves execution, not universal numerical equivalence. The exact
 #' H100 \code{sm_90} comparable-mode campaign accepted 13 of 24 core24-quick
 #' surfaces, including the difficult group/individual surface strictly. Eleven
@@ -695,7 +695,7 @@ NULL
 #' \code{backend = "cpu"} for any fully certified result on such graphs,
 #' including coefficients, inference, residuals, recovered fixed effects, and
 #' FE-based predictions/decompositions. CUDA remains opt-in and never masks this
-#' boundary with a CPU fallback; see the 2.26.0 release notes for the exact
+#' boundary with a CPU fallback; see the 2.26.1 release notes for the exact
 #' failed surfaces.
 #'
 #' \tabular{lll}{
@@ -1121,7 +1121,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.26.0.
+#' effects regression via a C++ backend." Version 2.26.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way
