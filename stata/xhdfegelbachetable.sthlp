@@ -88,8 +88,12 @@ not causal mediation, and preserve the bootstrap nonregularity warning.{p_end}
 
 {title:Examples}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ) x2groups("human = ability : job = tenure exper") commonfes(year) fes(firm) method(pairs) reps(499) seed(42)}{p_end}
-{phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown) keep("human|job") labels("human = Human capital : job = Job controls") saving(gelbach.md) replace}{p_end}
+{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ)}
+{cmd:x2groups("human = ability : job = tenure exper") commonfes(year)}
+{cmd:fes(firm) method(pairs) reps(499) seed(42)}{p_end}
+{phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown)}
+{cmd:keep("human|job") labels("human = Human capital : job = Job controls")}
+{cmd:saving(gelbach.md) replace}{p_end}
 
 
 {title:Also see}

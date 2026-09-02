@@ -12,8 +12,8 @@
 {p2colreset}{...}
 
 {pstd}
-{bf:Version 1.6.0 (02sep2026), distributed with shared package
-2.26.1.20260902.} This release adds common HDFE, selectable connectivity
+{bf:Version 1.6.0 (02sep2026), distributed with shared package}
+{bf:2.26.1.20260902.} This release adds common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 
@@ -263,8 +263,8 @@ normal-approximation confidence intervals from {cmd:r(cov)},
 uncertainty in both numerator and denominator and their covariance:
 {p_end}
 {p 8 8 2}
-{it:Var(delta_g/b) = Var(delta_g)/b^2
- + delta_g^2 Var(b)/b^4 - 2 delta_g Cov(delta_g,b)/b^3}.
+{it:Var(delta_g/b) = Var(delta_g)/b^2}
+{it:+ delta_g^2 Var(b)/b^4 - 2 delta_g Cov(delta_g,b)/b^3}.
 {p_end}
 {pstd}
 This full ratio convention is labelled
@@ -708,7 +708,9 @@ layer emits a note or warning.{p_end}
 {synopt:{cmd:r(thread_limit_code)} {cmd:r(thread_limit_reason)}}capacity/availability limit diagnostics{p_end}
 {synopt:{cmd:r(fullfit_threads_used)} {cmd:r(fullfit_parallel_workers_active)}}observed full-fit team/workers{p_end}
 {synopt:{cmd:r(recovery_threads_used)} {cmd:r(recovery_parallel_workers_active)}}observed recovery team/workers (0 when absent){p_end}
-{synopt:{cmd:r(covariance_threads_used)} {cmd:r(cov_parallel_workers_active)}}observed base/auxiliary/covariance team/workers; the worker-field name is shortened for Stata's identifier limit{p_end}
+{synopt:{cmd:r(covariance_threads_used)} {cmd:r(cov_parallel_workers_active)}}
+observed base/auxiliary/covariance team/workers; the worker-field name is shortened
+for Stata's identifier limit{p_end}
 {synopt:{cmd:r(gpu_requested)}}1 when CUDA was requested by {opt gpu} or the active backend selector{p_end}
 {synopt:{cmd:r(gpu_used)}}1 only if CUDA was actually used{p_end}
 {synopt:{cmd:r(gpu_status_code)}}0 not requested; 1 used; 2 unavailable; 3 not converged; 4 failed; 5 CPU cache; 6 not applicable{p_end}
@@ -747,14 +749,17 @@ layer emits a note or warning.{p_end}
 {synopt:{cmd:r(fe_se_type)}}{cmd:conditional_gamma0}, with a diagnostic suffix when the FE-variance gate fires{p_end}
 {synopt:{cmd:r(fe_variance_status)}}per-X1 {cmd:valid_first_order} or {cmd:conditional_only_between_fe_dominant}{p_end}
 {synopt:{cmd:r(fe_variance_status_order)}}{opt x1()} column order{p_end}
-{synopt:{cmd:r(fe_split_status)}}{cmd:not_applicable}, {cmd:single_fe_dimension}, {cmd:identified_two_way}, {cmd:normalization_dependent}, {cmd:not_certified_multiway}, or {cmd:not_certified_with_common_fes}{p_end}
+{synopt:{cmd:r(fe_split_status)}}{cmd:not_applicable}, {cmd:single_fe_dimension},
+{cmd:identified_two_way}, {cmd:normalization_dependent}, {cmd:not_certified_multiway},
+or {cmd:not_certified_with_common_fes}{p_end}
 {synopt:{cmd:r(connected_mode)}}{cmd:diagnose} or {cmd:require}{p_end}
 {synopt:{cmd:r(connectivity_fes)}}selected FE variable names{p_end}
 {synopt:{cmd:r(connectivity_fe_indices)}}selected zero-based FE indices{p_end}
 {synopt:{cmd:r(connectivity_pair_status)}}{cmd:not_applicable}, {cmd:connected}, or {cmd:disconnected}{p_end}
 {synopt:{cmd:r(mobility_component_scope)}}historical FE-pair scope, added-FE-pair scope with common FEs, or {cmd:not_applicable}{p_end}
 {synopt:{cmd:r(gpu_backend)}}effective backend, {cmd:cuda} or {cmd:cpu}{p_end}
-{synopt:{cmd:r(gpu_status)}}{cmd:not_requested}, {cmd:used}, {cmd:unavailable}, {cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, or {cmd:not_applicable}{p_end}
+{synopt:{cmd:r(gpu_status)}}{cmd:not_requested}, {cmd:used}, {cmd:unavailable},
+{cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, or {cmd:not_applicable}{p_end}
 {synopt:{cmd:r(regular_inference_status)}}group-major status words, X1 rows then intercept within each observed block{p_end}
 {synopt:{cmd:r(regular_inference_status_order)}}ordering description for the status words{p_end}
 {synopt:{cmd:r(regular_inference_codebook)}}mapping from numeric status codes to status words{p_end}
@@ -774,7 +779,9 @@ block, a job-covariate block and a firm fixed-effect block:{p_end}
 
 {pstd}Keep age and a high-dimensional year effect common to both models, report
 only education, and obtain signed shares of the coefficient movement:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ age) focal(educ) x2groups("ability = ability : job = tenure exper") commonfes(year) fes(firm_id) shares(movement)}{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(educ age) focal(educ)}
+{cmd:x2groups("ability = ability : job = tenure exper") commonfes(year)}
+{cmd:fes(firm_id) shares(movement)}{p_end}
 {phang2}{cmd:. matrix list r(share)}{p_end}
 {phang2}{cmd:. matrix list r(share_se)}{p_end}
 {phang2}{cmd:. matrix list r(share_ci_low)}{p_end}
@@ -787,7 +794,9 @@ the numerator-denominator cross-covariance:{p_end}
 
 {pstd}Allocate a worker-invariant group coefficient after worker FE absorb it.
 The zero in {cmd:r(b_full)} is imposed and is labelled accordingly:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(female age) x2groups("job = tenure exper") fes(worker_id firm_id) absorbedtargets(female) vce(cluster) cluster(worker_id)}{p_end}
+{phang2}{cmd:. xhdfegelbach lwage, x1(female age)}
+{cmd:x2groups("job = tenure exper") fes(worker_id firm_id)}
+{cmd:absorbedtargets(female) vce(cluster) cluster(worker_id)}{p_end}
 {phang2}{cmd:. di "`r(estimand)'  `r(b_full_status)'"}{p_end}
 
 {pstd}Request real CUDA absorption and show phase progress:{p_end}
@@ -800,7 +809,9 @@ larger FE system without claiming multiway certification:{p_end}
 {phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(worker_id firm_id occupation_id) connectivityfes(worker_id firm_id)}{p_end}
 
 {pstd}Materialize and fingerprint the exact retained estimation sample:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage if analysis_sample, x1(educ age) x2groups("job = tenure exper") fes(worker_id firm_id) sampleaudit generate(gelbach_sample)}{p_end}
+{phang2}{cmd:. xhdfegelbach lwage if analysis_sample, x1(educ age)}
+{cmd:x2groups("job = tenure exper") fes(worker_id firm_id)}
+{cmd:sampleaudit generate(gelbach_sample)}{p_end}
 {phang2}{cmd:. local gelbach_sample_hash "`r(sample_hash)'"}{p_end}
 {phang2}{cmd:. local gelbach_sample_hash_algorithm "`r(sample_hash_algorithm)'"}{p_end}
 {pstd}{cmd:r()} is volatile: store provenance results before running another

@@ -98,10 +98,12 @@
 {synopt : }{bf:- note:} the {cmd:individual()} option requires {cmd:group()}{p_end}
 {synopt : }{bf:- note:} {cmd:individual()} is appended to {cmd:absorb()} if not already listed{p_end}
 {synopt : }{bf:- alias:} {cmd:i(}{it:indvar}{cmd:)} is accepted as a shorthand for {cmd:individual(}{it:indvar}{cmd:)}{p_end}
-{synopt : {opth ag:gregation(xhdfe##opt_aggregation:str)}}aggregation for individual FEs within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases for mean{p_end}
+{synopt : {opth ag:gregation(xhdfe##opt_aggregation:str)}}aggregation for individual FEs
+within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases for mean{p_end}
 
 {syntab:Model {help xhdfe##opt_model:[+]}}
-{synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be {opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {help fvvarlist} (multiway){p_end}
+{synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be
+{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {help fvvarlist} (multiway){p_end}
 {synopt : {opt r:obust}}equivalent to {cmd:vce(robust)}{p_end}
 {synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)}; multiway clustering allowed; supports two-way interactions with {cmd:#}/{cmd:##}{p_end}
 {synopt : {opth res:iduals(newvar)}}save regression residuals{p_end}
@@ -121,8 +123,12 @@
 
 {syntab:Optimization {help xhdfe##opt_optimization:[+]}}
 {synopt :{opt tol:erance(#)}}convergence tolerance (default 1e-8){p_end}
-{synopt :{opt tolerancemode(str)}}absorber convergence mode: {it:reghdfe-comparable} (default since 2.7.0), {it:xhdfe-fast} (pre-2.7.0 fast trigger), or {it:strict-residual}{p_end}
-{synopt :{opt convergence(str)}}stopping criterion for heterogeneous-slope absorption ({cmd:absorb(fe#c.x)}): {it:auto} (default; follows {cmd:tolerancemode()}), {it:normchange}, {it:reghdfe}, or {it:both}{p_end}
+{synopt :{opt tolerancemode(str)}}absorber convergence mode:
+{it:reghdfe-comparable} (default since 2.7.0), {it:xhdfe-fast} (pre-2.7.0 fast trigger),
+or {it:strict-residual}{p_end}
+{synopt :{opt convergence(str)}}stopping criterion for heterogeneous-slope absorption
+({cmd:absorb(fe#c.x)}): {it:auto} (default; follows {cmd:tolerancemode()}),
+{it:normchange}, {it:reghdfe}, or {it:both}{p_end}
 {synopt :{opt fetol:erance(#)}}fixed-effect recovery tolerance for {cmd:savefe}/{cmd:savefes} MAP fallback (default 1e-6){p_end}
 {synopt :{opt ferecoverym:ethod(str)}}fixed-effect recovery method: {it:hybrid} (default) or {it:map}{p_end}
 {synopt :{opt maxit:er(#)}}maximum absorber iterations (default 100000){p_end}
@@ -183,7 +189,8 @@
 {synopt :{opth absorptioncache(filename)}}read or save an explicit absorption cache file{p_end}
 {synopt :{opt absorptioncachemode(str)}}absorption cache mode: off, auto, read, write{p_end}
 {synopt :{opt festructurecache}}build/reuse a fixed-effect structure cache in the {cmd:xhdfe.ado} directory{p_end}
-{synopt :{opth fescache(filename)}}read or save a fixed-effect structure cache file at an explicit path (aliases: {cmd:festructurecache()}, {cmd:festructurecachefile()}){p_end}
+{synopt :{opth fescache(filename)}}read or save a fixed-effect structure cache file
+at an explicit path (aliases: {cmd:festructurecache()}, {cmd:festructurecachefile()}){p_end}
 {synopt :{opt fescachemode(str)}}fixed-effect structure cache mode: off, auto, read, write{p_end}
 {synopt : }{bf:- note:} when a profile file exists and matches the data, xhdfe auto-loads it to guide absorber ordering{p_end}
 {synopt : }{bf:- note:} FE structure caches speed up repeated runs with the same {cmd:absorb()} structure; use {cmd:fescache()} for a fixed path{p_end}
@@ -683,7 +690,9 @@ forces recovery sweeps on the partial residual.
 
 {phang}
 {opt absorptionm:ethod(str)} sets the absorption method. Valid values (case-insensitive) are
-{cmd:auto}; {cmd:gauss-seidel}/{cmd:gauss_seidel}/{cmd:gs}; {cmd:symmetric}/{cmd:sym}/{cmd:symgs}/{cmd:symmetric-gauss-seidel}/{cmd:symmetric_gauss_seidel}; {cmd:jacobi};
+{cmd:auto}; {cmd:gauss-seidel/gauss_seidel/gs};
+{cmd:symmetric/sym/symgs/symmetric-gauss-seidel/symmetric_gauss_seidel};
+{cmd:jacobi};
 {cmd:mlsmr}/{cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive};
 {cmd:lsmr}/{cmd:plain-lsmr}/{cmd:plain_lsmr}; and
 {cmd:auto-mlsmr}/{cmd:auto_mlsmr}/{cmd:mlsmr-auto}/{cmd:mlsmr_auto}.
@@ -1079,7 +1088,9 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
-{synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto, 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR, 6 MLSMR, 7 auto-MLSMR{p_end}
+{synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto,
+1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR,
+6 MLSMR, 7 auto-MLSMR{p_end}
 {synopt:{cmd:e(N_clust)}}minimum number of clusters (if clustered){p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster dimensions{p_end}
 {synopt:{cmd:e(N_clust#)}}cluster counts by dimension{p_end}
@@ -1145,8 +1156,11 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(tolerance_mode)}}absorber tolerance mode used by the command{p_end}
 {synopt:{cmd:e(nowarn)}}posted when {cmd:nowarn} was specified{p_end}
 {synopt:{cmd:e(gpu_backend_requested)}}requested backend from {cmd:gpubackend()} or the {cmd:XHDFE_GPU_BACKEND} environment variable, when provided{p_end}
-{synopt:{cmd:e(gpu_backend)}}effective backend when {cmd:gpubackend()} is supplied, or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end}
-{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used}, {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged}, {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(gpu_backend)}}effective backend when {cmd:gpubackend()} is supplied,
+or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end}
+{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
+{cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
+{cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
 {synoptline}
 
 {synoptset 24 tabbed}{...}
@@ -1184,8 +1198,12 @@ Website: {browse "https://www.tgstavares.com":https://www.tgstavares.com}{p_end}
 {marker support}{...}
 {title:Support and updates}
 
-{pstd}Released builds of {cmd:xhdfe} are installed via {cmd:net install} from the online Stata site published by {cmd:xhdfe-xfe}: {browse "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata":https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata}.{p_end}
-{pstd}For local development checkouts or unzipped release bundles, {cmd:net install} can also point at the local {cmd:stata/} folder that contains {cmd:stata.toc}, {cmd:xhdfe.pkg}, and the platform plugin.{p_end}
+{pstd}Released builds of {cmd:xhdfe} are installed via {cmd:net install} from the
+online Stata site published by {cmd:xhdfe-xfe}:
+{browse "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata"}.{p_end}
+{pstd}For local development checkouts or unzipped release bundles,
+{cmd:net install} can also point at the local {cmd:stata/} folder that contains
+{cmd:stata.toc}, {cmd:xhdfe.pkg}, and the platform plugin.{p_end}
 {pstd}For building the plugin or running validation tests, see the repository README.{p_end}
 
 
@@ -1209,7 +1227,8 @@ benchmarking, tolerances, and {cmd:reghdfe}-comparable validation. Nelson Areal 
 {it:Speeding Up Empirical Research: Tools and Techniques for Fast Computing}
 ({browse "https://github.com/BPLIM/Workshops/tree/master/BPLIM2025":BPLIM2025}), where we
 shared an earlier version of this proof of concept. We also
-thank Universidade do Minho, Banco de Portugal, and FCT - Portuguese Foundation for Science and Technology (UID/03182/2025) for financial support. All remaining errors are
+thank Universidade do Minho, Banco de Portugal, and FCT - Portuguese Foundation
+for Science and Technology (UID/03182/2025) for financial support. All remaining errors are
 ours. The usual disclaimer applies.{p_end}
 
 

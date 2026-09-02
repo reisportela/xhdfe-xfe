@@ -14,7 +14,8 @@
 {p2col :{cmd:xfepout} {hline 2}}Partial-out variables with respect to multiple levels of fixed effects via the xhdfe C++ absorption core{p_end}
 {p2colreset}{...}
 
-{pstd}{cmd:xfepout} is a separate package from {cmd:xhdfe} and ships its own plugin binary ({cmd:xfepout.plugin}). It is a partialling-out command (no coefficient table).{p_end}
+{pstd}{cmd:xfepout} is a separate package from {cmd:xhdfe} and ships its own plugin binary
+({cmd:xfepout.plugin}). It is a partialling-out command (no coefficient table).{p_end}
 
 {marker development}{...}
 {title:Development process}
@@ -116,7 +117,11 @@ adjustments in {cmd:e(df_a)}. {cmd:xfepout} does not estimate clustered standard
 {cmd:cl()} and {cmd:cluster()} are accepted as aliases.{p_end}
 
 {dlgtab:Optimization}
-{phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)). Since version 1.9.0 the absorber stops when one full sweep moves the working data by less than this value in relative norm (reghdfe-comparable semantics, matching the default tolerancemode used by {cmd:xhdfe}).{p_end}
+{marker opt_tolerance}{...}
+{phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)).
+Since version 1.9.0 the absorber stops when one full sweep moves the working data
+by less than this value in relative norm (reghdfe-comparable semantics, matching
+the default tolerancemode used by {cmd:xhdfe}).{p_end}
 {phang}{opt maxiter(#)} maximum absorption iterations (default 100000).{p_end}
 {phang}{opt transform(str)} accept hdfe-style transform names: {it:kac}, {it:cim}, {it:sym}. {it:sym}
 turns on symmetric sweeps; {it:kac} and {it:cim} only steer method choice when
@@ -207,7 +212,8 @@ never returned for an explicit CUDA request.{p_end}
 {phang}{opt dofadjustments(list)} reghdfe-style DoF adjustments (tokens include {it:all},
 {it:none}, {it:firstpair}/{it:first}, {it:pairwise}/{it:pair}, {it:clusters}/{it:cluster},
 {it:continuous}/{it:cont}). {cmd:dof()} is accepted as an alias.{p_end}
-{phang}{opt groupvar(newvar)} save the first mobility-group id (connected component; 1-based) as a new variable when the backend computes the relevant mobility structure.{p_end}
+{phang}{opt groupvar(newvar)} save the first mobility-group id (connected component;
+1-based) as a new variable when the backend computes the relevant mobility structure.{p_end}
 
 {dlgtab:Compatibility}
 {phang}{opt maxiterations(#)} alias for {opt maxiter(#)}.{p_end}
@@ -261,7 +267,9 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(absorption_method)}}resolved sweep-method label; inspect {cmd:e(method_used)} for the full method enum{p_end}
 {synopt:{cmd:e(gpu_backend_requested)}}requested backend from {opt gpubackend()}, when provided{p_end}
 {synopt:{cmd:e(gpu_backend)}}effective backend ({cmd:cpu}, {cmd:cuda}, or {cmd:metal}) when the command completed successfully{p_end}
-{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used}, {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged}, {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
+{cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
+{cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
 {synopt:{cmd:e(version)}}xfepout version string{p_end}
 {synopt:{cmd:e(cmd)}}{cmd:xfepout}{p_end}
 {synopt:{cmd:e(cmdline)}}command line used to invoke xfepout{p_end}

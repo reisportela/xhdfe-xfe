@@ -55,6 +55,7 @@ jobs:
           EXPECTED_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
           python3 tools/validate_release_metadata.py \
             --expected-version "$EXPECTED_VERSION"
+          bash tests/release_lint.sh
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             test "$GITHUB_REF_NAME" = "v${EXPECTED_VERSION}" || {
               echo "ERROR: tag $GITHUB_REF_NAME does not match v${EXPECTED_VERSION}" >&2

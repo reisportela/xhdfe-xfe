@@ -18,6 +18,16 @@ with 28 residual degrees of freedom. The tagged `2.26.0.20260902` workflow
 stopped at this Windows gate and produced no public release; 2.26.1 supersedes
 that unissued candidate.
 
+## Stata Viewer SMCL safety
+
+The active Stata help files are rewrapped without changing paragraph text so
+every physical source line is at most 160 bytes and every line balances its
+SMCL braces. This prevents the Stata 19.5 GUI Viewer's 245-character source-line
+truncation from cutting the `xfepout` tolerance paragraph or the `xhdfe`
+net-install URL. The tagged release workflow now enforces both conditions via
+`tests/release_lint.sh`; translator output is not used as a substitute for the
+Viewer check.
+
 ## Ordinary Krylov parity floor
 
 Standard high-level ordinary-FE LSMR/MLSMR calls in reghdfe-comparable or
