@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.26.1.20260902. Use `python -m xhdfe --version`
+Package documentation version: 2.26.2.20260903. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -635,7 +635,7 @@ XHDFE_GPU_BACKEND=metal
 CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device.
 Metal is currently reserved.
 
-For version 2.26.1, `gpu_used_ == 1` proves GPU execution, not universal
+For version 2.26.2, `gpu_used_ == 1` proves GPU execution, not universal
 numerical certification. The exact H100 `sm_90` comparable-mode campaign
 accepted 13 of 24 core24-quick surfaces, including the difficult
 group/individual case strictly. Eleven poorly connected ordinary two- or
@@ -644,7 +644,7 @@ coefficient or standard-error gates. Use CPU for any fully certified result on
 such a graph, including coefficients, inference, residuals, recovered fixed
 effects, `predict`/FE contributions, and FE-based decompositions. CUDA remains
 opt-in and does not hide this boundary with a CPU fallback; the exact failed
-surfaces are reported in the 2.26.1 release notes.
+surfaces are reported in the 2.26.2 release notes.
 
 ## Mobility profiles
 

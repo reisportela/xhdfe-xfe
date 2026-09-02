@@ -1,7 +1,4 @@
-# xhdfe 2.26.0 / xfepout 1.13.0 - 02sep2026
-
-> Unissued candidate: its tagged workflow stopped at the Windows Python wheel
-> runtime gate before release creation. Version 2.26.2 supersedes it.
+# xhdfe 2.26.2 / xfepout 1.13.0 - 03sep2026
 
 Precision and cache-contract hardening for ordinary and grouped absorption,
 heterogeneous slopes, inference, and the `xfepout` partial-out frontend. The estimator
@@ -9,6 +6,43 @@ definition, public tolerance, supported coefficient/inference outputs, and
 default formatting remain unchanged. Failed precision or backend checks remain
 fail-closed; this release does not introduce a silent CPU fallback for an
 explicit CUDA request.
+
+## Windows Student-t inverse portability fix
+
+The safeguarded normal and Student-t inverse solvers now terminate cleanly
+when a valid bracket reaches the effective arithmetic resolution of the
+platform. Final bracket and relative-tail postconditions remain authoritative;
+no inference tolerance or estimator definition changed. This fixes the
+CPython 3.12 wheel on Strawberry MinGW GCC 13.2, including a perfect-fit smoke
+with 28 residual degrees of freedom. The tagged `2.26.0.20260902` workflow
+stopped at this Windows gate and produced no public release. Version 2.26.2
+includes the fix from the unissued 2.26.1 candidate.
+
+## Stata Viewer SMCL safety
+
+The active Stata help files are rewrapped without changing paragraph text so
+every physical source line is at most 160 bytes and every line balances its
+SMCL braces. This prevents the Stata 19.5 GUI Viewer's 245-character source-line
+truncation from cutting the `xfepout` tolerance paragraph or the `xhdfe`
+net-install URL. The tagged release workflow now enforces both conditions via
+`tests/release_lint.sh`; translator output is not used as a substitute for the
+Viewer check.
+
+## CUDA audit-gate alignment
+
+The H100 audit now separates the advertised default `1e-8` solver contract
+from a deliberately tighter comparison. The default CPU and CUDA fits must
+each remain within `1e-8` of the tight CPU reference and of each other. A
+second cell explicitly requests `tolerancemode(strict-residual)` with
+`tolerance(1e-12)` and retains the stronger `1e-10` CPU-CUDA comparison. It
+also repeats the default CUDA fit and requires agreement within `1e-12`.
+
+This corrects a test introduced in 2.23.0 that requested the default `1e-8`
+solve but asserted incidental `1e-10` agreement between its CPU and CUDA
+stopping points. On the exact unissued 2.26.1 H100 bytes, the default
+coefficient gap was `2.70e-9`, while the explicit tight-cell gap was
+`3.42e-12`; both covariance gaps were below `1e-13`. The estimator, public
+tolerances, and CUDA implementation are unchanged in 2.26.2.
 
 ## Ordinary Krylov parity floor
 
@@ -160,11 +194,11 @@ from the tagged CI workflow, not local runtime execution.
 
 ## Version scope
 
-- Shared C++/Python/R package and release tag: `2.26.0.20260902`.
-- Stata `xhdfe`, `xhdfe_p`, `xhdfe_estat`, and `xhdfegpu`: `2.26.0`.
+- Shared C++/Python/R package and release tag: `2.26.2.20260903`.
+- Stata `xhdfe`, `xhdfe_p`, `xhdfe_estat`, and `xhdfegpu`: `2.26.2`.
 - Stata `xfepout`: `1.13.0`.
 - Companion feature versions remain unchanged.
-- All production Stata text files carry `02sep2026`.
+- All production Stata text files carry `03sep2026`.
 
 ## Attribution
 

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.26.1 02sep2026}{...}
+{* *! version 2.26.2 03sep2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -260,14 +260,14 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.26.1 certification boundary.} {cmd:e(gpu_used)} proves execution on the GPU; it is not by itself a
+{bf:Version 2.26.2 certification boundary.} {cmd:e(gpu_used)} proves execution on the GPU; it is not by itself a
 certificate of numerical equivalence. The exact H100 {cmd:sm_90} comparable-mode campaign accepted 13 of 24
 core24-quick surfaces, including the Marta {cmd:group()}/{cmd:individual()} case strictly. Eleven difficult ordinary
 two- or three-way FE graphs did not meet the full contract; some also failed coefficient or standard-error gates.
 Until a GPU-native Krylov finish is available, use {cmd:gpubackend(cpu)} for any fully certified result on a hard,
 poorly connected ordinary graph, including coefficients, inference, residuals, recovered FEs,
 {cmd:predict, d}/{cmd:xbd}, and FE-based decompositions. The CUDA path remains opt-in and never hides this limitation with a CPU fallback;
-the exact failed surfaces and measurements are listed in the 2.26.1 release notes.
+the exact failed surfaces and measurements are listed in the 2.26.2 release notes.
 
 {phang}
 Practical rule: after rebuilding {cmd:xhdfe.plugin}, after switching between CPU and CUDA plugin binaries, or after
@@ -1240,7 +1240,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.26.1.
+regression via a C++ backend." Version 2.26.2.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

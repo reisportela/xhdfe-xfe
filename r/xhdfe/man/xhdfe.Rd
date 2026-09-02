@@ -842,7 +842,7 @@ diagnostics on the result object: \code{gpu_used} must be \code{1} and
 \code{e(gpu_backend)=="cuda"}, \code{e(gpu_status)=="used"}). The status
 taxonomy (\code{gpu_status_code} / \code{gpu_status}) is:
 
-\strong{Version 2.26.1 certification boundary.} A successful GPU-use
+\strong{Version 2.26.2 certification boundary.} A successful GPU-use
 diagnostic proves execution, not universal numerical equivalence. The exact
 H100 \code{sm_90} comparable-mode campaign accepted 13 of 24 core24-quick
 surfaces, including the difficult group/individual surface strictly. Eleven
@@ -851,7 +851,7 @@ contract; some also failed coefficient or standard-error gates. Use
 \code{backend = "cpu"} for any fully certified result on such graphs,
 including coefficients, inference, residuals, recovered fixed effects, and
 FE-based predictions/decompositions. CUDA remains opt-in and never masks this
-boundary with a CPU fallback; see the 2.26.1 release notes for the exact
+boundary with a CPU fallback; see the 2.26.2 release notes for the exact
 failed surfaces.
 
 \tabular{lll}{
@@ -1124,7 +1124,7 @@ stopifnot(mg$gpu_used == 1, mg$gpu_status == "used")
 }
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.26.1.
+effects regression via a C++ backend." Version 2.26.2.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

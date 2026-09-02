@@ -18,7 +18,7 @@ Key facts, true for all three versions:
   your GPU, **(2)** request the GPU on a call, **(3)** verify it was actually
   used.
 
-## Version 2.26.1 certification boundary
+## Version 2.26.2 certification boundary
 
 The exact Linux H100 `sm_90` comparable-mode campaign accepted 13 of 24
 core24-quick surfaces. The difficult Marta `group()`/`individual()` surface
@@ -29,7 +29,7 @@ eliminate the error. Therefore, use CPU for any fully certified result on a
 difficult ordinary graph, including coefficients, inference, residuals,
 recovered fixed effects, FE-inclusive predictions, and FE-based decompositions.
 The exact failed datasets and measured errors are recorded in the
-2.26.1 release notes. CUDA binaries remain available for testing and for the
+2.26.2 release notes. CUDA binaries remain available for testing and for the
 surfaces that passed, but are not described as universally certified.
 
 ## Requirements

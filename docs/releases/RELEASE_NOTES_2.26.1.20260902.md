@@ -1,5 +1,10 @@
 # xhdfe 2.26.1 / xfepout 1.13.0 - 02sep2026
 
+> Unissued candidate: the multiplatform workflow passed and created a draft,
+> but publication was withheld when the exact H100 run exposed a legacy CUDA
+> audit assertion that did not match the requested default tolerance. Version
+> 2.26.2 corrects that test without changing the estimator.
+
 Precision and cache-contract hardening for ordinary and grouped absorption,
 heterogeneous slopes, inference, and the `xfepout` partial-out frontend. The estimator
 definition, public tolerance, supported coefficient/inference outputs, and

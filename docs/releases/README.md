@@ -5,8 +5,9 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
-| 2.26.1 | 2 September 2026 | [Windows Student-t portability fix on the fully certified 2.26 line](RELEASE_NOTES_2.26.1.20260902.md) |
-| 2.26.0 | 2 September 2026 | [Unissued candidate, superseded by 2.26.1: numerical certification, bounded Auto retry, grouped precision, and cache hardening](RELEASE_NOTES_2.26.0.20260902.md) |
+| 2.26.2 | 3 September 2026 | [Certified 2.26 line: Windows Student-t, SMCL Viewer safety, and CUDA gate alignment](RELEASE_NOTES_2.26.2.20260903.md) |
+| 2.26.1 | 2 September 2026 | [Unissued candidate, superseded by 2.26.2: Windows Student-t and SMCL Viewer fixes](RELEASE_NOTES_2.26.1.20260902.md) |
+| 2.26.0 | 2 September 2026 | [Unissued candidate, superseded by 2.26.2: numerical certification, bounded Auto retry, grouped precision, and cache hardening](RELEASE_NOTES_2.26.0.20260902.md) |
 | 2.25.1 | 27 August 2026 | [`group()` / `individual()` joint-LSMR correctness hotfix](RELEASE_NOTES_2.25.1.20260827.md) |
 | 2.25.0 | 24 August 2026 | [`xfepout` rename and source/release hardening](RELEASE_NOTES_2.25.0.20260824.md) |
 | 2.24.2 | 22 August 2026 | [Stata large-ID ingestion and Windows net-install runtime delivery](RELEASE_NOTES_2.24.2.20260822.md) |

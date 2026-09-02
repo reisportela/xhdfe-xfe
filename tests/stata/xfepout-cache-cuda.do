@@ -8,7 +8,7 @@ adopath ++ "`repo'/stata"
 discard
 which xfepout
 quietly xfepout, version
-assert "`e(version)'" == "1.13.0 02sep2026"
+assert "`e(version)'" == "1.13.0 03sep2026"
 
 set seed 20260901
 set obs 6000
