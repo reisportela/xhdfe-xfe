@@ -28,6 +28,7 @@
 
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
+#include "hdfe/ieee_bits.hpp"
 #include "fe_absorption_cuda.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
@@ -682,6 +683,14 @@ void maybe_save_scalar(const std::optional<std::string>& name, double value) {
     if (rc) {
         throw_with_prefix("xhdfe plugin: ", "failed to save scalar: " + *name);
     }
+}
+
+double stata_krylov_diagnostic(double value) {
+    if (!hdfe::detail::ieee_finite(value) ||
+        value == std::numeric_limits<double>::max()) {
+        return SV_missval;
+    }
+    return value;
 }
 
 void maybe_save_gpu_diagnostics(const std::optional<std::string>& s_gpu_status_code,
@@ -2255,6 +2264,8 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.refine_stored_residuals = store_resid;
         opts.symmetric_sweep = parse_bool(args.get_required("symmetric_sweep"), "symmetric_sweep");
         opts.absorption_method = parse_absorption_method(args.get_required("absorption_method"));
+        opts.ordinary_krylov_parity_floor = !group_mode && nslope == 0;
+        opts.ordinary_auto_routing_retry = !group_mode && nslope == 0;
         if (auto val = args.get_optional("convergence")) {
             opts.convergence_criterion = parse_convergence_criterion(*val);
         }
@@ -2742,6 +2753,54 @@ STDLL stata_call(int argc, char* argv[]) {
             args.get_optional("s_abs_residual");
         const std::optional<std::string> s_abs_residual_rel =
             args.get_optional("s_abs_residual_rel");
+        const std::optional<std::string> s_krylov_internal_tolerance =
+            args.get_optional("s_krylov_internal_tolerance");
+        const std::optional<std::string> s_krylov_max_final_backward_error =
+            args.get_optional("s_krylov_max_final_backward_error");
+        const std::optional<std::string> s_krylov_max_condition =
+            args.get_optional("s_krylov_max_condition");
+        const std::optional<std::string> s_krylov_max_condition_times_backward_error =
+            args.get_optional("s_krylov_max_condition_times_backward_error");
+        const std::optional<std::string> s_auto_routing_retry_policy_enabled =
+            args.get_optional("s_auto_routing_retry_policy_enabled");
+        const std::optional<std::string> s_auto_routing_retry_eligible =
+            args.get_optional("s_auto_routing_retry_eligible");
+        const std::optional<std::string> s_auto_routing_retry_fired =
+            args.get_optional("s_auto_routing_retry_fired");
+        const std::optional<std::string> s_auto_routing_retry_status =
+            args.get_optional("s_auto_routing_retry_status");
+        const std::optional<std::string> s_auto_routing_retry_primary_method =
+            args.get_optional("s_auto_routing_retry_primary_method");
+        const std::optional<std::string> s_auto_routing_retry_primary_iterations =
+            args.get_optional("s_auto_routing_retry_primary_iterations");
+        const std::optional<std::string> s_auto_routing_retry_primary_abs_residual_rel =
+            args.get_optional("s_auto_routing_retry_primary_abs_residual_rel");
+        const std::optional<std::string> s_auto_routing_retry_iterations =
+            args.get_optional("s_auto_routing_retry_iterations");
+        const std::optional<std::string> s_auto_routing_retry_abs_residual_rel =
+            args.get_optional("s_auto_routing_retry_abs_residual_rel");
+        const std::optional<std::string> s_auto_routing_retry_elapsed_seconds =
+            args.get_optional("s_auto_routing_retry_elapsed_seconds");
+        const std::optional<std::string> s_slope_block_residual_rel =
+            args.get_optional("s_slope_block_residual_rel");
+        const std::optional<std::string> s_slope_block_frobenius_rel =
+            args.get_optional("s_slope_block_frobenius_rel");
+        const std::optional<std::string> s_slope_block_rms_rel =
+            args.get_optional("s_slope_block_rms_rel");
+        const std::optional<std::string> s_slope_block_max_rel =
+            args.get_optional("s_slope_block_max_rel");
+        const std::optional<std::string> s_slope_block_skipped_max_rel =
+            args.get_optional("s_slope_block_skipped_max_rel");
+        const std::optional<std::string> s_slope_certificate_worst_fe =
+            args.get_optional("s_slope_certificate_worst_fe");
+        const std::optional<std::string> s_slope_certificate_worst_moment =
+            args.get_optional("s_slope_certificate_worst_moment");
+        const std::optional<std::string> s_slope_accuracy_retry_stages =
+            args.get_optional("s_slope_accuracy_retry_stages");
+        const std::optional<std::string> s_slope_accuracy_retry_iterations =
+            args.get_optional("s_slope_accuracy_retry_iterations");
+        const std::optional<std::string> s_slope_internal_tolerance =
+            args.get_optional("s_slope_internal_tolerance");
         const std::optional<std::string> s_precision_certified =
             args.get_optional("s_precision_certified");
         const std::optional<std::string> s_fe_recovery_converged =
@@ -2786,6 +2845,29 @@ STDLL stata_call(int argc, char* argv[]) {
             static_cast<int>(opts.collinear_priority.size()) < p) {
             throw_with_prefix("xhdfe plugin: ", "omit_priority length is smaller than p");
         }
+
+        const auto save_auto_routing_retry = [&](const hdfe::HdfeResults& result) {
+            maybe_save_scalar(s_auto_routing_retry_policy_enabled,
+                              result.auto_routing_retry_policy_enabled ? 1.0 : 0.0);
+            maybe_save_scalar(s_auto_routing_retry_eligible,
+                              result.auto_routing_retry_eligible ? 1.0 : 0.0);
+            maybe_save_scalar(s_auto_routing_retry_fired,
+                              result.auto_routing_retry_fired ? 1.0 : 0.0);
+            maybe_save_scalar(s_auto_routing_retry_status,
+                              static_cast<double>(result.auto_routing_retry_status));
+            maybe_save_scalar(s_auto_routing_retry_primary_method,
+                              static_cast<double>(result.auto_routing_retry_primary_method));
+            maybe_save_scalar(s_auto_routing_retry_primary_iterations,
+                              static_cast<double>(result.auto_routing_retry_primary_iterations));
+            maybe_save_scalar(s_auto_routing_retry_primary_abs_residual_rel,
+                              result.auto_routing_retry_primary_abs_residual_rel);
+            maybe_save_scalar(s_auto_routing_retry_iterations,
+                              static_cast<double>(result.auto_routing_retry_iterations));
+            maybe_save_scalar(s_auto_routing_retry_abs_residual_rel,
+                              result.auto_routing_retry_abs_residual_rel);
+            maybe_save_scalar(s_auto_routing_retry_elapsed_seconds,
+                              result.auto_routing_retry_elapsed_seconds);
+        };
         HdfeRegressorV11 reg(opts, threading);
 
         // Group/individual mode: estimate on collapsed group observations and map results back to a
@@ -2928,6 +3010,33 @@ STDLL stata_call(int argc, char* argv[]) {
                 maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
                 maybe_save_scalar(s_abs_residual, r.abs_residual);
                 maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+                maybe_save_scalar(s_krylov_internal_tolerance,
+                                  stata_krylov_diagnostic(r.krylov_internal_tolerance));
+                maybe_save_scalar(s_krylov_max_final_backward_error,
+                                  stata_krylov_diagnostic(
+                                      r.krylov_max_final_backward_error));
+                maybe_save_scalar(s_krylov_max_condition,
+                                  stata_krylov_diagnostic(r.krylov_max_condition));
+                maybe_save_scalar(s_krylov_max_condition_times_backward_error,
+                                  stata_krylov_diagnostic(
+                                      r.krylov_max_condition_times_backward_error));
+                save_auto_routing_retry(r);
+                maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
+                maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
+                maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
+                maybe_save_scalar(s_slope_block_max_rel, r.slope_block_max_rel);
+                maybe_save_scalar(s_slope_block_skipped_max_rel,
+                                  r.slope_block_skipped_max_rel);
+                maybe_save_scalar(s_slope_certificate_worst_fe,
+                                  static_cast<double>(r.slope_certificate_worst_fe));
+                maybe_save_scalar(s_slope_certificate_worst_moment,
+                                  static_cast<double>(r.slope_certificate_worst_moment));
+                maybe_save_scalar(s_slope_accuracy_retry_stages,
+                                  static_cast<double>(r.slope_accuracy_retry_stages));
+                maybe_save_scalar(s_slope_accuracy_retry_iterations,
+                                  static_cast<double>(r.slope_accuracy_retry_iterations));
+                maybe_save_scalar(s_slope_internal_tolerance,
+                                  r.slope_internal_tolerance);
                 maybe_save_scalar(s_precision_certified,
                                   r.precision_certified ? 1.0 : 0.0);
                 maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
@@ -3046,6 +3155,33 @@ STDLL stata_call(int argc, char* argv[]) {
             maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
             maybe_save_scalar(s_abs_residual, r.abs_residual);
             maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+            maybe_save_scalar(s_krylov_internal_tolerance,
+                              stata_krylov_diagnostic(r.krylov_internal_tolerance));
+            maybe_save_scalar(s_krylov_max_final_backward_error,
+                              stata_krylov_diagnostic(
+                                  r.krylov_max_final_backward_error));
+            maybe_save_scalar(s_krylov_max_condition,
+                              stata_krylov_diagnostic(r.krylov_max_condition));
+            maybe_save_scalar(s_krylov_max_condition_times_backward_error,
+                              stata_krylov_diagnostic(
+                                  r.krylov_max_condition_times_backward_error));
+            save_auto_routing_retry(r);
+            maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
+            maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
+            maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
+            maybe_save_scalar(s_slope_block_max_rel, r.slope_block_max_rel);
+            maybe_save_scalar(s_slope_block_skipped_max_rel,
+                              r.slope_block_skipped_max_rel);
+            maybe_save_scalar(s_slope_certificate_worst_fe,
+                              static_cast<double>(r.slope_certificate_worst_fe));
+            maybe_save_scalar(s_slope_certificate_worst_moment,
+                              static_cast<double>(r.slope_certificate_worst_moment));
+            maybe_save_scalar(s_slope_accuracy_retry_stages,
+                              static_cast<double>(r.slope_accuracy_retry_stages));
+            maybe_save_scalar(s_slope_accuracy_retry_iterations,
+                              static_cast<double>(r.slope_accuracy_retry_iterations));
+            maybe_save_scalar(s_slope_internal_tolerance,
+                              r.slope_internal_tolerance);
             maybe_save_scalar(s_precision_certified,
                               r.precision_certified ? 1.0 : 0.0);
             maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
@@ -3131,6 +3267,33 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_converged, r.converged ? 1.0 : 0.0);
         maybe_save_scalar(s_abs_residual, r.abs_residual);
         maybe_save_scalar(s_abs_residual_rel, r.abs_residual_rel);
+        maybe_save_scalar(s_krylov_internal_tolerance,
+                          stata_krylov_diagnostic(r.krylov_internal_tolerance));
+        maybe_save_scalar(s_krylov_max_final_backward_error,
+                          stata_krylov_diagnostic(
+                              r.krylov_max_final_backward_error));
+        maybe_save_scalar(s_krylov_max_condition,
+                          stata_krylov_diagnostic(r.krylov_max_condition));
+        maybe_save_scalar(s_krylov_max_condition_times_backward_error,
+                          stata_krylov_diagnostic(
+                              r.krylov_max_condition_times_backward_error));
+        save_auto_routing_retry(r);
+        maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
+        maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
+        maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
+        maybe_save_scalar(s_slope_block_max_rel, r.slope_block_max_rel);
+        maybe_save_scalar(s_slope_block_skipped_max_rel,
+                          r.slope_block_skipped_max_rel);
+        maybe_save_scalar(s_slope_certificate_worst_fe,
+                          static_cast<double>(r.slope_certificate_worst_fe));
+        maybe_save_scalar(s_slope_certificate_worst_moment,
+                          static_cast<double>(r.slope_certificate_worst_moment));
+        maybe_save_scalar(s_slope_accuracy_retry_stages,
+                          static_cast<double>(r.slope_accuracy_retry_stages));
+        maybe_save_scalar(s_slope_accuracy_retry_iterations,
+                          static_cast<double>(r.slope_accuracy_retry_iterations));
+        maybe_save_scalar(s_slope_internal_tolerance,
+                          r.slope_internal_tolerance);
         maybe_save_scalar(s_precision_certified,
                           r.precision_certified ? 1.0 : 0.0);
         maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
@@ -3250,8 +3413,16 @@ STDLL stata_call(int argc, char* argv[]) {
         if (msg.empty() || msg.back() != '\n') {
             msg.push_back('\n');
         }
+        const bool numerical_failure =
+            msg.find(
+                "Group/individual HDFE absorption did not converge; "
+                "no estimates were produced") != std::string::npos ||
+            msg.find(
+                "Group/individual HDFE absorption failed the independent "
+                "precision certificate; no estimates were produced") !=
+                std::string::npos;
         SF_error(const_cast<char*>(msg.c_str()));
-        return static_cast<ST_retcode>(198);
+        return static_cast<ST_retcode>(numerical_failure ? 498 : 198);
     } catch (...) {
         const char* msg = "xhdfe plugin: unknown error\n";
         SF_error(const_cast<char*>(msg));

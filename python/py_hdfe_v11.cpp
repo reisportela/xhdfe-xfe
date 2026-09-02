@@ -31,6 +31,38 @@ using hdfe::v11::HdfeRegressorV11;
 using hdfe::v11::GroupAggregation;
 using hdfe::v11::ThreadingOptions;
 
+namespace hdfe {
+namespace v11 {
+
+class BindingAttemptGuard {
+public:
+    BindingAttemptGuard(HdfeRegressorV11& owner, bool weights_are_frequencies)
+        : owner_(owner),
+          previous_weights_are_frequencies_(
+              owner.options_.weights_are_frequencies) {
+        owner_.begin_attempt();
+        owner_.options_.weights_are_frequencies = weights_are_frequencies;
+    }
+
+    ~BindingAttemptGuard() {
+        if (!committed_) {
+            owner_.fail_attempt();
+            owner_.options_.weights_are_frequencies =
+                previous_weights_are_frequencies_;
+        }
+    }
+
+    void commit() noexcept { committed_ = true; }
+
+private:
+    HdfeRegressorV11& owner_;
+    bool previous_weights_are_frequencies_ = false;
+    bool committed_ = false;
+};
+
+}  // namespace v11
+}  // namespace hdfe
+
 namespace {
 
 // Observation counts are integral row counts unless frequency weights are
@@ -700,6 +732,8 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                  opts.absorption_method = parse_absorption_method(absorption_method);
                  opts.jacobi_relaxation = jacobi_relaxation;
                  opts.use_krylov = false;
+                 opts.ordinary_krylov_parity_floor = true;
+                 opts.ordinary_auto_routing_retry = true;
 
                  const ParsedDofAdjustments dof = parse_dofadjustments(dofadjustments);
                  opts.dof_method = dof.method;
@@ -786,7 +820,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                const std::string& aggregation,
                py::object slopes_obj,
                bool fweights) {
-                self.set_weights_are_frequencies(fweights);
+                hdfe::v11::BindingAttemptGuard attempt(self, fweights);
                 if (fweights && weights_obj.is_none()) {
                     throw std::runtime_error(
                         "fweights=True requires a weights vector");
@@ -968,6 +1002,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                         throw py::error_already_set();
                     }
                 }
+                attempt.commit();
             },
             py::arg("y"),
             py::arg("X"),
@@ -1159,6 +1194,10 @@ bookkeeping. The flag is reset on every call and requires ``weights``.
             py::arg("a2p1") = 1e-8,
             py::arg("a2p2") = 5)
         .def("summary", [](const HdfeRegressorV11& self) {
+            if (!self.has_estimation_result()) {
+                return std::string("No estimation result available (state: ") +
+                       self.lifecycle_state_name() + ")\n";
+            }
             return summarize(self.results(), self.threads_used(), self.absorption_method_used());
         })
         .def_property_readonly("coef_", [](const HdfeRegressorV11& self) {
@@ -1338,6 +1377,78 @@ bookkeeping. The flag is reset on every call and requires ``weights``.
         .def_property_readonly("abs_residual_rel_", [](const HdfeRegressorV11& self) {
             return self.results().abs_residual_rel;
         })
+        .def_property_readonly("krylov_internal_tolerance_", [](const HdfeRegressorV11& self) {
+            return self.results().krylov_internal_tolerance;
+        })
+        .def_property_readonly("krylov_max_final_backward_error_", [](const HdfeRegressorV11& self) {
+            return self.results().krylov_max_final_backward_error;
+        })
+        .def_property_readonly("krylov_max_condition_", [](const HdfeRegressorV11& self) {
+            return self.results().krylov_max_condition;
+        }, "Maximum running Krylov condition estimate across right-hand sides; zero outside ordinary LSMR/MLSMR.")
+        .def_property_readonly("krylov_max_condition_times_backward_error_", [](const HdfeRegressorV11& self) {
+            return self.results().krylov_max_condition_times_backward_error;
+        })
+        .def_property_readonly("auto_routing_retry_policy_enabled_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_policy_enabled;
+        })
+        .def_property_readonly("auto_routing_retry_eligible_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_eligible;
+        })
+        .def_property_readonly("auto_routing_retry_fired_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_fired;
+        })
+        .def_property_readonly("auto_routing_retry_status_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_status;
+        })
+        .def_property_readonly("auto_routing_retry_primary_method_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_primary_method;
+        })
+        .def_property_readonly("auto_routing_retry_primary_iterations_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_primary_iterations;
+        })
+        .def_property_readonly("auto_routing_retry_primary_abs_residual_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_primary_abs_residual_rel;
+        })
+        .def_property_readonly("auto_routing_retry_iterations_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_iterations;
+        })
+        .def_property_readonly("auto_routing_retry_abs_residual_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_abs_residual_rel;
+        })
+        .def_property_readonly("auto_routing_retry_elapsed_seconds_", [](const HdfeRegressorV11& self) {
+            return self.results().auto_routing_retry_elapsed_seconds;
+        })
+        .def_property_readonly("slope_block_residual_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_residual_rel;
+        })
+        .def_property_readonly("slope_block_frobenius_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_frobenius_rel;
+        })
+        .def_property_readonly("slope_block_rms_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_rms_rel;
+        })
+        .def_property_readonly("slope_block_max_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_max_rel;
+        })
+        .def_property_readonly("slope_block_skipped_max_rel_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_skipped_max_rel;
+        })
+        .def_property_readonly("slope_certificate_worst_fe_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_certificate_worst_fe;
+        })
+        .def_property_readonly("slope_certificate_worst_moment_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_certificate_worst_moment;
+        })
+        .def_property_readonly("slope_accuracy_retry_stages_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_accuracy_retry_stages;
+        })
+        .def_property_readonly("slope_accuracy_retry_iterations_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_accuracy_retry_iterations;
+        })
+        .def_property_readonly("slope_internal_tolerance_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_internal_tolerance;
+        })
         .def_property_readonly("precision_certified_", [](const HdfeRegressorV11& self) {
             return self.results().precision_certified;
         })
@@ -1397,6 +1508,12 @@ bookkeeping. The flag is reset on every call and requires ``weights``.
         })
         .def_property_readonly("absorption_method_used", [](const HdfeRegressorV11& self) {
             return self.absorption_method_used();
+        })
+        .def_property_readonly("lifecycle_state_", [](const HdfeRegressorV11& self) {
+            return std::string(self.lifecycle_state_name());
+        })
+        .def_property_readonly("generation_", [](const HdfeRegressorV11& self) {
+            return self.generation();
         });
 
     // ---- AKM + leave-out (KSS) variance decomposition (opt-in module) ----

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.12.0 27aug2026}{...}
+{* *! version 1.13.0 02sep2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -173,11 +173,29 @@ when the plugin binary itself has not changed; for example, rerunning {cmd:xfepo
 on CPU and then with {cmd:gpubackend(cuda)} now reuses the same loaded plugin correctly.{p_end}
 
 {dlgtab:Cache and Profile}
-{phang}{opt mobilityprofile} write/update mobility profile at default path {cmd:xfepout_mobility_profile.txt}.{p_end}
-{phang}{opt mobfile(path)} mobility profile path; enables profile auto mode at that path.{p_end}
-{phang}{opt absorptioncache(path)} path for absorption cache payload.{p_end}
+{phang}{opt mobilityprofile} write/update a mobility profile at the path supplied by
+{cmd:mobfile()} or, if no path is supplied, at {cmd:xfepout_mobility_profile.txt}.{p_end}
+{phang}{opt mobfile(path)} mobility profile path; enables profile auto mode at that path.
+{cmd:mobilityfile()} and {cmd:mobilityprofilefile()} are accepted as aliases.{p_end}
+{pmore}Version-2 profiles have explicit {cmd:standard} scope and FE-structure signatures. They are
+method-selection hints, not transformed-data caches: the applicable signature and scope must match before
+reuse. Legacy version-1 files and mismatches are safe misses. A suggested method is retained only
+after convergence and independent precision certification; otherwise automatic selection restarts
+from the original data. CPU-only method hints are not forced on CUDA runs, and profiles are written
+only after convergence and certification.{p_end}
+{phang}{opt absorptioncache(path)} path for the generation-4 absorption cache payload.
+{cmd:abscachefile()} is accepted as an alias.{p_end}
 {phang}{opt abscachemode(mode)} absorption cache mode: {it:off}, {it:auto}, {it:read}, {it:write}.
 {cmd:absorptioncachemode()} is accepted as an alias.{p_end}
+{pmore}{it:read}, {it:write}, and {it:auto} require either an explicit
+{cmd:absorptioncache()}/{cmd:abscachefile()} path or a mobility profile path supplied by
+{cmd:mobfile()} or one of its aliases. Pathless {cmd:abscachemode(off)} is allowed.{p_end}
+{pmore}Cache identity covers the retained outcome, transformed-variable matrix, FE structure,
+weights, solver contract, requested tolerance/method/thread configuration, and CPU/CUDA request.
+Old cache magic, signature or dimension mismatch, truncation, corruption, nonfinite payloads, and
+trailing bytes are safe misses. {it:auto} repairs a miss only after a newly computed result converges
+and passes the independent precision certificate; {it:read} never rewrites. CPU cache material is
+never returned for an explicit CUDA request.{p_end}
 {phang}{opt fescache(path)} path for FE-structure cache payload.{p_end}
 {phang}{opt festructurecache} use default FE-structure cache path relative to {cmd:xfepout.ado}.
 {cmd:festructurecache()} and {cmd:festructurecachefile()} are accepted as aliases for

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.25.1  27aug2026}{...}
+{* *! version 2.26.0  02sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
@@ -81,9 +81,13 @@ new CUDA plugin is loaded, then verify a GPU run:
 {p 8 8 2}{cmd:. display e(gpu_used)}   {it:// should be 1}{p_end}
 
 {pstd}
-CPU behavior is the numerical reference; the CUDA backend is validated to
-agree with it. If a {cmd:gpubackend(cuda)} run reports that CUDA was not
-available, this command is how you build the matching plugin.
+CPU behavior is the numerical reference. A successful CUDA status proves GPU
+execution, not universal numerical equivalence: version 2.26.0 does not certify
+the complete results on eleven difficult ordinary FE graphs, and some also
+failed coefficient or standard-error gates. See
+{helpb xhdfe##opt_gpu:help xhdfe, GPU option}; use CPU when those outputs or
+any fully certified result is required. If a {cmd:gpubackend(cuda)} run reports that
+CUDA was not available, this command is how you build the matching plugin.
 
 
 {title:Examples}

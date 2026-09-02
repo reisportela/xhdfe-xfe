@@ -4,7 +4,7 @@
 # far below any econometrically meaningful difference.
 
 skip_if_not_installed("jsonlite")
-fixture_path <- test_path("fixtures", "parity_reference.json")
+fixture_path <- test_path("fixtures", "parity_reference_current.json")
 skip_if_not(file.exists(fixture_path), "parity fixture not generated")
 
 ref_all <- jsonlite_fromJSON_lite(fixture_path)

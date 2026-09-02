@@ -246,7 +246,7 @@ xhdfe <- function(fml, data = NULL,
 
   out <- finalize_xhdfe(res, coef_names, n_input, rows_used, cl, level,
                         backend, se_type, cluster_names, fe_labels,
-                        tolerance_mode,
+                        tolerance_mode, stats_style = stats_style,
                         model_has_cons = if (length(fes_use)) {
                           any(fe_has_intercept)
                         } else isTRUE(fit_intercept),

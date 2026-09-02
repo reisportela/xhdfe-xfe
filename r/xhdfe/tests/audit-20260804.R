@@ -1,5 +1,7 @@
-lib <- Sys.getenv("XHDFE_AUDIT_R_LIB", "/tmp/xhdfe-r-audit-lib")
-.libPaths(c(lib, .libPaths()))
+lib <- Sys.getenv("XHDFE_AUDIT_R_LIB", "")
+if (nzchar(lib)) {
+  .libPaths(c(lib, .libPaths()))
+}
 library(xhdfe)
 
 set.seed(20260804)

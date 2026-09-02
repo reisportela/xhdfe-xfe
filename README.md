@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.25.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.26.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -38,6 +38,13 @@ and clusters standard errors at the worker level:
 
 The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 `reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
+The CUDA rows are performance measurements, not a universal residual/FE
+certificate. In the exact 2.26.0 H100 comparable-mode campaign, 13/24
+core24-quick surfaces passed; eleven difficult ordinary FE graphs did not meet
+the full contract, and some also failed coefficient or standard-error gates.
+Use CPU for any fully certified result on such graphs, including estimates,
+inference, residuals, recovered FEs and FE-based predictions/decompositions; see the
+[GPU guide](docs/gpu.md) and release notes.
 
 ## Features
 
@@ -465,7 +472,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.25.1.
+> effects regression via a C++ backend.* Version 2.26.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

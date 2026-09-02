@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -23,6 +24,10 @@ namespace detail {
 namespace {
 
 constexpr int kBlockSize = 256;
+constexpr int kForwardProbeMaxP = kCudaForwardProbeMaxP;
+constexpr int kForwardProbeGrid = 512;
+static_assert(kForwardProbeMaxP * kForwardProbeMaxP <= kBlockSize,
+              "forward-probe Gram finish requires one CUDA block");
 
 inline bool finite_double_bits(double value) {
     static_assert(sizeof(double) == sizeof(std::uint64_t),
@@ -214,6 +219,567 @@ bool cuda_cert_shadow_enabled() {
     }();
     return enabled;
 }
+
+// Diagnostic-only convergence trace for the accelerated CUDA sweeps.  The
+// solver already copies the three Irons-Tuck sums below to the host on every
+// accelerated iteration.  Keeping their raw values here adds no device work,
+// synchronization, allocation, or public result field.  All derived
+// arithmetic lives in a noinline emitter so the CUDA host compiler cannot
+// reassociate it with the solver's fast-math expressions.
+bool cuda_accel_trace_enabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_CUDA_ACCEL_TRACE");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
+bool cuda_forward_probe_environment_enabled() {
+    static const bool environment_enabled = [] {
+        const char* raw = std::getenv("XHDFE_CUDA_FORWARD_PROBE");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return environment_enabled;
+}
+
+bool cuda_forward_probe_enabled() {
+    return cuda_forward_probe_environment_enabled() ||
+           thread_cuda_forward_probe_requested();
+}
+
+bool cuda_forward_probe_diag_enabled() {
+    static const bool enabled = [] {
+        const char* own = std::getenv("XHDFE_CUDA_FORWARD_PROBE_DIAG");
+        const char* retry = std::getenv(
+            "XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_RETRY_DIAG");
+        return (own != nullptr && *own != '\0' && *own != '0') ||
+               (retry != nullptr && *retry != '\0' && *retry != '0');
+    }();
+    return enabled;
+}
+
+int cuda_forward_probe_sweeps() {
+    static const int sweeps = [] {
+        const char* raw = std::getenv("XHDFE_CUDA_FORWARD_PROBE_SWEEPS");
+        const int parsed = raw != nullptr ? std::atoi(raw) : 4;
+        return parsed > 0 ? std::min(parsed, 64) : 4;
+    }();
+    return sweeps;
+}
+
+int cuda_forward_probe_forced_status() {
+    static const int status = [] {
+        const char* raw = std::getenv(
+            "XHDFE_CUDA_FORWARD_PROBE_FORCE_STATUS");
+        const int parsed = raw != nullptr ? std::atoi(raw) : 0;
+        return parsed >= 2 && parsed <= 4 ? parsed : 0;
+    }();
+    return status;
+}
+
+std::atomic<long long> g_cuda_forward_probe_sequence{0};
+
+#if defined(_MSC_VER)
+#define XHDFE_CUDA_HOST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define XHDFE_CUDA_HOST_NOINLINE __attribute__((noinline))
+#else
+#define XHDFE_CUDA_HOST_NOINLINE
+#endif
+
+struct CudaAccelTraceRecord {
+    double vprod;
+    double ssq;
+    double d1sq;
+    double prev_norm;
+    int phase;
+    int iter;
+};
+
+struct CudaAccelTraceBuffer {
+    static constexpr int kRingSize = 16;
+    bool enabled = false;
+    bool use_accel = false;
+    bool two_stage = false;
+    bool honest_mode = false;
+    int n = 0;
+    int cols = 0;
+    int dims = 0;
+    int phase = 0;
+    int ring_count = 0;
+    int ring_next = 0;
+    long long records = 0;
+    double honest_tol = 0.0;
+    double convergence_tol = 0.0;
+    CudaAccelTraceRecord ring[kRingSize];
+
+    void begin_phase() {
+        if (enabled) {
+            ++phase;
+        }
+    }
+
+    void record(double vprod_value,
+                double ssq_value,
+                double d1sq_value,
+                double prev_norm_value,
+                int iter_value) {
+        if (!enabled) {
+            return;
+        }
+        CudaAccelTraceRecord& out = ring[ring_next];
+        out.vprod = vprod_value;
+        out.ssq = ssq_value;
+        out.d1sq = d1sq_value;
+        out.prev_norm = prev_norm_value;
+        out.phase = phase;
+        out.iter = iter_value;
+        ring_next = (ring_next + 1) % kRingSize;
+        ring_count = std::min(ring_count + 1, kRingSize);
+        ++records;
+    }
+};
+
+XHDFE_CUDA_HOST_NOINLINE void emit_cuda_accel_trace(
+    const CudaAccelTraceBuffer& trace,
+    int iterations,
+    bool converged) {
+    if (!trace.enabled) {
+        return;
+    }
+
+    double ratios[CudaAccelTraceBuffer::kRingSize];
+    int ratio_count = 0;
+    double r_exit = std::numeric_limits<double>::quiet_NaN();
+    double cos_exit = std::numeric_limits<double>::quiet_NaN();
+    double displacement_rel_exit = std::numeric_limits<double>::quiet_NaN();
+    double error_rel_exit = std::numeric_limits<double>::quiet_NaN();
+    int exit_phase = 0;
+    int exit_iter = -1;
+
+    for (int k = 0; k < trace.ring_count; ++k) {
+        const int index =
+            (trace.ring_next - trace.ring_count + k +
+             2 * CudaAccelTraceBuffer::kRingSize) %
+            CudaAccelTraceBuffer::kRingSize;
+        const CudaAccelTraceRecord& rec = trace.ring[index];
+        const double d0sq = rec.ssq + rec.d1sq - 2.0 * rec.vprod;
+        if (!(d0sq > 0.0) || !(rec.d1sq >= 0.0) ||
+            !finite_double_bits(d0sq) || !finite_double_bits(rec.d1sq)) {
+            continue;
+        }
+        const double ratio = std::sqrt(rec.d1sq / d0sq);
+        if (!finite_double_bits(ratio)) {
+            continue;
+        }
+        ratios[ratio_count++] = ratio;
+        if (k + 1 == trace.ring_count) {
+            const double d0d1 = rec.d1sq - rec.vprod;
+            r_exit = ratio;
+            cos_exit = rec.d1sq > 0.0
+                           ? d0d1 / std::sqrt(d0sq * rec.d1sq)
+                           : std::numeric_limits<double>::quiet_NaN();
+            displacement_rel_exit =
+                std::sqrt(rec.d1sq) / std::max(1.0, rec.prev_norm);
+            error_rel_exit = ratio < 1.0
+                                 ? displacement_rel_exit / (1.0 - ratio)
+                                 : std::numeric_limits<double>::infinity();
+            exit_phase = rec.phase;
+            exit_iter = rec.iter;
+        }
+    }
+
+    std::sort(ratios, ratios + ratio_count);
+    const double r_tail_median =
+        ratio_count > 0
+            ? ratios[ratio_count / 2]
+            : std::numeric_limits<double>::quiet_NaN();
+    const double r_tail_max =
+        ratio_count > 0
+            ? ratios[ratio_count - 1]
+            : std::numeric_limits<double>::quiet_NaN();
+    std::fprintf(
+        stderr,
+        "cuda_accel_trace n=%d cols=%d dims=%d accel=%d two_stage=%d "
+        "honest=%d tol=%.17g eff_tol=%.17g phases=%d records=%lld "
+        "iterations=%d converged=%d exit_phase=%d exit_iter=%d "
+        "r_exit=%.17g r_tail_median=%.17g r_tail_max=%.17g "
+        "cos_exit=%.17g displacement_rel_exit=%.17g "
+        "error_rel_exit=%.17g ring=%d\n",
+        trace.n, trace.cols, trace.dims, trace.use_accel ? 1 : 0,
+        trace.two_stage ? 1 : 0, trace.honest_mode ? 1 : 0,
+        trace.honest_tol, trace.convergence_tol, trace.phase, trace.records,
+        iterations, converged ? 1 : 0, exit_phase, exit_iter, r_exit,
+        r_tail_median, r_tail_max, cos_exit, displacement_rel_exit,
+        error_rel_exit, trace.ring_count);
+}
+
+struct CudaForwardProbeGram {
+    int p = 0;
+    bool centered = false;
+    double values[kForwardProbeMaxP * kForwardProbeMaxP] = {0.0};
+};
+
+struct CudaForwardProbeFit {
+    bool ok = false;
+    int columns = 0;
+    unsigned int mask = 0;
+    double yy = 0.0;
+    double rss = 0.0;
+    double intercept = 0.0;
+    double condition_proxy = 0.0;
+    double coefficients[kForwardProbeMaxP] = {0.0};
+    double standard_errors[kForwardProbeMaxP] = {0.0};
+    double covariance[kForwardProbeMaxP * kForwardProbeMaxP] = {0.0};
+};
+
+XHDFE_CUDA_HOST_NOINLINE bool fit_cuda_forward_probe_gram(
+    const CudaForwardProbeGram& gram,
+    long long observations,
+    CudaForwardProbeFit& out) {
+    out = CudaForwardProbeFit{};
+    const int p = gram.p;
+    if (p < 2 || p > kForwardProbeMaxP || observations <= 0) {
+        return false;
+    }
+    for (int index = 0; index < p * p; ++index) {
+        if (!finite_double_bits(gram.values[index])) {
+            return false;
+        }
+    }
+    auto raw_value = [&](int row, int column) {
+        return gram.values[row * p + column];
+    };
+    const int regressor_count = gram.centered ? p - 2 : p - 1;
+    if (regressor_count < 1) {
+        return false;
+    }
+    const int constant_column = p - 1;
+    const double centering_denominator =
+        gram.centered
+            ? raw_value(constant_column, constant_column)
+            : 1.0;
+    if (!(centering_denominator > 0.0)) {
+        return false;
+    }
+    auto value = [&](int row, int column) {
+        const double raw = raw_value(row, column);
+        if (!gram.centered) {
+            return raw;
+        }
+        return raw -
+               raw_value(row, constant_column) *
+                   raw_value(column, constant_column) /
+                   centering_denominator;
+    };
+
+    out.yy = value(0, 0);
+    double max_diagonal = 0.0;
+    for (int column = 1; column <= regressor_count; ++column) {
+        max_diagonal = std::max(max_diagonal, value(column, column));
+    }
+    if (!(max_diagonal > 0.0)) {
+        return false;
+    }
+
+    constexpr double kAbsoluteFloor = 1.0e-14;
+    constexpr double kPivotTolerance = 1.0e-12;
+    int selected[kForwardProbeMaxP] = {0};
+    int selected_count = 0;
+    double lower[kForwardProbeMaxP * kForwardProbeMaxP] = {0.0};
+    double new_row[kForwardProbeMaxP] = {0.0};
+    for (int column = 1; column <= regressor_count; ++column) {
+        const double diagonal = value(column, column);
+        if (!(diagonal > kAbsoluteFloor * max_diagonal)) {
+            continue;
+        }
+        double pivot = diagonal;
+        for (int prior = 0; prior < selected_count; ++prior) {
+            double cross = value(column, selected[prior]);
+            for (int inner = 0; inner < prior; ++inner) {
+                cross -= lower[prior * kForwardProbeMaxP + inner] *
+                         new_row[inner];
+            }
+            new_row[prior] =
+                cross / lower[prior * kForwardProbeMaxP + prior];
+            pivot -= new_row[prior] * new_row[prior];
+        }
+        if (!(pivot > kPivotTolerance * diagonal)) {
+            continue;
+        }
+        for (int prior = 0; prior < selected_count; ++prior) {
+            lower[selected_count * kForwardProbeMaxP + prior] =
+                new_row[prior];
+        }
+        lower[selected_count * kForwardProbeMaxP + selected_count] =
+            std::sqrt(pivot);
+        selected[selected_count] = column;
+        out.mask |= 1U << static_cast<unsigned int>(column - 1);
+        ++selected_count;
+    }
+    if (selected_count == 0) {
+        return false;
+    }
+
+    double work[kForwardProbeMaxP] = {0.0};
+    double beta[kForwardProbeMaxP] = {0.0};
+    for (int row = 0; row < selected_count; ++row) {
+        double rhs = value(selected[row], 0);
+        for (int prior = 0; prior < row; ++prior) {
+            rhs -= lower[row * kForwardProbeMaxP + prior] * work[prior];
+        }
+        work[row] = rhs / lower[row * kForwardProbeMaxP + row];
+    }
+    for (int row = selected_count; row-- > 0;) {
+        double rhs = work[row];
+        for (int following = row + 1; following < selected_count; ++following) {
+            rhs -= lower[following * kForwardProbeMaxP + row] *
+                   beta[following];
+        }
+        beta[row] = rhs / lower[row * kForwardProbeMaxP + row];
+    }
+
+    double rss = out.yy;
+    for (int row = 0; row < selected_count; ++row) {
+        rss -= beta[row] * value(selected[row], 0);
+        out.coefficients[selected[row] - 1] = beta[row];
+    }
+    if (gram.centered) {
+        double intercept =
+            raw_value(0, constant_column) / centering_denominator;
+        for (int row = 0; row < selected_count; ++row) {
+            intercept -= beta[row] *
+                         raw_value(selected[row], constant_column) /
+                         centering_denominator;
+        }
+        out.intercept = intercept;
+    }
+    if (!finite_double_bits(rss) || !(rss > 0.0)) {
+        return false;
+    }
+
+    double inverse[kForwardProbeMaxP * kForwardProbeMaxP] = {0.0};
+    for (int column = 0; column < selected_count; ++column) {
+        for (int row = 0; row < selected_count; ++row) {
+            double rhs = row == column ? 1.0 : 0.0;
+            for (int prior = 0; prior < row; ++prior) {
+                rhs -= lower[row * kForwardProbeMaxP + prior] * work[prior];
+            }
+            work[row] = rhs / lower[row * kForwardProbeMaxP + row];
+        }
+        for (int row = selected_count; row-- > 0;) {
+            double rhs = work[row];
+            for (int following = row + 1; following < selected_count;
+                 ++following) {
+                rhs -= lower[following * kForwardProbeMaxP + row] *
+                       inverse[following * kForwardProbeMaxP + column];
+            }
+            inverse[row * kForwardProbeMaxP + column] =
+                rhs / lower[row * kForwardProbeMaxP + row];
+        }
+    }
+
+    const double degrees =
+        static_cast<double>(observations - selected_count -
+                            (gram.centered ? 1 : 0));
+    if (!(degrees > 0.0)) {
+        return false;
+    }
+    const double sigma2 = rss / degrees;
+    double minimum_cholesky =
+        lower[0 * kForwardProbeMaxP + 0];
+    double maximum_cholesky = minimum_cholesky;
+    for (int row = 0; row < selected_count; ++row) {
+        const double diagonal = lower[row * kForwardProbeMaxP + row];
+        minimum_cholesky = std::min(minimum_cholesky, diagonal);
+        maximum_cholesky = std::max(maximum_cholesky, diagonal);
+        const int public_row = selected[row] - 1;
+        const double variance =
+            sigma2 * inverse[row * kForwardProbeMaxP + row];
+        if (!(variance >= 0.0) || !finite_double_bits(variance)) {
+            return false;
+        }
+        out.standard_errors[public_row] = std::sqrt(variance);
+        for (int column = 0; column < selected_count; ++column) {
+            const int public_column = selected[column] - 1;
+            out.covariance[public_row * kForwardProbeMaxP + public_column] =
+                sigma2 * inverse[row * kForwardProbeMaxP + column];
+        }
+    }
+
+    out.columns = selected_count;
+    out.rss = rss;
+    out.condition_proxy =
+        minimum_cholesky > 0.0
+            ? (maximum_cholesky / minimum_cholesky) *
+                  (maximum_cholesky / minimum_cholesky)
+            : std::numeric_limits<double>::infinity();
+    out.ok = finite_double_bits(out.condition_proxy);
+    return out.ok;
+}
+
+XHDFE_CUDA_HOST_NOINLINE CudaForwardProbeSummary emit_cuda_forward_probe(
+    long long sequence,
+    int n,
+    int cols,
+    int dims,
+    bool honest_mode,
+    bool use_accel,
+    int iterations,
+    int polish_sweeps,
+    int continuation_sweeps,
+    double exit_gram_ms,
+    double continuation_ms,
+    bool diagnostics_enabled,
+    const CudaForwardProbeGram& gram_public,
+    const CudaForwardProbeGram& gram_continuation,
+    const CudaForwardProbeFit& exit_fit,
+    const CudaForwardProbeFit& public_fit,
+    const CudaForwardProbeFit& continuation_fit,
+    const CudaForwardProbeFit& second_continuation_fit) {
+    CudaForwardProbeSummary summary;
+    summary.continuation_sweeps = continuation_sweeps;
+    const bool masks_match =
+        exit_fit.mask == public_fit.mask &&
+        public_fit.mask == continuation_fit.mask &&
+        continuation_fit.mask == second_continuation_fit.mask;
+    if (!exit_fit.ok || !public_fit.ok || !continuation_fit.ok ||
+        !second_continuation_fit.ok || !masks_match) {
+        if (diagnostics_enabled) {
+            std::fprintf(
+                stderr,
+                "cuda_forward_probe seq=%lld status=fit_error n=%d cols=%d "
+                "dims=%d exit_ok=%d public_ok=%d k_ok=%d k2_ok=%d "
+                "mask_exit=%x mask_public=%x mask_k=%x mask_k2=%x\n",
+                sequence, n, cols, dims, exit_fit.ok ? 1 : 0,
+                public_fit.ok ? 1 : 0, continuation_fit.ok ? 1 : 0,
+                second_continuation_fit.ok ? 1 : 0, exit_fit.mask,
+                public_fit.mask, continuation_fit.mask,
+                second_continuation_fit.mask);
+        }
+        summary.status = 2;
+        return summary;
+    }
+
+    double coefficient_polish_max = 0.0;
+    double coefficient_k_max = 0.0;
+    double coefficient_k2_max = 0.0;
+    double first_step_squared = 0.0;
+    double second_step_squared = 0.0;
+    double second_step_max = 0.0;
+    double standard_error_k2_max = 0.0;
+    double covariance_k2_max = 0.0;
+    for (int column = 0; column < cols; ++column) {
+        if ((public_fit.mask & (1U << static_cast<unsigned int>(column))) == 0U) {
+            continue;
+        }
+        coefficient_polish_max = std::max(
+            coefficient_polish_max,
+            std::abs(public_fit.coefficients[column] -
+                     exit_fit.coefficients[column]));
+        const double first_step =
+            continuation_fit.coefficients[column] -
+            public_fit.coefficients[column];
+        const double second_step =
+            second_continuation_fit.coefficients[column] -
+            continuation_fit.coefficients[column];
+        coefficient_k_max =
+            std::max(coefficient_k_max, std::abs(first_step));
+        coefficient_k2_max = std::max(
+            coefficient_k2_max,
+            std::abs(second_continuation_fit.coefficients[column] -
+                     public_fit.coefficients[column]));
+        first_step_squared += first_step * first_step;
+        second_step_squared += second_step * second_step;
+        second_step_max = std::max(second_step_max, std::abs(second_step));
+        standard_error_k2_max = std::max(
+            standard_error_k2_max,
+            std::abs(second_continuation_fit.standard_errors[column] -
+                     public_fit.standard_errors[column]));
+        for (int other = 0; other < cols; ++other) {
+            if ((public_fit.mask &
+                 (1U << static_cast<unsigned int>(other))) == 0U) {
+                continue;
+            }
+            covariance_k2_max = std::max(
+                covariance_k2_max,
+                std::abs(second_continuation_fit.covariance[
+                             column * kForwardProbeMaxP + other] -
+                         public_fit.covariance[
+                             column * kForwardProbeMaxP + other]));
+        }
+    }
+    const double first_norm = std::sqrt(first_step_squared);
+    const double second_norm = std::sqrt(second_step_squared);
+    const double rho_k =
+        first_norm > 0.0 ? second_norm / first_norm : 0.0;
+    const double tail_max =
+        rho_k < 1.0
+            ? second_step_max * rho_k / (1.0 - rho_k)
+            : std::numeric_limits<double>::infinity();
+    const double total_drift_estimate = coefficient_k2_max + tail_max;
+    const double rss_scale = std::max(std::abs(public_fit.rss), 1.0e-300);
+    const double rss_k_relative =
+        std::abs(continuation_fit.rss - public_fit.rss) / rss_scale;
+    const double rss_k2_relative =
+        std::abs(second_continuation_fit.rss - public_fit.rss) / rss_scale;
+
+    double gram_difference_squared = 0.0;
+    double gram_public_squared = 0.0;
+    for (int row = 1; row <= cols; ++row) {
+        for (int column = 1; column <= cols; ++column) {
+            const double public_value =
+                gram_public.values[row * gram_public.p + column];
+            const double difference =
+                gram_continuation.values[
+                    row * gram_continuation.p + column] -
+                public_value;
+            gram_difference_squared += difference * difference;
+            gram_public_squared += public_value * public_value;
+        }
+    }
+    const double gram_relative =
+        gram_public_squared > 0.0
+            ? std::sqrt(gram_difference_squared / gram_public_squared)
+            : std::numeric_limits<double>::infinity();
+    const double rss_cancellation =
+        public_fit.rss > 0.0
+            ? public_fit.yy / public_fit.rss
+            : std::numeric_limits<double>::infinity();
+
+    summary.status = 1;
+    summary.coefficient_drift_abs = coefficient_k2_max;
+    summary.rss_drift_rel = rss_k2_relative;
+    summary.standard_error_drift_abs = standard_error_k2_max;
+    summary.covariance_drift_abs = covariance_k2_max;
+    summary.contraction = rho_k;
+    summary.coefficient_tail_abs = tail_max;
+    summary.condition_proxy = public_fit.condition_proxy;
+
+    if (diagnostics_enabled) {
+        std::fprintf(
+            stderr,
+        "cuda_forward_probe seq=%lld status=ok n=%d cols=%d dims=%d "
+        "honest=%d accel=%d iterations=%d polish=%d k=%d mask=%x "
+        "db_polish_max=%.17g db_k_max=%.17g db_k2_max=%.17g "
+        "rho_k=%.17g tail_b_max=%.17g drift_total_est=%.17g "
+        "rss_public=%.17g rss_k_rel=%.17g rss_k2_rel=%.17g "
+        "dse_k2_max=%.17g dcov_k2_max=%.17g dgram_k2_rel=%.17g "
+        "condition_proxy=%.17g rss_cancel=%.17g "
+        "exit_gram_ms=%.3f continuation_ms=%.3f\n",
+        sequence, n, cols, dims, honest_mode ? 1 : 0,
+        use_accel ? 1 : 0, iterations, polish_sweeps,
+        continuation_sweeps, public_fit.mask, coefficient_polish_max,
+        coefficient_k_max, coefficient_k2_max, rho_k, tail_max,
+        total_drift_estimate, public_fit.rss, rss_k_relative,
+        rss_k2_relative, standard_error_k2_max, covariance_k2_max,
+            gram_relative, public_fit.condition_proxy, rss_cancellation,
+            exit_gram_ms, continuation_ms);
+    }
+    return summary;
+}
+
+#undef XHDFE_CUDA_HOST_NOINLINE
 
 void staged_memcpy_h2d(void* dst_dev,
                        const void* src_host,
@@ -990,6 +1556,134 @@ __global__ __launch_bounds__(BLOCK, 2) void component_dot_kernel(const double* y
     }
 }
 
+__global__ __launch_bounds__(kBlockSize, 2) void forward_probe_gram_partials_kernel(
+    const double* y,
+    const double* X,
+    int n,
+    int ld,
+    int cols,
+    int p,
+    double* partials) {
+    const int first = static_cast<int>(blockIdx.y);
+    const int second = static_cast<int>(blockIdx.z);
+    if (second < first) {
+        return;
+    }
+    const double* first_values = nullptr;
+    if (first == 0) {
+        first_values = y;
+    } else if (first <= cols) {
+        first_values = X + static_cast<std::size_t>(first - 1) * ld;
+    }
+    const double* second_values = nullptr;
+    if (second == 0) {
+        second_values = y;
+    } else if (second <= cols) {
+        second_values = X + static_cast<std::size_t>(second - 1) * ld;
+    }
+    __shared__ double scratch[kBlockSize];
+    double local = 0.0;
+    for (int row = static_cast<int>(blockIdx.x) * kBlockSize + threadIdx.x;
+         row < n;
+         row += kBlockSize * static_cast<int>(gridDim.x)) {
+        const double first_value =
+            first_values != nullptr ? first_values[row] : 1.0;
+        const double second_value =
+            second_values != nullptr ? second_values[row] : 1.0;
+        local = __dadd_rn(
+            local, __dmul_rn(first_value, second_value));
+    }
+    scratch[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            scratch[threadIdx.x] = __dadd_rn(
+                scratch[threadIdx.x], scratch[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        const std::size_t pair =
+            static_cast<std::size_t>(first) * p + second;
+        partials[pair * gridDim.x + blockIdx.x] = scratch[0];
+    }
+}
+
+__global__ __launch_bounds__(kBlockSize, 2) void forward_probe_gram_finish_kernel(
+    const double* partials,
+    int p,
+    int grid,
+    double* gram) {
+    const int pair = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair >= p * p) {
+        return;
+    }
+    const int first = pair / p;
+    const int second = pair % p;
+    if (second < first) {
+        return;
+    }
+    const double* values =
+        partials + static_cast<std::size_t>(pair) * grid;
+    double total = 0.0;
+    for (int block = 0; block < grid; ++block) {
+        total = __dadd_rn(total, values[block]);
+    }
+    gram[pair] = total;
+    gram[second * p + first] = total;
+}
+
+__global__ __launch_bounds__(kBlockSize, 2) void forward_probe_rss_partials_kernel(
+    const double* y,
+    const double* X,
+    const double* coefficients,
+    double intercept,
+    int n,
+    int ld,
+    int cols,
+    double* partials) {
+    __shared__ double scratch[kBlockSize];
+    double local = 0.0;
+    for (int row = static_cast<int>(blockIdx.x) * kBlockSize + threadIdx.x;
+         row < n;
+         row += kBlockSize * static_cast<int>(gridDim.x)) {
+        double residual = __dadd_rn(y[row], -intercept);
+        for (int column = 0; column < cols; ++column) {
+            residual = __dadd_rn(
+                residual,
+                -__dmul_rn(
+                    X[static_cast<std::size_t>(column) * ld + row],
+                    coefficients[column]));
+        }
+        local = __dadd_rn(local, __dmul_rn(residual, residual));
+    }
+    scratch[threadIdx.x] = local;
+    __syncthreads();
+    for (int stride = kBlockSize / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            scratch[threadIdx.x] = __dadd_rn(
+                scratch[threadIdx.x], scratch[threadIdx.x + stride]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x] = scratch[0];
+    }
+}
+
+__global__ void forward_probe_rss_finish_kernel(
+    const double* partials,
+    int count,
+    double* output) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        double total = 0.0;
+        for (int index = 0; index < count; ++index) {
+            total = __dadd_rn(total, partials[index]);
+        }
+        output[0] = total;
+    }
+}
+
 __global__ __launch_bounds__(256, 4) void projection_residual_kernel(double* proj_y,
                                                                      const double* src_y,
                                                                      double* proj_x,
@@ -1453,6 +2147,220 @@ __global__ void gi_apply_update_kernel(double* y,
     y[g] -= relaxation * scale * sum_y;
 }
 
+// Matrix-free joint group()/individual() LSMR primitives. Every A' output has
+// one stable CSR owner and all norm reductions use a fixed two-stage tree; no
+// atomic accumulation can affect a Krylov iterate or stopping decision.
+__global__ void gi_lsmr_inverse_sqrt_kernel(const double* diagonal,
+                                            int count,
+                                            int output_offset,
+                                            double* column_scale) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        const double value = diagonal[i];
+        column_scale[output_offset + i] =
+            value > 0.0 ? 1.0 / sqrt(value) : 0.0;
+    }
+}
+
+__global__ void gi_lsmr_build_rhs_kernel(const double* raw,
+                                         const double* weights,
+                                         bool unit_weights,
+                                         int n,
+                                         double* rhs) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < n) {
+        rhs[row] = (unit_weights ? 1.0 : sqrt(weights[row])) * raw[row];
+    }
+}
+
+__global__ void gi_lsmr_scale_coefficients_kernel(const double* values,
+                                                  const double* column_scale,
+                                                  int count,
+                                                  double* scaled) {
+    const int column = blockIdx.x * blockDim.x + threadIdx.x;
+    if (column < count) {
+        scaled[column] = column_scale[column] * values[column];
+    }
+}
+
+__global__ void gi_lsmr_apply_a_kernel(
+    const double* scaled_coefficients,
+    const int* const* standard_gid,
+    const int* offsets,
+    int dims,
+    const int* group_ptr,
+    const int* group_individual,
+    const double* group_scale,
+    int individual_offset,
+    const double* weights,
+    bool unit_weights,
+    bool weighted_output,
+    int groups,
+    double* output) {
+    const int group = blockIdx.x * blockDim.x + threadIdx.x;
+    if (group >= groups) {
+        return;
+    }
+    double fitted = 0.0;
+    for (int dim = 0; dim < dims; ++dim) {
+        fitted += scaled_coefficients[
+            offsets[dim] + standard_gid[dim][group]];
+    }
+    double individual_sum = 0.0;
+    for (int pos = group_ptr[group]; pos < group_ptr[group + 1]; ++pos) {
+        individual_sum += scaled_coefficients[
+            individual_offset + group_individual[pos]];
+    }
+    fitted += group_scale[group] * individual_sum;
+    if (weighted_output && !unit_weights) {
+        fitted *= sqrt(weights[group]);
+    }
+    output[group] = fitted;
+}
+
+__global__ void gi_lsmr_apply_at_standard_kernel(
+    const double* input,
+    const int* group_ptr,
+    const int* observation_index,
+    const double* weights,
+    bool unit_weights,
+    const double* column_scale,
+    int output_offset,
+    int levels,
+    double* output) {
+    const int level = blockIdx.x * blockDim.x + threadIdx.x;
+    if (level >= levels) {
+        return;
+    }
+    double value = 0.0;
+    for (int pos = group_ptr[level]; pos < group_ptr[level + 1]; ++pos) {
+        const int row = observation_index ? observation_index[pos] : pos;
+        value += (unit_weights ? 1.0 : sqrt(weights[row])) * input[row];
+    }
+    output[output_offset + level] =
+        column_scale[output_offset + level] * value;
+}
+
+__global__ void gi_lsmr_apply_at_individual_kernel(
+    const double* input,
+    const int* individual_ptr,
+    const int* individual_group,
+    const double* group_scale,
+    const double* weights,
+    bool unit_weights,
+    const double* column_scale,
+    int output_offset,
+    int individuals,
+    double* output) {
+    const int individual = blockIdx.x * blockDim.x + threadIdx.x;
+    if (individual >= individuals) {
+        return;
+    }
+    double value = 0.0;
+    for (int pos = individual_ptr[individual];
+         pos < individual_ptr[individual + 1]; ++pos) {
+        const int group = individual_group[pos];
+        value += (unit_weights ? 1.0 : sqrt(weights[group])) *
+                 group_scale[group] * input[group];
+    }
+    output[output_offset + individual] =
+        column_scale[output_offset + individual] * value;
+}
+
+__global__ void gi_lsmr_scale_copy_kernel(const double* source,
+                                          double scale,
+                                          int count,
+                                          double* target) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        target[i] = scale * source[i];
+    }
+}
+
+__global__ void gi_lsmr_affine_subtract_kernel(const double* first,
+                                               const double* second,
+                                               double second_scale,
+                                               int count,
+                                               double* target) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        const double a = first[i];
+        const double b = second[i];
+        target[i] = a - second_scale * b;
+    }
+}
+
+__global__ void gi_lsmr_update_solution_kernel(double* solution,
+                                               double* hbar,
+                                               const double* h,
+                                               double hbar_scale,
+                                               double solution_scale,
+                                               int count) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        const double next_hbar = hbar_scale * hbar[i] + h[i];
+        hbar[i] = next_hbar;
+        solution[i] += solution_scale * next_hbar;
+    }
+}
+
+__global__ void gi_lsmr_update_h_kernel(double* h,
+                                        const double* v,
+                                        double h_scale,
+                                        int count) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        h[i] = h_scale * h[i] + v[i];
+    }
+}
+
+__global__ void gi_lsmr_make_residual_kernel(const double* original,
+                                             const double* fitted,
+                                             int count,
+                                             double* residual) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < count) {
+        residual[i] = original[i] - fitted[i];
+    }
+}
+
+template <int BLOCK>
+__global__ __launch_bounds__(BLOCK, 2) void gi_lsmr_sumsq_partials_kernel(
+    const double* values,
+    int count,
+    double* partials) {
+    using BlockReduce = cub::BlockReduce<double, BLOCK>;
+    __shared__ typename BlockReduce::TempStorage temp;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    double local = 0.0;
+    for (int i = tid; i < count; i += stride) {
+        const double value = values[i];
+        local += value * value;
+    }
+    const double block_sum = BlockReduce(temp).Sum(local);
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x] = block_sum;
+    }
+}
+
+template <int BLOCK>
+__global__ __launch_bounds__(BLOCK, 1) void gi_lsmr_sumsq_finish_kernel(
+    const double* partials,
+    int count,
+    double* output) {
+    using BlockReduce = cub::BlockReduce<double, BLOCK>;
+    __shared__ typename BlockReduce::TempStorage temp;
+    double local = 0.0;
+    for (int i = threadIdx.x; i < count; i += blockDim.x) {
+        local += partials[i];
+    }
+    const double total = BlockReduce(temp).Sum(local);
+    if (threadIdx.x == 0) {
+        output[0] = total;
+    }
+}
+
 struct CudaFeDevice {
     int num_groups = 0;
     int num_levels_present = 0;
@@ -1526,6 +2434,31 @@ struct CudaWorkspace {
 
     // Reusable pinned staging for large host<->device copies.
     PinnedStage h_stage;
+};
+
+// The joint LSMR vectors are intentionally call-local. They can be much
+// larger than the legacy grouped-sweep workspace, and retaining a failed or
+// completed solve here would make unrelated later CUDA fits inherit its peak
+// allocation. Stack unwinding releases every buffer on all return paths.
+struct GiLsmrLocalWorkspace {
+    std::vector<DeviceBuffer<int>> standard_group_ptr;
+    std::vector<DeviceBuffer<int>> standard_observation_index;
+    DeviceBuffer<const int*> gid_ptrs;
+    DeviceBuffer<int> offsets;
+    DeviceBuffer<double> column_scale;
+    DeviceBuffer<double> b;
+    DeviceBuffer<double> u;
+    DeviceBuffer<double> v;
+    DeviceBuffer<double> h;
+    DeviceBuffer<double> hbar;
+    DeviceBuffer<double> solution;
+    DeviceBuffer<double> av;
+    DeviceBuffer<double> atu;
+    DeviceBuffer<double> scaled;
+    DeviceBuffer<double> residual_y;
+    DeviceBuffer<double> residual_x;
+    DeviceBuffer<double> norm_partials;
+    DeviceBuffer<double> norm_scalar;
 };
 
 struct AlphaStatePtrs {
@@ -2528,6 +3461,15 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         cuda_prof.t0 = std::chrono::steady_clock::now();
         cuda_prof.h2d_calls0 = g_cuda_h2d_calls.load();
         cuda_prof.d2h_calls0 = g_cuda_d2h_calls.load();
+        CudaAccelTraceBuffer accel_trace;
+        accel_trace.enabled = cuda_accel_trace_enabled();
+        accel_trace.use_accel = use_accel;
+        accel_trace.honest_mode = honest_mode;
+        accel_trace.n = n;
+        accel_trace.cols = cols;
+        accel_trace.dims = static_cast<int>(fe_inputs.size());
+        accel_trace.honest_tol = honest_tol;
+        accel_trace.convergence_tol = convergence_tol;
         const bool unit_weights = (weights == nullptr);
         CudaWorkspace& workspace = cuda_workspace;
 
@@ -3440,6 +4382,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                     iter_two_fe = 0;
                 }
             }
+            accel_trace.two_stage = enable_two_stage;
 
             bool converged = false;
 
@@ -3602,6 +4545,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (max_iter <= 0 || order.empty()) {
                         return false;
 	                    }
+	                    accel_trace.begin_phase();
 	                    double prev_norm = compute_norm();
 	                    copy_update_snapshot(d_y.data(), d_x.data());
 	                    int last_check_iter = -1;
@@ -3669,6 +4613,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                    "cudaMemcpy stats failed");
                         const double vprod = stats_host[0];
                         const double ssq = stats_host[1];
+                        accel_trace.record(vprod, ssq, stats_host[2], prev_norm,
+                                           iter);
                         if (honest_mode && !mixed_update_criterion &&
                             std::sqrt(stats_host[2]) <=
                                 honest_tol * std::max(1.0, prev_norm)) {
@@ -4536,6 +5482,172 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
+        struct ForwardProbeState {
+            long long sequence = 0;
+            int continuation_sweeps = 4;
+            double exit_gram_ms = 0.0;
+            DeviceBuffer<double> partials;
+            DeviceBuffer<double> device_gram;
+            DeviceBuffer<double> rss_partials;
+            DeviceBuffer<double> rss_scalar;
+            DeviceBuffer<double> coefficients;
+            DeviceBuffer<double> scratch_y;
+            DeviceBuffer<double> scratch_x;
+            CudaForwardProbeGram gram_exit;
+            CudaForwardProbeGram gram_public;
+            CudaForwardProbeGram gram_continuation;
+            CudaForwardProbeGram gram_second_continuation;
+            CudaForwardProbeFit fit_exit;
+            CudaForwardProbeFit fit_public;
+            CudaForwardProbeFit fit_continuation;
+            CudaForwardProbeFit fit_second_continuation;
+        };
+        std::unique_ptr<ForwardProbeState> forward_probe;
+        const bool forward_probe_requested = cuda_forward_probe_enabled();
+        const bool forward_probe_thread_requested =
+            thread_cuda_forward_probe_requested();
+        bool forward_probe_selector_shape =
+            forward_probe_thread_requested;
+        if (forward_probe_requested && !forward_probe_thread_requested) {
+            auto env_int = [](const char* name, int fallback, int minimum) {
+                const char* raw = std::getenv(name);
+                const int parsed = raw != nullptr ? std::atoi(raw) : fallback;
+                return std::max(minimum, parsed);
+            };
+            const int min_rows = env_int(
+                "XHDFE_AUTO_MLSMR_MIN_ROWS", 200000, 1);
+            const int min_rhs = env_int(
+                "XHDFE_AUTO_MLSMR_MIN_RHS", 2, 1);
+            const int max_fes = env_int(
+                "XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES", 3, 1);
+            const int four_fe_max_rows = env_int(
+                "XHDFE_AUTO_MLSMR_DEFAULT_4FE_MAX_ROWS", 2000000, 1);
+            const bool bounded_four_fe =
+                max_fes >= 3 && active_fes == 4 &&
+                n <= four_fe_max_rows;
+            forward_probe_selector_shape =
+                n >= min_rows && cols >= min_rhs &&
+                (static_cast<int>(active_fes) <= max_fes ||
+                 bounded_four_fe);
+        }
+        const bool forward_probe_eligible =
+            forward_probe_requested && result.converged &&
+            forward_probe_selector_shape &&
+            method != AbsorptionMethod::Jacobi && !any_slope && unit_weights &&
+            !store_alphas && !options.retain_fixed_effects && cols >= 1 &&
+            cols + 1 + (options.fit_intercept ? 1 : 0) <=
+                kForwardProbeMaxP &&
+            active_fes > 0;
+        auto capture_forward_probe_gram = [&](ForwardProbeState& state,
+                                              const double* y_values,
+                                              const double* x_values,
+                                              CudaForwardProbeGram& output) {
+            const int p = cols + 1 + (options.fit_intercept ? 1 : 0);
+            const std::size_t pairs =
+                static_cast<std::size_t>(p) * static_cast<std::size_t>(p);
+            state.partials.allocate(
+                pairs * static_cast<std::size_t>(kForwardProbeGrid));
+            state.device_gram.allocate(pairs);
+            const dim3 grid(kForwardProbeGrid, p, p);
+            forward_probe_gram_partials_kernel<<<grid, kBlockSize>>>(
+                y_values, x_values, n, ld, cols, p,
+                state.partials.data());
+            cuda_check(cudaGetLastError(),
+                       "forward probe Gram partials kernel launch failed");
+            forward_probe_gram_finish_kernel<<<1, kBlockSize>>>(
+                state.partials.data(), p, kForwardProbeGrid,
+                state.device_gram.data());
+            cuda_check(cudaGetLastError(),
+                       "forward probe Gram finish kernel launch failed");
+            cuda_check(cudaMemcpy(output.values, state.device_gram.data(),
+                                  sizeof(double) * pairs,
+                                  cudaMemcpyDeviceToHost),
+                       "forward probe Gram copy failed");
+            output.p = p;
+            output.centered = options.fit_intercept;
+        };
+        auto capture_forward_probe_rss = [&](ForwardProbeState& state,
+                                             const double* y_values,
+                                             const double* x_values,
+                                             CudaForwardProbeFit& fit) {
+            if (!fit.ok) {
+                throw std::runtime_error(
+                    "forward probe cannot compute RSS from an invalid fit");
+            }
+            state.rss_partials.allocate(kForwardProbeGrid);
+            state.rss_scalar.allocate(1);
+            state.coefficients.allocate(static_cast<std::size_t>(cols));
+            cuda_check(cudaMemcpy(
+                           state.coefficients.data(), fit.coefficients,
+                           sizeof(double) * static_cast<std::size_t>(cols),
+                           cudaMemcpyHostToDevice),
+                       "forward probe coefficient copy failed");
+            forward_probe_rss_partials_kernel
+                <<<kForwardProbeGrid, kBlockSize>>>(
+                    y_values, x_values, state.coefficients.data(),
+                    fit.intercept, n, ld, cols,
+                    state.rss_partials.data());
+            cuda_check(cudaGetLastError(),
+                       "forward probe RSS partials kernel launch failed");
+            forward_probe_rss_finish_kernel<<<1, 1>>>(
+                state.rss_partials.data(), kForwardProbeGrid,
+                state.rss_scalar.data());
+            cuda_check(cudaGetLastError(),
+                       "forward probe RSS finish kernel launch failed");
+            double stable_rss = 0.0;
+            cuda_check(cudaMemcpy(&stable_rss, state.rss_scalar.data(),
+                                  sizeof(double), cudaMemcpyDeviceToHost),
+                       "forward probe RSS copy failed");
+            if (!(stable_rss > 0.0) || !finite_double_bits(stable_rss)) {
+                throw std::runtime_error(
+                    "forward probe RSS is non-positive or non-finite");
+            }
+            const double scale = stable_rss / fit.rss;
+            const double se_scale = std::sqrt(scale);
+            for (int column = 0; column < cols; ++column) {
+                fit.standard_errors[column] *= se_scale;
+                for (int other = 0; other < cols; ++other) {
+                    fit.covariance[
+                        column * kForwardProbeMaxP + other] *= scale;
+                }
+            }
+            fit.rss = stable_rss;
+        };
+        if (forward_probe_eligible) {
+            forward_probe = std::make_unique<ForwardProbeState>();
+            forward_probe->sequence =
+                g_cuda_forward_probe_sequence.fetch_add(
+                    1, std::memory_order_relaxed) +
+                1;
+            forward_probe->continuation_sweeps =
+                cuda_forward_probe_sweeps();
+            const auto probe_exit_start = std::chrono::steady_clock::now();
+            try {
+                capture_forward_probe_gram(
+                    *forward_probe, d_y.data(), d_x.data(),
+                    forward_probe->gram_exit);
+                forward_probe->exit_gram_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - probe_exit_start)
+                        .count();
+            } catch (const std::exception& error) {
+                if (cuda_forward_probe_diag_enabled()) {
+                    std::fprintf(
+                        stderr,
+                        "cuda_forward_probe seq=%lld status=exit_error n=%d "
+                        "cols=%d dims=%zu error=%s\n",
+                        forward_probe->sequence, n, cols, active_fes,
+                        error.what());
+                }
+                result.cuda_forward_probe.status = 3;
+                result.cuda_forward_probe.continuation_sweeps =
+                    forward_probe->continuation_sweeps;
+                (void)cudaGetLastError();
+                forward_probe.reset();
+            }
+        }
+
+        int published_polish_sweeps = 0;
         if (result.converged && active_fes > 0) {
             constexpr int kPolishSweeps = 6;
             const bool strict_tolerance = strict_residual_tolerance_mode(options);
@@ -4604,6 +5716,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                     }
                 }
             }
+            published_polish_sweeps = polish_done;
             if (strict_tolerance) {
                 result.iterations += polish_done;
                 if (final_max > polish_tol) {
@@ -4614,6 +5727,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         cuda_prof.solve_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - cuda_prof_solve_t0).count();
+        emit_cuda_accel_trace(accel_trace, result.iterations, result.converged);
 
         // WP3 shadow certificate: the residuals are still device-resident;
         // run the device verifier before any D2H. The host certificate that
@@ -4645,6 +5759,147 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 shadow.wsum_tol, shadow.wsum_ok,
                 shadow.empty_groups, shadow.dims, shadow.rhs,
                 shadow.shadow_begin_ms, shadow.shadow_finish_ms);
+        }
+
+        if (forward_probe) {
+            const auto continuation_start = std::chrono::steady_clock::now();
+            try {
+                capture_forward_probe_gram(
+                    *forward_probe, d_y.data(), d_x.data(),
+                    forward_probe->gram_public);
+                (void)fit_cuda_forward_probe_gram(
+                    forward_probe->gram_public, n,
+                    forward_probe->fit_public);
+                capture_forward_probe_rss(
+                    *forward_probe, d_y.data(), d_x.data(),
+                    forward_probe->fit_public);
+                forward_probe->scratch_y.allocate(static_cast<std::size_t>(n));
+                forward_probe->scratch_x.allocate(x_size);
+                cuda_check(cudaMemcpy(forward_probe->scratch_y.data(),
+                                      d_y.data(), sizeof(double) * n,
+                                      cudaMemcpyDeviceToDevice),
+                           "forward probe y snapshot failed");
+                cuda_check(cudaMemcpy(forward_probe->scratch_x.data(),
+                                      d_x.data(), sizeof(double) * x_size,
+                                      cudaMemcpyDeviceToDevice),
+                           "forward probe X snapshot failed");
+
+                const bool probe_symmetric =
+                    options.symmetric_sweep && active_fes > 1;
+                auto run_probe_sweep = [&]() {
+                    for (std::size_t dim = 0; dim < active_fes; ++dim) {
+                        double ignored = 0.0;
+                        run_demean(
+                            fe_dev[dim], forward_probe->scratch_y.data(),
+                            forward_probe->scratch_x.data(), false, ignored,
+                            1.0, nullptr, nullptr);
+                    }
+                    if (probe_symmetric) {
+                        for (std::size_t dim = active_fes; dim-- > 0;) {
+                            double ignored = 0.0;
+                            run_demean(
+                                fe_dev[dim],
+                                forward_probe->scratch_y.data(),
+                                forward_probe->scratch_x.data(), false,
+                                ignored, 1.0, nullptr, nullptr);
+                        }
+                    }
+                };
+
+                for (int sweep = 0;
+                     sweep < forward_probe->continuation_sweeps; ++sweep) {
+                    run_probe_sweep();
+                }
+                capture_forward_probe_gram(
+                    *forward_probe, forward_probe->scratch_y.data(),
+                    forward_probe->scratch_x.data(),
+                    forward_probe->gram_continuation);
+                (void)fit_cuda_forward_probe_gram(
+                    forward_probe->gram_continuation, n,
+                    forward_probe->fit_continuation);
+                capture_forward_probe_rss(
+                    *forward_probe, forward_probe->scratch_y.data(),
+                    forward_probe->scratch_x.data(),
+                    forward_probe->fit_continuation);
+                for (int sweep = 0;
+                     sweep < forward_probe->continuation_sweeps; ++sweep) {
+                    run_probe_sweep();
+                }
+                capture_forward_probe_gram(
+                    *forward_probe, forward_probe->scratch_y.data(),
+                    forward_probe->scratch_x.data(),
+                    forward_probe->gram_second_continuation);
+                (void)fit_cuda_forward_probe_gram(
+                    forward_probe->gram_second_continuation, n,
+                    forward_probe->fit_second_continuation);
+                capture_forward_probe_rss(
+                    *forward_probe, forward_probe->scratch_y.data(),
+                    forward_probe->scratch_x.data(),
+                    forward_probe->fit_second_continuation);
+
+                (void)fit_cuda_forward_probe_gram(
+                    forward_probe->gram_exit, n,
+                    forward_probe->fit_exit);
+                const double continuation_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        continuation_start)
+                        .count();
+                result.cuda_forward_probe = emit_cuda_forward_probe(
+                    forward_probe->sequence, n, cols,
+                    static_cast<int>(active_fes), honest_mode, use_accel,
+                    result.iterations, published_polish_sweeps,
+                    forward_probe->continuation_sweeps,
+                    forward_probe->exit_gram_ms, continuation_ms,
+                    cuda_forward_probe_diag_enabled(),
+                    forward_probe->gram_public,
+                    forward_probe->gram_second_continuation,
+                    forward_probe->fit_exit,
+                    forward_probe->fit_public,
+                    forward_probe->fit_continuation,
+                    forward_probe->fit_second_continuation);
+                const int forced_status =
+                    cuda_forward_probe_forced_status();
+                if (forced_status != 0) {
+                    result.cuda_forward_probe.status = forced_status;
+                    if (cuda_forward_probe_diag_enabled()) {
+                        std::fprintf(
+                            stderr,
+                            "cuda_forward_probe seq=%lld status=forced%d\n",
+                            forward_probe->sequence, forced_status);
+                    }
+                }
+            } catch (const std::exception& error) {
+                if (cuda_forward_probe_diag_enabled()) {
+                    std::fprintf(
+                        stderr,
+                        "cuda_forward_probe seq=%lld status=error n=%d cols=%d "
+                        "dims=%zu error=%s\n",
+                        forward_probe->sequence, n, cols, active_fes,
+                        error.what());
+                }
+                result.cuda_forward_probe.status = 3;
+                result.cuda_forward_probe.continuation_sweeps =
+                    forward_probe->continuation_sweeps;
+                (void)cudaGetLastError();
+            }
+        } else if (forward_probe_requested) {
+            if (result.cuda_forward_probe.status == 0) {
+                result.cuda_forward_probe.status = 4;
+                result.cuda_forward_probe.continuation_sweeps =
+                    cuda_forward_probe_sweeps();
+            }
+            if (cuda_forward_probe_diag_enabled()) {
+                std::fprintf(
+                    stderr,
+                    "cuda_forward_probe seq=0 status=skipped n=%d cols=%d "
+                    "dims=%zu converged=%d slopes=%d weights=%d savefe=%d "
+                    "method=%d\n",
+                    n, cols, active_fes, result.converged ? 1 : 0,
+                    any_slope ? 1 : 0, unit_weights ? 0 : 1,
+                    options.retain_fixed_effects ? 1 : 0,
+                    static_cast<int>(method));
+            }
         }
 
         const auto cuda_prof_d2h_t0 = std::chrono::steady_clock::now();
@@ -4737,6 +5992,715 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
 }
 
+bool valid_group_individual_lsmr_structure(
+    const GroupIndividualStructure& gi,
+    int groups,
+    const Eigen::VectorXd* weights) {
+    if (groups <= 0 || gi.num_groups != groups || gi.num_individuals <= 0 ||
+        gi.group_ptr.size() != static_cast<std::size_t>(groups) + 1U ||
+        gi.individual_ptr.size() !=
+            static_cast<std::size_t>(gi.num_individuals) + 1U ||
+        gi.group_scale.size() != static_cast<std::size_t>(groups) ||
+        gi.group_individual.size() != gi.individual_group.size() ||
+        (weights && weights->size() != groups)) {
+        return false;
+    }
+
+    auto valid_ptr = [](const std::vector<int>& ptr,
+                        std::size_t rows,
+                        std::size_t edges) {
+        if (ptr.size() != rows + 1U || ptr.empty() || ptr.front() != 0 ||
+            ptr.back() < 0 ||
+            static_cast<std::size_t>(ptr.back()) != edges) {
+            return false;
+        }
+        int previous = 0;
+        for (const int value : ptr) {
+            if (value < previous || value < 0 ||
+                static_cast<std::size_t>(value) > edges) {
+                return false;
+            }
+            previous = value;
+        }
+        return true;
+    };
+    if (!valid_ptr(gi.group_ptr, static_cast<std::size_t>(groups),
+                   gi.group_individual.size()) ||
+        !valid_ptr(gi.individual_ptr,
+                   static_cast<std::size_t>(gi.num_individuals),
+                   gi.individual_group.size())) {
+        return false;
+    }
+    for (const int individual : gi.group_individual) {
+        if (individual < 0 || individual >= gi.num_individuals) {
+            return false;
+        }
+    }
+    for (const int group : gi.individual_group) {
+        if (group < 0 || group >= groups) {
+            return false;
+        }
+    }
+    for (const double scale : gi.group_scale) {
+        if (!finite_double_bits(scale)) {
+            return false;
+        }
+    }
+    if (weights) {
+        for (Eigen::Index row = 0; row < weights->size(); ++row) {
+            const double weight = (*weights)[row];
+            if (!finite_double_bits(weight) || weight < 0.0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool absorb_group_individual_lsmr_cuda_impl(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& standard_fe_inputs,
+    const GroupIndividualStructure& gi,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+    const int n = static_cast<int>(y.size());
+    const int cols = static_cast<int>(X.cols());
+    const int ld = static_cast<int>(X.rows());
+    const int dims = static_cast<int>(standard_fe_inputs.size());
+    const int individuals = gi.num_individuals;
+    const bool unit_weights = weights == nullptr;
+    const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    const auto solve_start = std::chrono::steady_clock::now();
+    if (!valid_group_individual_lsmr_structure(gi, n, weights)) {
+        return false;
+    }
+
+    try {
+        GiLsmrLocalWorkspace lsmr;
+        lsmr.standard_group_ptr.resize(static_cast<std::size_t>(dims));
+        lsmr.standard_observation_index.resize(
+            static_cast<std::size_t>(dims));
+        std::vector<int> offsets(static_cast<std::size_t>(dims) + 1U, 0);
+        for (int dim = 0; dim < dims; ++dim) {
+            const GpuFeInput& fe = standard_fe_inputs[static_cast<std::size_t>(dim)];
+            if (fe.group_ids == nullptr || fe.weight_sums == nullptr ||
+                fe.num_groups <= 0 ||
+                offsets[static_cast<std::size_t>(dim)] >
+                    std::numeric_limits<int>::max() - fe.num_groups) {
+                return false;
+            }
+            offsets[static_cast<std::size_t>(dim + 1)] =
+                offsets[static_cast<std::size_t>(dim)] + fe.num_groups;
+        }
+        const int individual_offset = offsets.back();
+        if (individuals <= 0 ||
+            individual_offset > std::numeric_limits<int>::max() - individuals) {
+            return false;
+        }
+        const int total_fe = individual_offset + individuals;
+
+        CudaWorkspace& workspace = cuda_workspace;
+        DeviceBuffer<double>& d_y = workspace.d_y;
+        d_y.allocate(static_cast<std::size_t>(n));
+        staged_memcpy_h2d(d_y.data(), y.data(), sizeof(double) * n,
+                          workspace.h_stage, "cudaMemcpy GI LSMR y failed");
+        DeviceBuffer<double>& d_x = workspace.d_x;
+        if (cols > 0) {
+            d_x.allocate(static_cast<std::size_t>(ld) * cols);
+            staged_memcpy_h2d(d_x.data(), X.data(),
+                              sizeof(double) * static_cast<std::size_t>(ld) * cols,
+                              workspace.h_stage, "cudaMemcpy GI LSMR X failed");
+        } else {
+            d_x.reset();
+        }
+        DeviceBuffer<double>& d_weights = workspace.d_weights;
+        if (!unit_weights) {
+            d_weights.allocate(static_cast<std::size_t>(n));
+            staged_memcpy_h2d(d_weights.data(), weights->data(),
+                              sizeof(double) * n, workspace.h_stage,
+                              "cudaMemcpy GI LSMR weights failed");
+        } else {
+            d_weights.reset();
+        }
+
+        std::vector<CudaFeDevice>& fe_dev = workspace.fe_dev;
+        if (fe_dev.size() != standard_fe_inputs.size()) {
+            fe_dev.resize(standard_fe_inputs.size());
+        }
+        std::vector<const int*> gid_ptrs(static_cast<std::size_t>(dims));
+        result.fe_levels.clear();
+        result.fe_levels.reserve(static_cast<std::size_t>(dims) + 1U);
+        for (int dim = 0; dim < dims; ++dim) {
+            const GpuFeInput& fe = standard_fe_inputs[static_cast<std::size_t>(dim)];
+            CudaFeDevice& dev = fe_dev[static_cast<std::size_t>(dim)];
+            dev.num_groups = fe.num_groups;
+            dev.num_levels_present = fe.num_levels_present;
+            dev.gid.allocate(static_cast<std::size_t>(n));
+            staged_memcpy_h2d(dev.gid.data(), fe.group_ids, sizeof(int) * n,
+                              workspace.h_stage,
+                              "cudaMemcpy GI LSMR group ids failed");
+
+            std::vector<int> group_ptr(
+                static_cast<std::size_t>(fe.num_groups) + 1U, 0);
+            for (int row = 0; row < n; ++row) {
+                const int group = fe.group_ids[row];
+                if (group < 0 || group >= fe.num_groups) {
+                    return false;
+                }
+                ++group_ptr[static_cast<std::size_t>(group + 1)];
+            }
+            for (int group = 0; group < fe.num_groups; ++group) {
+                group_ptr[static_cast<std::size_t>(group + 1)] +=
+                    group_ptr[static_cast<std::size_t>(group)];
+            }
+            std::vector<int> observation_index(static_cast<std::size_t>(n));
+            std::vector<int> cursor = group_ptr;
+            for (int row = 0; row < n; ++row) {
+                const int group = fe.group_ids[row];
+                observation_index[static_cast<std::size_t>(
+                    cursor[static_cast<std::size_t>(group)]++)] = row;
+            }
+            DeviceBuffer<int>& standard_group_ptr =
+                lsmr.standard_group_ptr[static_cast<std::size_t>(dim)];
+            standard_group_ptr.allocate(group_ptr.size());
+            staged_memcpy_h2d(standard_group_ptr.data(), group_ptr.data(),
+                              sizeof(int) * group_ptr.size(), workspace.h_stage,
+                              "cudaMemcpy GI LSMR FE ptr failed");
+            DeviceBuffer<int>& standard_observation_index =
+                lsmr.standard_observation_index[static_cast<std::size_t>(dim)];
+            standard_observation_index.allocate(static_cast<std::size_t>(n));
+            staged_memcpy_h2d(standard_observation_index.data(),
+                              observation_index.data(), sizeof(int) * n,
+                              workspace.h_stage,
+                              "cudaMemcpy GI LSMR FE observations failed");
+            dev.weight_sums.allocate(static_cast<std::size_t>(fe.num_groups));
+            staged_memcpy_h2d(dev.weight_sums.data(), fe.weight_sums,
+                              sizeof(double) * fe.num_groups,
+                              workspace.h_stage,
+                              "cudaMemcpy GI LSMR weight sums failed");
+            gid_ptrs[static_cast<std::size_t>(dim)] = dev.gid.data();
+            result.fe_levels.push_back(fe.num_levels_present);
+        }
+        result.fe_levels.push_back(individuals);
+
+        lsmr.gid_ptrs.allocate(static_cast<std::size_t>(dims));
+        if (dims > 0) {
+            cuda_check(cudaMemcpy(lsmr.gid_ptrs.data(),
+                                  gid_ptrs.data(),
+                                  sizeof(const int*) * static_cast<std::size_t>(dims),
+                                  cudaMemcpyHostToDevice),
+                       "cudaMemcpy GI LSMR gid pointers failed");
+        }
+        lsmr.offsets.allocate(offsets.size());
+        cuda_check(cudaMemcpy(lsmr.offsets.data(), offsets.data(),
+                              sizeof(int) * offsets.size(),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy GI LSMR offsets failed");
+
+        DeviceBuffer<int>& d_group_ptr = workspace.gi_group_ptr;
+        d_group_ptr.allocate(static_cast<std::size_t>(n) + 1U);
+        staged_memcpy_h2d(d_group_ptr.data(), gi.group_ptr.data(),
+                          sizeof(int) * (static_cast<std::size_t>(n) + 1U),
+                          workspace.h_stage,
+                          "cudaMemcpy GI LSMR group ptr failed");
+        DeviceBuffer<int>& d_group_individual = workspace.gi_group_individual;
+        d_group_individual.allocate(gi.group_individual.size());
+        staged_memcpy_h2d(d_group_individual.data(), gi.group_individual.data(),
+                          sizeof(int) * gi.group_individual.size(),
+                          workspace.h_stage,
+                          "cudaMemcpy GI LSMR group individuals failed");
+        DeviceBuffer<int>& d_individual_ptr = workspace.gi_individual_ptr;
+        d_individual_ptr.allocate(static_cast<std::size_t>(individuals) + 1U);
+        staged_memcpy_h2d(d_individual_ptr.data(), gi.individual_ptr.data(),
+                          sizeof(int) *
+                              (static_cast<std::size_t>(individuals) + 1U),
+                          workspace.h_stage,
+                          "cudaMemcpy GI LSMR individual ptr failed");
+        DeviceBuffer<int>& d_individual_group = workspace.gi_individual_group;
+        d_individual_group.allocate(gi.individual_group.size());
+        staged_memcpy_h2d(d_individual_group.data(), gi.individual_group.data(),
+                          sizeof(int) * gi.individual_group.size(),
+                          workspace.h_stage,
+                          "cudaMemcpy GI LSMR individual groups failed");
+        DeviceBuffer<double>& d_group_scale = workspace.gi_group_scale;
+        d_group_scale.allocate(static_cast<std::size_t>(n));
+        staged_memcpy_h2d(d_group_scale.data(), gi.group_scale.data(),
+                          sizeof(double) * n, workspace.h_stage,
+                          "cudaMemcpy GI LSMR group scale failed");
+
+        const int blocks_n = (n + kBlockSize - 1) / kBlockSize;
+        const int blocks_i = (individuals + kBlockSize - 1) / kBlockSize;
+        const int blocks_fe = (total_fe + kBlockSize - 1) / kBlockSize;
+        DeviceBuffer<double>& d_denom = workspace.gi_denom;
+        d_denom.allocate(static_cast<std::size_t>(individuals));
+        gi_denom_by_individual_kernel<<<blocks_i, kBlockSize>>>(
+            d_individual_ptr.data(), d_individual_group.data(),
+            d_group_scale.data(), unit_weights ? nullptr : d_weights.data(),
+            unit_weights, n, individuals, d_denom.data());
+        cuda_check(cudaGetLastError(),
+                   "GI LSMR individual diagonal kernel launch failed");
+
+        DeviceBuffer<double>& d_column_scale = lsmr.column_scale;
+        d_column_scale.allocate(static_cast<std::size_t>(total_fe));
+        for (int dim = 0; dim < dims; ++dim) {
+            const CudaFeDevice& dev = fe_dev[static_cast<std::size_t>(dim)];
+            const int blocks = (dev.num_groups + kBlockSize - 1) / kBlockSize;
+            gi_lsmr_inverse_sqrt_kernel<<<blocks, kBlockSize>>>(
+                dev.weight_sums.data(), dev.num_groups,
+                offsets[static_cast<std::size_t>(dim)], d_column_scale.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR standard column-scale kernel launch failed");
+        }
+        gi_lsmr_inverse_sqrt_kernel<<<blocks_i, kBlockSize>>>(
+            d_denom.data(), individuals, individual_offset,
+            d_column_scale.data());
+        cuda_check(cudaGetLastError(),
+                   "GI LSMR individual column-scale kernel launch failed");
+
+        lsmr.b.allocate(static_cast<std::size_t>(n));
+        lsmr.u.allocate(static_cast<std::size_t>(n));
+        lsmr.av.allocate(static_cast<std::size_t>(n));
+        lsmr.v.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.h.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.hbar.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.solution.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.atu.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.scaled.allocate(static_cast<std::size_t>(total_fe));
+        lsmr.residual_y.allocate(static_cast<std::size_t>(n));
+        if (cols > 0) {
+            lsmr.residual_x.allocate(
+                static_cast<std::size_t>(ld) * cols);
+        }
+        constexpr int kNormBlocks = 256;
+        lsmr.norm_partials.allocate(kNormBlocks);
+        lsmr.norm_scalar.allocate(1);
+
+        auto device_norm = [&](const double* values, int count) {
+            const int blocks = std::max(
+                1, std::min(kNormBlocks,
+                            (count + kBlockSize - 1) / kBlockSize));
+            gi_lsmr_sumsq_partials_kernel<kBlockSize>
+                <<<blocks, kBlockSize>>>(
+                    values, count, lsmr.norm_partials.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR norm partial kernel launch failed");
+            gi_lsmr_sumsq_finish_kernel<kBlockSize><<<1, kBlockSize>>>(
+                lsmr.norm_partials.data(), blocks,
+                lsmr.norm_scalar.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR norm finish kernel launch failed");
+            double sumsq = 0.0;
+            cuda_check(cudaMemcpy(&sumsq,
+                                  lsmr.norm_scalar.data(),
+                                  sizeof(double), cudaMemcpyDeviceToHost),
+                       "cudaMemcpy GI LSMR norm failed");
+            if (!finite_double_bits(sumsq) || sumsq < 0.0) {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+            return std::sqrt(sumsq);
+        };
+
+        auto apply_a = [&](const double* coefficients,
+                           double* output,
+                           bool weighted_output) {
+            gi_lsmr_scale_coefficients_kernel<<<blocks_fe, kBlockSize>>>(
+                coefficients, d_column_scale.data(), total_fe,
+                lsmr.scaled.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR coefficient-scale kernel launch failed");
+            gi_lsmr_apply_a_kernel<<<blocks_n, kBlockSize>>>(
+                lsmr.scaled.data(),
+                dims > 0 ? lsmr.gid_ptrs.data() : nullptr,
+                lsmr.offsets.data(), dims,
+                d_group_ptr.data(), d_group_individual.data(),
+                d_group_scale.data(), individual_offset,
+                unit_weights ? nullptr : d_weights.data(), unit_weights,
+                weighted_output, n, output);
+            cuda_check(cudaGetLastError(), "GI LSMR A kernel launch failed");
+        };
+
+        auto apply_at = [&](const double* input, double* output) {
+            for (int dim = 0; dim < dims; ++dim) {
+                const CudaFeDevice& dev = fe_dev[static_cast<std::size_t>(dim)];
+                const int blocks =
+                    (dev.num_groups + kBlockSize - 1) / kBlockSize;
+                gi_lsmr_apply_at_standard_kernel<<<blocks, kBlockSize>>>(
+                    input,
+                    lsmr.standard_group_ptr[static_cast<std::size_t>(dim)].data(),
+                    lsmr.standard_observation_index[
+                        static_cast<std::size_t>(dim)].data(),
+                    unit_weights ? nullptr : d_weights.data(), unit_weights,
+                    d_column_scale.data(),
+                    offsets[static_cast<std::size_t>(dim)], dev.num_groups,
+                    output);
+                cuda_check(cudaGetLastError(),
+                           "GI LSMR standard A-transpose kernel launch failed");
+            }
+            gi_lsmr_apply_at_individual_kernel<<<blocks_i, kBlockSize>>>(
+                input, d_individual_ptr.data(), d_individual_group.data(),
+                d_group_scale.data(),
+                unit_weights ? nullptr : d_weights.data(), unit_weights,
+                d_column_scale.data(), individual_offset, individuals, output);
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR individual A-transpose kernel launch failed");
+        };
+
+        struct Rotation {
+            double c = 1.0;
+            double s = 0.0;
+            double r = 0.0;
+        };
+        auto sym_ortho = [](double a, double b) {
+            Rotation rotation;
+            if (b == 0.0) {
+                rotation.c = a < 0.0 ? -1.0 : 1.0;
+                rotation.r = std::abs(a);
+            } else if (a == 0.0) {
+                rotation.c = 0.0;
+                rotation.s = b < 0.0 ? -1.0 : 1.0;
+                rotation.r = std::abs(b);
+            } else if (std::abs(b) > std::abs(a)) {
+                const double tau = a / b;
+                rotation.s = (b < 0.0 ? -1.0 : 1.0) /
+                             std::sqrt(1.0 + tau * tau);
+                rotation.c = rotation.s * tau;
+                rotation.r = b / rotation.s;
+            } else {
+                const double tau = b / a;
+                rotation.c = (a < 0.0 ? -1.0 : 1.0) /
+                             std::sqrt(1.0 + tau * tau);
+                rotation.s = rotation.c * tau;
+                rotation.r = a / rotation.c;
+            }
+            return rotation;
+        };
+
+        auto solve_one = [&](const double* raw,
+                             int rhs_index,
+                             int& iterations,
+                             bool& converged) {
+            DeviceBuffer<double>& d_b = lsmr.b;
+            DeviceBuffer<double>& d_u = lsmr.u;
+            DeviceBuffer<double>& d_v = lsmr.v;
+            DeviceBuffer<double>& d_h = lsmr.h;
+            DeviceBuffer<double>& d_hbar = lsmr.hbar;
+            DeviceBuffer<double>& d_solution = lsmr.solution;
+            DeviceBuffer<double>& d_av = lsmr.av;
+            DeviceBuffer<double>& d_atu = lsmr.atu;
+
+            gi_lsmr_build_rhs_kernel<<<blocks_n, kBlockSize>>>(
+                raw, unit_weights ? nullptr : d_weights.data(), unit_weights,
+                n, d_b.data());
+            cuda_check(cudaGetLastError(), "GI LSMR RHS kernel launch failed");
+            cuda_check(cudaMemset(d_solution.data(), 0,
+                                  sizeof(double) * total_fe),
+                       "cudaMemset GI LSMR solution failed");
+            cuda_check(cudaMemset(d_hbar.data(), 0,
+                                  sizeof(double) * total_fe),
+                       "cudaMemset GI LSMR hbar failed");
+
+            const double norm_b = device_norm(d_b.data(), n);
+            if (!finite_double_bits(norm_b)) {
+                iterations = 0;
+                converged = false;
+                return;
+            }
+            if (norm_b == 0.0) {
+                iterations = 0;
+                converged = true;
+                return;
+            }
+            gi_lsmr_scale_copy_kernel<<<blocks_n, kBlockSize>>>(
+                d_b.data(), 1.0 / norm_b, n, d_u.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR initial u kernel launch failed");
+            apply_at(d_u.data(), d_v.data());
+            double alpha = device_norm(d_v.data(), total_fe);
+            if (!finite_double_bits(alpha)) {
+                iterations = 0;
+                converged = false;
+                return;
+            }
+            if (alpha == 0.0) {
+                iterations = 0;
+                converged = true;
+                return;
+            }
+            gi_lsmr_scale_copy_kernel<<<blocks_fe, kBlockSize>>>(
+                d_v.data(), 1.0 / alpha, total_fe, d_v.data());
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR initial v kernel launch failed");
+            cuda_check(cudaMemcpy(d_h.data(), d_v.data(),
+                                  sizeof(double) * total_fe,
+                                  cudaMemcpyDeviceToDevice),
+                       "cudaMemcpy GI LSMR initial h failed");
+
+            double beta = norm_b;
+            double zetabar = alpha * beta;
+            double alphabar = alpha;
+            double rho = 1.0;
+            double rhobar = 1.0;
+            double cbar = 1.0;
+            double sbar = 0.0;
+            double betadd = beta;
+            double betad = 0.0;
+            double rhodold = 1.0;
+            double tautildeold = 0.0;
+            double thetatilde = 0.0;
+            double zeta = 0.0;
+            double dnorm = 0.0;
+            double norm_a_sq = alpha * alpha;
+            double max_rbar = 0.0;
+            double min_rbar = 1.0e100;
+            double norm_a = std::sqrt(norm_a_sq);
+            double condition = 1.0;
+            double norm_r = beta;
+            const double tolerance =
+                group_individual_absorption_tolerance(options);
+            const double condition_limit = 1.0e12;
+            double final_test1 = std::numeric_limits<double>::infinity();
+            double final_test2 = std::numeric_limits<double>::infinity();
+            const char* stop_reason = "maxiter";
+
+            converged = false;
+            int k = 0;
+            for (; k < options.max_iter; ++k) {
+                apply_a(d_v.data(), d_av.data(), true);
+                gi_lsmr_affine_subtract_kernel<<<blocks_n, kBlockSize>>>(
+                    d_av.data(), d_u.data(), alpha, n, d_u.data());
+                cuda_check(cudaGetLastError(),
+                           "GI LSMR u recurrence kernel launch failed");
+                beta = device_norm(d_u.data(), n);
+                if (!finite_double_bits(beta)) {
+                    stop_reason = "nonfinite_beta";
+                    break;
+                }
+                if (beta > 0.0) {
+                    gi_lsmr_scale_copy_kernel<<<blocks_n, kBlockSize>>>(
+                        d_u.data(), 1.0 / beta, n, d_u.data());
+                    cuda_check(cudaGetLastError(),
+                               "GI LSMR u normalization kernel launch failed");
+                    apply_at(d_u.data(), d_atu.data());
+                    gi_lsmr_affine_subtract_kernel<<<blocks_fe, kBlockSize>>>(
+                        d_atu.data(), d_v.data(), beta, total_fe, d_v.data());
+                    cuda_check(cudaGetLastError(),
+                               "GI LSMR v recurrence kernel launch failed");
+                    alpha = device_norm(d_v.data(), total_fe);
+                    if (!finite_double_bits(alpha)) {
+                        stop_reason = "nonfinite_alpha";
+                        break;
+                    }
+                    if (alpha > 0.0) {
+                        gi_lsmr_scale_copy_kernel<<<blocks_fe, kBlockSize>>>(
+                            d_v.data(), 1.0 / alpha, total_fe, d_v.data());
+                        cuda_check(cudaGetLastError(),
+                                   "GI LSMR v normalization kernel launch failed");
+                    } else {
+                        cuda_check(cudaMemset(d_v.data(), 0,
+                                              sizeof(double) * total_fe),
+                                   "cudaMemset GI LSMR v failed");
+                    }
+                } else {
+                    cuda_check(cudaMemset(d_v.data(), 0,
+                                          sizeof(double) * total_fe),
+                               "cudaMemset GI LSMR exhausted v failed");
+                    alpha = 0.0;
+                }
+
+                const Rotation qhat = sym_ortho(alphabar, 0.0);
+                const double alphahat = qhat.r;
+                const double rho_old = rho;
+                const Rotation q = sym_ortho(alphahat, beta);
+                rho = q.r;
+                if (rho == 0.0) {
+                    stop_reason = "rho_zero";
+                    break;
+                }
+                const double theta_new = q.s * alpha;
+                alphabar = q.c * alpha;
+                const double rhobar_old = rhobar;
+                const double zeta_old = zeta;
+                const double theta_bar = sbar * rho;
+                const double rho_temp = cbar * rho;
+                const Rotation qbar = sym_ortho(rho_temp, theta_new);
+                cbar = qbar.c;
+                sbar = qbar.s;
+                rhobar = qbar.r;
+                if (rhobar == 0.0 || rhobar_old == 0.0 || rho_old == 0.0) {
+                    stop_reason = "rhobar_zero";
+                    break;
+                }
+                zeta = cbar * zetabar;
+                zetabar = -sbar * zetabar;
+
+                gi_lsmr_update_solution_kernel<<<blocks_fe, kBlockSize>>>(
+                    d_solution.data(), d_hbar.data(), d_h.data(),
+                    -(theta_bar * rho / (rho_old * rhobar_old)),
+                    zeta / (rho * rhobar), total_fe);
+                cuda_check(cudaGetLastError(),
+                           "GI LSMR solution kernel launch failed");
+                gi_lsmr_update_h_kernel<<<blocks_fe, kBlockSize>>>(
+                    d_h.data(), d_v.data(), -(theta_new / rho), total_fe);
+                cuda_check(cudaGetLastError(),
+                           "GI LSMR h kernel launch failed");
+
+                const double beta_acute = qhat.c * betadd;
+                const double beta_check = -qhat.s * betadd;
+                const double beta_hat = q.c * beta_acute;
+                betadd = -q.s * beta_acute;
+                const double theta_tilde_old = thetatilde;
+                const Rotation qtilde = sym_ortho(rhodold, theta_bar);
+                if (qtilde.r == 0.0) {
+                    stop_reason = "qtilde_zero";
+                    break;
+                }
+                thetatilde = qtilde.s * rhobar;
+                rhodold = qtilde.c * rhobar;
+                if (rhodold == 0.0) {
+                    stop_reason = "rhodold_zero";
+                    break;
+                }
+                betad = -qtilde.s * betad + qtilde.c * beta_hat;
+                tautildeold =
+                    (zeta_old - theta_tilde_old * tautildeold) / qtilde.r;
+                const double taud =
+                    (zeta - thetatilde * tautildeold) / rhodold;
+                dnorm += beta_check * beta_check;
+                norm_r = std::sqrt(std::max(
+                    0.0, dnorm + (betad - taud) * (betad - taud) +
+                             betadd * betadd));
+                norm_a_sq += beta * beta;
+                norm_a = std::sqrt(norm_a_sq);
+                norm_a_sq += alpha * alpha;
+                max_rbar = std::max(max_rbar, rhobar_old);
+                if (k > 0) {
+                    min_rbar = std::min(min_rbar, rhobar_old);
+                }
+                const double condition_denom = std::min(min_rbar, rho_temp);
+                condition = condition_denom > 0.0
+                                ? std::max(max_rbar, rho_temp) /
+                                      condition_denom
+                                : std::numeric_limits<double>::infinity();
+
+                const double norm_ar = std::abs(zetabar);
+                const double norm_x = device_norm(d_solution.data(), total_fe);
+                if (!finite_double_bits(norm_x)) {
+                    stop_reason = "nonfinite_solution";
+                    break;
+                }
+                final_test1 = norm_r / norm_b;
+                final_test2 = norm_a * norm_r != 0.0
+                                  ? norm_ar / (norm_a * norm_r)
+                                  : std::numeric_limits<double>::infinity();
+                const double residual_tolerance =
+                    tolerance + tolerance * norm_a * norm_x / norm_b;
+                if (final_test1 <= residual_tolerance ||
+                    final_test2 <= tolerance || alpha == 0.0) {
+                    converged = true;
+                    stop_reason = final_test1 <= residual_tolerance
+                                      ? "test1"
+                                      : (final_test2 <= tolerance ? "test2"
+                                                                   : "alpha_zero");
+                    ++k;
+                    break;
+                }
+                if (condition >= condition_limit) {
+                    stop_reason = "condition";
+                    ++k;
+                    break;
+                }
+            }
+            iterations = k;
+            if (trace) {
+                std::fprintf(stderr,
+                             "gi_lsmr_rhs rhs=%d tol=%.3e iterations=%d "
+                             "converged=%d reason=%s test1=%.3e test2=%.3e "
+                             "condition=%.3e\n",
+                             rhs_index, tolerance, iterations,
+                             converged ? 1 : 0, stop_reason,
+                             final_test1, final_test2, condition);
+            }
+        };
+
+        int max_iterations = 0;
+        bool all_converged = true;
+        auto solve_and_project = [&](const double* raw,
+                                     double* residual,
+                                     int rhs_index) {
+            int iterations = 0;
+            bool converged = false;
+            solve_one(raw, rhs_index, iterations, converged);
+            apply_a(lsmr.solution.data(), lsmr.av.data(), false);
+            gi_lsmr_make_residual_kernel<<<blocks_n, kBlockSize>>>(
+                raw, lsmr.av.data(), n, residual);
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR residual kernel launch failed");
+            max_iterations = std::max(max_iterations, iterations);
+            all_converged = all_converged && converged;
+        };
+
+        solve_and_project(d_y.data(), lsmr.residual_y.data(), 0);
+        for (int column = 0; column < cols; ++column) {
+            solve_and_project(
+                d_x.data() + static_cast<std::size_t>(column) * ld,
+                lsmr.residual_x.data() +
+                    static_cast<std::size_t>(column) * ld,
+                column + 1);
+        }
+
+        result.y_tilde.resize(n);
+        staged_memcpy_d2h(result.y_tilde.data(),
+                          lsmr.residual_y.data(),
+                          sizeof(double) * n, workspace.h_stage,
+                          "cudaMemcpy GI LSMR y_tilde failed");
+        result.X_tilde.resize(ld, cols);
+        if (cols > 0) {
+            staged_memcpy_d2h(result.X_tilde.data(),
+                              lsmr.residual_x.data(),
+                              sizeof(double) * static_cast<std::size_t>(ld) * cols,
+                              workspace.h_stage,
+                              "cudaMemcpy GI LSMR X_tilde failed");
+        }
+        result.iterations = max_iterations;
+        result.converged = all_converged;
+        result.precision_certified = false;
+        result.mlsmr_used = true;
+        result.sweep_order_used.clear();
+        if (trace) {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - solve_start).count();
+            std::fprintf(stderr,
+                         "gi_lsmr_solve tol=%.3e rhs=%d iterations=%d "
+                         "converged=%d seconds=%.6f\n",
+                         group_individual_absorption_tolerance(options), cols + 1,
+                         max_iterations, all_converged ? 1 : 0, elapsed);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (std::getenv("XHDFE_DEBUG_GPU") != nullptr || trace) {
+            std::fprintf(stderr, "[gpu] group/individual LSMR failed: %s\n",
+                         e.what());
+        }
+        cudaGetLastError();
+        result.converged = false;
+        result.precision_certified = false;
+        result.mlsmr_used = true;
+        return false;
+    } catch (...) {
+        if (std::getenv("XHDFE_DEBUG_GPU") != nullptr || trace) {
+            std::fprintf(stderr,
+                         "[gpu] group/individual LSMR failed: unknown\n");
+        }
+        cudaGetLastError();
+        result.converged = false;
+        result.precision_certified = false;
+        result.mlsmr_used = true;
+        return false;
+    }
+}
+
 bool absorb_fixed_effects_group_individual_cuda(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -4767,6 +6731,17 @@ bool absorb_fixed_effects_group_individual_cuda(
     }
     if (static_cast<std::size_t>(gi.group_ptr.back()) != gi.group_individual.size()) {
         return false;
+    }
+    if (static_cast<int>(gi.individual_ptr.size()) != gi.num_individuals + 1 ||
+        gi.individual_ptr.empty() ||
+        static_cast<std::size_t>(gi.individual_ptr.back()) !=
+            gi.individual_group.size() ||
+        gi.group_individual.size() != gi.individual_group.size()) {
+        return false;
+    }
+    if (method == AbsorptionMethod::Lsmr || options.from_auto) {
+        return absorb_group_individual_lsmr_cuda_impl(
+            y, X, standard_fe_inputs, gi, weights, options, result);
     }
     if (method == AbsorptionMethod::Jacobi) {
         return false;

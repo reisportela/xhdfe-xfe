@@ -3,12 +3,27 @@
 
 #include <Eigen/Dense>
 
+#include <type_traits>
 #include <vector>
 
 #include "hdfe/hdfe_regressor.hpp"
 
 namespace hdfe {
 namespace detail {
+
+struct CudaForwardProbeSummary {
+    int status = 0;  // 0 not run, 1 ok, 2 fit error, 3 CUDA error, 4 ineligible
+    int continuation_sweeps = 0;
+    double coefficient_drift_abs = 0.0;
+    double rss_drift_rel = 0.0;
+    double standard_error_drift_abs = 0.0;
+    double covariance_drift_abs = 0.0;
+    double contraction = 0.0;
+    double coefficient_tail_abs = 0.0;
+    double condition_proxy = 0.0;
+};
+static_assert(std::is_trivially_copyable<CudaForwardProbeSummary>::value,
+              "CUDA forward-probe summary must remain POD-like");
 
 struct GroupIndividualStructure {
     int num_groups = 0;
@@ -36,6 +51,30 @@ struct AbsorptionResult {
     bool converged = true;
     double abs_residual = 0.0;      // verified ||D' W v_tilde||_2, max over RHS columns
     double abs_residual_rel = 0.0;  // max ||D' W v_tilde||_2 / (||D' W||_F ||v||_2)
+    double slope_block_residual_rel = 0.0;  // max scale-invariant per-block/RHS certificate
+    double slope_block_frobenius_rel = 0.0;  // max ||m||/(sqrt(sum d)||u_tilde||_W)
+    double slope_block_rms_rel = 0.0;  // max RMS diagonal-scaled group moment
+    double slope_block_max_rel = 0.0;  // max worst-group diagonal-scaled moment
+    double slope_block_skipped_max_rel = 0.0;  // max skipped rank-deficient-group cosine
+    int slope_certificate_worst_fe = -1;
+    int slope_certificate_worst_moment = -1;  // 0 intercept/plain, 1 slope
+    int slope_accuracy_retry_stages = 0;
+    int slope_accuracy_retry_iterations = 0;
+    double slope_internal_tolerance = 0.0;
+    double krylov_internal_tolerance = 0.0;
+    double krylov_max_final_backward_error = 0.0;
+    double krylov_max_condition = 0.0;
+    double krylov_max_condition_times_backward_error = 0.0;
+    bool auto_routing_retry_policy_enabled = false;
+    bool auto_routing_retry_eligible = false;
+    bool auto_routing_retry_fired = false;
+    int auto_routing_retry_status = 0;
+    int auto_routing_retry_primary_method = -1;
+    int auto_routing_retry_primary_iterations = 0;
+    double auto_routing_retry_primary_abs_residual_rel = 0.0;
+    int auto_routing_retry_iterations = 0;
+    double auto_routing_retry_abs_residual_rel = 0.0;
+    double auto_routing_retry_elapsed_seconds = 0.0;
     bool precision_certified = true;
     bool schwarz_used = false;  // true when the Schwarz/approx-Cholesky PCG path ran (forced or auto-gated)
     bool mlsmr_used = false;    // true when the MLSMR absorber ran via the auto-gate promotion
@@ -44,6 +83,10 @@ struct AbsorptionResult {
     bool gpu_attempted = false;
     bool gpu_absorption_converged = false;
     int gpu_absorption_iterations = 0;
+    CudaForwardProbeSummary cuda_forward_probe;
+    int cuda_accuracy_retry_trigger = 0;  // 0 none, 1 residual, 2 forward
+    int cuda_accuracy_retry_stage = 0;    // 0 none, 1-3 warm, 4 cold
+    int cuda_accuracy_retry_iterations = 0;
 };
 
 struct HeterogeneousSlopeTerm {

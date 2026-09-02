@@ -436,6 +436,10 @@ In **Python**, `.fit()` falls back to CPU instead of erroring, so always check
 install-with-GPU walkthrough in every language, see the
 [GPU (CUDA) guide](gpu.md).
 
+For 2.26.0, GPU status proves execution, not universal numerical equivalence.
+Use CPU for any fully certified result on difficult ordinary FE graphs; the
+GPU guide records the exact boundary and affected outputs.
+
 **Stata** — request CUDA and verify:
 
 ```stata

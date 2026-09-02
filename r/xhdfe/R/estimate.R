@@ -123,7 +123,7 @@ run_with_backend <- function(backend, fun) {
 # Post-process the raw C++ result list into the user-facing "xhdfe" object.
 finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
                            backend, se_type, cluster_names, fe_labels,
-                           tolerance_mode, model_has_cons = NULL,
+                           tolerance_mode, stats_style, model_has_cons = NULL,
                            weights_sum = NULL,
                            X_used = NULL, y_used = NULL) {
   k <- length(coef_names)
@@ -197,20 +197,38 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
 
   # Derived statistics, mirroring stata/xhdfe.ado.
   mss <- res$tss - res$rss
-  used_df_r <- max(res$df_resid_unadj - res$df_a_nested, 0)
-  rmse <- if (used_df_r > 0) sqrt(res$rss / used_df_r) else sqrt(res$rss)
+  reghdfe_stats <- identical(stats_style, "reghdfe")
+  used_df_r <- res$df_resid_unadj
+  if (reghdfe_stats) used_df_r <- used_df_r - res$df_a_nested
+  rmse <- NA_real_
+  if (is.finite(used_df_r) && used_df_r > 0 && res$rss >= 0) {
+    rmse <- sqrt(res$rss / used_df_r)
+  } else if (reghdfe_stats && is.finite(used_df_r) &&
+             used_df_r == 0 && res$rss >= 0) {
+    rmse <- sqrt(res$rss)
+  } else if (!reghdfe_stats && res$rss >= 0) {
+    # Preserve the legacy R fallback for non-positive residual degrees of freedom.
+    rmse <- sqrt(res$rss)
+  }
   r2_a <- r2_a_within <- NA_real_
-  if (res$tss > 0 && used_df_r > 0) {
+  if (res$tss > 0 && is.finite(used_df_r) && used_df_r > 0) {
     r2_a <- 1 - (res$rss / used_df_r) /
       (res$tss / max(n_eff - as.integer(isTRUE(model_has_cons)), 1))
   }
-  if (res$tss_within > 0 && used_df_r + df_m > 0 && used_df_r > 0) {
+  if (res$tss_within > 0 && is.finite(used_df_r) &&
+      used_df_r > 0 && used_df_r + df_m > 0) {
     r2_a_within <- 1 - (res$rss / used_df_r) /
       (res$tss_within / (used_df_r + df_m))
   }
-  if (isTRUE(res$saturated)) {
+  canonical_saturated <- reghdfe_stats &&
+    is.finite(used_df_r) && used_df_r <= 0 && is.finite(df_r) && df_r <= 0 &&
+    res$tss > 0 && res$rss >= 0 && res$rss <= 1e-8 * res$tss
+  if (!reghdfe_stats && isTRUE(res$saturated)) {
     r2_a <- 1
     r2_a_within <- 1
+  } else if (canonical_saturated) {
+    r2_a <- 1
+    if (res$tss_within > 0) r2_a_within <- 1
   }
   ll <- ll0 <- NA_real_
   if (res$rss > 0 && n_eff > 0) {
@@ -224,7 +242,8 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
   f_stat <- f_p <- NA_real_
   keep <- which(omitted == 0L & coef_names != "(Intercept)" &
                   is.finite(se) & se > 0)
-  if (length(keep) > 0 && df_r > 0) {
+  if (length(keep) > 0 && is.finite(df_r) && df_r > 0 &&
+      (!reghdfe_stats || (is.finite(used_df_r) && used_df_r > 0))) {
     V1 <- covariance[keep, keep, drop = FALSE]
     b1 <- coefficients[keep]
     g <- sym_ginv(V1)
@@ -304,6 +323,37 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     converged = res$converged,
     abs_residual = res$abs_residual,
     abs_residual_rel = res$abs_residual_rel,
+    krylov_internal_tolerance = res$krylov_internal_tolerance,
+    krylov_max_final_backward_error = res$krylov_max_final_backward_error,
+    krylov_max_condition = res$krylov_max_condition,
+    krylov_max_condition_times_backward_error =
+      res$krylov_max_condition_times_backward_error,
+    auto_routing_retry_policy_enabled =
+      res$auto_routing_retry_policy_enabled,
+    auto_routing_retry_eligible = res$auto_routing_retry_eligible,
+    auto_routing_retry_fired = res$auto_routing_retry_fired,
+    auto_routing_retry_status = res$auto_routing_retry_status,
+    auto_routing_retry_primary_method =
+      res$auto_routing_retry_primary_method,
+    auto_routing_retry_primary_iterations =
+      res$auto_routing_retry_primary_iterations,
+    auto_routing_retry_primary_abs_residual_rel =
+      res$auto_routing_retry_primary_abs_residual_rel,
+    auto_routing_retry_iterations = res$auto_routing_retry_iterations,
+    auto_routing_retry_abs_residual_rel =
+      res$auto_routing_retry_abs_residual_rel,
+    auto_routing_retry_elapsed_seconds =
+      res$auto_routing_retry_elapsed_seconds,
+    slope_block_residual_rel = res$slope_block_residual_rel,
+    slope_block_frobenius_rel = res$slope_block_frobenius_rel,
+    slope_block_rms_rel = res$slope_block_rms_rel,
+    slope_block_max_rel = res$slope_block_max_rel,
+    slope_block_skipped_max_rel = res$slope_block_skipped_max_rel,
+    slope_certificate_worst_fe = res$slope_certificate_worst_fe,
+    slope_certificate_worst_moment = res$slope_certificate_worst_moment,
+    slope_accuracy_retry_stages = res$slope_accuracy_retry_stages,
+    slope_accuracy_retry_iterations = res$slope_accuracy_retry_iterations,
+    slope_internal_tolerance = res$slope_internal_tolerance,
     precision_certified = res$precision_certified,
     absorption_method_used = res$absorption_method_used,
     absorption_method_code = res$absorption_method_code,
@@ -336,6 +386,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     se_type = se_type,
     level = res_level(level),
     tolerance_mode = tolerance_mode,
+    stats_style = stats_style,
     has_intercept = has_cons,
     sumweights = if (is.null(weights_sum)) nobs else weights_sum,
     n_input = n_input,

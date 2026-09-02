@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.25.1.20260827. Use `python -m xhdfe --version`
+Package documentation version: 2.26.0.20260902. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -362,7 +362,9 @@ Main options:
 - `absorption_method`: `auto`, `gauss-seidel`, `symmetric-gauss-seidel`,
   `jacobi`, `mlsmr`, `lsmr`, or `auto-mlsmr` with documented aliases.
 - `tolerance_mode`: `reghdfe-comparable` (default), `xhdfe-fast`, or
-  `strict-residual`.
+  `strict-residual`. Ordinary no-slope LSMR/MLSMR uses
+  `min(effective tolerance, 1e-11)` in comparable/strict modes; fast mode and
+  requested tolerances at or below `1e-11` are unchanged.
 - `dofadjustments`: `all`, `none`, `firstpair`, `pairwise`, `clusters`, and
   `continuous`, as a string or sequence.
 - `ssc_*`: fixest-style small-sample correction controls.
@@ -533,6 +535,14 @@ After `fit`, the regressor exposes:
   certificate is authoritative: any continuation sweeps are counted in
   `num_iterations_`, and `converged_` is true only when
   `precision_certified_` is also true.
+  Ordinary no-slope LSMR/MLSMR additionally reports
+  `krylov_internal_tolerance_`, `krylov_max_final_backward_error_`,
+  `krylov_max_condition_`, and
+  `krylov_max_condition_times_backward_error_`; these are deterministic
+  maxima across right-hand sides, with `krylov_max_condition_` recording the
+  maximum running condition estimate. They remain zero on non-Krylov paths.
+  The distinct Krylov-PCG path is not covered and continues to report zeros;
+  a PCG precision floor remains future work rather than part of this change.
 
   When a fit stops with `precision_certified_` false, `fit` emits a
   `py_hdfe_v11.PrecisionWarning` (a `RuntimeWarning` subclass, so it can be
@@ -624,6 +634,47 @@ XHDFE_GPU_BACKEND=metal
 
 CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device.
 Metal is currently reserved.
+
+For version 2.26.0, `gpu_used_ == 1` proves GPU execution, not universal
+numerical certification. The exact H100 `sm_90` comparable-mode campaign
+accepted 13 of 24 core24-quick surfaces, including the difficult
+group/individual case strictly. Eleven poorly connected ordinary two- or
+three-way FE graphs did not satisfy the full contract; some also failed
+coefficient or standard-error gates. Use CPU for any fully certified result on
+such a graph, including coefficients, inference, residuals, recovered fixed
+effects, `predict`/FE contributions, and FE-based decompositions. CUDA remains
+opt-in and does not hide this boundary with a CPU fallback; the exact failed
+surfaces are reported in the 2.26.0 release notes.
+
+## Mobility profiles
+
+`XHDFE_MOBILITY_PROFILE` selects a profile path and
+`XHDFE_MOBILITY_MODE=off|read|write|auto` controls its use. Version-2 profiles
+distinguish `standard` from `group_individual` fits. Group/individual profiles
+require two domain-separated signatures covering the post-singleton operator,
+incidence and aggregation scale, weights and frequency-weight semantics, RHS
+count, threads, tolerance, backend, and solver-selection context. Legacy
+version-1 profiles, scope mismatches, and signature mismatches are safe misses.
+
+A profile is a method-selection hint, not a transformed-data cache. In
+group/individual Auto it cannot promote Gauss-Seidel or symmetric Gauss-Seidel:
+CPU keeps joint LSMR and CUDA keeps the grouped GPU solver. Explicit GS/SGS
+requests remain available. Profile write/auto does not benchmark sweep methods
+and writes only after the requested route converges and certifies. It suggests
+LSMR only after safe CPU LSMR and otherwise records Auto, so an explicit GS/SGS
+diagnostic run cannot promote that method later. CPU-only LSMR hints are not
+forced on CUDA runs.
+
+For combined group/individual CUDA fits, `xhdfe-fast` uses an internal
+`min(tol, 1e-12)` floor before certification. Fast mode therefore cannot
+re-enable the materially inaccurate early GS stop fixed in version 2.26.0.
+
+For group/individual fits, `precision_certified` requires the canonical
+preconditioned-operator check for `A = W^(1/2) D C`: weighted residuals,
+moments `C D' W r`, and a Frobenius norm over active normalized columns. The
+consistent-system residual ratio or the least-squares optimality ratio must
+pass for every right-hand side. The public residual diagnostics retain their
+established scale for compatibility.
 
 ## Help commands
 

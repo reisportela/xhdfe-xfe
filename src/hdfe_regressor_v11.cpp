@@ -27,6 +27,7 @@
 #include "hdfe/deterministic_parallel.hpp"
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
+#include "hdfe/student_t_detail.hpp"
 #include "iv.hpp"
 #include "ols.hpp"
 
@@ -38,8 +39,24 @@ namespace hdfe {
 namespace v11 {
 namespace {
 
-constexpr double kInvSqrt2 = 0.70710678118654752440084436210485;
 constexpr int kMaxSingletonIterations = 100;
+
+class ScopedBoolOverride final {
+public:
+    ScopedBoolOverride(bool& target, bool value) noexcept
+        : target_(target), original_(target) {
+        target_ = value;
+    }
+
+    ~ScopedBoolOverride() noexcept { target_ = original_; }
+
+    ScopedBoolOverride(const ScopedBoolOverride&) = delete;
+    ScopedBoolOverride& operator=(const ScopedBoolOverride&) = delete;
+
+private:
+    bool& target_;
+    bool original_;
+};
 
 void require_finite_vector(
     const Eigen::Ref<const Eigen::VectorXd>& values,
@@ -1643,6 +1660,8 @@ struct FeStructureCacheConfig {
 };
 
 struct MobilityProfile {
+    int format_version = 0;
+    std::string profile_kind;
     std::uint64_t signature = 0;
     std::uint64_t signature_sample = 0;
     bool has_signature_sample = false;
@@ -1721,6 +1740,39 @@ bool cuda_backend_env_requested() {
         return false;
     }
     return to_lower_ascii(trim_ascii(raw)) == "cuda";
+}
+
+std::uint64_t mobility_backend_tag() {
+    if (detail::has_thread_gpu_backend_override()) {
+        switch (detail::thread_gpu_backend_override()) {
+            case detail::GpuBackend::Cuda:
+                return 1ULL;
+            case detail::GpuBackend::Metal:
+                return 2ULL;
+            case detail::GpuBackend::Cpu:
+            default:
+                return 0ULL;
+        }
+    }
+    const char* raw = std::getenv("XHDFE_GPU_BACKEND");
+    if (!raw || *raw == '\0') {
+#ifndef HDFE_GPU_BACKEND_DEFAULT
+#define HDFE_GPU_BACKEND_DEFAULT "cpu"
+#endif
+        raw = HDFE_GPU_BACKEND_DEFAULT;
+    }
+    const std::string value = to_lower_ascii(trim_ascii(raw));
+    if (value == "cuda") {
+        return 1ULL;
+    }
+    if (value == "metal") {
+        return 2ULL;
+    }
+    return 0ULL;
+}
+
+bool mobility_gpu_backend_selected() {
+    return mobility_backend_tag() != 0ULL;
 }
 
 std::optional<bool> read_env_bool(const char* name) {
@@ -1960,9 +2012,11 @@ std::uint64_t hash_fe_structure_cache_signature(const std::vector<Eigen::VectorX
     return hash;
 }
 
-constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v2";
+constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v4";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 4ULL;
+constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
 
 struct AbsorptionCacheKey {
     std::uint64_t sig1 = 0;
@@ -1976,6 +2030,20 @@ struct AbsorptionCacheRecord {
     int cols = 0;
     int iterations = 0;
     bool converged = true;
+    double krylov_internal_tolerance = 0.0;
+    double krylov_max_final_backward_error = 0.0;
+    double krylov_max_condition = 0.0;
+    double krylov_max_condition_times_backward_error = 0.0;
+    bool auto_routing_retry_policy_enabled = false;
+    bool auto_routing_retry_eligible = false;
+    bool auto_routing_retry_fired = false;
+    int auto_routing_retry_status = 0;
+    int auto_routing_retry_primary_method = -1;
+    int auto_routing_retry_primary_iterations = 0;
+    double auto_routing_retry_primary_abs_residual_rel = 0.0;
+    int auto_routing_retry_iterations = 0;
+    double auto_routing_retry_abs_residual_rel = 0.0;
+    double auto_routing_retry_elapsed_seconds = 0.0;
     std::vector<int> fe_levels;
     std::vector<int> sweep_order;
     Eigen::VectorXd y_tilde;
@@ -1998,7 +2066,8 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
                                              const Eigen::Ref<const Eigen::MatrixXd>& X,
                                              const std::vector<Eigen::VectorXi>& fes,
                                              const Eigen::VectorXd* weights,
-                                             const HdfeOptions& options) {
+                                             const HdfeOptions& options,
+                                             std::uint64_t solve_contract_generation) {
     std::uint64_t h1 = kFnvOffset64;
     std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
     auto update = [&](std::uint64_t value) {
@@ -2010,6 +2079,10 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(static_cast<std::uint64_t>(X.rows()));
     update(static_cast<std::uint64_t>(X.cols()));
     update(static_cast<std::uint64_t>(fes.size()));
+    update(solve_contract_generation);
+    update(options.ordinary_krylov_parity_floor ? 1ULL : 0ULL);
+    update(kOrdinaryAutoRoutingRetryPolicyVersion);
+    update(options.ordinary_auto_routing_retry ? 1ULL : 0ULL);
     update(weights ? 1ULL : 0ULL);
     update(options.fit_intercept ? 1ULL : 0ULL);
     update(options.drop_singletons ? 1ULL : 0ULL);
@@ -2113,12 +2186,16 @@ bool write_int_vector(std::ofstream& out, const std::vector<int>& values) {
     return true;
 }
 
-bool read_int_vector(std::ifstream& in, std::vector<int>& values) {
+bool read_int_vector(std::ifstream& in,
+                     std::vector<int>& values,
+                     std::int32_t max_count,
+                     std::int32_t exact_count = -1) {
     std::int32_t count = 0;
     if (!read_binary(in, count)) {
         return false;
     }
-    if (count < 0) {
+    if (count < 0 || count > max_count ||
+        (exact_count >= 0 && count != exact_count)) {
         return false;
     }
     values.assign(static_cast<std::size_t>(count), 0);
@@ -2132,6 +2209,90 @@ bool read_int_vector(std::ifstream& in, std::vector<int>& values) {
     return true;
 }
 
+struct AbsorptionCacheDigest {
+    std::uint64_t first = 0;
+    std::uint64_t second = 0;
+};
+
+AbsorptionCacheDigest absorption_cache_digest(
+    const AbsorptionCacheKey& key,
+    int nobs,
+    int cols,
+    int design_cols,
+    AbsorptionMethod method,
+    int iterations,
+    bool converged,
+    double krylov_internal_tolerance,
+    double krylov_max_final_backward_error,
+    double krylov_max_condition,
+    double krylov_max_condition_times_backward_error,
+    bool auto_routing_retry_policy_enabled,
+    bool auto_routing_retry_eligible,
+    bool auto_routing_retry_fired,
+    int auto_routing_retry_status,
+    int auto_routing_retry_primary_method,
+    int auto_routing_retry_primary_iterations,
+    double auto_routing_retry_primary_abs_residual_rel,
+    int auto_routing_retry_iterations,
+    double auto_routing_retry_abs_residual_rel,
+    double auto_routing_retry_elapsed_seconds,
+    const std::vector<int>& fe_levels,
+    const std::vector<int>& sweep_order,
+    const Eigen::VectorXd& y_tilde,
+    const Eigen::MatrixXd& X_tilde) {
+    std::uint64_t h1 = kFnvOffset64;
+    std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
+    auto update = [&](std::uint64_t value) {
+        h1 = fnv1a_update(h1, value);
+        h2 = fnv1a_update(h2, value + kAbsorptionCacheSalt);
+    };
+    update(0x5848444645414253ULL);  // "XHDFEABS" domain separator.
+    update(key.sig1);
+    update(key.sig2);
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(nobs)));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(cols)));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(design_cols)));
+    update(static_cast<std::uint64_t>(static_cast<int>(method)));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(iterations)));
+    update(converged ? 1ULL : 0ULL);
+    update(hash_double_bits(krylov_internal_tolerance));
+    update(hash_double_bits(krylov_max_final_backward_error));
+    update(hash_double_bits(krylov_max_condition));
+    update(hash_double_bits(krylov_max_condition_times_backward_error));
+    update(auto_routing_retry_policy_enabled ? 1ULL : 0ULL);
+    update(auto_routing_retry_eligible ? 1ULL : 0ULL);
+    update(auto_routing_retry_fired ? 1ULL : 0ULL);
+    update(static_cast<std::uint64_t>(auto_routing_retry_status));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(
+        auto_routing_retry_primary_method)));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(
+        auto_routing_retry_primary_iterations)));
+    update(hash_double_bits(auto_routing_retry_primary_abs_residual_rel));
+    update(static_cast<std::uint64_t>(static_cast<std::int64_t>(
+        auto_routing_retry_iterations)));
+    update(hash_double_bits(auto_routing_retry_abs_residual_rel));
+    update(hash_double_bits(auto_routing_retry_elapsed_seconds));
+    update(static_cast<std::uint64_t>(fe_levels.size()));
+    for (const int value : fe_levels) {
+        update(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+    }
+    update(static_cast<std::uint64_t>(sweep_order.size()));
+    for (const int value : sweep_order) {
+        update(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+    }
+    update(static_cast<std::uint64_t>(y_tilde.size()));
+    for (Eigen::Index i = 0; i < y_tilde.size(); ++i) {
+        update(hash_double_bits(y_tilde(i)));
+    }
+    update(static_cast<std::uint64_t>(X_tilde.rows()));
+    update(static_cast<std::uint64_t>(X_tilde.cols()));
+    update(static_cast<std::uint64_t>(X_tilde.size()));
+    for (Eigen::Index i = 0; i < X_tilde.size(); ++i) {
+        update(hash_double_bits(X_tilde.data()[i]));
+    }
+    return {h1, h2};
+}
+
 bool write_absorption_cache(const std::string& path,
                             const AbsorptionCacheKey& key,
                             const Eigen::VectorXd& y_tilde,
@@ -2141,7 +2302,12 @@ bool write_absorption_cache(const std::string& path,
                             int design_cols,
                             AbsorptionMethod method,
                             int iterations,
-                            bool converged) {
+                            bool converged,
+                            double krylov_internal_tolerance,
+                            double krylov_max_final_backward_error,
+                            double krylov_max_condition,
+                            double krylov_max_condition_times_backward_error,
+                            const detail::AbsorptionResult& retry_diagnostics) {
     if (path.empty()) {
         return false;
     }
@@ -2165,7 +2331,21 @@ bool write_absorption_cache(const std::string& path,
     const std::int32_t converged_out = converged ? 1 : 0;
     if (!write_binary(out, nobs) || !write_binary(out, cols) ||
         !write_binary(out, design_cols_out) || !write_binary(out, method_out) ||
-        !write_binary(out, iterations_out) || !write_binary(out, converged_out)) {
+        !write_binary(out, iterations_out) || !write_binary(out, converged_out) ||
+        !write_binary(out, krylov_internal_tolerance) ||
+        !write_binary(out, krylov_max_final_backward_error) ||
+        !write_binary(out, krylov_max_condition) ||
+        !write_binary(out, krylov_max_condition_times_backward_error) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_policy_enabled) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_eligible) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_fired) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_status) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_primary_method) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_primary_iterations) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_primary_abs_residual_rel) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_iterations) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_abs_residual_rel) ||
+        !write_binary(out, retry_diagnostics.auto_routing_retry_elapsed_seconds)) {
         return false;
     }
     if (!write_int_vector(out, fe_levels) || !write_int_vector(out, sweep_order)) {
@@ -2187,11 +2367,35 @@ bool write_absorption_cache(const std::string& path,
     }
     out.write(reinterpret_cast<const char*>(X_tilde.data()),
               static_cast<std::streamsize>(x_size * sizeof(double)));
-    return static_cast<bool>(out);
+    if (!out) {
+        return false;
+    }
+    const AbsorptionCacheDigest digest = absorption_cache_digest(
+        key, static_cast<int>(nobs), static_cast<int>(cols), design_cols,
+        method, iterations, converged, krylov_internal_tolerance,
+        krylov_max_final_backward_error, krylov_max_condition,
+        krylov_max_condition_times_backward_error,
+        retry_diagnostics.auto_routing_retry_policy_enabled,
+        retry_diagnostics.auto_routing_retry_eligible,
+        retry_diagnostics.auto_routing_retry_fired,
+        retry_diagnostics.auto_routing_retry_status,
+        retry_diagnostics.auto_routing_retry_primary_method,
+        retry_diagnostics.auto_routing_retry_primary_iterations,
+        retry_diagnostics.auto_routing_retry_primary_abs_residual_rel,
+        retry_diagnostics.auto_routing_retry_iterations,
+        retry_diagnostics.auto_routing_retry_abs_residual_rel,
+        retry_diagnostics.auto_routing_retry_elapsed_seconds,
+        fe_levels, sweep_order,
+        y_tilde, X_tilde);
+    return write_binary(out, digest.first) && write_binary(out, digest.second);
 }
 
 bool read_absorption_cache(const std::string& path,
                            const AbsorptionCacheKey& key,
+                           int expected_nobs,
+                           int expected_cols,
+                           int expected_design_cols,
+                           int expected_fe_count,
                            AbsorptionCacheRecord& record) {
     if (path.empty()) {
         return false;
@@ -2227,14 +2431,63 @@ bool read_absorption_cache(const std::string& path,
     std::int32_t converged = 0;
     if (!read_binary(in, nobs) || !read_binary(in, cols) ||
         !read_binary(in, design_cols) || !read_binary(in, method) ||
-        !read_binary(in, iterations) || !read_binary(in, converged)) {
+        !read_binary(in, iterations) || !read_binary(in, converged) ||
+        !read_binary(in, record.krylov_internal_tolerance) ||
+        !read_binary(in, record.krylov_max_final_backward_error) ||
+        !read_binary(in, record.krylov_max_condition) ||
+        !read_binary(in, record.krylov_max_condition_times_backward_error) ||
+        !read_binary(in, record.auto_routing_retry_policy_enabled) ||
+        !read_binary(in, record.auto_routing_retry_eligible) ||
+        !read_binary(in, record.auto_routing_retry_fired) ||
+        !read_binary(in, record.auto_routing_retry_status) ||
+        !read_binary(in, record.auto_routing_retry_primary_method) ||
+        !read_binary(in, record.auto_routing_retry_primary_iterations) ||
+        !read_binary(in, record.auto_routing_retry_primary_abs_residual_rel) ||
+        !read_binary(in, record.auto_routing_retry_iterations) ||
+        !read_binary(in, record.auto_routing_retry_abs_residual_rel) ||
+        !read_binary(in, record.auto_routing_retry_elapsed_seconds)) {
         return false;
     }
-    if (nobs < 0 || cols < 0 || design_cols < 0) {
+    if (nobs != expected_nobs || cols != expected_cols ||
+        design_cols != expected_design_cols || expected_fe_count < 0 ||
+        method < static_cast<std::int32_t>(AbsorptionMethod::Auto) ||
+        method > static_cast<std::int32_t>(AbsorptionMethod::AutoMlsmr) ||
+        iterations < 0 || (converged != 0 && converged != 1)) {
+        return false;
+    }
+    const double diagnostics[] = {
+        record.krylov_internal_tolerance,
+        record.krylov_max_final_backward_error,
+        record.krylov_max_condition,
+        record.krylov_max_condition_times_backward_error,
+    };
+    for (const double value : diagnostics) {
+        if (!hdfe::detail::ieee_finite(value) || value < 0.0) {
+            return false;
+        }
+    }
+    if (record.auto_routing_retry_status < 0 ||
+        record.auto_routing_retry_status > 3 ||
+        record.auto_routing_retry_primary_method < -1 ||
+        record.auto_routing_retry_primary_method >
+            static_cast<int>(AbsorptionMethod::AutoMlsmr) ||
+        record.auto_routing_retry_primary_iterations < 0 ||
+        record.auto_routing_retry_iterations < 0 ||
+        !hdfe::detail::ieee_finite(
+            record.auto_routing_retry_primary_abs_residual_rel) ||
+        record.auto_routing_retry_primary_abs_residual_rel < 0.0 ||
+        !hdfe::detail::ieee_finite(
+            record.auto_routing_retry_abs_residual_rel) ||
+        record.auto_routing_retry_abs_residual_rel < 0.0 ||
+        !hdfe::detail::ieee_finite(
+            record.auto_routing_retry_elapsed_seconds) ||
+        record.auto_routing_retry_elapsed_seconds < 0.0) {
         return false;
     }
 
-    if (!read_int_vector(in, record.fe_levels) || !read_int_vector(in, record.sweep_order)) {
+    if (!read_int_vector(in, record.fe_levels, expected_fe_count,
+                         expected_fe_count) ||
+        !read_int_vector(in, record.sweep_order, expected_fe_count)) {
         return false;
     }
 
@@ -2251,6 +2504,11 @@ bool read_absorption_cache(const std::string& path,
     if (!in) {
         return false;
     }
+    for (Eigen::Index i = 0; i < record.y_tilde.size(); ++i) {
+        if (!hdfe::detail::ieee_finite(record.y_tilde(i))) {
+            return false;
+        }
+    }
 
     std::size_t x_size = 0;
     if (!read_binary(in, x_size)) {
@@ -2265,6 +2523,38 @@ bool read_absorption_cache(const std::string& path,
     in.read(reinterpret_cast<char*>(record.X_tilde.data()),
             static_cast<std::streamsize>(x_size * sizeof(double)));
     if (!in) {
+        return false;
+    }
+    for (Eigen::Index i = 0; i < record.X_tilde.size(); ++i) {
+        if (!hdfe::detail::ieee_finite(record.X_tilde.data()[i])) {
+            return false;
+        }
+    }
+
+    std::uint64_t stored_first = 0;
+    std::uint64_t stored_second = 0;
+    if (!read_binary(in, stored_first) || !read_binary(in, stored_second) ||
+        in.peek() != std::ifstream::traits_type::eof()) {
+        return false;
+    }
+    const AbsorptionCacheDigest expected_digest = absorption_cache_digest(
+        key, nobs, cols, design_cols, static_cast<AbsorptionMethod>(method),
+        iterations, converged != 0, record.krylov_internal_tolerance,
+        record.krylov_max_final_backward_error, record.krylov_max_condition,
+        record.krylov_max_condition_times_backward_error,
+        record.auto_routing_retry_policy_enabled,
+        record.auto_routing_retry_eligible,
+        record.auto_routing_retry_fired,
+        record.auto_routing_retry_status,
+        record.auto_routing_retry_primary_method,
+        record.auto_routing_retry_primary_iterations,
+        record.auto_routing_retry_primary_abs_residual_rel,
+        record.auto_routing_retry_iterations,
+        record.auto_routing_retry_abs_residual_rel,
+        record.auto_routing_retry_elapsed_seconds, record.fe_levels,
+        record.sweep_order, record.y_tilde, record.X_tilde);
+    if (stored_first != expected_digest.first ||
+        stored_second != expected_digest.second) {
         return false;
     }
 
@@ -2846,11 +3136,21 @@ double probe_fe_mean_norm(const Eigen::VectorXd& v,
     return std::sqrt(static_cast<double>(total / denom_total));
 }
 
-AbsorptionMethod select_auto_mlsmr_method(const std::vector<Eigen::VectorXi>& fes,
-                                          const Eigen::VectorXd* weights,
-                                          const HdfeOptions& options,
-                                          int rhs_count,
-                                          AbsorptionMethod sweep_fallback) {
+struct AutoMlsmrSelectionDiagnostics {
+    bool evaluated = false;
+    double per_sweep_rho = std::numeric_limits<double>::quiet_NaN();
+};
+
+AbsorptionMethod select_auto_mlsmr_method(
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    int rhs_count,
+    AbsorptionMethod sweep_fallback,
+    AutoMlsmrSelectionDiagnostics* diagnostics = nullptr) {
+    if (diagnostics != nullptr) {
+        *diagnostics = AutoMlsmrSelectionDiagnostics{};
+    }
     const bool trace = read_env_bool("XHDFE_AUTO_MLSMR_TRACE").value_or(false);
     auto trace_fallback = [&](const std::string& reason,
                               int n,
@@ -2954,6 +3254,10 @@ AbsorptionMethod select_auto_mlsmr_method(const std::vector<Eigen::VectorXi>& fe
     const double ratio = last_violation / std::max(first_violation, 1.0e-300);
     const double per_sweep_rho =
         std::pow(std::max(0.0, ratio), 1.0 / static_cast<double>(probe_sweeps - 1));
+    if (diagnostics != nullptr) {
+        diagnostics->evaluated = true;
+        diagnostics->per_sweep_rho = per_sweep_rho;
+    }
     // Fast mode keeps the conservative rho threshold, but lets large,
     // many-RHS, multi-way designs enter the moderate-rho band where MLSMR won
     // the base-DGP difficult 1M/10M runs without catching Section 5 fast.
@@ -3029,6 +3333,18 @@ std::optional<AbsorptionMethod> parse_method_hint(const std::string& raw) {
     }
     if (name == "jacobi") {
         return AbsorptionMethod::Jacobi;
+    }
+    if (name == "schwarz") {
+        return AbsorptionMethod::Schwarz;
+    }
+    if (name == "lsmr") {
+        return AbsorptionMethod::Lsmr;
+    }
+    if (name == "mlsmr") {
+        return AbsorptionMethod::Mlsmr;
+    }
+    if (name == "auto-mlsmr" || name == "auto_mlsmr") {
+        return AbsorptionMethod::AutoMlsmr;
     }
     if (name == "auto") {
         return AbsorptionMethod::Auto;
@@ -3244,6 +3560,7 @@ bool load_mobility_profile(const std::string& path, MobilityProfile& profile) {
         return false;
     }
 
+    bool have_header = false;
     bool have_signature = false;
     bool have_signature_sample = false;
     bool have_signature_canon = false;
@@ -3254,8 +3571,17 @@ bool load_mobility_profile(const std::string& path, MobilityProfile& profile) {
         if (trimmed.empty() || trimmed[0] == '#') {
             continue;
         }
-        if (trimmed.rfind("xhdfe_mobility_profile_v", 0) == 0) {
+        if (!have_header) {
+            if (trimmed == "xhdfe_mobility_profile_v2") {
+                profile.format_version = 2;
+            } else {
+                return false;
+            }
+            have_header = true;
             continue;
+        }
+        if (trimmed.rfind("xhdfe_mobility_profile_v", 0) == 0) {
+            return false;
         }
         const std::size_t eq = trimmed.find('=');
         if (eq == std::string::npos) {
@@ -3263,6 +3589,10 @@ bool load_mobility_profile(const std::string& path, MobilityProfile& profile) {
         }
         const std::string key = trim_ascii(trimmed.substr(0, eq));
         const std::string value = trim_ascii(trimmed.substr(eq + 1));
+        if (key == "profile_kind") {
+            profile.profile_kind = to_lower_ascii(value);
+            continue;
+        }
         if (key == "signature") {
             std::uint64_t sig = 0;
             if (parse_uint64(value, &sig)) {
@@ -3381,8 +3711,13 @@ bool load_mobility_profile(const std::string& path, MobilityProfile& profile) {
             continue;
         }
     }
-    return have_signature || have_signature_sample ||
-           have_signature_canon || have_signature_sample_canon;
+    const bool known_kind =
+        profile.format_version == 2 &&
+        (profile.profile_kind == "standard" ||
+         profile.profile_kind == "group_individual");
+    return have_header && known_kind &&
+           (have_signature || have_signature_sample ||
+            have_signature_canon || have_signature_sample_canon);
 }
 
 bool write_mobility_profile(const std::string& path, const MobilityProfile& profile) {
@@ -3390,7 +3725,10 @@ bool write_mobility_profile(const std::string& path, const MobilityProfile& prof
     if (!out) {
         return false;
     }
-    out << "xhdfe_mobility_profile_v1\n";
+    out << "xhdfe_mobility_profile_v2\n";
+    out << "profile_kind="
+        << (profile.profile_kind.empty() ? "standard" : profile.profile_kind)
+        << "\n";
     out << "signature=0x" << std::hex << profile.signature << std::dec << "\n";
     if (profile.has_signature_sample) {
         out << "signature_sample=0x" << std::hex << profile.signature_sample << std::dec << "\n";
@@ -3451,6 +3789,8 @@ MobilityProfile compute_mobility_profile(const std::vector<Eigen::VectorXi>& fes
                                          bool drop_singletons,
                                          const std::vector<int>& sweep_order_used) {
     MobilityProfile profile;
+    profile.format_version = 2;
+    profile.profile_kind = "standard";
     profile.nobs = fes.empty() ? 0 : static_cast<int>(fes[0].size());
     profile.nobs_full = nobs_full;
     profile.num_singletons = num_singletons;
@@ -3573,6 +3913,24 @@ MobilityHint build_mobility_hint(const MobilityProfile& profile) {
     }
     hint.use_sparse = profile.suggest_use_sparse;
     hint.use_krylov = profile.suggest_use_krylov;
+    return hint;
+}
+
+MobilityHint build_standard_mobility_hint(const MobilityProfile& profile) {
+    MobilityHint hint = build_mobility_hint(profile);
+    // Before v2, the standard-profile parser recognized only the three sweep
+    // methods. Keep that behavior until standard profiles have their own
+    // backend/RHS/thread-context signature. The extended parser is needed for
+    // exact-context group/individual profiles, but must not widen the standard
+    // profile's authority.
+    if (hint.has_method &&
+        hint.preferred_method != AbsorptionMethod::GaussSeidel &&
+        hint.preferred_method != AbsorptionMethod::SymmetricGaussSeidel &&
+        hint.preferred_method != AbsorptionMethod::Jacobi) {
+        hint.preferred_method = AbsorptionMethod::Auto;
+        hint.has_method = false;
+        hint.force_symmetric = false;
+    }
     return hint;
 }
 
@@ -5536,6 +5894,170 @@ struct GroupCollapsedData {
     std::vector<int> rep_row;
 };
 
+AbsorptionCacheKey hash_grouped_mobility_signature(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& design,
+    const std::vector<Eigen::VectorXi>& standard_fes,
+    const hdfe::detail::GroupIndividualStructure& gi,
+    GroupAggregation aggregation,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    int nobs_full,
+    int singletons_dropped) {
+    // A mobility profile is a method-selection hint, not a transformed-data
+    // cache. Both domain-separated digests therefore cover the complete
+    // post-singleton operator-equivalent structure, RHS count, weights,
+    // backend and selection context, but deliberately not y/X values. This
+    // preserves safe reuse across outcomes with the same operator and cost
+    // shape; the separate absorption cache remains value-exact.
+    // The second digest is stored in the legacy signature_canon field, but is
+    // an independent fail-closed checksum rather than a permissive fallback.
+    std::uint64_t h1 = kFnvOffset64;
+    std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
+    auto update = [&](std::uint64_t value) {
+        h1 = fnv1a_update(h1, value);
+        h2 = fnv1a_update(h2, value + kAbsorptionCacheSalt);
+    };
+    auto update_int_vector = [&](const std::vector<int>& values) {
+        update(static_cast<std::uint64_t>(values.size()));
+        for (const int value : values) {
+            update(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
+        }
+    };
+    auto update_eigen_int_vector = [&](const Eigen::VectorXi& values) {
+        update(static_cast<std::uint64_t>(values.size()));
+        for (Eigen::Index i = 0; i < values.size(); ++i) {
+            update(static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(values(i))));
+        }
+    };
+    auto update_double_vector = [&](const std::vector<double>& values) {
+        update(static_cast<std::uint64_t>(values.size()));
+        for (const double value : values) {
+            update(hash_double_bits(value));
+        }
+    };
+
+    // Versioned, scope-specific domain separator.
+    update(0x58484446454d5032ULL);  // "XHDFEMP2"
+    update(0x47524f5550494e44ULL);  // "GROUPIND"
+    update(static_cast<std::uint64_t>(y.size()));
+    update(static_cast<std::uint64_t>(design.rows()));
+    update(static_cast<std::uint64_t>(design.cols()));
+    update(static_cast<std::uint64_t>(design.cols() + 1));  // y plus X RHS
+    update(static_cast<std::uint64_t>(standard_fes.size()));
+    update(static_cast<std::uint64_t>(gi.num_groups));
+    update(static_cast<std::uint64_t>(gi.num_individuals));
+    update(static_cast<std::uint64_t>(nobs_full));
+    update(static_cast<std::uint64_t>(singletons_dropped));
+    update(aggregation == GroupAggregation::Mean ? 1ULL : 2ULL);
+    update(weights ? 1ULL : 0ULL);
+    update(options.weights_are_frequencies ? 1ULL : 0ULL);
+    update(options.fit_intercept ? 1ULL : 0ULL);
+    update(options.drop_singletons ? 1ULL : 0ULL);
+    update(static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(options.num_threads)));
+    update(options.num_threads_explicit ? 1ULL : 0ULL);
+    update(mobility_backend_tag());
+    update(static_cast<std::uint64_t>(options.max_iter));
+    update(static_cast<std::uint64_t>(static_cast<int>(options.tolerance_mode)));
+    update(hash_double_bits(options.tol));
+    update(static_cast<std::uint64_t>(
+        static_cast<int>(options.absorption_method)));
+    update(static_cast<std::uint64_t>(
+        static_cast<int>(options.convergence_criterion)));
+    update(options.symmetric_sweep ? 1ULL : 0ULL);
+    update(options.use_sparse_solver ? 1ULL : 0ULL);
+    update(options.use_krylov ? 1ULL : 0ULL);
+    update(options.from_auto ? 1ULL : 0ULL);
+    update(static_cast<std::uint64_t>(
+        static_cast<std::uint32_t>(options.convergence_check_interval)));
+    update(hash_double_bits(options.krylov_lambda));
+    update(hash_double_bits(options.jacobi_relaxation));
+    update(hash_double_bits(options.sparse_threshold));
+    update_int_vector(options.sweep_order_override);
+
+    for (const auto& fe : standard_fes) {
+        update_eigen_int_vector(fe);
+    }
+    update_int_vector(gi.group_ptr);
+    update_int_vector(gi.group_individual);
+    update_double_vector(gi.group_scale);
+
+    if (weights) {
+        update(static_cast<std::uint64_t>(weights->size()));
+        for (Eigen::Index i = 0; i < weights->size(); ++i) {
+            update(hash_double_bits((*weights)(i)));
+        }
+    }
+
+    AbsorptionCacheKey key;
+    key.sig1 = h1 == 0 ? kFnvOffset64 : h1;
+    key.sig2 = h2 == 0 ? (kFnvOffset64 ^ kAbsorptionCacheSalt) : h2;
+    return key;
+}
+
+AbsorptionCacheKey hash_grouped_fit_signature(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::Ref<const Eigen::VectorXi>& group_ids,
+    const Eigen::Ref<const Eigen::VectorXi>& individual_ids,
+    GroupAggregation aggregation,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options) {
+    std::uint64_t h1 = kFnvOffset64;
+    std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
+    auto update = [&](std::uint64_t value) {
+        h1 = fnv1a_update(h1, value);
+        h2 = fnv1a_update(h2, value + kAbsorptionCacheSalt);
+    };
+    auto update_double = [&](double value) {
+        hash_update_double(h1, value);
+        hash_update_double(h2, value);
+    };
+    auto update_int_vector = [&](const Eigen::VectorXi& values) {
+        update(static_cast<std::uint64_t>(values.size()));
+        for (Eigen::Index i = 0; i < values.size(); ++i) {
+            update(static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(values[i])));
+        }
+    };
+
+    update(0x5848444645474931ULL);  // "XHDFEGI1"
+    update(static_cast<std::uint64_t>(y.size()));
+    update(static_cast<std::uint64_t>(X.rows()));
+    update(static_cast<std::uint64_t>(X.cols()));
+    update(static_cast<std::uint64_t>(fes.size()));
+    update(aggregation == GroupAggregation::Mean ? 1ULL : 2ULL);
+    update(weights ? 1ULL : 0ULL);
+    update(options.weights_are_frequencies ? 1ULL : 0ULL);
+    update(options.fit_intercept ? 1ULL : 0ULL);
+    update(options.drop_singletons ? 1ULL : 0ULL);
+
+    for (Eigen::Index i = 0; i < y.size(); ++i) {
+        update_double(y[i]);
+    }
+    for (Eigen::Index column = 0; column < X.cols(); ++column) {
+        for (Eigen::Index row = 0; row < X.rows(); ++row) {
+            update_double(X(row, column));
+        }
+    }
+    for (const auto& fe : fes) {
+        update_int_vector(fe);
+    }
+    update_int_vector(group_ids);
+    update_int_vector(individual_ids);
+    if (weights) {
+        update(static_cast<std::uint64_t>(weights->size()));
+        for (Eigen::Index i = 0; i < weights->size(); ++i) {
+            update_double((*weights)[i]);
+        }
+    }
+
+    return AbsorptionCacheKey{h1, h2};
+}
+
 GroupCollapsedData collapse_group_long_format(const Eigen::VectorXd& y,
                                               const Eigen::MatrixXd& X,
                                               const std::vector<Eigen::VectorXi>& fes,
@@ -6889,78 +7411,6 @@ double normal_critical_value(double level_percent) {
     return normal_ppf(p);
 }
 
-double betacf(double a, double b, double x) {
-    constexpr int kMaxIterations = 200;
-    constexpr double kEps = 3e-14;
-    constexpr double kFpMin = 1e-30;
-
-    double qab = a + b;
-    double qap = a + 1.0;
-    double qam = a - 1.0;
-
-    double c = 1.0;
-    double d = 1.0 - qab * x / qap;
-    if (std::abs(d) < kFpMin) {
-        d = kFpMin;
-    }
-    d = 1.0 / d;
-    double h = d;
-
-    for (int m = 1; m <= kMaxIterations; ++m) {
-        const int m2 = 2 * m;
-        double aa = m * (b - m) * x / ((qam + m2) * (a + m2));
-        d = 1.0 + aa * d;
-        if (std::abs(d) < kFpMin) {
-            d = kFpMin;
-        }
-        c = 1.0 + aa / c;
-        if (std::abs(c) < kFpMin) {
-            c = kFpMin;
-        }
-        d = 1.0 / d;
-        h *= d * c;
-
-        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
-        d = 1.0 + aa * d;
-        if (std::abs(d) < kFpMin) {
-            d = kFpMin;
-        }
-        c = 1.0 + aa / c;
-        if (std::abs(c) < kFpMin) {
-            c = kFpMin;
-        }
-        d = 1.0 / d;
-        const double del = d * c;
-        h *= del;
-        if (std::abs(del - 1.0) <= kEps) {
-            break;
-        }
-    }
-    return h;
-}
-
-double regularized_incomplete_beta(double a, double b, double x) {
-    if (!(x >= 0.0 && x <= 1.0)) {
-        throw std::runtime_error("regularized_incomplete_beta requires x in [0, 1]");
-    }
-    if (x <= 0.0) {
-        return 0.0;
-    }
-    if (x >= 1.0) {
-        return 1.0;
-    }
-
-    const double log_bt = std::lgamma(a + b) - std::lgamma(a) - std::lgamma(b) +
-                          a * std::log(x) + b * std::log1p(-x);
-    const double bt = std::exp(log_bt);
-
-    const double threshold = (a + 1.0) / (a + b + 2.0);
-    if (x < threshold) {
-        return bt * betacf(a, b, x) / a;
-    }
-    return 1.0 - bt * betacf(b, a, 1.0 - x) / b;
-}
-
 double student_t_cdf(double t, double df) {
     if (!(df > 0.0) || !hdfe::detail::ieee_finite(df)) {
         return std::numeric_limits<double>::quiet_NaN();
@@ -6968,73 +7418,14 @@ double student_t_cdf(double t, double df) {
     if (!hdfe::detail::ieee_finite(t)) {
         return std::numeric_limits<double>::quiet_NaN();
     }
-    if (t == 0.0) {
-        return 0.5;
-    }
-    if (df > 1e7) {
-        return 0.5 * std::erfc(-t * kInvSqrt2);
-    }
-    const double x = df / (df + t * t);
-    const double ib = regularized_incomplete_beta(df / 2.0, 0.5, x);
-    if (t > 0.0) {
-        return 1.0 - 0.5 * ib;
-    }
-    return 0.5 * ib;
-}
-
-double student_t_tail(double t_abs, double df) {
-    if (!(df > 0.0) || !hdfe::detail::ieee_finite(df)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-    if (!(t_abs >= 0.0) || !hdfe::detail::ieee_finite(t_abs)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-    if (df > 1e7) {
-        return 0.5 * std::erfc(t_abs * kInvSqrt2);
-    }
-    const double x = df / (df + t_abs * t_abs);
-    return 0.5 * regularized_incomplete_beta(df / 2.0, 0.5, x);
+    const double probability =
+        hdfe::detail::student_t_internal::two_sided_probability(
+            std::abs(t), df);
+    return t > 0.0 ? 1.0 - 0.5 * probability : 0.5 * probability;
 }
 
 double student_t_inv_cdf(double p, double df) {
-    if (!(df > 0.0) || !hdfe::detail::ieee_finite(df)) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-    if (!(p > 0.0 && p < 1.0) || !hdfe::detail::ieee_finite(p)) {
-        throw std::runtime_error("student_t_inv_cdf requires p in (0, 1)");
-    }
-    if (p == 0.5) {
-        return 0.0;
-    }
-    if (p < 0.5) {
-        return -student_t_inv_cdf(1.0 - p, df);
-    }
-
-    double low = 0.0;
-    double high = 1.0;
-    while (student_t_cdf(high, df) < p) {
-        high *= 2.0;
-        if (high > 1e12) {
-            break;
-        }
-    }
-
-    for (int iter = 0; iter < 120; ++iter) {
-        const double mid = 0.5 * (low + high);
-        const double cdf_mid = student_t_cdf(mid, df);
-        if (!hdfe::detail::ieee_finite(cdf_mid)) {
-            break;
-        }
-        if (cdf_mid < p) {
-            low = mid;
-        } else {
-            high = mid;
-        }
-        if (std::abs(high - low) <= 1e-13 * (1.0 + high + low)) {
-            break;
-        }
-    }
-    return 0.5 * (low + high);
+    return hdfe::detail::student_t_internal::inverse_cdf(p, df);
 }
 
 double student_t_critical_value(double level_percent, double df) {
@@ -7044,8 +7435,9 @@ double student_t_critical_value(double level_percent, double df) {
     if (!(df > 0.0) || !hdfe::detail::ieee_finite(df)) {
         return std::numeric_limits<double>::quiet_NaN();
     }
-    const double p = 0.5 + (level_percent / 200.0);
-    return student_t_inv_cdf(p, df);
+    const double upper_tail = (100.0 - level_percent) / 200.0;
+    return hdfe::detail::student_t_internal::inverse_survival(
+        upper_tail, df);
 }
 
 // When inference is unavailable (a saturated/over-specified model or fewer
@@ -7176,8 +7568,9 @@ void recompute_inference(Eigen::VectorXd& coefficients,
         tvalues(j) = t;
         const double abs_t = std::abs(t);
         if (df_ok && hdfe::detail::ieee_finite(abs_t)) {
-            const double tail = student_t_tail(abs_t, df_resid);
-            pvalues(j) = 2.0 * tail;
+            pvalues(j) =
+                hdfe::detail::student_t_internal::two_sided_probability(
+                    abs_t, df_resid);
         } else {
             pvalues(j) = nan;
         }
@@ -7272,6 +7665,119 @@ FeComponentStats compute_first_pair_component_stats(
     return stats;
 }
 
+class HdfeRegressorV11::AttemptTransaction {
+public:
+    explicit AttemptTransaction(HdfeRegressorV11& owner)
+        : owner_(owner), owns_attempt_(owner.lifecycle_state_ != LifecycleState::InProgress) {
+        if (owns_attempt_) {
+            owner_.begin_attempt();
+        }
+    }
+
+    ~AttemptTransaction() {
+        if (owns_attempt_ && !committed_) {
+            owner_.fail_attempt();
+        }
+    }
+
+    void commit(LifecycleState ready_state) noexcept {
+        owner_.commit_attempt(ready_state);
+        committed_ = true;
+    }
+
+private:
+    HdfeRegressorV11& owner_;
+    bool owns_attempt_ = false;
+    bool committed_ = false;
+};
+
+void HdfeRegressorV11::clear_consumable_state() noexcept {
+    results_ = HdfeResults{};
+    results_.converged = false;
+    results_.precision_certified = false;
+    results_.fe_recovery_converged = false;
+    method_used_ = AbsorptionMethod::Auto;
+    grouped_signature_1_ = 0;
+    grouped_signature_2_ = 0;
+    grouped_signature_valid_ = false;
+    gpu_used_ = false;
+    gpu_status_code_ = 0;
+    gpu_attempted_ = false;
+    gpu_absorption_converged_ = false;
+    gpu_absorption_iterations_ = 0;
+    threads_used_ = 0;
+    threads_requested_ = 0;
+    threads_effective_ = 0;
+    parallel_workers_active_ = 0;
+    thread_capacity_ = 0;
+    openmp_enabled_ = false;
+    thread_limit_code_ = 0;
+    thread_limit_reason_ = "not_run";
+    first_pair_component_stats_ = FeComponentStats{};
+    if (parallel_observer_) {
+        parallel_observer_->reset();
+    }
+}
+
+void HdfeRegressorV11::begin_attempt() {
+    clear_consumable_state();
+    lifecycle_state_ = LifecycleState::InProgress;
+    generation_ = generation_ == std::numeric_limits<std::uint64_t>::max()
+                      ? 1
+                      : generation_ + 1;
+}
+
+void HdfeRegressorV11::fail_attempt() noexcept {
+    clear_consumable_state();
+    lifecycle_state_ = LifecycleState::Failed;
+}
+
+void HdfeRegressorV11::commit_attempt(LifecycleState ready_state) noexcept {
+    lifecycle_state_ = ready_state;
+}
+
+void HdfeRegressorV11::invalidate_semantics() noexcept {
+    clear_consumable_state();
+    lifecycle_state_ = LifecycleState::Empty;
+    generation_ = generation_ == std::numeric_limits<std::uint64_t>::max()
+                      ? 1
+                      : generation_ + 1;
+}
+
+void HdfeRegressorV11::reset_moved_from() noexcept {
+    clear_consumable_state();
+    lifecycle_state_ = LifecycleState::Empty;
+    generation_ = 0;
+}
+
+const char* HdfeRegressorV11::lifecycle_state_name() const noexcept {
+    switch (lifecycle_state_) {
+        case LifecycleState::Empty: return "empty";
+        case LifecycleState::InProgress: return "in_progress";
+        case LifecycleState::Failed: return "failed";
+        case LifecycleState::PartialReady: return "partial_ready";
+        case LifecycleState::StandardReady: return "standard_ready";
+        case LifecycleState::GroupedReady: return "grouped_ready";
+    }
+    return "failed";
+}
+
+bool HdfeRegressorV11::has_estimation_result() const noexcept {
+    return lifecycle_state_ == LifecycleState::StandardReady ||
+           lifecycle_state_ == LifecycleState::GroupedReady;
+}
+
+bool HdfeRegressorV11::has_partial_result() const noexcept {
+    return lifecycle_state_ == LifecycleState::PartialReady;
+}
+
+void HdfeRegressorV11::set_weights_are_frequencies(bool value) noexcept {
+    if (options_.weights_are_frequencies != value) {
+        options_.weights_are_frequencies = value;
+        invalidate_semantics();
+    }
+}
+
 HdfeRegressorV11::HdfeRegressorV11(HdfeOptions options, ThreadingOptions threading)
     : options_(options),
       threading_(threading),
@@ -7279,6 +7785,8 @@ HdfeRegressorV11::HdfeRegressorV11(HdfeOptions options, ThreadingOptions threadi
     if (!options_.symmetric_sweep) {
         options_.symmetric_sweep = threading_.symmetric_sweep;
     }
+    clear_consumable_state();
+    lifecycle_state_ = LifecycleState::Empty;
 }
 
 HdfeRegressorV11::HdfeRegressorV11(const HdfeRegressorV11& other)
@@ -7295,12 +7803,21 @@ HdfeRegressorV11::HdfeRegressorV11(const HdfeRegressorV11& other)
       thread_limit_reason_(other.thread_limit_reason_),
       parallel_observer_(std::make_shared<detail::ParallelWorkObserver>()),
       method_used_(other.method_used_),
+      lifecycle_state_(other.lifecycle_state_),
+      generation_(other.generation_),
+      grouped_signature_1_(other.grouped_signature_1_),
+      grouped_signature_2_(other.grouped_signature_2_),
+      grouped_signature_valid_(other.grouped_signature_valid_),
       gpu_used_(other.gpu_used_),
       gpu_status_code_(other.gpu_status_code_),
       gpu_attempted_(other.gpu_attempted_),
       gpu_absorption_converged_(other.gpu_absorption_converged_),
       gpu_absorption_iterations_(other.gpu_absorption_iterations_),
-      first_pair_component_stats_(other.first_pair_component_stats_) {}
+      first_pair_component_stats_(other.first_pair_component_stats_) {
+    if (lifecycle_state_ == LifecycleState::InProgress) {
+        fail_attempt();
+    }
+}
 
 HdfeRegressorV11& HdfeRegressorV11::operator=(
     const HdfeRegressorV11& other) {
@@ -7320,12 +7837,86 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(
     thread_limit_reason_ = other.thread_limit_reason_;
     parallel_observer_ = std::make_shared<detail::ParallelWorkObserver>();
     method_used_ = other.method_used_;
+    lifecycle_state_ = other.lifecycle_state_;
+    generation_ = other.generation_;
+    grouped_signature_1_ = other.grouped_signature_1_;
+    grouped_signature_2_ = other.grouped_signature_2_;
+    grouped_signature_valid_ = other.grouped_signature_valid_;
     gpu_used_ = other.gpu_used_;
     gpu_status_code_ = other.gpu_status_code_;
     gpu_attempted_ = other.gpu_attempted_;
     gpu_absorption_converged_ = other.gpu_absorption_converged_;
     gpu_absorption_iterations_ = other.gpu_absorption_iterations_;
     first_pair_component_stats_ = other.first_pair_component_stats_;
+    if (lifecycle_state_ == LifecycleState::InProgress) {
+        fail_attempt();
+    }
+    return *this;
+}
+
+HdfeRegressorV11::HdfeRegressorV11(HdfeRegressorV11&& other) noexcept
+    : options_(std::move(other.options_)),
+      threading_(std::move(other.threading_)),
+      results_(std::move(other.results_)),
+      threads_used_(other.threads_used_),
+      threads_requested_(other.threads_requested_),
+      threads_effective_(other.threads_effective_),
+      parallel_workers_active_(other.parallel_workers_active_),
+      thread_capacity_(other.thread_capacity_),
+      openmp_enabled_(other.openmp_enabled_),
+      thread_limit_code_(other.thread_limit_code_),
+      thread_limit_reason_(std::move(other.thread_limit_reason_)),
+      parallel_observer_(std::move(other.parallel_observer_)),
+      method_used_(other.method_used_),
+      lifecycle_state_(other.lifecycle_state_),
+      generation_(other.generation_),
+      grouped_signature_1_(other.grouped_signature_1_),
+      grouped_signature_2_(other.grouped_signature_2_),
+      grouped_signature_valid_(other.grouped_signature_valid_),
+      gpu_used_(other.gpu_used_),
+      gpu_status_code_(other.gpu_status_code_),
+      gpu_attempted_(other.gpu_attempted_),
+      gpu_absorption_converged_(other.gpu_absorption_converged_),
+      gpu_absorption_iterations_(other.gpu_absorption_iterations_),
+      first_pair_component_stats_(other.first_pair_component_stats_) {
+    if (lifecycle_state_ == LifecycleState::InProgress) {
+        fail_attempt();
+    }
+    other.reset_moved_from();
+}
+
+HdfeRegressorV11& HdfeRegressorV11::operator=(HdfeRegressorV11&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    options_ = std::move(other.options_);
+    threading_ = std::move(other.threading_);
+    results_ = std::move(other.results_);
+    threads_used_ = other.threads_used_;
+    threads_requested_ = other.threads_requested_;
+    threads_effective_ = other.threads_effective_;
+    parallel_workers_active_ = other.parallel_workers_active_;
+    thread_capacity_ = other.thread_capacity_;
+    openmp_enabled_ = other.openmp_enabled_;
+    thread_limit_code_ = other.thread_limit_code_;
+    thread_limit_reason_ = std::move(other.thread_limit_reason_);
+    parallel_observer_ = std::move(other.parallel_observer_);
+    method_used_ = other.method_used_;
+    lifecycle_state_ = other.lifecycle_state_;
+    generation_ = other.generation_;
+    grouped_signature_1_ = other.grouped_signature_1_;
+    grouped_signature_2_ = other.grouped_signature_2_;
+    grouped_signature_valid_ = other.grouped_signature_valid_;
+    gpu_used_ = other.gpu_used_;
+    gpu_status_code_ = other.gpu_status_code_;
+    gpu_attempted_ = other.gpu_attempted_;
+    gpu_absorption_converged_ = other.gpu_absorption_converged_;
+    gpu_absorption_iterations_ = other.gpu_absorption_iterations_;
+    first_pair_component_stats_ = other.first_pair_component_stats_;
+    if (lifecycle_state_ == LifecycleState::InProgress) {
+        fail_attempt();
+    }
+    other.reset_moved_from();
     return *this;
 }
 
@@ -7433,6 +8024,9 @@ HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
 
 void HdfeRegressorV11::begin_parallel_observation(
     const ThreadResolution& resolution) {
+    if (!parallel_observer_) {
+        parallel_observer_ = std::make_shared<detail::ParallelWorkObserver>();
+    }
     threads_requested_ = resolution.requested;
     threads_effective_ = resolution.effective;
     thread_capacity_ = resolution.capacity;
@@ -7512,6 +8106,20 @@ void HdfeRegressorV11::apply_common_postprocessing(const Eigen::Ref<const Eigen:
     results_.fe_recovery_converged = true;
     results_.abs_residual = 0.0;
     results_.abs_residual_rel = 0.0;
+    results_.krylov_internal_tolerance = 0.0;
+    results_.krylov_max_final_backward_error = 0.0;
+    results_.krylov_max_condition = 0.0;
+    results_.krylov_max_condition_times_backward_error = 0.0;
+    results_.auto_routing_retry_policy_enabled = false;
+    results_.auto_routing_retry_eligible = false;
+    results_.auto_routing_retry_fired = false;
+    results_.auto_routing_retry_status = 0;
+    results_.auto_routing_retry_primary_method = -1;
+    results_.auto_routing_retry_primary_iterations = 0;
+    results_.auto_routing_retry_primary_abs_residual_rel = 0.0;
+    results_.auto_routing_retry_iterations = 0;
+    results_.auto_routing_retry_abs_residual_rel = 0.0;
+    results_.auto_routing_retry_elapsed_seconds = 0.0;
     results_.precision_certified = true;
     results_.num_clusters = ols_result.num_clusters;
     results_.cluster_counts.clear();
@@ -7527,10 +8135,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                            const Eigen::MatrixXd* instruments,
                            const std::vector<int>& endogenous_idx,
                            const std::vector<detail::HeterogeneousSlopeTerm>* slopes) {
-    // Any exception after a fit attempt must leave an inspectable fail-closed
-    // state rather than exposing a prior/default result as successful.
-    results_.converged = false;
-    results_.precision_certified = false;
+    AttemptTransaction attempt(*this);
     const auto fit_outer_t0 = std::chrono::steady_clock::now();
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
@@ -7720,6 +8325,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
         const bool has_slopes_use = !slope_terms.empty();
+        tuned.ordinary_krylov_parity_floor =
+            options_.ordinary_krylov_parity_floor && !has_slopes_use;
+        tuned.ordinary_auto_routing_retry =
+            options_.ordinary_auto_routing_retry &&
+            !suppress_auto_routing_retry_ && !has_slopes_use &&
+            read_env_bool("XHDFE_AUTO_ROUTING_RETRY").value_or(true);
 
         MobilityHint mobility_hint;
         bool have_mobility_hint = false;
@@ -7731,7 +8342,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 have_profile = true;
             }
         }
-        if (have_profile) {
+        if (have_profile && profile.profile_kind == "standard") {
             bool match = false;
             if (profile.signature != 0 || profile.signature_canon != 0) {
                 const std::uint64_t sig = hash_fe_signature(fes_use, options_.drop_singletons);
@@ -7752,7 +8363,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 match = (profile.signature == sig_raw);
             }
             if (match) {
-                mobility_hint = build_mobility_hint(profile);
+                mobility_hint = build_standard_mobility_hint(profile);
                 have_mobility_hint = true;
                 mobility_profile_match = true;
             }
@@ -7814,6 +8425,58 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         bool abs_cache_key_ready = false;
         bool cache_hit = false;
 
+        // PF3_CANDIDATE2_PROTOTYPE_BEGIN
+        // Accuracy-only opt-in for the standard CUDA Auto/comparable path.
+        // Keep the default and every adjacent estimator surface byte-for-byte
+        // equivalent unless the explicit environment gate is enabled.
+        const bool cuda_auto_comparable_accuracy_retry =
+            read_env_bool("XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_RETRY").value_or(false) &&
+            options_.absorption_method == AbsorptionMethod::Auto &&
+            options_.convergence_criterion == ConvergenceCriterion::Auto &&
+            options_.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+            cuda_backend_env_requested() &&
+            !options_.retain_fixed_effects && !options_.refine_stored_residuals &&
+            !options_.save_groupvar && !options_.symmetric_sweep &&
+            !options_.use_sparse_solver && !options_.use_krylov &&
+            options_.sweep_order_override.empty() &&
+            !env_krylov.has_value() && !has_slopes_use && w_ptr == nullptr &&
+            !wants_iv && !has_instruments &&
+            mobility_cfg.mode == "off" && abs_cache_cfg.mode == "off" &&
+            fe_cache_cfg.mode == "off" && !fe_cache_hit &&
+            !allow_profile_write && !allow_cache_read && !allow_cache_write &&
+            !savefe_profile_enabled() && !cpu_profile_enabled() &&
+            tuned.tol > 1.0e-10;
+        const bool cuda_auto_comparable_accuracy_retry_diag =
+            read_env_bool(
+                "XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_RETRY_DIAG").value_or(false);
+        const bool cuda_auto_forward_accuracy_repair =
+            read_env_bool(
+                "XHDFE_CUDA_AUTO_FORWARD_ACCURACY_REPAIR").value_or(false) &&
+            options_.absorption_method == AbsorptionMethod::Auto &&
+            options_.convergence_criterion == ConvergenceCriterion::Auto &&
+            (options_.tolerance_mode == ToleranceMode::ReghdfeComparable ||
+             options_.tolerance_mode == ToleranceMode::XhdfeFast) &&
+            cuda_backend_env_requested() &&
+            !options_.retain_fixed_effects && !options_.refine_stored_residuals &&
+            !options_.save_groupvar && !options_.symmetric_sweep &&
+            !options_.use_sparse_solver && !options_.use_krylov &&
+            options_.sweep_order_override.empty() &&
+            !env_krylov.has_value() && !has_slopes_use && w_ptr == nullptr &&
+            !wants_iv && !has_instruments &&
+            mobility_cfg.mode == "off" && abs_cache_cfg.mode == "off" &&
+            fe_cache_cfg.mode == "off" && !fe_cache_hit &&
+            !allow_profile_write && !allow_cache_read && !allow_cache_write &&
+            !savefe_profile_enabled() && !cpu_profile_enabled();
+        const std::optional<bool> cuda_accuracy_ladder_override =
+            read_env_bool(
+                "XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_LADDER");
+        const bool cuda_auto_comparable_accuracy_ladder =
+            cuda_auto_forward_accuracy_repair
+                ? cuda_accuracy_ladder_override.value_or(true)
+                : (cuda_auto_comparable_accuracy_retry &&
+                   cuda_accuracy_ladder_override.value_or(false));
+        // PF3_CANDIDATE2_PROTOTYPE_END
+
         if (have_mobility_hint && options_.absorption_method == AbsorptionMethod::Auto &&
             !options_.use_krylov && !options_.use_sparse_solver) {
             if (mobility_hint.use_krylov) {
@@ -7852,6 +8515,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         } else if (preferred_method != AbsorptionMethod::Auto) {
             selected_method = preferred_method;
         }
+        bool cuda_auto_forward_probe_candidate = false;
         // ---- Auto-MLSMR selection (CPU-only, standard FEs) -----------------------
         // Plain absorptionmethod(auto) now uses the same selector as the explicit
         // absorptionmethod(auto-mlsmr) alias. The selector probes standard-FE designs
@@ -7906,12 +8570,67 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 tuned.from_auto = false;
                 benchmark_methods = false;
             } else if (use_auto_mlsmr_selector) {
+                if (cuda_auto_forward_accuracy_repair && !has_slopes_use &&
+                    !options_.retain_fixed_effects) {
+                    const int fast_min_rows = read_env_int(
+                        "XHDFE_AUTO_MLSMR_FAST_MIN_ROWS", 1000000, 1);
+                    const int fast_min_rhs = read_env_int(
+                        "XHDFE_AUTO_MLSMR_FAST_MIN_RHS", 8, 1);
+                    const int fast_min_fes = read_env_int(
+                        "XHDFE_AUTO_MLSMR_FAST_MIN_FES", 3, 1);
+                    const int rhs_count = static_cast<int>(X_use.cols());
+                    const bool moderate_band_shape =
+                        y_use.size() >= fast_min_rows &&
+                        rhs_count >= fast_min_rhs &&
+                        static_cast<int>(fes_use.size()) >= fast_min_fes &&
+                        rhs_count + 1 +
+                                (options_.fit_intercept ? 1 : 0) <=
+                            detail::kCudaForwardProbeMaxP;
+                    if (moderate_band_shape) {
+                        const AbsorptionMethod sweep_fallback =
+                            auto_mlsmr_sweep_fallback(
+                                fes_use.size(), options_.symmetric_sweep);
+                        AutoMlsmrSelectionDiagnostics diagnostics;
+                        (void)select_auto_mlsmr_method(
+                            fes_use, w_ptr, options_, rhs_count,
+                            sweep_fallback, &diagnostics);
+                        const double rho_min = read_env_double(
+                            "XHDFE_AUTO_MLSMR_FAST_RHO_MIN", 0.60,
+                            0.0, 1.0);
+                        const double rho_max = read_env_double(
+                            "XHDFE_AUTO_MLSMR_FAST_RHO_MAX", 0.675,
+                            0.0, 1.0);
+                        cuda_auto_forward_probe_candidate =
+                            diagnostics.evaluated &&
+                            diagnostics.per_sweep_rho >= rho_min &&
+                            diagnostics.per_sweep_rho <= rho_max;
+                        if (cuda_auto_comparable_accuracy_retry_diag) {
+                            std::cerr
+                                << "xhdfe cuda_auto_forward_accuracy_repair"
+                                << " event=preselector"
+                                << " candidate="
+                                << (cuda_auto_forward_probe_candidate ? 1 : 0)
+                                << " rho="
+                                << diagnostics.per_sweep_rho
+                                << " rho_min=" << rho_min
+                                << " rho_max=" << rho_max << '\n';
+                        }
+                    }
+                }
                 // GPU-requested or ineligible auto selector -> normal sweep selector.
                 selected_method =
                     auto_mlsmr_sweep_fallback(fes_use.size(), options_.symmetric_sweep);
                 tuned.from_auto = false;
                 benchmark_methods = false;
             }
+        }
+        if (has_slopes_use &&
+            (options_.absorption_method == AbsorptionMethod::Auto ||
+             options_.absorption_method == AbsorptionMethod::AutoMlsmr)) {
+            // The auto-MLSMR selector intentionally falls back to sweeps for
+            // slopes, but Option-A's slope certificate/continuation must still
+            // remember that the public request was adaptive Auto.
+            tuned.from_auto = true;
         }
         if (selected_method == AbsorptionMethod::Auto && fes_use.size() == 2 &&
             y_use.size() < 50000) {
@@ -7975,6 +8694,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         auto absorb_with_precision_repair = [&](
             const Eigen::Ref<const Eigen::MatrixXd>& design,
             AbsorptionMethod requested_method) {
+            std::optional<detail::ScopedCudaForwardProbeRequest>
+                forward_probe_request;
+            if (cuda_auto_forward_probe_candidate) {
+                forward_probe_request.emplace(true);
+            }
             bool requested_backend_unavailable = false;
             std::optional<detail::ScopedGpuBackendOverride>
                 unavailable_backend_cpu_fallback;
@@ -7985,6 +8709,103 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     candidate.gpu_attempted = false;
                     candidate.gpu_absorption_converged = false;
                     candidate.gpu_absorption_iterations = 0;
+                }
+                constexpr double kOrdinaryAutoRoutingRetryTrigger = 1.0e-11;
+                AbsorptionMethod actual_primary_method = requested_method;
+                if (candidate.mlsmr_used) {
+                    actual_primary_method = AbsorptionMethod::Mlsmr;
+                } else if (candidate.schwarz_used) {
+                    actual_primary_method = AbsorptionMethod::Schwarz;
+                }
+                const bool in_default_promotion_band =
+                    !fes_use.empty() &&
+                    (fes_use.size() <= 3 ||
+                     (fes_use.size() == 4 && y_use.size() <= 2000000));
+                bool nested_parallel = false;
+#ifdef HDFE_USE_OPENMP
+                nested_parallel = omp_in_parallel() != 0;
+#endif
+                candidate.auto_routing_retry_policy_enabled =
+                    tuned.ordinary_auto_routing_retry;
+                candidate.auto_routing_retry_primary_method =
+                    static_cast<int>(actual_primary_method);
+                candidate.auto_routing_retry_primary_iterations =
+                    candidate.iterations;
+                candidate.auto_routing_retry_primary_abs_residual_rel =
+                    candidate.abs_residual_rel;
+                const bool eligible =
+                    tuned.ordinary_auto_routing_retry &&
+                    options_.absorption_method == AbsorptionMethod::Auto &&
+                    !candidate.mlsmr_used && !candidate.schwarz_used &&
+                    (actual_primary_method == AbsorptionMethod::GaussSeidel ||
+                     actual_primary_method ==
+                         AbsorptionMethod::SymmetricGaussSeidel) &&
+                    in_default_promotion_band && !wants_iv && !has_instruments &&
+                    !cuda_backend_env_requested() && !candidate.gpu_used &&
+                    !candidate.gpu_attempted && candidate.gpu_status_code == 0 &&
+                    candidate.converged && candidate.precision_certified &&
+                    tuned.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+                    tuned.tol == 1.0e-8 && w_ptr == nullptr &&
+                    slope_terms.empty() && !tuned.retain_fixed_effects &&
+                    !tuned.save_groupvar && !tuned.use_sparse_solver &&
+                    !tuned.use_krylov && !nested_parallel;
+                candidate.auto_routing_retry_eligible = eligible;
+                if (eligible) {
+                    candidate.auto_routing_retry_status = 1;
+                }
+                if (read_env_bool("XHDFE_AUTO_ROUTING_RETRY_DIAG").value_or(false)) {
+                    std::cerr << "xhdfe auto_routing_retry"
+                              << " policy=" << (tuned.ordinary_auto_routing_retry ? 1 : 0)
+                              << " eligible=" << (eligible ? 1 : 0)
+                              << " requested=" << static_cast<int>(options_.absorption_method)
+                              << " primary=" << static_cast<int>(actual_primary_method)
+                              << " certified=" << (candidate.precision_certified ? 1 : 0)
+                              << " rel=" << candidate.abs_residual_rel << '\n';
+                }
+                if (eligible && candidate.abs_residual_rel >
+                                    kOrdinaryAutoRoutingRetryTrigger) {
+                    const auto retry_started = std::chrono::steady_clock::now();
+                    HdfeOptions retry_options = tuned;
+                    retry_options.absorption_method = AbsorptionMethod::Mlsmr;
+                    retry_options.from_auto = false;
+                    detail::AbsorptionResult retry =
+                        detail::absorb_fixed_effects_v6(
+                            y_use, design, fes_use, w_ptr, retry_options,
+                            AbsorptionMethod::Mlsmr, slope_terms);
+                    detail::certify_absorption_result(
+                        y_use, design, fes_use, w_ptr, tuned, slope_terms, retry);
+                    const double retry_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - retry_started).count();
+                    const bool force_failure = read_env_bool(
+                        "XHDFE_TEST_AUTO_ROUTING_RETRY_FAIL").value_or(false);
+                    if (force_failure) {
+                        retry.converged = false;
+                        retry.precision_certified = false;
+                    }
+                    auto diagnostics = [&](detail::AbsorptionResult& out,
+                                           int status) {
+                        out.auto_routing_retry_policy_enabled = true;
+                        out.auto_routing_retry_eligible = true;
+                        out.auto_routing_retry_fired = true;
+                        out.auto_routing_retry_status = status;
+                        out.auto_routing_retry_primary_method =
+                            static_cast<int>(actual_primary_method);
+                        out.auto_routing_retry_primary_iterations =
+                            candidate.iterations;
+                        out.auto_routing_retry_primary_abs_residual_rel =
+                            candidate.abs_residual_rel;
+                        out.auto_routing_retry_iterations = retry.iterations;
+                        out.auto_routing_retry_abs_residual_rel =
+                            retry.abs_residual_rel;
+                        out.auto_routing_retry_elapsed_seconds = retry_seconds;
+                    };
+                    if (retry.converged && retry.precision_certified) {
+                        diagnostics(retry, 2);
+                        retry.mlsmr_used = true;
+                        method_used_ = AbsorptionMethod::Mlsmr;
+                        return retry;
+                    }
+                    diagnostics(candidate, 3);
                 }
                 return candidate;
             };
@@ -8110,6 +8931,349 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         requested_method, slope_terms);
                 }
             }
+
+            // PF3_CANDIDATE2_PROTOTYPE_BEGIN
+            // A successful public-tolerance primary pass can still be above
+            // the opt-in 1e-10 accuracy target. Re-solve from the original
+            // y/design (never from the primary residual) with the same
+            // Auto-resolved CUDA method and a tighter internal tolerance.
+            constexpr double kCudaAutoComparableAccuracyTarget = 1.0e-10;
+            const bool cuda_accuracy_retry_triggered =
+                cuda_auto_comparable_accuracy_retry &&
+                !cuda_auto_forward_accuracy_repair && primary.gpu_used &&
+                primary.gpu_attempted && primary.gpu_status_code == 1 &&
+                primary.gpu_absorption_converged && primary.converged &&
+                primary.precision_certified &&
+                hdfe::detail::ieee_finite(primary.abs_residual_rel) &&
+                primary.abs_residual_rel > kCudaAutoComparableAccuracyTarget;
+            if (cuda_auto_comparable_accuracy_retry_diag &&
+                cuda_auto_comparable_accuracy_retry) {
+                std::cerr
+                    << "xhdfe cuda_auto_comparable_accuracy_retry event=primary"
+                    << " triggered=" << (cuda_accuracy_retry_triggered ? 1 : 0)
+                    << " abs_residual_rel=" << primary.abs_residual_rel
+                    << " iterations=" << primary.iterations << '\n';
+            }
+            if (cuda_accuracy_retry_triggered) {
+                const int primary_iterations = primary.iterations;
+                int accumulated_iterations = primary_iterations;
+                if (cuda_auto_comparable_accuracy_ladder) {
+                    constexpr std::array<double, 3> kWarmStageTolerances = {
+                        1.0e-9, 3.0e-10, 1.0e-10};
+                    detail::AbsorptionResult stage_seed = std::move(primary);
+                    for (std::size_t stage = 0;
+                         stage < kWarmStageTolerances.size(); ++stage) {
+                        HdfeOptions stage_options = tuned;
+                        stage_options.tol = kWarmStageTolerances[stage];
+                        stage_options.tolerance_mode =
+                            ToleranceMode::ReghdfeComparable;
+                        stage_options.convergence_criterion =
+                            ConvergenceCriterion::Auto;
+                        detail::AbsorptionResult staged =
+                            detail::absorb_fixed_effects_v6(
+                                stage_seed.y_tilde, stage_seed.X_tilde,
+                                fes_use, w_ptr, stage_options,
+                                requested_method, slope_terms);
+                        certify_public_contract(staged);
+                        const int stage_iterations = staged.iterations;
+                        accumulated_iterations += stage_iterations;
+                        staged.iterations = accumulated_iterations;
+                        staged.gpu_absorption_iterations =
+                            accumulated_iterations;
+                        const bool stage_valid =
+                            staged.gpu_used && staged.gpu_attempted &&
+                            staged.gpu_status_code == 1 &&
+                            staged.gpu_absorption_converged &&
+                            staged.converged && staged.precision_certified &&
+                            hdfe::detail::ieee_finite(
+                                staged.abs_residual_rel);
+                        const bool stage_accepted =
+                            stage_valid &&
+                            staged.abs_residual_rel <=
+                                kCudaAutoComparableAccuracyTarget;
+                        if (cuda_auto_comparable_accuracy_retry_diag) {
+                            std::cerr
+                                << "xhdfe cuda_auto_comparable_accuracy_retry"
+                                << " event=ladder_stage"
+                                << " stage=" << (stage + 1)
+                                << " tol=" << kWarmStageTolerances[stage]
+                                << " valid=" << (stage_valid ? 1 : 0)
+                                << " accepted=" << (stage_accepted ? 1 : 0)
+                                << " abs_residual_rel="
+                                << staged.abs_residual_rel
+                                << " stage_iterations=" << stage_iterations
+                                << " reported_total_iterations="
+                                << accumulated_iterations << '\n';
+                        }
+                        if (stage_accepted) {
+                            return finalize_backend_status(std::move(staged));
+                        }
+                        if (!stage_valid) {
+                            break;
+                        }
+                        stage_seed = std::move(staged);
+                    }
+                    if (cuda_auto_comparable_accuracy_retry_diag) {
+                        std::cerr
+                            << "xhdfe cuda_auto_comparable_accuracy_retry"
+                            << " event=ladder_cold_fallback"
+                            << " prior_reported_iterations="
+                            << accumulated_iterations << '\n';
+                    }
+                }
+                HdfeOptions retry_options = tuned;
+                retry_options.tol = kCudaAutoComparableAccuracyTarget;
+                retry_options.tolerance_mode = ToleranceMode::ReghdfeComparable;
+                retry_options.convergence_criterion = ConvergenceCriterion::Auto;
+                detail::AbsorptionResult retried =
+                    detail::absorb_fixed_effects_v6(
+                        y_use, design, fes_use, w_ptr, retry_options,
+                        requested_method, slope_terms);
+                certify_public_contract(retried);
+                const int retry_iterations = retried.iterations;
+                retried.iterations += accumulated_iterations;
+                retried.gpu_absorption_iterations = retried.iterations;
+                const bool retry_accepted =
+                    retried.gpu_used && retried.gpu_attempted &&
+                    retried.gpu_status_code == 1 &&
+                    retried.gpu_absorption_converged && retried.converged &&
+                    retried.precision_certified &&
+                    hdfe::detail::ieee_finite(retried.abs_residual_rel) &&
+                    retried.abs_residual_rel <=
+                        kCudaAutoComparableAccuracyTarget;
+                if (cuda_auto_comparable_accuracy_retry_diag) {
+                    std::cerr
+                        << "xhdfe cuda_auto_comparable_accuracy_retry event=retry"
+                        << " accepted=" << (retry_accepted ? 1 : 0)
+                        << " accepted_stage=cold"
+                        << " abs_residual_rel=" << retried.abs_residual_rel
+                        << " primary_iterations=" << primary_iterations
+                        << " retry_iterations=" << retry_iterations
+                        << " total_iterations=" << retried.iterations << '\n';
+                }
+                if (!retry_accepted) {
+                    retried.gpu_used = false;
+                    retried.gpu_status_code = 3;
+                    retried.gpu_absorption_converged = false;
+                    retried.converged = false;
+                    retried.precision_certified = false;
+                }
+                return finalize_backend_status(std::move(retried));
+            }
+            // PF3_CANDIDATE2_PROTOTYPE_END
+
+            auto forward_probe_rss_threshold = [](
+                const detail::CudaForwardProbeSummary& probe) {
+                constexpr double kReleasedRssGate = 5.0e-9;
+                constexpr double kReferenceContraction = 0.9999;
+                const int sweeps = std::max(1, probe.continuation_sweeps);
+                // The second checkpoint is 2K sweeps after publication.
+                // RSS excess is a squared residual error, hence its geometric
+                // contraction over that interval is rho^(2 * 2K)=rho^(4K).
+                return kReleasedRssGate *
+                       (1.0 - std::pow(
+                                    kReferenceContraction,
+                                    4.0 * static_cast<double>(sweeps)));
+            };
+            auto forward_probe_is_stable = [&](
+                const detail::AbsorptionResult& candidate) {
+                const auto& probe = candidate.cuda_forward_probe;
+                return probe.status == 1 &&
+                       hdfe::detail::ieee_finite(probe.rss_drift_rel) &&
+                       probe.rss_drift_rel <
+                           forward_probe_rss_threshold(probe);
+            };
+            auto forward_accuracy_retry_triggered = [&]
+                (const detail::AbsorptionResult& candidate) {
+                if (!cuda_auto_forward_accuracy_repair ||
+                    !cuda_auto_forward_probe_candidate ||
+                    requested_backend_unavailable || !candidate.gpu_used ||
+                    !candidate.gpu_attempted ||
+                    candidate.gpu_status_code != 1 ||
+                    !candidate.gpu_absorption_converged ||
+                    !candidate.converged || !candidate.precision_certified) {
+                    return false;
+                }
+                const auto& probe = candidate.cuda_forward_probe;
+                if (probe.status != 1 ||
+                    !hdfe::detail::ieee_finite(probe.rss_drift_rel)) {
+                    if (cuda_auto_comparable_accuracy_retry_diag) {
+                        std::cerr
+                            << "xhdfe cuda_auto_forward_accuracy_repair"
+                            << " event=probe_unavailable"
+                            << " status=" << probe.status << '\n';
+                    }
+                    return false;
+                }
+                const double threshold =
+                    forward_probe_rss_threshold(probe);
+                if (probe.rss_drift_rel < threshold) {
+                    return false;
+                }
+                if (cuda_auto_comparable_accuracy_retry_diag) {
+                    std::cerr
+                        << "xhdfe cuda_auto_forward_accuracy_repair"
+                        << " event=selector"
+                        << " selected=1"
+                        << " rss_drift_rel=" << probe.rss_drift_rel
+                        << " threshold=" << threshold << '\n';
+                }
+                return true;
+            };
+            auto run_forward_accuracy_retry = [&]
+                (detail::AbsorptionResult candidate) {
+                const int initial_iterations = candidate.iterations;
+                int accumulated_iterations = initial_iterations;
+                if (cuda_auto_comparable_accuracy_ladder) {
+                    constexpr std::array<double, 3> kWarmStageTolerances = {
+                        1.0e-9, 3.0e-10, 1.0e-10};
+                    detail::AbsorptionResult stage_seed =
+                        std::move(candidate);
+                    for (std::size_t stage = 0;
+                         stage < kWarmStageTolerances.size(); ++stage) {
+                        HdfeOptions stage_options = tuned;
+                        stage_options.tol = kWarmStageTolerances[stage];
+                        stage_options.tolerance_mode =
+                            ToleranceMode::ReghdfeComparable;
+                        stage_options.convergence_criterion =
+                            ConvergenceCriterion::Auto;
+                        detail::AbsorptionResult staged =
+                            detail::absorb_fixed_effects_v6(
+                                stage_seed.y_tilde, stage_seed.X_tilde,
+                                fes_use, w_ptr, stage_options,
+                                requested_method, slope_terms);
+                        certify_public_contract(staged);
+                        const int stage_iterations = staged.iterations;
+                        accumulated_iterations += stage_iterations;
+                        staged.iterations = accumulated_iterations;
+                        staged.gpu_absorption_iterations =
+                            accumulated_iterations;
+                        const bool accepted =
+                            staged.gpu_used && staged.gpu_attempted &&
+                            staged.gpu_status_code == 1 &&
+                            staged.gpu_absorption_converged &&
+                            staged.converged && staged.precision_certified &&
+                            hdfe::detail::ieee_finite(
+                                staged.abs_residual_rel) &&
+                            staged.abs_residual_rel <=
+                                kCudaAutoComparableAccuracyTarget &&
+                            forward_probe_is_stable(staged);
+                        if (cuda_auto_comparable_accuracy_retry_diag) {
+                            std::cerr
+                                << "xhdfe cuda_auto_forward_accuracy_repair"
+                                << " event=ladder_stage"
+                                << " stage=" << (stage + 1)
+                                << " accepted=" << (accepted ? 1 : 0)
+                                << " abs_residual_rel="
+                                << staged.abs_residual_rel
+                                << " rss_drift_rel="
+                                << staged.cuda_forward_probe.rss_drift_rel
+                                << " stage_iterations=" << stage_iterations
+                                << " total_iterations="
+                                << accumulated_iterations << '\n';
+                        }
+                        if (accepted) {
+                            staged.cuda_accuracy_retry_trigger = 2;
+                            staged.cuda_accuracy_retry_stage =
+                                static_cast<int>(stage + 1);
+                            staged.cuda_accuracy_retry_iterations =
+                                accumulated_iterations - initial_iterations;
+                            return staged;
+                        }
+                        const bool stage_valid =
+                            staged.gpu_used && staged.gpu_attempted &&
+                            staged.gpu_status_code == 1 &&
+                            staged.gpu_absorption_converged &&
+                            staged.converged && staged.precision_certified;
+                        if (!stage_valid) {
+                            break;
+                        }
+                        stage_seed = std::move(staged);
+                    }
+                }
+
+                HdfeOptions retry_options = tuned;
+                retry_options.tol = kCudaAutoComparableAccuracyTarget;
+                retry_options.tolerance_mode =
+                    ToleranceMode::ReghdfeComparable;
+                retry_options.convergence_criterion =
+                    ConvergenceCriterion::Auto;
+                detail::AbsorptionResult retried =
+                    detail::absorb_fixed_effects_v6(
+                        y_use, design, fes_use, w_ptr, retry_options,
+                        requested_method, slope_terms);
+                certify_public_contract(retried);
+                const int retry_iterations = retried.iterations;
+                retried.iterations += accumulated_iterations;
+                retried.gpu_absorption_iterations = retried.iterations;
+                const bool accepted =
+                    retried.gpu_used && retried.gpu_attempted &&
+                    retried.gpu_status_code == 1 &&
+                    retried.gpu_absorption_converged && retried.converged &&
+                    retried.precision_certified &&
+                    hdfe::detail::ieee_finite(retried.abs_residual_rel) &&
+                    retried.abs_residual_rel <=
+                        kCudaAutoComparableAccuracyTarget &&
+                    forward_probe_is_stable(retried);
+                if (cuda_auto_comparable_accuracy_retry_diag) {
+                    std::cerr
+                        << "xhdfe cuda_auto_forward_accuracy_repair"
+                        << " event=cold"
+                        << " accepted=" << (accepted ? 1 : 0)
+                        << " abs_residual_rel="
+                        << retried.abs_residual_rel
+                        << " rss_drift_rel="
+                        << retried.cuda_forward_probe.rss_drift_rel
+                        << " retry_iterations=" << retry_iterations
+                        << " total_iterations=" << retried.iterations
+                        << '\n';
+                }
+                retried.cuda_accuracy_retry_trigger = 2;
+                retried.cuda_accuracy_retry_stage = 4;
+                retried.cuda_accuracy_retry_iterations =
+                    retried.iterations - initial_iterations;
+                if (!accepted) {
+                    retried.gpu_used = false;
+                    retried.gpu_status_code = 3;
+                    retried.gpu_absorption_converged = false;
+                    retried.converged = false;
+                    retried.precision_certified = false;
+                }
+                return retried;
+            };
+            auto finalize_with_forward_repair = [&]
+                (detail::AbsorptionResult candidate) {
+                const bool probe_required =
+                    cuda_auto_forward_accuracy_repair &&
+                    cuda_auto_forward_probe_candidate &&
+                    candidate.gpu_used && candidate.gpu_attempted &&
+                    candidate.gpu_status_code == 1 &&
+                    candidate.gpu_absorption_converged &&
+                    candidate.converged && candidate.precision_certified;
+                if (probe_required &&
+                    (candidate.cuda_forward_probe.status != 1 ||
+                     !hdfe::detail::ieee_finite(
+                         candidate.cuda_forward_probe.rss_drift_rel))) {
+                    if (cuda_auto_comparable_accuracy_retry_diag) {
+                        std::cerr
+                            << "xhdfe cuda_auto_forward_accuracy_repair"
+                            << " event=required_probe_failed"
+                            << " status="
+                            << candidate.cuda_forward_probe.status << '\n';
+                    }
+                    candidate.gpu_used = false;
+                    candidate.gpu_status_code = 3;
+                    candidate.gpu_absorption_converged = false;
+                    candidate.converged = false;
+                    candidate.precision_certified = false;
+                    return finalize_backend_status(std::move(candidate));
+                }
+                if (forward_accuracy_retry_triggered(candidate)) {
+                    candidate = run_forward_accuracy_retry(
+                        std::move(candidate));
+                }
+                return finalize_backend_status(std::move(candidate));
+            };
             // The public certificate deliberately allows an 8x FP envelope.
             // On bounded default-fast problems, use one half of the requested
             // tolerance as the repair trigger; the bounded four-FE CUDA case
@@ -8123,7 +9287,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 requested_method != AbsorptionMethod::Mlsmr &&
                 (!primary.precision_certified || primary_precision_gate_failed);
             if (!repair_eligible) {
-                return finalize_backend_status(std::move(primary));
+                return finalize_with_forward_repair(std::move(primary));
             }
 
             if (!requested_backend_unavailable &&
@@ -8148,7 +9312,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         repaired.iterations += primary.iterations;
                         repaired.gpu_absorption_iterations = repaired.iterations;
                     }
-                    return finalize_backend_status(std::move(repaired));
+                    return finalize_with_forward_repair(std::move(repaired));
                 }
                 if (w_ptr != nullptr && repaired.gpu_used) {
                     detail::AbsorptionResult strict_retry =
@@ -8306,7 +9470,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             abs_cache_key =
                 hash_absorption_signature(
-                    y_use, design, fes_use, w_ptr, cache_key_options);
+                    y_use, design, fes_use, w_ptr, cache_key_options,
+                    kAbsorptionSolveContractGeneration);
             abs_cache_key_ready = true;
         };
         auto try_load_cache = [&](const Eigen::Ref<const Eigen::MatrixXd>& design,
@@ -8317,7 +9482,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             ensure_cache_key(design);
             AbsorptionCacheRecord cached;
-            if (!read_absorption_cache(cache_path, abs_cache_key, cached)) {
+            if (!read_absorption_cache(
+                    cache_path, abs_cache_key, static_cast<int>(y_use.size()),
+                    static_cast<int>(design.cols()), design_cols,
+                    static_cast<int>(fes_use.size()), cached)) {
                 return false;
             }
             if (!cached.converged) {
@@ -8338,6 +9506,33 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             absorption.sweep_order_used = std::move(cached.sweep_order);
             absorption.iterations = cached.iterations;
             absorption.converged = cached.converged;
+            absorption.krylov_internal_tolerance =
+                cached.krylov_internal_tolerance;
+            absorption.krylov_max_final_backward_error =
+                cached.krylov_max_final_backward_error;
+            absorption.krylov_max_condition = cached.krylov_max_condition;
+            absorption.krylov_max_condition_times_backward_error =
+                cached.krylov_max_condition_times_backward_error;
+            absorption.auto_routing_retry_policy_enabled =
+                cached.auto_routing_retry_policy_enabled;
+            absorption.auto_routing_retry_eligible =
+                cached.auto_routing_retry_eligible;
+            absorption.auto_routing_retry_fired =
+                cached.auto_routing_retry_fired;
+            absorption.auto_routing_retry_status =
+                cached.auto_routing_retry_status;
+            absorption.auto_routing_retry_primary_method =
+                cached.auto_routing_retry_primary_method;
+            absorption.auto_routing_retry_primary_iterations =
+                cached.auto_routing_retry_primary_iterations;
+            absorption.auto_routing_retry_primary_abs_residual_rel =
+                cached.auto_routing_retry_primary_abs_residual_rel;
+            absorption.auto_routing_retry_iterations =
+                cached.auto_routing_retry_iterations;
+            absorption.auto_routing_retry_abs_residual_rel =
+                cached.auto_routing_retry_abs_residual_rel;
+            absorption.auto_routing_retry_elapsed_seconds =
+                cached.auto_routing_retry_elapsed_seconds;
             method_used_ = cached.method;
             detail::certify_absorption_result(
                 y_use, design, fes_use, w_ptr, tuned, slope_terms, absorption);
@@ -8460,7 +9655,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                        absorption.X_tilde, absorption.fe_levels,
                                        absorption.sweep_order_used, design_cols, method_used_,
-                                       absorption.iterations, absorption.converged);
+                                       absorption.iterations, absorption.converged,
+                                       absorption.krylov_internal_tolerance,
+                                       absorption.krylov_max_final_backward_error,
+                                       absorption.krylov_max_condition,
+                                       absorption.krylov_max_condition_times_backward_error,
+                                       absorption);
             }
         } else {
             if (drop_intercept && inst_use && inst_use->cols() > 0) {
@@ -8516,7 +9716,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                            absorption.X_tilde, absorption.fe_levels,
                                            absorption.sweep_order_used, design_cols, method_used_,
-                                           absorption.iterations, absorption.converged);
+                                           absorption.iterations, absorption.converged,
+                                           absorption.krylov_internal_tolerance,
+                                           absorption.krylov_max_final_backward_error,
+                                           absorption.krylov_max_condition,
+                                           absorption.krylov_max_condition_times_backward_error,
+                                           absorption);
                 }
             } else {
                 Eigen::MatrixXd design =
@@ -8575,7 +9780,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                                absorption.X_tilde, absorption.fe_levels,
                                                absorption.sweep_order_used, design_cols, method_used_,
-                                               absorption.iterations, absorption.converged);
+                                               absorption.iterations, absorption.converged,
+                                               absorption.krylov_internal_tolerance,
+                                               absorption.krylov_max_final_backward_error,
+                                               absorption.krylov_max_condition,
+                                               absorption.krylov_max_condition_times_backward_error,
+                                               absorption);
                     }
                 } else {
                     const Eigen::MatrixXd combined = append_matrix(design, inst_use);
@@ -8630,7 +9840,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
                                                absorption.X_tilde, absorption.fe_levels,
                                                absorption.sweep_order_used, design_cols, method_used_,
-                                               absorption.iterations, absorption.converged);
+                                               absorption.iterations, absorption.converged,
+                                               absorption.krylov_internal_tolerance,
+                                               absorption.krylov_max_final_backward_error,
+                                               absorption.krylov_max_condition,
+                                               absorption.krylov_max_condition_times_backward_error,
+                                               absorption);
                     }
                 }
             }
@@ -9050,8 +10265,51 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         results_.converged = absorption.converged;
         results_.abs_residual = absorption.abs_residual;
         results_.abs_residual_rel = absorption.abs_residual_rel;
+        results_.krylov_internal_tolerance =
+            absorption.krylov_internal_tolerance;
+        results_.krylov_max_final_backward_error =
+            absorption.krylov_max_final_backward_error;
+        results_.krylov_max_condition = absorption.krylov_max_condition;
+        results_.krylov_max_condition_times_backward_error =
+            absorption.krylov_max_condition_times_backward_error;
+        results_.auto_routing_retry_policy_enabled =
+            absorption.auto_routing_retry_policy_enabled;
+        results_.auto_routing_retry_eligible =
+            absorption.auto_routing_retry_eligible;
+        results_.auto_routing_retry_fired =
+            absorption.auto_routing_retry_fired;
+        results_.auto_routing_retry_status =
+            absorption.auto_routing_retry_status;
+        results_.auto_routing_retry_primary_method =
+            absorption.auto_routing_retry_primary_method;
+        results_.auto_routing_retry_primary_iterations =
+            absorption.auto_routing_retry_primary_iterations;
+        results_.auto_routing_retry_primary_abs_residual_rel =
+            absorption.auto_routing_retry_primary_abs_residual_rel;
+        results_.auto_routing_retry_iterations =
+            absorption.auto_routing_retry_iterations;
+        results_.auto_routing_retry_abs_residual_rel =
+            absorption.auto_routing_retry_abs_residual_rel;
+        results_.auto_routing_retry_elapsed_seconds =
+            absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
+        results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
+        results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
+        results_.slope_block_max_rel = absorption.slope_block_max_rel;
+        results_.slope_block_skipped_max_rel =
+            absorption.slope_block_skipped_max_rel;
+        results_.slope_certificate_worst_fe =
+            absorption.slope_certificate_worst_fe;
+        results_.slope_certificate_worst_moment =
+            absorption.slope_certificate_worst_moment;
+        results_.slope_accuracy_retry_stages =
+            absorption.slope_accuracy_retry_stages;
+        results_.slope_accuracy_retry_iterations =
+            absorption.slope_accuracy_retry_iterations;
+        results_.slope_internal_tolerance = absorption.slope_internal_tolerance;
         results_.precision_certified = absorption.precision_certified;
-        if (allow_profile_write) {
+        if (allow_profile_write && absorption.converged &&
+            absorption.precision_certified) {
             MobilityProfile profile = compute_mobility_profile(
                 fes_use, nobs_full, singletons_dropped_rows, options_.drop_singletons,
                 absorption.sweep_order_used);
@@ -9849,15 +11107,22 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             static_cast<double>(df_a_report);
         const double df_r_unadj = std::max(0.0, df_r_raw);
         results_.df_resid_unadj = df_r_raw;
-        if (df_r_unadj > 0.0) {
+        const double sigma2_df =
+            use_reghdfe_stats ? df_r_raw - static_cast<double>(nested_report)
+                              : df_r_unadj;
+        if (sigma2_df > 0.0) {
             const double sigma2_old = results_.sigma2;
-            const double sigma2_new = results_.rss / df_r_unadj;
+            const double sigma2_new = results_.rss / sigma2_df;
             results_.sigma2 = sigma2_new;
             if (tuned.se_type == StandardErrorType::Homoskedastic && sigma2_old > 0.0) {
                 const double ratio = sigma2_new / sigma2_old;
                 results_.covariance *= ratio;
                 results_.std_errors *= std::sqrt(ratio);
             }
+        } else if (use_reghdfe_stats && sigma2_df == 0.0) {
+            results_.sigma2 = results_.rss;
+        } else if (use_reghdfe_stats) {
+            results_.sigma2 = std::numeric_limits<double>::quiet_NaN();
         } else {
             results_.sigma2 = 0.0;
         }
@@ -10319,6 +11584,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     cpu_profile_log_elapsed("sample_index", sample_index_t0);
     cpu_profile_log_elapsed("fit_total", fit_outer_t0);
 
+    attempt.commit(LifecycleState::StandardReady);
 }
 
 detail::AbsorptionResult HdfeRegressorV11::partial_out(
@@ -10328,10 +11594,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     const Eigen::VectorXd* weights,
     const std::vector<Eigen::VectorXi>* clusters,
     const std::vector<detail::HeterogeneousSlopeTerm>* slopes) {
-    // Match fit()/fit_grouped(): any failed attempt must invalidate a prior
-    // successful state before validation can throw.
-    results_.converged = false;
-    results_.precision_certified = false;
+    AttemptTransaction attempt(*this);
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
     }
@@ -10405,6 +11668,26 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     }
 
     const bool has_fes = !fes.empty();
+    auto env_option_set = [](const char* name) {
+        const char* value = std::getenv(name);
+        return value && *value != '\0';
+    };
+    const bool mobility_config_requested =
+        env_option_set("XHDFE_MOBILITY_PROFILE") ||
+        env_option_set("XHDFE_MOBILITY_MODE");
+    const bool absorption_config_requested =
+        env_option_set("XHDFE_ABSORPTION_CACHE") ||
+        env_option_set("XHDFE_ABSORPTION_CACHE_MODE");
+    MobilityProfileConfig mobility_cfg;
+    mobility_cfg.mode = "off";
+    if (mobility_config_requested) {
+        mobility_cfg = load_mobility_profile_config();
+    }
+    AbsorptionCacheConfig abs_cache_cfg;
+    abs_cache_cfg.mode = "off";
+    if (absorption_config_requested) {
+        abs_cache_cfg = load_absorption_cache_config();
+    }
     const FeStructureCacheConfig fe_cache_cfg = load_fe_structure_cache_config();
     std::vector<std::int64_t> integer_frequency_weights;
     const std::int64_t nobs_full_frequency =
@@ -10494,14 +11777,262 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         tuned.num_threads = threads;
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
+        tuned.ordinary_krylov_parity_floor =
+            options_.ordinary_krylov_parity_floor && slope_terms.empty();
+        // partial_out/xfepout is explicitly outside the bounded Auto retry
+        // product contract.
+        tuned.ordinary_auto_routing_retry = false;
+        const bool has_slopes_use = !slope_terms.empty();
+        const bool cache_profile_enabled =
+            !has_slopes_use &&
+            (mobility_cfg.mode != "off" || abs_cache_cfg.mode != "off");
 
-        detail::AbsorptionResult absorption =
-            detail::absorb_fixed_effects_v6(y_use, X_use, fes_use, w_ptr, tuned,
-                                            AbsorptionMethod::Auto, slope_terms);
-        method_used_ = choose_method_used(fes_use.size(), threads, tuned);
-        if (!slope_terms.empty() && method_used_ == AbsorptionMethod::Jacobi) {
-            method_used_ = fes_use.size() > 1 ? AbsorptionMethod::SymmetricGaussSeidel
-                                               : AbsorptionMethod::GaussSeidel;
+        auto solve_absorption = [&]() {
+            detail::AbsorptionResult solved =
+                detail::absorb_fixed_effects_v6(
+                    y_use, X_use, fes_use, w_ptr, tuned,
+                    AbsorptionMethod::Auto, slope_terms);
+            method_used_ = choose_method_used(fes_use.size(), threads, tuned);
+            if (has_slopes_use && method_used_ == AbsorptionMethod::Jacobi) {
+                method_used_ = fes_use.size() > 1
+                                   ? AbsorptionMethod::SymmetricGaussSeidel
+                                   : AbsorptionMethod::GaussSeidel;
+            }
+            return solved;
+        };
+
+        detail::AbsorptionResult absorption;
+        if (!cache_profile_enabled) {
+            // Preserve the cache-off hot path exactly: no signature, profile,
+            // cache allocation, read, or write is attempted.
+            absorption = solve_absorption();
+        } else {
+            MobilityHint mobility_hint;
+            bool have_mobility_hint = false;
+            bool mobility_profile_match = false;
+            MobilityProfile profile;
+            bool have_profile = false;
+            if (mobility_cfg.mode == "read" || mobility_cfg.mode == "auto") {
+                have_profile = load_mobility_profile(mobility_cfg.path, profile);
+            }
+            if (have_profile && profile.profile_kind == "standard") {
+                bool match = false;
+                if (profile.signature != 0 || profile.signature_canon != 0) {
+                    const std::uint64_t sig =
+                        hash_fe_signature(fes_use, options_.drop_singletons);
+                    match =
+                        (profile.signature != 0 && profile.signature == sig) ||
+                        (profile.signature_canon != 0 &&
+                         profile.signature_canon == sig);
+                }
+                if (!match && fe_cache_hit && profile.signature != 0) {
+                    const std::vector<int>* kept_ptr =
+                        (options_.drop_singletons && !kept_idx.empty())
+                            ? &kept_idx
+                            : nullptr;
+                    const std::uint64_t sig_raw =
+                        hash_fe_signature_filtered(
+                            fes, kept_ptr, options_.drop_singletons);
+                    match = profile.signature == sig_raw;
+                }
+                if (match) {
+                    mobility_hint = build_standard_mobility_hint(profile);
+                    have_mobility_hint = true;
+                    mobility_profile_match = true;
+                }
+            }
+            if (have_mobility_hint && !mobility_hint.sweep_order.empty()) {
+                tuned.sweep_order_override = mobility_hint.sweep_order;
+            }
+            if (have_mobility_hint && mobility_hint.force_symmetric &&
+                options_.absorption_method == AbsorptionMethod::Auto &&
+                !options_.symmetric_sweep) {
+                tuned.symmetric_sweep = true;
+            }
+            if (have_mobility_hint && !gpu_backend_env_requested() &&
+                options_.absorption_method == AbsorptionMethod::Auto &&
+                !options_.use_krylov && !options_.use_sparse_solver) {
+                if (mobility_hint.use_krylov) {
+                    tuned.use_krylov = true;
+                    tuned.use_sparse_solver = false;
+                } else if (mobility_hint.use_sparse) {
+                    tuned.use_sparse_solver = true;
+                    tuned.use_krylov = false;
+                }
+            }
+
+            bool allow_profile_write =
+                mobility_cfg.mode == "write" ||
+                (mobility_cfg.mode == "auto" &&
+                 mobility_cfg.allow_auto_write && !mobility_profile_match);
+            bool allow_cache_read = false;
+            bool allow_cache_write = false;
+            std::string cache_path;
+            if (abs_cache_cfg.mode_set) {
+                if (abs_cache_cfg.mode != "off") {
+                    if (!abs_cache_cfg.path.empty()) {
+                        cache_path = abs_cache_cfg.path;
+                    } else if (mobility_cfg.mode != "off") {
+                        cache_path = absorption_cache_path(mobility_cfg.path);
+                    }
+                    allow_cache_read =
+                        abs_cache_cfg.mode == "read" ||
+                        abs_cache_cfg.mode == "auto";
+                    allow_cache_write =
+                        abs_cache_cfg.mode == "write" ||
+                        (abs_cache_cfg.mode == "auto" &&
+                         abs_cache_cfg.allow_auto_write);
+                    if (cache_path.empty()) {
+                        allow_cache_read = false;
+                        allow_cache_write = false;
+                    }
+                }
+            } else if (abs_cache_cfg.mode != "off" &&
+                       !abs_cache_cfg.path.empty()) {
+                allow_cache_read =
+                    abs_cache_cfg.mode == "read" ||
+                    abs_cache_cfg.mode == "auto";
+                allow_cache_write =
+                    abs_cache_cfg.mode == "write" ||
+                    (abs_cache_cfg.mode == "auto" &&
+                     abs_cache_cfg.allow_auto_write);
+                cache_path = abs_cache_cfg.path;
+            } else {
+                allow_cache_read =
+                    mobility_cfg.mode == "read" ||
+                    mobility_cfg.mode == "auto";
+                allow_cache_write =
+                    mobility_cfg.mode == "write" ||
+                    (mobility_cfg.mode == "auto" &&
+                     mobility_cfg.allow_auto_write);
+                cache_path = absorption_cache_path(mobility_cfg.path);
+            }
+
+            AbsorptionCacheKey cache_key;
+            bool cache_key_ready = false;
+            bool cache_hit = false;
+            const HdfeOptions cache_key_options = tuned;
+            auto ensure_cache_key = [&]() {
+                if (!cache_key_ready) {
+                    // FE-structure-cache hits expose canonical 0-based group
+                    // ids, while a cold call may still carry arbitrary raw
+                    // labels. Hash the common canonical representation so the
+                    // absorption and FE caches compose without weakening any
+                    // outcome/X/weight/solver identity field.
+                    std::vector<Eigen::VectorXi> canonical_fes;
+                    canonical_fes.reserve(fes_use.size());
+                    for (const auto& fe : fes_use) {
+                        FeIndexerLite indexer = build_indexer_lite(fe);
+                        Eigen::VectorXi ids(
+                            static_cast<int>(indexer.group_ids.size()));
+                        for (int i = 0; i < ids.size(); ++i) {
+                            ids(i) = indexer.group_ids[
+                                static_cast<std::size_t>(i)];
+                        }
+                        canonical_fes.push_back(std::move(ids));
+                    }
+                    cache_key = hash_absorption_signature(
+                        y_use, X_use, canonical_fes, w_ptr,
+                        cache_key_options,
+                        kAbsorptionSolveContractGeneration);
+                    cache_key_ready = true;
+                }
+            };
+
+            if (allow_cache_read && !cache_path.empty() &&
+                !gpu_backend_env_requested()) {
+                ensure_cache_key();
+                AbsorptionCacheRecord cached;
+                if (read_absorption_cache(
+                        cache_path, cache_key,
+                        static_cast<int>(y_use.size()),
+                        static_cast<int>(X_use.cols()),
+                        static_cast<int>(X_use.cols()),
+                        static_cast<int>(fes_use.size()), cached) &&
+                    cached.converged) {
+                    absorption.y_tilde = std::move(cached.y_tilde);
+                    absorption.X_tilde = std::move(cached.X_tilde);
+                    absorption.fe_levels = std::move(cached.fe_levels);
+                    absorption.sweep_order_used =
+                        std::move(cached.sweep_order);
+                    absorption.iterations = cached.iterations;
+                    absorption.converged = cached.converged;
+                    absorption.krylov_internal_tolerance =
+                        cached.krylov_internal_tolerance;
+                    absorption.krylov_max_final_backward_error =
+                        cached.krylov_max_final_backward_error;
+                    absorption.krylov_max_condition =
+                        cached.krylov_max_condition;
+                    absorption.krylov_max_condition_times_backward_error =
+                        cached.krylov_max_condition_times_backward_error;
+                    absorption.auto_routing_retry_policy_enabled =
+                        cached.auto_routing_retry_policy_enabled;
+                    absorption.auto_routing_retry_eligible =
+                        cached.auto_routing_retry_eligible;
+                    absorption.auto_routing_retry_fired =
+                        cached.auto_routing_retry_fired;
+                    absorption.auto_routing_retry_status =
+                        cached.auto_routing_retry_status;
+                    absorption.auto_routing_retry_primary_method =
+                        cached.auto_routing_retry_primary_method;
+                    absorption.auto_routing_retry_primary_iterations =
+                        cached.auto_routing_retry_primary_iterations;
+                    absorption.auto_routing_retry_primary_abs_residual_rel =
+                        cached.auto_routing_retry_primary_abs_residual_rel;
+                    absorption.auto_routing_retry_iterations =
+                        cached.auto_routing_retry_iterations;
+                    absorption.auto_routing_retry_abs_residual_rel =
+                        cached.auto_routing_retry_abs_residual_rel;
+                    absorption.auto_routing_retry_elapsed_seconds =
+                        cached.auto_routing_retry_elapsed_seconds;
+                    method_used_ = cached.method;
+                    detail::certify_absorption_result(
+                        y_use, X_use, fes_use, w_ptr, tuned, slope_terms,
+                        absorption);
+                    if (absorption.precision_certified) {
+                        cache_hit = true;
+                        allow_profile_write = false;
+                    } else {
+                        absorption = detail::AbsorptionResult{};
+                    }
+                }
+            }
+
+            if (!cache_hit) {
+                absorption = solve_absorption();
+                if (allow_cache_write && !cache_path.empty() &&
+                    absorption.converged && absorption.precision_certified) {
+                    ensure_cache_key();
+                    write_absorption_cache(
+                        cache_path, cache_key, absorption.y_tilde,
+                        absorption.X_tilde, absorption.fe_levels,
+                        absorption.sweep_order_used,
+                        static_cast<int>(X_use.cols()), method_used_,
+                        absorption.iterations, absorption.converged,
+                        absorption.krylov_internal_tolerance,
+                        absorption.krylov_max_final_backward_error,
+                        absorption.krylov_max_condition,
+                        absorption.krylov_max_condition_times_backward_error,
+                        absorption);
+                }
+                if (allow_profile_write && absorption.converged &&
+                    absorption.precision_certified) {
+                    MobilityProfile written = compute_mobility_profile(
+                        fes_use, nobs_full, singletons_dropped_rows,
+                        options_.drop_singletons,
+                        absorption.sweep_order_used);
+                    if (options_.absorption_method == AbsorptionMethod::Auto &&
+                        !options_.symmetric_sweep) {
+                        written.suggest_method = method_used_;
+                        written.suggest_symmetric =
+                            method_used_ ==
+                            AbsorptionMethod::SymmetricGaussSeidel;
+                    }
+                    written.suggest_use_sparse = tuned.use_sparse_solver;
+                    written.suggest_use_krylov = tuned.use_krylov;
+                    write_mobility_profile(mobility_cfg.path, written);
+                }
+            }
         }
         gpu_used_ = absorption.gpu_used;
         gpu_status_code_ = absorption.gpu_status_code;
@@ -10558,6 +12089,48 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.converged = absorption.converged;
         results_.abs_residual = absorption.abs_residual;
         results_.abs_residual_rel = absorption.abs_residual_rel;
+        results_.krylov_internal_tolerance =
+            absorption.krylov_internal_tolerance;
+        results_.krylov_max_final_backward_error =
+            absorption.krylov_max_final_backward_error;
+        results_.krylov_max_condition = absorption.krylov_max_condition;
+        results_.krylov_max_condition_times_backward_error =
+            absorption.krylov_max_condition_times_backward_error;
+        results_.auto_routing_retry_policy_enabled =
+            absorption.auto_routing_retry_policy_enabled;
+        results_.auto_routing_retry_eligible =
+            absorption.auto_routing_retry_eligible;
+        results_.auto_routing_retry_fired =
+            absorption.auto_routing_retry_fired;
+        results_.auto_routing_retry_status =
+            absorption.auto_routing_retry_status;
+        results_.auto_routing_retry_primary_method =
+            absorption.auto_routing_retry_primary_method;
+        results_.auto_routing_retry_primary_iterations =
+            absorption.auto_routing_retry_primary_iterations;
+        results_.auto_routing_retry_primary_abs_residual_rel =
+            absorption.auto_routing_retry_primary_abs_residual_rel;
+        results_.auto_routing_retry_iterations =
+            absorption.auto_routing_retry_iterations;
+        results_.auto_routing_retry_abs_residual_rel =
+            absorption.auto_routing_retry_abs_residual_rel;
+        results_.auto_routing_retry_elapsed_seconds =
+            absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
+        results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
+        results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
+        results_.slope_block_max_rel = absorption.slope_block_max_rel;
+        results_.slope_block_skipped_max_rel =
+            absorption.slope_block_skipped_max_rel;
+        results_.slope_certificate_worst_fe =
+            absorption.slope_certificate_worst_fe;
+        results_.slope_certificate_worst_moment =
+            absorption.slope_certificate_worst_moment;
+        results_.slope_accuracy_retry_stages =
+            absorption.slope_accuracy_retry_stages;
+        results_.slope_accuracy_retry_iterations =
+            absorption.slope_accuracy_retry_iterations;
+        results_.slope_internal_tolerance = absorption.slope_internal_tolerance;
         results_.precision_certified = absorption.precision_certified;
         results_.num_clusters = 0;
         results_.cluster_counts.clear();
@@ -10948,6 +12521,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         }
     }
 
+    attempt.commit(LifecycleState::PartialReady);
     return absorption;
 }
 
@@ -10959,14 +12533,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                   GroupAggregation aggregation,
                                   const Eigen::VectorXd* weights,
                                   const std::vector<Eigen::VectorXi>* clusters) {
-    results_.converged = false;
-    results_.precision_certified = false;
-    gpu_used_ = false;
-    gpu_status_code_ = 0;
-    gpu_attempted_ = false;
-    gpu_absorption_converged_ = false;
-    gpu_absorption_iterations_ = 0;
-    first_pair_component_stats_ = FeComponentStats{};
+    AttemptTransaction attempt(*this);
     if (!individual_ids) {
         GroupCollapsedData collapsed =
             collapse_group_long_format(
@@ -10974,8 +12541,15 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 options_.weights_are_frequencies, clusters);
         const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
         const std::vector<Eigen::VectorXi>* c_ptr = collapsed.clusters ? &(*collapsed.clusters) : nullptr;
-        fit(collapsed.y, collapsed.X, collapsed.standard_fes, w_ptr, c_ptr, nullptr, {});
+        {
+            ScopedBoolOverride disable_group_only_parity_floor(
+                options_.ordinary_krylov_parity_floor, false);
+            ScopedBoolOverride disable_group_only_auto_retry(
+                suppress_auto_routing_retry_, true);
+            fit(collapsed.y, collapsed.X, collapsed.standard_fes, w_ptr, c_ptr, nullptr, {});
+        }
         results_.sample_index.resize(0);
+        attempt.commit(LifecycleState::StandardReady);
         return;
     }
 
@@ -11055,6 +12629,21 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     tuned.num_threads_explicit = options_.num_threads > 0;
     tuned.parallel_observer = parallel_observer_.get();
     tuned.num_threads = threads;
+    std::optional<HdfeOptions> grouped_profile_context;
+    if (mobility_cfg.mode != "off") {
+        grouped_profile_context = tuned;
+    }
+    std::optional<AbsorptionCacheKey> grouped_profile_signature;
+    auto ensure_grouped_profile_signature = [&]() -> const AbsorptionCacheKey& {
+        if (!grouped_profile_signature) {
+            grouped_profile_signature = hash_grouped_mobility_signature(
+                y_work, design, standard_fes_work, gi_work,
+                aggregation, w_ptr,
+                *grouped_profile_context, collapsed_full,
+                group_singletons_dropped);
+        }
+        return *grouped_profile_signature;
+    };
 
     MobilityHint mobility_hint;
     bool have_mobility_hint = false;
@@ -11066,52 +12655,43 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             have_profile = true;
         }
     }
-    if (have_profile) {
-        bool match = false;
-        if (profile.signature != 0 || profile.signature_canon != 0) {
-            const std::uint64_t sig =
-                hash_fe_signature(standard_fes_work, options_.drop_singletons);
-            if (profile.signature != 0 && profile.signature == sig) {
-                match = true;
-            }
-            if (!match && profile.signature_canon != 0 &&
-                profile.signature_canon == sig) {
-                match = true;
-            }
-        }
+    if (have_profile && profile.profile_kind == "group_individual") {
+        const AbsorptionCacheKey& expected =
+            ensure_grouped_profile_signature();
+        const bool match =
+            profile.signature != 0 && profile.signature_canon != 0 &&
+            profile.signature == expected.sig1 &&
+            profile.signature_canon == expected.sig2;
         if (match) {
             mobility_hint = build_mobility_hint(profile);
             have_mobility_hint = true;
             mobility_profile_match = true;
         }
     }
+    const bool mobility_hint_method_usable =
+        have_mobility_hint && mobility_hint.has_method &&
+        mobility_hint.preferred_method == AbsorptionMethod::Lsmr &&
+        !mobility_gpu_backend_selected();
     if (have_mobility_hint && !mobility_hint.sweep_order.empty()) {
         tuned.sweep_order_override = mobility_hint.sweep_order;
     }
-    if (have_mobility_hint && mobility_hint.force_symmetric &&
+    // Grouped Auto has one safe authority per backend: joint LSMR on CPU and
+    // the grouped CUDA solver on GPU. Profiles may confirm CPU LSMR, but a
+    // GS/SGS hint can never promote a sweep method into Auto.
+    if (mobility_hint_method_usable &&
         options_.absorption_method == AbsorptionMethod::Auto &&
         !options_.symmetric_sweep) {
-        tuned.symmetric_sweep = true;
-    }
-    // A matching, explicitly requested mobility profile remains authoritative.
-    // Without a profile, auto uses the joint LSMR default below.
-    if (have_mobility_hint) {
         tuned.from_auto = false;
     }
 
-    const bool allow_profile_write =
+    const bool profile_write_requested =
         mobility_cfg.mode == "write" ||
-        (mobility_cfg.mode == "auto" && mobility_cfg.allow_auto_write && !mobility_profile_match);
-
-    const bool benchmark_methods =
-        allow_profile_write && !have_mobility_hint &&
-        options_.absorption_method == AbsorptionMethod::Auto &&
-        !options_.symmetric_sweep && !options_.use_sparse_solver &&
-        standard_fes_work.size() + 1 > 1;
+        (mobility_cfg.mode == "auto" && mobility_cfg.allow_auto_write &&
+         (!mobility_profile_match || !mobility_hint_method_usable));
+    bool allow_profile_write = profile_write_requested;
 
     AbsorptionMethod preferred_method = AbsorptionMethod::Auto;
-    if (have_mobility_hint && mobility_hint.has_method &&
-        mobility_hint.preferred_method != AbsorptionMethod::Jacobi) {
+    if (mobility_hint_method_usable) {
         preferred_method = mobility_hint.preferred_method;
     }
     AbsorptionMethod selected_method = AbsorptionMethod::Auto;
@@ -11119,6 +12699,11 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         selected_method = options_.absorption_method;
     } else if (options_.symmetric_sweep) {
         selected_method = AbsorptionMethod::SymmetricGaussSeidel;
+    } else if (!options_.use_sparse_solver && !options_.use_krylov &&
+               !mobility_gpu_backend_selected()) {
+        // Make the safe CPU Auto authority explicit. Do not rely on the
+        // downstream from_auto flag to override a sweep-method label.
+        selected_method = AbsorptionMethod::Lsmr;
     } else if (preferred_method != AbsorptionMethod::Auto) {
         selected_method = preferred_method;
     }
@@ -11134,51 +12719,38 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     tuned.absorption_method = method_used_;
 
-    detail::AbsorptionResult absorption;
-    bool absorption_ready = false;
-    if (benchmark_methods) {
-        std::vector<AbsorptionMethod> candidates;
-        candidates.reserve(3);
-        candidates.push_back(AbsorptionMethod::Lsmr);
-        candidates.push_back(AbsorptionMethod::GaussSeidel);
-        candidates.push_back(AbsorptionMethod::SymmetricGaussSeidel);
-
-        double best_time = std::numeric_limits<double>::infinity();
-        AbsorptionMethod best_method = AbsorptionMethod::Auto;
-        for (const auto method : candidates) {
-            HdfeOptions bench_opts = tuned;
-            bench_opts.from_auto = false;
-            bench_opts.absorption_method = method;
-            bench_opts.symmetric_sweep = (method == AbsorptionMethod::SymmetricGaussSeidel);
-
-            const auto t0 = std::chrono::steady_clock::now();
-            detail::AbsorptionResult res =
-                detail::absorb_fixed_effects_group_individual(
-                    y_work, design, standard_fes_work, gi_work, w_ptr, bench_opts, method);
-            const auto t1 = std::chrono::steady_clock::now();
-            const double elapsed =
-                std::chrono::duration<double, std::milli>(t1 - t0).count();
-            if (!res.converged) {
-                continue;
-            }
-            if (elapsed < best_time) {
-                best_time = elapsed;
-                best_method = method;
-                absorption = std::move(res);
-                absorption_ready = true;
-            }
-        }
-        if (absorption_ready) {
-            method_used_ = best_method;
-            tuned.absorption_method = best_method;
-            tuned.symmetric_sweep = (best_method == AbsorptionMethod::SymmetricGaussSeidel);
-        }
-    }
-    if (!absorption_ready) {
+    detail::AbsorptionResult absorption =
+        detail::absorb_fixed_effects_group_individual(
+            y_work, design, standard_fes_work, gi_work, w_ptr, tuned,
+            method_used_);
+    if (mobility_hint_method_usable &&
+        options_.absorption_method == AbsorptionMethod::Auto &&
+        !options_.symmetric_sweep &&
+        (!absorption.converged || !absorption.precision_certified)) {
+        // The profile is a structural/cost hint and deliberately excludes RHS
+        // values. A method that worked for one outcome can therefore fail for
+        // another outcome with the same operator. Restore the exact pre-hint
+        // Auto context and retry from the original y/design. Certification
+        // failure never promotes GS/SGS.
+        HdfeOptions auto_options = *grouped_profile_context;
+        auto_options.from_auto = true;
+        const AbsorptionMethod auto_method =
+            select_method(standard_fes_work.size() + 1);
+        auto_options.absorption_method = auto_method;
+        auto_options.symmetric_sweep = options_.symmetric_sweep;
         absorption = detail::absorb_fixed_effects_group_individual(
-            y_work, design, standard_fes_work, gi_work, w_ptr, tuned, method_used_);
+            y_work, design, standard_fes_work, gi_work, w_ptr,
+            auto_options, auto_method);
+        tuned = std::move(auto_options);
+        method_used_ = auto_method;
+        if (mobility_cfg.mode == "auto" && mobility_cfg.allow_auto_write) {
+            allow_profile_write = true;
+        }
     }
-    if (tuned.from_auto && !absorption.gpu_used) {
+    if (absorption.mlsmr_used) {
+        method_used_ = AbsorptionMethod::Lsmr;
+        tuned.absorption_method = method_used_;
+    } else if (tuned.from_auto && !absorption.gpu_used) {
         method_used_ = absorption.mlsmr_used
                            ? AbsorptionMethod::Lsmr
                            : (method_used_ == AbsorptionMethod::SymmetricGaussSeidel
@@ -11201,7 +12773,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (absorption.gpu_status_code == 4) {
             throw std::runtime_error("Requested GPU backend failed during group/individual HDFE absorption");
         }
-        // Pure CPU non-convergence: preserve reference best-effort behaviour (see fit()).
+        throw std::runtime_error(
+            "Group/individual HDFE absorption did not converge; no estimates were produced");
+    }
+    if (!absorption.precision_certified) {
+        throw std::runtime_error(
+            "Group/individual HDFE absorption failed the independent precision certificate; no estimates were produced");
     }
 
     double sum_weights_for_stats = static_cast<double>(y_work.size());
@@ -11423,6 +13000,47 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     results_.converged = absorption.converged;
     results_.abs_residual = absorption.abs_residual;
     results_.abs_residual_rel = absorption.abs_residual_rel;
+    results_.krylov_internal_tolerance =
+        absorption.krylov_internal_tolerance;
+    results_.krylov_max_final_backward_error =
+        absorption.krylov_max_final_backward_error;
+    results_.krylov_max_condition = absorption.krylov_max_condition;
+    results_.krylov_max_condition_times_backward_error =
+        absorption.krylov_max_condition_times_backward_error;
+    results_.auto_routing_retry_policy_enabled =
+        absorption.auto_routing_retry_policy_enabled;
+    results_.auto_routing_retry_eligible =
+        absorption.auto_routing_retry_eligible;
+    results_.auto_routing_retry_fired =
+        absorption.auto_routing_retry_fired;
+    results_.auto_routing_retry_status = absorption.auto_routing_retry_status;
+    results_.auto_routing_retry_primary_method =
+        absorption.auto_routing_retry_primary_method;
+    results_.auto_routing_retry_primary_iterations =
+        absorption.auto_routing_retry_primary_iterations;
+    results_.auto_routing_retry_primary_abs_residual_rel =
+        absorption.auto_routing_retry_primary_abs_residual_rel;
+    results_.auto_routing_retry_iterations =
+        absorption.auto_routing_retry_iterations;
+    results_.auto_routing_retry_abs_residual_rel =
+        absorption.auto_routing_retry_abs_residual_rel;
+    results_.auto_routing_retry_elapsed_seconds =
+        absorption.auto_routing_retry_elapsed_seconds;
+    results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
+    results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
+    results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
+    results_.slope_block_max_rel = absorption.slope_block_max_rel;
+    results_.slope_block_skipped_max_rel =
+        absorption.slope_block_skipped_max_rel;
+    results_.slope_certificate_worst_fe =
+        absorption.slope_certificate_worst_fe;
+    results_.slope_certificate_worst_moment =
+        absorption.slope_certificate_worst_moment;
+    results_.slope_accuracy_retry_stages =
+        absorption.slope_accuracy_retry_stages;
+    results_.slope_accuracy_retry_iterations =
+        absorption.slope_accuracy_retry_iterations;
+    results_.slope_internal_tolerance = absorption.slope_internal_tolerance;
     results_.precision_certified = absorption.precision_certified;
     // For group/individual mode, map each collapsed group observation back to a representative
     // row in the original long-format input.
@@ -11433,18 +13051,26 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     for (int i = 0; i < results_.nobs; ++i) {
         results_.sample_index(i) = collapsed.rep_row[static_cast<std::size_t>(i)];
     }
-    if (allow_profile_write) {
+    if (allow_profile_write && absorption.converged &&
+        absorption.precision_certified) {
+        const AbsorptionCacheKey& profile_signature =
+            ensure_grouped_profile_signature();
         MobilityProfile profile = compute_mobility_profile(
             standard_fes_work, collapsed_full, group_singletons_dropped,
             options_.drop_singletons, absorption.sweep_order_used);
-        if (options_.absorption_method == AbsorptionMethod::Auto &&
-            !options_.symmetric_sweep) {
-            profile.suggest_method = method_used_;
-            profile.suggest_symmetric =
-                (method_used_ == AbsorptionMethod::SymmetricGaussSeidel);
-        }
-        profile.suggest_use_sparse = tuned.use_sparse_solver;
-        profile.suggest_use_krylov = tuned.use_krylov;
+        profile.profile_kind = "group_individual";
+        profile.signature = profile_signature.sig1;
+        profile.signature_canon = profile_signature.sig2;
+        profile.has_signature_canon = true;
+        profile.has_signature_sample = false;
+        profile.has_signature_sample_canon = false;
+        profile.suggest_method =
+            !absorption.gpu_used && absorption.mlsmr_used
+                ? AbsorptionMethod::Lsmr
+                : AbsorptionMethod::Auto;
+        profile.suggest_symmetric = false;
+        profile.suggest_use_sparse = false;
+        profile.suggest_use_krylov = false;
         write_mobility_profile(mobility_cfg.path, profile);
     }
 
@@ -11813,15 +13439,22 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         static_cast<double>(df_a_report);
     const double df_r_unadj = std::max(0.0, df_r_raw);
     results_.df_resid_unadj = df_r_raw;
-    if (df_r_unadj > 0.0) {
+    const double sigma2_df =
+        use_reghdfe_stats ? df_r_raw - static_cast<double>(nested_report)
+                          : df_r_unadj;
+    if (sigma2_df > 0.0) {
         const double sigma2_old = results_.sigma2;
-        const double sigma2_new = results_.rss / df_r_unadj;
+        const double sigma2_new = results_.rss / sigma2_df;
         results_.sigma2 = sigma2_new;
         if (tuned.se_type == StandardErrorType::Homoskedastic && sigma2_old > 0.0) {
             const double ratio = sigma2_new / sigma2_old;
             results_.covariance *= ratio;
             results_.std_errors *= std::sqrt(ratio);
         }
+    } else if (use_reghdfe_stats && sigma2_df == 0.0) {
+        results_.sigma2 = results_.rss;
+    } else if (use_reghdfe_stats) {
+        results_.sigma2 = std::numeric_limits<double>::quiet_NaN();
     } else {
         results_.sigma2 = 0.0;
     }
@@ -12061,6 +13694,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         results_, drop_intercept, inference_unavailable);
 
     end_parallel_observation();
+    const AbsorptionCacheKey grouped_signature = hash_grouped_fit_signature(
+        y, X, fes, group_ids, *individual_ids, aggregation, weights, options_);
+    grouped_signature_1_ = grouped_signature.sig1;
+    grouped_signature_2_ = grouped_signature.sig2;
+    grouped_signature_valid_ = true;
+    attempt.commit(LifecycleState::GroupedReady);
 }
 
 GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
@@ -12072,8 +13711,12 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     GroupAggregation aggregation,
     const Eigen::VectorXd* weights,
     const GroupIndividualFeOptions& options) const {
-    if (results_.coefficients.size() == 0) {
-        throw std::runtime_error("extract_group_individual_fes requires calling fit() first");
+    if (lifecycle_state_ != LifecycleState::GroupedReady ||
+        !results_.converged ||
+        !results_.precision_certified) {
+        throw std::runtime_error(
+            "extract_group_individual_fes requires a successful, "
+            "precision-certified fit() first");
     }
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
@@ -12108,6 +13751,16 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     const int individual_fe_index = find_identical_fe(individual_ids, fes);
     if (individual_fe_index < 0) {
         throw std::runtime_error("individual_ids must also be included in fes");
+    }
+
+    const AbsorptionCacheKey supplied_signature = hash_grouped_fit_signature(
+        y, X, fes, group_ids, individual_ids, aggregation, weights, options_);
+    if (!grouped_signature_valid_ ||
+        supplied_signature.sig1 != grouped_signature_1_ ||
+        supplied_signature.sig2 != grouped_signature_2_) {
+        throw std::runtime_error(
+            "extract_group_individual_fes inputs and fit semantics must "
+            "exactly match the last successful grouped fit");
     }
 
     GroupCollapsedData collapsed =
@@ -12167,10 +13820,26 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     tuned.parallel_observer = &extraction_observer;
     tuned.max_iter = std::max(tuned.max_iter, 20000);
     tuned.tol = std::min(tuned.tol, 1e-15);
+    AbsorptionMethod extraction_method = method_used_;
+    if (options_.absorption_method == AbsorptionMethod::Auto) {
+        // Re-enter through the internal Auto context used by the successful
+        // fit. In particular, CUDA Auto may have reported LSMR as the method
+        // actually used, but that must not be reinterpreted as a public
+        // absorptionmethod(lsmr) request, which remains CPU-only.
+        tuned.absorption_method = AbsorptionMethod::Auto;
+        tuned.from_auto = !options_.symmetric_sweep;
+        extraction_method = AbsorptionMethod::Auto;
+    }
     Eigen::MatrixXd empty_X(static_cast<int>(y_minus_xb.size()), 0);
     const detail::AbsorptionResult absorbed =
         detail::absorb_fixed_effects_group_individual(y_minus_xb, empty_X, collapsed.standard_fes,
-                                                      collapsed.gi, w_ptr, tuned, method_used_);
+                                                      collapsed.gi, w_ptr, tuned,
+                                                      extraction_method);
+    if (!absorbed.converged || !absorbed.precision_certified) {
+        throw std::runtime_error(
+            "Group/individual FE extraction absorption did not converge "
+            "and pass the independent precision certificate");
+    }
     const Eigen::VectorXd d = y_minus_xb - absorbed.y_tilde;
 
     const int G = collapsed.gi.num_groups;

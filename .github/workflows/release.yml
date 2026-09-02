@@ -648,10 +648,20 @@ jobs:
             file "$f" | grep -q 'Mach-O' \
               || { echo "ERROR: not a Mach-O object: $f" >&2; exit 1; }
             echo "-- lipo -archs --"
-            lipo -archs "$f" || true
-            # arm64 is the required target ("Mac ARM"); x86_64 is a bonus universal slice.
-            lipo -archs "$f" | grep -q 'arm64'  || { echo "ERROR: missing arm64 slice in $f"  >&2; exit 1; }
-            lipo -archs "$f" | grep -q 'x86_64' && echo "OK: universal (also has x86_64)" || echo "NOTE: arm64-only (no x86_64 slice) -- acceptable for Mac ARM"
+            ARCHS="$(lipo -archs "$f")" || {
+              echo "ERROR: lipo could not inspect $f" >&2
+              exit 1
+            }
+            echo "$ARCHS"
+            echo "$ARCHS" | grep -qw 'arm64' || {
+              echo "ERROR: missing required arm64 slice in $f" >&2
+              exit 1
+            }
+            echo "$ARCHS" | grep -qw 'x86_64' || {
+              echo "ERROR: missing required x86_64 slice in $f" >&2
+              exit 1
+            }
+            echo "OK: required universal slices present (arm64 + x86_64)"
             echo "-- otool -L --"
             otool -L "$f" || true
           done

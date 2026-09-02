@@ -494,6 +494,38 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["converged"] = res.converged;
     out["abs_residual"] = res.abs_residual;
     out["abs_residual_rel"] = res.abs_residual_rel;
+    out["krylov_internal_tolerance"] = res.krylov_internal_tolerance;
+    out["krylov_max_final_backward_error"] = res.krylov_max_final_backward_error;
+    out["krylov_max_condition"] = res.krylov_max_condition;
+    out["krylov_max_condition_times_backward_error"] =
+        res.krylov_max_condition_times_backward_error;
+    out["auto_routing_retry_policy_enabled"] =
+        res.auto_routing_retry_policy_enabled;
+    out["auto_routing_retry_eligible"] = res.auto_routing_retry_eligible;
+    out["auto_routing_retry_fired"] = res.auto_routing_retry_fired;
+    out["auto_routing_retry_status"] = res.auto_routing_retry_status;
+    out["auto_routing_retry_primary_method"] =
+        res.auto_routing_retry_primary_method;
+    out["auto_routing_retry_primary_iterations"] =
+        res.auto_routing_retry_primary_iterations;
+    out["auto_routing_retry_primary_abs_residual_rel"] =
+        res.auto_routing_retry_primary_abs_residual_rel;
+    out["auto_routing_retry_iterations"] =
+        res.auto_routing_retry_iterations;
+    out["auto_routing_retry_abs_residual_rel"] =
+        res.auto_routing_retry_abs_residual_rel;
+    out["auto_routing_retry_elapsed_seconds"] =
+        res.auto_routing_retry_elapsed_seconds;
+    out["slope_block_residual_rel"] = res.slope_block_residual_rel;
+    out["slope_block_frobenius_rel"] = res.slope_block_frobenius_rel;
+    out["slope_block_rms_rel"] = res.slope_block_rms_rel;
+    out["slope_block_max_rel"] = res.slope_block_max_rel;
+    out["slope_block_skipped_max_rel"] = res.slope_block_skipped_max_rel;
+    out["slope_certificate_worst_fe"] = res.slope_certificate_worst_fe;
+    out["slope_certificate_worst_moment"] = res.slope_certificate_worst_moment;
+    out["slope_accuracy_retry_stages"] = res.slope_accuracy_retry_stages;
+    out["slope_accuracy_retry_iterations"] = res.slope_accuracy_retry_iterations;
+    out["slope_internal_tolerance"] = res.slope_internal_tolerance;
     out["precision_certified"] = res.precision_certified;
 
     out["groupvar"] = wrap_vector(res.groupvar);
@@ -622,6 +654,11 @@ Rcpp::List xhdfe_cpp_fit(Rcpp::NumericVector y,
             "IV/instruments are not supported with group()/individual() mode");
     }
 
+    options.ordinary_krylov_parity_floor =
+        !has_group && slope_terms.empty();
+    options.ordinary_auto_routing_retry =
+        !has_group && slope_terms.empty();
+
     hdfe::v11::HdfeRegressorV11 reg(options, threading);
 
     if (has_group) {
@@ -683,6 +720,9 @@ Rcpp::List xhdfe_cpp_partial_out(Rcpp::NumericVector y,
     const std::vector<hdfe::detail::HeterogeneousSlopeTerm>* slopes_ptr =
         slope_terms.empty() ? nullptr : &slope_terms;
 
+    options.ordinary_krylov_parity_floor = slope_terms.empty();
+    options.ordinary_auto_routing_retry = false;
+
     hdfe::v11::HdfeRegressorV11 reg(options, threading);
     hdfe::detail::AbsorptionResult partial =
         reg.partial_out(y_map, X_map, fe_list, weights_ptr, nullptr, slopes_ptr);
@@ -698,6 +738,40 @@ Rcpp::List xhdfe_cpp_partial_out(Rcpp::NumericVector y,
     out["converged"] = partial.converged;
     out["abs_residual"] = partial.abs_residual;
     out["abs_residual_rel"] = partial.abs_residual_rel;
+    out["krylov_internal_tolerance"] = partial.krylov_internal_tolerance;
+    out["krylov_max_final_backward_error"] =
+        partial.krylov_max_final_backward_error;
+    out["krylov_max_condition"] = partial.krylov_max_condition;
+    out["krylov_max_condition_times_backward_error"] =
+        partial.krylov_max_condition_times_backward_error;
+    out["auto_routing_retry_policy_enabled"] =
+        partial.auto_routing_retry_policy_enabled;
+    out["auto_routing_retry_eligible"] =
+        partial.auto_routing_retry_eligible;
+    out["auto_routing_retry_fired"] = partial.auto_routing_retry_fired;
+    out["auto_routing_retry_status"] = partial.auto_routing_retry_status;
+    out["auto_routing_retry_primary_method"] =
+        partial.auto_routing_retry_primary_method;
+    out["auto_routing_retry_primary_iterations"] =
+        partial.auto_routing_retry_primary_iterations;
+    out["auto_routing_retry_primary_abs_residual_rel"] =
+        partial.auto_routing_retry_primary_abs_residual_rel;
+    out["auto_routing_retry_iterations"] =
+        partial.auto_routing_retry_iterations;
+    out["auto_routing_retry_abs_residual_rel"] =
+        partial.auto_routing_retry_abs_residual_rel;
+    out["auto_routing_retry_elapsed_seconds"] =
+        partial.auto_routing_retry_elapsed_seconds;
+    out["slope_block_residual_rel"] = partial.slope_block_residual_rel;
+    out["slope_block_frobenius_rel"] = partial.slope_block_frobenius_rel;
+    out["slope_block_rms_rel"] = partial.slope_block_rms_rel;
+    out["slope_block_max_rel"] = partial.slope_block_max_rel;
+    out["slope_block_skipped_max_rel"] = partial.slope_block_skipped_max_rel;
+    out["slope_certificate_worst_fe"] = partial.slope_certificate_worst_fe;
+    out["slope_certificate_worst_moment"] = partial.slope_certificate_worst_moment;
+    out["slope_accuracy_retry_stages"] = partial.slope_accuracy_retry_stages;
+    out["slope_accuracy_retry_iterations"] = partial.slope_accuracy_retry_iterations;
+    out["slope_internal_tolerance"] = partial.slope_internal_tolerance;
     out["precision_certified"] = partial.precision_certified;
     out["schwarz_used"] = partial.schwarz_used;
     out["mlsmr_used"] = partial.mlsmr_used;

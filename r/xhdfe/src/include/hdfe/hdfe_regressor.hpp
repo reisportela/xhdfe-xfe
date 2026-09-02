@@ -76,6 +76,8 @@ struct HdfeOptions {
     bool from_auto = false;                                //!< Internal: set by the regressor when absorption_method was left Auto, so the adaptive Schwarz gate can fire after Auto is resolved to a concrete MAP method. Not user-facing.
     double jacobi_relaxation = 0.0;                         //!< Optional relaxation factor for Jacobi (<=0 uses default 2/(J+1)).
     bool use_krylov = false;                               //!< When true, use Krylov-PCG partialling-out (v7+ only).
+    bool ordinary_krylov_parity_floor = false;             //!< Internal caller contract: enable the ordinary no-slope LSMR/MLSMR parity floor.
+    bool ordinary_auto_routing_retry = true;               //!< Default-on bounded CPU Auto sweep-to-MLSMR retry policy; env kill switch may disable.
     double krylov_lambda = 1e-6;                           //!< Ridge regularization for Krylov-PCG (v7+ only).
     int krylov_probe_iters = 0;                            //!< Internal: when >0, the Jacobi-PCG absorber caps the leading (y) solve at this many iterations and returns converged=false if it does not converge, so the adaptive Schwarz gate can fall back to the approx-Cholesky path on graphs where matrix-free PCG stalls. 0 = solve fully (no probe). Not user-facing.
     bool use_sparse_solver = false;                        //!< When true, attempt sparse direct/PCG absorption before MAP.
@@ -146,6 +148,30 @@ struct HdfeResults {
     bool converged = true;         //!< Flag indicating whether the absorber reached tolerance.
     double abs_residual = 0.0;     //!< Verified absolute normal-equation residual after absorption.
     double abs_residual_rel = 0.0; //!< Verified relative normal-equation residual after absorption.
+    double slope_block_residual_rel = 0.0; //!< Undiluted max per-block/RHS slope certificate.
+    double slope_block_frobenius_rel = 0.0; //!< Max per-block Frobenius-scaled moment.
+    double slope_block_rms_rel = 0.0; //!< Max RMS diagonal-scaled group moment.
+    double slope_block_max_rel = 0.0; //!< Max worst-group diagonal-scaled moment.
+    double slope_block_skipped_max_rel = 0.0; //!< Max skipped rank-deficient-group cosine.
+    int slope_certificate_worst_fe = -1; //!< Internal FE dimension attaining the slope gate.
+    int slope_certificate_worst_moment = -1; //!< 0 intercept/plain, 1 slope.
+    int slope_accuracy_retry_stages = 0; //!< Adaptive continuation stages completed.
+    int slope_accuracy_retry_iterations = 0; //!< Continuation iterations beyond primary.
+    double slope_internal_tolerance = 0.0; //!< Last internal continuation tolerance.
+    double krylov_internal_tolerance = 0.0; //!< Internal ordinary no-slope LSMR/MLSMR tolerance; zero otherwise.
+    double krylov_max_final_backward_error = 0.0; //!< Maximum final LSMR test2 across RHS solves.
+    double krylov_max_condition = 0.0; //!< Maximum running Krylov condition estimate across RHS solves.
+    double krylov_max_condition_times_backward_error = 0.0; //!< Maximum condition*test2 across RHS solves.
+    bool auto_routing_retry_policy_enabled = false; //!< Default-on bounded Auto retry policy state.
+    bool auto_routing_retry_eligible = false; //!< Whether all bounded retry eligibility gates passed.
+    bool auto_routing_retry_fired = false; //!< Whether the one cold MLSMR retry ran.
+    int auto_routing_retry_status = 0; //!< 0 ineligible/disabled, 1 below trigger, 2 retry returned, 3 retry failed/primary returned.
+    int auto_routing_retry_primary_method = -1; //!< Concrete primary AbsorptionMethod code.
+    int auto_routing_retry_primary_iterations = 0; //!< Iterations used by the primary sweep.
+    double auto_routing_retry_primary_abs_residual_rel = 0.0; //!< Existing primary canonical certificate metric.
+    int auto_routing_retry_iterations = 0; //!< Iterations used by the cold MLSMR retry.
+    double auto_routing_retry_abs_residual_rel = 0.0; //!< Retry canonical certificate metric.
+    double auto_routing_retry_elapsed_seconds = 0.0; //!< Wall time of the retry phase only.
     bool precision_certified = true; //!< Whether the verified residual meets the declared certificate limit.
     int num_clusters = 0;          //!< Minimum number of clusters across dimensions (if clustered).
     std::vector<int> cluster_counts; //!< Number of clusters for each dimension (if clustered).

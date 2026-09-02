@@ -1,0 +1,79 @@
+
+. clear all
+
+. set more off
+
+. 
+. di as result "STATA_ID version=" c(stata_version) " flavor=" c(flavor) " os="
+>  c(os) " machine=" c(machine_type)
+STATA_ID version=19.5 flavor=IC os=Unix machine=PC (64-bit x86-64)
+
+. 
+. foreach df in 1 2 10 100 49347 112742 118119 148356 206623 {
+  2.     scalar critical = invttail(`df', 0.025)
+  3.     di as result "STATA_CRITICAL df=`df' value=" %24.17g critical
+  4. }
+STATA_CRITICAL df=1 value=      12.706204736174698
+STATA_CRITICAL df=2 value=      4.3026527297494654
+STATA_CRITICAL df=10 value=       2.228138851986273
+STATA_CRITICAL df=100 value=      1.9839715185235531
+STATA_CRITICAL df=49347 value=      1.9600120589605514
+STATA_CRITICAL df=112742 value=      1.9599850263546905
+STATA_CRITICAL df=118119 value=      1.9599840684818926
+STATA_CRITICAL df=148356 value=      1.9599799750645721
+STATA_CRITICAL df=206623 value=      1.9599754657637822
+
+. 
+. foreach tail in 0.0000005 1e-12 1e-50 1e-100 1e-300 {
+  2.     scalar cauchy = invttail(1, `tail')
+  3.     di as result "STATA_CAUCHY tail=`tail' value=" %24.17g cauchy
+  4. }
+STATA_CAUCHY tail=0.0000005 value=      636619.77236705751
+STATA_CAUCHY tail=1e-12 value=      318309886183.79071
+STATA_CAUCHY tail=1e-50 value=  3.1830988618379044e+49
+STATA_CAUCHY tail=1e-100 value=  3.1830988618379040e+99
+STATA_CAUCHY tail=1e-300 value=                       .
+
+. 
+. scalar public_level = 99.9999
+
+. scalar public_tail = (100 - public_level) / 200
+
+. scalar public_critical = invttail(1, public_tail)
+
+. di as result "STATA_PUBLIC_LEVEL level=" %24.17g public_level " tail=" %24.17
+> g public_tail " value=" %24.17g public_critical
+STATA_PUBLIC_LEVEL level=      99.999899999999997 tail=  5.0000000001659833e-07
+>  value=      636619.77234592417
+
+. 
+. local names patents schools uniform_easy uniform_hard uniform_harder
+
+. local dfs 49347 206623 148356 112742 118119
+
+. local ts 0.50916929119588794 1.473485721671121 0.93501225146834288 0.00745941
+> 28213933608 1.9594791142984223
+
+. forvalues i = 1/5 {
+  2.     local name : word `i' of `names'
+  3.     local df : word `i' of `dfs'
+  4.     local t : word `i' of `ts'
+  5.     scalar probability = 2 * ttail(`df', `t')
+  6.     di as result "STATA_P name=`name' df=`df' t=" %24.17g `t' " value=" %2
+> 4.17g probability
+  7. }
+STATA_P name=patents df=49347 t=      .50916929119588794 value=      .610635842
+> 77650618
+STATA_P name=schools df=206623 t=       1.473485721671121 value=      .14062163
+> 446714071
+STATA_P name=uniform_easy df=148356 t=      .93501225146834288 value=      .349
+> 78350750772269
+STATA_P name=uniform_hard df=112742 t=    .0074594128213933608 value=       .99
+> 40483180701507
+STATA_P name=uniform_harder df=118119 t=      1.9594791142984223 value=     .05
+> 0059051814231349
+
+. 
+. exit, clear
+
+end of do-file

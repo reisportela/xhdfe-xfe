@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -13,6 +14,8 @@
 
 namespace hdfe {
 namespace v11 {
+
+class BindingAttemptGuard;
 
 enum class GroupAggregation { Mean, Sum };
 
@@ -84,8 +87,8 @@ public:
                               ThreadingOptions threading = ThreadingOptions{});
     HdfeRegressorV11(const HdfeRegressorV11& other);
     HdfeRegressorV11& operator=(const HdfeRegressorV11& other);
-    HdfeRegressorV11(HdfeRegressorV11&&) noexcept = default;
-    HdfeRegressorV11& operator=(HdfeRegressorV11&&) noexcept = default;
+    HdfeRegressorV11(HdfeRegressorV11&& other) noexcept;
+    HdfeRegressorV11& operator=(HdfeRegressorV11&& other) noexcept;
 
     void fit(const Eigen::Ref<const Eigen::VectorXd>& y,
              const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -128,11 +131,13 @@ public:
     // Bindings whose weight semantics are selected per call must set this
     // explicitly before fit()/fit_grouped(). The Python binding resets it on
     // every fit call, so a previous fweight fit cannot leak into a later call.
-    void set_weights_are_frequencies(bool value) noexcept {
-        options_.weights_are_frequencies = value;
-    }
+    void set_weights_are_frequencies(bool value) noexcept;
 
     const HdfeResults& results() const noexcept { return results_; }
+    const char* lifecycle_state_name() const noexcept;
+    std::uint64_t generation() const noexcept { return generation_; }
+    bool has_estimation_result() const noexcept;
+    bool has_partial_result() const noexcept;
     int threads_used() const noexcept { return threads_used_; }
     int threads_requested() const noexcept { return threads_requested_; }
     int threads_effective() const noexcept { return threads_effective_; }
@@ -154,6 +159,18 @@ public:
     }
 
 private:
+    enum class LifecycleState {
+        Empty,
+        InProgress,
+        Failed,
+        PartialReady,
+        StandardReady,
+        GroupedReady,
+    };
+
+    class AttemptTransaction;
+    friend class BindingAttemptGuard;
+
     struct ThreadResolution {
         int requested = 0;
         int effective = 1;
@@ -166,6 +183,12 @@ private:
     ThreadResolution resolve_threads(int n_rows, int num_fes) const;
     void begin_parallel_observation(const ThreadResolution& resolution);
     void end_parallel_observation();
+    void clear_consumable_state() noexcept;
+    void begin_attempt();
+    void fail_attempt() noexcept;
+    void commit_attempt(LifecycleState ready_state) noexcept;
+    void invalidate_semantics() noexcept;
+    void reset_moved_from() noexcept;
     AbsorptionMethod select_method(std::size_t num_fes) const;
     void apply_common_postprocessing(const Eigen::Ref<const Eigen::VectorXd>& y,
                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -185,7 +208,13 @@ private:
     int thread_limit_code_ = 0;
     std::string thread_limit_reason_ = "none";
     std::shared_ptr<detail::ParallelWorkObserver> parallel_observer_;
+    bool suppress_auto_routing_retry_ = false;
     AbsorptionMethod method_used_ = AbsorptionMethod::GaussSeidel;
+    LifecycleState lifecycle_state_ = LifecycleState::Empty;
+    std::uint64_t generation_ = 0;
+    std::uint64_t grouped_signature_1_ = 0;
+    std::uint64_t grouped_signature_2_ = 0;
+    bool grouped_signature_valid_ = false;
     bool gpu_used_ = false;
     int gpu_status_code_ = 0;
     bool gpu_attempted_ = false;

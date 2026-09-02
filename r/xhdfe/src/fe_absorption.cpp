@@ -47,6 +47,7 @@ namespace {
 
 thread_local bool tls_gpu_backend_override_active = false;
 thread_local GpuBackend tls_gpu_backend_override = GpuBackend::Cpu;
+thread_local bool tls_cuda_forward_probe_requested = false;
 
 // Mean group occupancy (observations per FE level) at or below which a
 // multi-FE problem is treated as ill-conditioned for plain Gauss-Seidel and is
@@ -342,6 +343,20 @@ double effective_absorption_tolerance(const HdfeOptions& options) {
         return std::min(options.tol, 1.0e-9);
     }
     return options.tol;
+}
+
+double krylov_parity_tolerance(const HdfeOptions& options) {
+    const double tol = effective_absorption_tolerance(options);
+    const bool parity_mode =
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable ||
+        options.tolerance_mode == ToleranceMode::StrictResidual;
+    const bool ordinary_krylov = options.ordinary_krylov_parity_floor &&
+        (options.absorption_method == AbsorptionMethod::Lsmr ||
+         options.absorption_method == AbsorptionMethod::Mlsmr);
+    if (tol > 0.0 && parity_mode && ordinary_krylov) {
+        return std::min(tol, 1.0e-11);
+    }
+    return tol;
 }
 
 double limited_polish_tolerance(const HdfeOptions& options) {
@@ -5990,6 +6005,20 @@ GpuBackend thread_gpu_backend_override() noexcept {
     return tls_gpu_backend_override;
 }
 
+ScopedCudaForwardProbeRequest::ScopedCudaForwardProbeRequest(
+    bool requested) noexcept
+    : previous_requested_(tls_cuda_forward_probe_requested) {
+    tls_cuda_forward_probe_requested = requested;
+}
+
+ScopedCudaForwardProbeRequest::~ScopedCudaForwardProbeRequest() noexcept {
+    tls_cuda_forward_probe_requested = previous_requested_;
+}
+
+bool thread_cuda_forward_probe_requested() noexcept {
+    return tls_cuda_forward_probe_requested;
+}
+
 AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                       const Eigen::MatrixXd& X,
                                       const std::vector<Eigen::VectorXi>& fes,
@@ -8773,8 +8802,97 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 "slopes in absorb() yet; use reghdfe-comparable or xhdfe-fast, or an "
                 "explicit convergence() criterion");
         }
-        return certified(
-            absorb_fixed_effects_v6_mixed(y, X, fes, weights, options, method, slopes));
+        AbsorptionResult primary = certified(absorb_fixed_effects_v6_mixed(
+            y, X, fes, weights, options, method, slopes));
+        primary.slope_internal_tolerance = options.tol;
+        const double slope_continuation_target = std::max(
+            effective_absorption_tolerance(options),
+            64.0 * std::numeric_limits<double>::epsilon());
+        const bool adaptive_eligible =
+            options.from_auto &&
+            options.convergence_criterion == ConvergenceCriterion::Auto &&
+            primary.converged &&
+            (!primary.precision_certified ||
+             primary.slope_block_residual_rel > slope_continuation_target) &&
+            options.tol > 0.0 && options.max_iter > primary.iterations;
+        if ((primary.precision_certified &&
+             primary.slope_block_residual_rel <= slope_continuation_target) ||
+            !adaptive_eligible) {
+            return primary;
+        }
+
+        constexpr double kSlopeContinuationFloor = 1.0e-15;
+        std::vector<double> stage_tolerances;
+        auto append_stage = [&](double candidate) {
+            candidate = std::max(kSlopeContinuationFloor, candidate);
+            const double prior = stage_tolerances.empty()
+                                     ? options.tol
+                                     : stage_tolerances.back();
+            if (candidate < prior &&
+                (stage_tolerances.empty() ||
+                 candidate != stage_tolerances.back())) {
+                stage_tolerances.push_back(candidate);
+            }
+        };
+        const double public_effective =
+            effective_absorption_tolerance(options);
+        append_stage(options.tol * 1.0e-2);
+        append_stage(public_effective * 1.0e-2);
+        append_stage(public_effective * 1.0e-4);
+        append_stage(public_effective * 1.0e-5);
+        append_stage(kSlopeContinuationFloor);
+
+        const int primary_iterations = primary.iterations;
+        int cumulative_iterations = primary_iterations;
+        int completed_stages = 0;
+        AbsorptionResult last = std::move(primary);
+        for (const double stage_tolerance : stage_tolerances) {
+            const int remaining = options.max_iter - cumulative_iterations;
+            if (remaining <= 0) {
+                break;
+            }
+            HdfeOptions stage_options = options;
+            stage_options.tol = stage_tolerance;
+            stage_options.max_iter = remaining;
+            stage_options.from_auto = false;
+            AbsorptionResult stage = absorb_fixed_effects_v6_mixed(
+                y, X, fes, weights, stage_options, method, slopes);
+            const int stage_iterations = stage.iterations;
+            cumulative_iterations += stage_iterations;
+            ++completed_stages;
+            stage = certified(std::move(stage));
+            stage.iterations = cumulative_iterations;
+            stage.slope_accuracy_retry_stages = completed_stages;
+            stage.slope_accuracy_retry_iterations =
+                cumulative_iterations - primary_iterations;
+            stage.slope_internal_tolerance = stage_tolerance;
+            if (stage.gpu_attempted) {
+                stage.gpu_absorption_iterations = cumulative_iterations;
+            }
+            if (stage.converged && stage.precision_certified &&
+                stage.slope_block_residual_rel <=
+                    slope_continuation_target) {
+                return stage;
+            }
+            last = std::move(stage);
+            if (stage_iterations >= remaining) {
+                break;
+            }
+        }
+
+        last.iterations = cumulative_iterations;
+        last.slope_accuracy_retry_stages = completed_stages;
+        last.slope_accuracy_retry_iterations =
+            cumulative_iterations - primary_iterations;
+        last.converged = false;
+        last.precision_certified = false;
+        if (last.gpu_attempted) {
+            last.gpu_used = false;
+            last.gpu_status_code = 3;
+            last.gpu_absorption_converged = false;
+            last.gpu_absorption_iterations = cumulative_iterations;
+        }
+        return last;
     }
 
     const int n = static_cast<int>(y.size());
@@ -10151,7 +10269,7 @@ AbsorptionResult absorb_group_individual_lsmr_cpu(
         double norm_a = std::sqrt(norm_a_sq);
         double condition = 1.0;
         double norm_r = beta;
-        const double tolerance = effective_absorption_tolerance(options);
+        const double tolerance = group_individual_absorption_tolerance(options);
         const double condition_limit = 1.0e12;
 
         converged = false;
@@ -10473,23 +10591,65 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
 
         const std::vector<std::size_t> order = resolve_order();
         HdfeOptions gpu_opts = options;
-        // Keep all tolerances and iteration caps identical; only the backend changes.
-        const bool ok = absorb_fixed_effects_group_individual_cuda(
-            y, X, fe_inputs, gi, weights, order, gpu_opts, selected, result);
-        if (ok && result.converged) {
-            const bool certified = certify_group_individual_candidate(
-                y, X, standard_fes, gi, weights, options, result);
-            if (certified) {
-                result.gpu_used = true;
-                result.gpu_status_code = 1;
-                result.gpu_attempted = true;
-                result.gpu_absorption_converged = true;
-                result.gpu_absorption_iterations = result.iterations;
-                return result;
-            }
-            result.converged = false;
-            result.precision_certified = false;
+        // A fast-mode norm-change stop is not precise enough on difficult
+        // group/individual incidence graphs.  Preserve the public mode and
+        // every iteration cap, but apply the same FP64 internal floor used by
+        // the comparable grouped path before accepting a CUDA candidate.
+        if (gpu_opts.tolerance_mode == ToleranceMode::XhdfeFast &&
+            gpu_opts.tol > 0.0) {
+            gpu_opts.tol = std::min(gpu_opts.tol, 1.0e-12);
         }
+        bool ok = absorb_fixed_effects_group_individual_cuda(
+            y, X, fe_inputs, gi, weights, order, gpu_opts, selected, result);
+        const bool solver_converged = ok && result.converged;
+        bool certified = false;
+        if (solver_converged) {
+            certified = certify_group_individual_candidate(
+                y, X, standard_fes, gi, weights, options, result);
+        }
+        if (!certified && solver_converged && result.mlsmr_used) {
+            HdfeOptions retry_options = gpu_opts;
+            if (strict_residual_tolerance_mode(options)) {
+                retry_options.tol = std::max(
+                    64.0 * std::numeric_limits<double>::epsilon(),
+                    std::max(0.0, options.tol) * 1.0e-4);
+            } else {
+                retry_options.tol = std::max(
+                    64.0 * std::numeric_limits<double>::epsilon(),
+                    std::max(0.0,
+                             group_individual_absorption_tolerance(gpu_opts)) *
+                        0.01);
+            }
+            if (std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr) {
+                std::fprintf(stderr,
+                             "gi_lsmr_retry first_tol=%.3e retry_tol=%.3e\n",
+                             group_individual_absorption_tolerance(gpu_opts),
+                             retry_options.tol);
+            }
+            AbsorptionResult retry;
+            ok = absorb_fixed_effects_group_individual_cuda(
+                y, X, fe_inputs, gi, weights, order, retry_options,
+                AbsorptionMethod::Lsmr, retry);
+            if (ok && retry.converged) {
+                certified = certify_group_individual_candidate(
+                    y, X, standard_fes, gi, weights, options, retry);
+            }
+            if (!certified) {
+                retry.converged = false;
+                retry.precision_certified = false;
+            }
+            result = std::move(retry);
+        }
+        if (certified) {
+            result.gpu_used = true;
+            result.gpu_status_code = 1;
+            result.gpu_attempted = true;
+            result.gpu_absorption_converged = true;
+            result.gpu_absorption_iterations = result.iterations;
+            return result;
+        }
+        result.converged = false;
+        result.precision_certified = false;
         result.gpu_used = false;
         result.gpu_status_code = ok ? 3 : 4;
         result.gpu_attempted = true;
@@ -10520,16 +10680,26 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             lsmr.converged = false;
             lsmr.precision_certified = false;
         }
-        if (!lsmr.converged && solver_converged &&
-            strict_residual_tolerance_mode(options)) {
-            // Strict mode certifies maximum weighted FE means, which is
-            // stronger than LSMR's normalized stopping test. Retry only when
-            // the nominal solve misses that independent gate; ordinary strict
-            // cases avoid unconditional oversolving.
+        if (!lsmr.converged && solver_converged) {
+            // A nominal Krylov stop is only a candidate. If the independent
+            // post-check rejects it, rerun LSMR from the original y/X with a
+            // stricter internal tolerance. Certification is still judged
+            // against the user's original tolerance.
             HdfeOptions retry_options = options;
-            retry_options.tol = std::max(
-                64.0 * std::numeric_limits<double>::epsilon(),
-                std::max(0.0, options.tol) * 1.0e-4);
+            if (strict_residual_tolerance_mode(options)) {
+                // Preserve the established strict-residual polishing strength:
+                // its maximum-mean gate can require more than the canonical
+                // dual LSMR test on nearly saturated right-hand sides.
+                retry_options.tol = std::max(
+                    64.0 * std::numeric_limits<double>::epsilon(),
+                    std::max(0.0, options.tol) * 1.0e-4);
+            } else {
+                retry_options.tol = std::max(
+                    64.0 * std::numeric_limits<double>::epsilon(),
+                    std::max(0.0,
+                             group_individual_absorption_tolerance(options)) *
+                        0.01);
+            }
             AbsorptionResult retry = absorb_group_individual_lsmr_cpu(
                 y, X, indexers, gi, weights, retry_options, threads);
             const bool retry_solver_converged = retry.converged;
@@ -10545,27 +10715,9 @@ AbsorptionResult absorb_fixed_effects_group_individual(const Eigen::VectorXd& y,
             }
             lsmr = std::move(retry);
         }
-        if (lsmr.converged || !auto_cpu_lsmr) {
-            return lsmr;
-        }
-
-        // Auto must not reduce feature coverage when LSMR encounters a
-        // numerical breakdown, condition stop, or failed certificate. Retry
-        // the previous sweep path from the original data; explicit LSMR stays
-        // fail-closed and never changes algorithm behind the user's back.
-        const AbsorptionMethod fallback_method =
-            selected == AbsorptionMethod::SymmetricGaussSeidel
-                ? AbsorptionMethod::SymmetricGaussSeidel
-                : AbsorptionMethod::GaussSeidel;
-        HdfeOptions fallback_options = options;
-        fallback_options.from_auto = false;
-        fallback_options.absorption_method = fallback_method;
-        fallback_options.symmetric_sweep =
-            fallback_method == AbsorptionMethod::SymmetricGaussSeidel;
-        ScopedGpuBackendOverride force_cpu_fallback(GpuBackend::Cpu);
-        return absorb_fixed_effects_group_individual(
-            y, X, standard_fes, gi, weights, fallback_options,
-            fallback_method);
+        // Explicit LSMR and Auto both fail closed here. Auto must never turn a
+        // failed LSMR certificate into an implicit GS/SGS result.
+        return lsmr;
     }
 
     std::vector<FeWorkspace> workspaces;
@@ -13770,6 +13922,49 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         return result;
     }
 
+    const bool krylov_method = options.ordinary_krylov_parity_floor &&
+        (options.absorption_method == AbsorptionMethod::Lsmr ||
+         options.absorption_method == AbsorptionMethod::Mlsmr);
+    if (krylov_method) {
+        result.krylov_internal_tolerance = krylov_parity_tolerance(options);
+    }
+
+    struct KrylovRhsDiagnostics {
+        double final_backward_error = 0.0;
+        double condition = 0.0;
+        double condition_times_backward_error = 0.0;
+    };
+    auto finite_diagnostic_or_max = [](double value) {
+        return hdfe::detail::ieee_finite(value)
+                   ? std::max(0.0, value)
+                   : std::numeric_limits<double>::max();
+    };
+    auto set_krylov_rhs_diagnostics = [&](double backward_error,
+                                          double condition,
+                                          KrylovRhsDiagnostics& diagnostics) {
+        diagnostics.final_backward_error =
+            finite_diagnostic_or_max(backward_error);
+        diagnostics.condition = finite_diagnostic_or_max(condition);
+        const double product = diagnostics.condition *
+                               diagnostics.final_backward_error;
+        diagnostics.condition_times_backward_error =
+            finite_diagnostic_or_max(product);
+    };
+    auto aggregate_krylov_rhs_diagnostics =
+        [&](const KrylovRhsDiagnostics& diagnostics) {
+            if (!krylov_method) {
+                return;
+            }
+            result.krylov_max_final_backward_error = std::max(
+                result.krylov_max_final_backward_error,
+                diagnostics.final_backward_error);
+            result.krylov_max_condition = std::max(
+                result.krylov_max_condition, diagnostics.condition);
+            result.krylov_max_condition_times_backward_error = std::max(
+                result.krylov_max_condition_times_backward_error,
+                diagnostics.condition_times_backward_error);
+        };
+
     int threads = 1;
     int runtime_capacity = 1;
 #ifdef HDFE_USE_OPENMP
@@ -14520,8 +14715,9 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
 
     auto lsmr_solve = [&](const Eigen::Ref<const Eigen::VectorXd>& raw_rhs,
                           int& iters,
-                          bool& ok) {
-        const double atol = effective_absorption_tolerance(options);
+                          bool& ok,
+                          KrylovRhsDiagnostics& diagnostics) {
+        const double atol = krylov_parity_tolerance(options);
         const double btol = atol;
         constexpr double kConlim = 1.0e8;
         constexpr double kHuge = 1.0e100;
@@ -14575,6 +14771,8 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         double condA = 1.0;
         double normr = beta;
         double normar = alpha * beta;
+        double final_test2 = std::numeric_limits<double>::infinity();
+        double max_condition_seen = condA;
         const double ctol = 1.0 / kConlim;
 
         ok = false;
@@ -14663,17 +14861,18 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             const double cond_denom = std::min(minrbar, rhotemp);
             condA = cond_denom > 0.0 ? std::max(maxrbar, rhotemp) / cond_denom
                                      : std::numeric_limits<double>::infinity();
+            max_condition_seen = std::max(max_condition_seen, condA);
 
             normar = std::abs(zetabar);
             const double normx = x.norm();
             const double test1 = normr / normb;
-            const double test2 =
+            final_test2 =
                 (normA * normr) != 0.0 ? normar / (normA * normr)
                                        : std::numeric_limits<double>::infinity();
             const double test3 = condA > 0.0 ? 1.0 / condA : 0.0;
             const double rtol = btol + atol * normA * normx / normb;
 
-            if (test1 <= rtol || test2 <= atol) {
+            if (test1 <= rtol || final_test2 <= atol) {
                 ok = true;
                 ++k;
                 break;
@@ -14685,17 +14884,20 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         }
 
         iters = k;
+        set_krylov_rhs_diagnostics(
+            final_test2, max_condition_seen, diagnostics);
         return x;
     };
 
     auto mlsmr_solve = [&](const Eigen::Ref<const Eigen::VectorXd>& raw_rhs,
                            int& iters,
                            bool& ok,
-                           std::vector<std::vector<Eigen::VectorXd>>* tls_override) {
+                           std::vector<std::vector<Eigen::VectorXd>>* tls_override,
+                           KrylovRhsDiagnostics& diagnostics) {
         const bool trace = mlsmr_trace_enabled();
         const int trace_every =
             trace ? mlsmr_env_positive_int("XHDFE_MLSMR_TRACE_EVERY", 10) : 0;
-        const double atol = effective_absorption_tolerance(options);
+        const double atol = krylov_parity_tolerance(options);
         const double btol = atol;
         constexpr double kConlim = 1.0e8;
         constexpr double kHuge = 1.0e100;
@@ -14809,6 +15011,8 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         double condA = 1.0;
         double normr = beta;
         double normar = alpha * beta;
+        double final_test2 = std::numeric_limits<double>::infinity();
+        double max_condition_seen = condA;
         const double ctol = 1.0 / kConlim;
 
         ok = false;
@@ -14907,17 +15111,18 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             const double cond_denom = std::min(minrbar, rhotemp);
             condA = cond_denom > 0.0 ? std::max(maxrbar, rhotemp) / cond_denom
                                      : std::numeric_limits<double>::infinity();
+            max_condition_seen = std::max(max_condition_seen, condA);
 
             normar = std::abs(zetabar);
             const double normx = x.norm();
             const double test1 = normr / normb;
-            const double test2 =
+            final_test2 =
                 (normA * normr) != 0.0 ? normar / (normA * normr)
                                        : std::numeric_limits<double>::infinity();
             const double test3 = condA > 0.0 ? 1.0 / condA : 0.0;
             const double rtol = btol + atol * normA * normx / normb;
 
-            if (test1 <= rtol || test2 <= atol) {
+            if (test1 <= rtol || final_test2 <= atol) {
                 ok = true;
                 ++k;
                 break;
@@ -14933,13 +15138,15 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             }
             if (trace && trace_every > 0 && ((k + 1) % trace_every == 0)) {
                 std::cerr << "xhdfe_mlsmr_trace solve_iter iter=" << (k + 1)
-                          << " test1=" << test1 << " test2=" << test2
+                          << " test1=" << test1 << " test2=" << final_test2
                           << " condA=" << condA << " normr=" << normr
                           << std::endl;
             }
         }
 
         iters = k;
+        set_krylov_rhs_diagnostics(
+            final_test2, max_condition_seen, diagnostics);
         return x;
     };
 
@@ -14947,14 +15154,16 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
                                  const char* label,
                                  int& iters,
                                  bool& ok,
-                                 std::vector<std::vector<Eigen::VectorXd>>* tls_override) {
+                                 std::vector<std::vector<Eigen::VectorXd>>* tls_override,
+                                 KrylovRhsDiagnostics& diagnostics) {
         const bool trace = mlsmr_trace_enabled();
         const auto start = std::chrono::steady_clock::now();
         if (trace) {
             std::cerr << "xhdfe_mlsmr_trace solve_start label=" << label
                       << " rhs_size=" << rhs.size() << std::endl;
         }
-        Eigen::VectorXd beta = mlsmr_solve(rhs, iters, ok, tls_override);
+        Eigen::VectorXd beta =
+            mlsmr_solve(rhs, iters, ok, tls_override, diagnostics);
         if (trace) {
             std::cerr << "xhdfe_mlsmr_trace solve_done label=" << label
                       << " iters=" << iters << " ok=" << (ok ? 1 : 0)
@@ -14998,6 +15207,8 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         std::vector<Eigen::VectorXd> alphas(static_cast<std::size_t>(rhs_count));
         std::vector<int> rhs_iters(static_cast<std::size_t>(rhs_count), 0);
         std::vector<uint8_t> rhs_ok(static_cast<std::size_t>(rhs_count), 0);
+        std::vector<KrylovRhsDiagnostics> rhs_diagnostics(
+            static_cast<std::size_t>(rhs_count));
         const bool trace = mlsmr_trace_enabled();
         if (trace) {
             std::cerr << "xhdfe_mlsmr_trace batch_rhs_start rhs_count="
@@ -15026,10 +15237,12 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             auto rhs_tls = make_lsmr_At_tls();
             if (rhs_idx == 0) {
                 beta = timed_mlsmr_solve(result.y_tilde, "y", rhs_it,
-                                         rhs_converged, &rhs_tls);
+                                         rhs_converged, &rhs_tls,
+                                         rhs_diagnostics[static_cast<std::size_t>(rhs_idx)]);
             } else {
                 beta = timed_mlsmr_solve(result.X_tilde.col(rhs_idx - 1),
-                                         "x", rhs_it, rhs_converged, &rhs_tls);
+                                         "x", rhs_it, rhs_converged, &rhs_tls,
+                                         rhs_diagnostics[static_cast<std::size_t>(rhs_idx)]);
             }
             alphas[static_cast<std::size_t>(rhs_idx)] =
                 column_scale.array() * beta.array();
@@ -15051,20 +15264,28 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
         subtract_projection(result.y_tilde, alpha_y);
         max_iters_used = std::max(max_iters_used, iters_y);
         all_converged = all_converged && ok_y;
+        aggregate_krylov_rhs_diagnostics(rhs_diagnostics[0]);
 
         for (int j = 0; j < cols; ++j) {
             const std::size_t rhs_idx = static_cast<std::size_t>(j + 1);
             subtract_projection(result.X_tilde.col(j), alphas[rhs_idx]);
             max_iters_used = std::max(max_iters_used, rhs_iters[rhs_idx]);
             all_converged = all_converged && (rhs_ok[rhs_idx] != 0);
+            aggregate_krylov_rhs_diagnostics(rhs_diagnostics[rhs_idx]);
         }
     } else if (options.absorption_method == AbsorptionMethod::Lsmr) {
-        const Eigen::VectorXd beta_y = lsmr_solve(result.y_tilde, iters_y, ok_y);
-        alpha_y = column_scale.array() * beta_y.array();
-    } else if (options.absorption_method == AbsorptionMethod::Mlsmr) {
+        KrylovRhsDiagnostics diagnostics_y;
         const Eigen::VectorXd beta_y =
-            timed_mlsmr_solve(result.y_tilde, "y", iters_y, ok_y, nullptr);
+            lsmr_solve(result.y_tilde, iters_y, ok_y, diagnostics_y);
         alpha_y = column_scale.array() * beta_y.array();
+        aggregate_krylov_rhs_diagnostics(diagnostics_y);
+    } else if (options.absorption_method == AbsorptionMethod::Mlsmr) {
+        KrylovRhsDiagnostics diagnostics_y;
+        const Eigen::VectorXd beta_y =
+            timed_mlsmr_solve(result.y_tilde, "y", iters_y, ok_y, nullptr,
+                              diagnostics_y);
+        alpha_y = column_scale.array() * beta_y.array();
+        aggregate_krylov_rhs_diagnostics(diagnostics_y);
     } else {
         const Eigen::VectorXd b_y = compute_Zt(result.y_tilde);
         alpha_y = pcg_solve(b_y, iters_y, ok_y);
@@ -15078,13 +15299,15 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             int iters_x = 0;
             bool ok_x = true;
             Eigen::VectorXd alpha_x;
+            KrylovRhsDiagnostics diagnostics_x;
             if (options.absorption_method == AbsorptionMethod::Lsmr) {
-                const Eigen::VectorXd beta_x = lsmr_solve(result.X_tilde.col(j), iters_x, ok_x);
+                const Eigen::VectorXd beta_x = lsmr_solve(
+                    result.X_tilde.col(j), iters_x, ok_x, diagnostics_x);
                 alpha_x = column_scale.array() * beta_x.array();
             } else if (options.absorption_method == AbsorptionMethod::Mlsmr) {
                 const Eigen::VectorXd beta_x =
                     timed_mlsmr_solve(result.X_tilde.col(j), "x", iters_x, ok_x,
-                                      nullptr);
+                                      nullptr, diagnostics_x);
                 alpha_x = column_scale.array() * beta_x.array();
             } else {
                 const Eigen::VectorXd b_x = compute_Zt(result.X_tilde.col(j));
@@ -15093,6 +15316,10 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             subtract_projection(result.X_tilde.col(j), alpha_x);
             max_iters_used = std::max(max_iters_used, iters_x);
             all_converged = all_converged && ok_x;
+            if (options.absorption_method == AbsorptionMethod::Lsmr ||
+                options.absorption_method == AbsorptionMethod::Mlsmr) {
+                aggregate_krylov_rhs_diagnostics(diagnostics_x);
+            }
         }
     }
 
@@ -15631,6 +15858,13 @@ void certify_absorption_result(
     const GroupIndividualStructure* group_individual) {
     result.abs_residual = 0.0;
     result.abs_residual_rel = 0.0;
+    result.slope_block_residual_rel = 0.0;
+    result.slope_block_frobenius_rel = 0.0;
+    result.slope_block_rms_rel = 0.0;
+    result.slope_block_max_rel = 0.0;
+    result.slope_block_skipped_max_rel = 0.0;
+    result.slope_certificate_worst_fe = -1;
+    result.slope_certificate_worst_moment = -1;
     result.precision_certified = result.converged;
 
     const int n = static_cast<int>(y.size());
@@ -15661,6 +15895,17 @@ void certify_absorption_result(
                 "Cannot certify absorption: invalid group/individual structure");
         }
     }
+    if (group_individual != nullptr &&
+        (!hdfe::detail::ieee_all_finite(y) ||
+         !hdfe::detail::ieee_all_finite(X) ||
+         !hdfe::detail::ieee_all_finite(result.y_tilde) ||
+         !hdfe::detail::ieee_all_finite(result.X_tilde) ||
+         (weights && !hdfe::detail::ieee_all_finite(*weights)))) {
+        result.abs_residual = std::numeric_limits<double>::infinity();
+        result.abs_residual_rel = std::numeric_limits<double>::infinity();
+        result.precision_certified = false;
+        return;
+    }
 
     std::vector<FeIndexer> indexers;
     indexers.reserve(fes.size());
@@ -15677,9 +15922,13 @@ void certify_absorption_result(
     const bool unit_weights = (weights == nullptr);
     const double* weight_ptr = unit_weights ? nullptr : weights->data();
     const int rhs_count = static_cast<int>(X.cols()) + 1;
+    const bool slope_block_scope =
+        !slopes.empty() && group_individual == nullptr;
     std::vector<long double> original_norm_sq(
         static_cast<std::size_t>(rhs_count), 0.0L);
     std::vector<long double> residual_norm_sq(static_cast<std::size_t>(rhs_count), 0.0L);
+    std::vector<long double> slope_weighted_transformed_norm_sq(
+        static_cast<std::size_t>(rhs_count), 0.0L);
     original_norm_sq[0] = static_cast<long double>(
         deterministic_sumsq_raw(y.data(), n, threads,
                                 options.parallel_observer));
@@ -15689,15 +15938,77 @@ void certify_absorption_result(
                 X.col(rhs - 1).data(), n, threads,
                 options.parallel_observer));
     }
+    if (slope_block_scope) {
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            slope_weighted_transformed_norm_sq[static_cast<std::size_t>(rhs)] =
+                static_cast<long double>(deterministic_chunked_sum<int>(
+                    n, threads, [&](int row) {
+                        const double value =
+                            rhs == 0 ? result.y_tilde[row]
+                                     : result.X_tilde(row, rhs - 1);
+                        const double weight =
+                            unit_weights ? 1.0 : weight_ptr[row];
+                        return weight * value * value;
+                    }, options.parallel_observer));
+        }
+    }
     long double operator_norm_sq = 0.0L;
+    const bool canonical_group_scope = group_individual != nullptr;
+    long double canonical_operator_norm_sq = 0.0L;
+    std::vector<long double> canonical_moment_norm_sq(
+        static_cast<std::size_t>(rhs_count), 0.0L);
+    std::vector<long double> canonical_weighted_original_norm_sq(
+        static_cast<std::size_t>(rhs_count), 0.0L);
+    std::vector<long double> canonical_weighted_residual_norm_sq(
+        static_cast<std::size_t>(rhs_count), 0.0L);
+    if (canonical_group_scope) {
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            canonical_weighted_original_norm_sq[
+                static_cast<std::size_t>(rhs)] =
+                static_cast<long double>(deterministic_chunked_sum<int>(
+                    n, threads, [&](int row) {
+                        const double value = rhs == 0 ? y[row]
+                                                      : X(row, rhs - 1);
+                        const double weight =
+                            unit_weights ? 1.0 : weight_ptr[row];
+                        return weight * value * value;
+                    }, options.parallel_observer));
+            canonical_weighted_residual_norm_sq[
+                static_cast<std::size_t>(rhs)] =
+                static_cast<long double>(deterministic_chunked_sum<int>(
+                    n, threads, [&](int row) {
+                        const double value =
+                            rhs == 0 ? result.y_tilde[row]
+                                     : result.X_tilde(row, rhs - 1);
+                        const double weight =
+                            unit_weights ? 1.0 : weight_ptr[row];
+                        return weight * value * value;
+                    }, options.parallel_observer));
+        }
+    }
 
     using CertificateMatrix =
         Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+    double slope_block_frobenius_max = 0.0;
+    double slope_block_rms_max = 0.0;
+    double slope_block_group_max = 0.0;
+    double slope_block_skipped_max = 0.0;
+    double slope_block_combined_max = 0.0;
+    int slope_worst_fe = -1;
+    int slope_worst_moment = -1;
+    bool slope_block_finite = true;
     for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
         const FeIndexer& indexer = indexers[dim];
         const HeterogeneousSlopeTerm* slope = slope_lookup[dim];
         const int moment_count = slope ? (slope->include_intercept ? 2 : 1) : 1;
-        const int values_per_group = rhs_count * moment_count;
+        const int canonical_diag_base = rhs_count * moment_count;
+        const bool need_block_diagonal =
+            canonical_group_scope || slope_block_scope;
+        const int rank_cross_col = canonical_diag_base + moment_count;
+        const int values_per_group =
+            canonical_diag_base +
+            (need_block_diagonal ? moment_count : 0) +
+            (slope_block_scope && slope && slope->include_intercept ? 1 : 0);
         const int chunk_count = deterministic_scatter_chunk_count(
             n, indexer.num_groups, values_per_group);
         std::vector<CertificateMatrix> chunks;
@@ -15727,15 +16038,21 @@ void certify_absorption_result(
                 const double weight = unit_weights ? 1.0 : weight_ptr[i];
                 for (int moment = 0; moment < moment_count; ++moment) {
                     double multiplier = weight;
+                    double design_value = 1.0;
                     if (slope) {
                         const bool intercept_moment =
                             slope->include_intercept && moment == 0;
                         if (!intercept_moment) {
+                            design_value = slope_values[i];
                             multiplier *= slope_values[i];
                         }
                     }
                     local_operator[static_cast<std::size_t>(moment)] +=
                         multiplier * multiplier;
+                    if (need_block_diagonal) {
+                        local(group, canonical_diag_base + moment) +=
+                            weight * design_value * design_value;
+                    }
                     const int base = moment * rhs_count;
                     local(group, base) += multiplier * result.y_tilde[i];
                     for (int rhs = 1; rhs < rhs_count; ++rhs) {
@@ -15743,6 +16060,10 @@ void certify_absorption_result(
                         local(group, base + rhs) +=
                             multiplier * result.X_tilde(i, col);
                     }
+                }
+                if (slope_block_scope && slope && slope->include_intercept) {
+                    local(group, rank_cross_col) +=
+                        weight * slope_values[i];
                 }
             }
         }
@@ -15767,12 +16088,144 @@ void certify_absorption_result(
                 residual_norm_sq[static_cast<std::size_t>(rhs)] +=
                     static_cast<long double>(residual_sq);
             }
+            if (canonical_group_scope) {
+                for (int group = 0; group < indexer.num_groups; ++group) {
+                    if (sums(group, canonical_diag_base + moment) > 0.0) {
+                        canonical_operator_norm_sq += 1.0L;
+                    }
+                }
+                for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                    const double canonical_sq = deterministic_chunked_sum<int>(
+                        indexer.num_groups, threads, [&](int group) {
+                            const double diagonal =
+                                sums(group, canonical_diag_base + moment);
+                            if (!(diagonal > 0.0)) {
+                                return 0.0;
+                            }
+                            const double value = sums(group, base + rhs);
+                            return value * value / diagonal;
+                        }, options.parallel_observer);
+                    canonical_moment_norm_sq[static_cast<std::size_t>(rhs)] +=
+                        static_cast<long double>(canonical_sq);
+                }
+            }
+            if (slope_block_scope) {
+                for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                    long double design_sum = 0.0L;
+                    long double moment_sum_sq = 0.0L;
+                    long double diagonal_scaled_sum_sq = 0.0L;
+                    double worst_group = 0.0;
+                    double worst_skipped = 0.0;
+                    int active_groups = 0;
+                    const double transformed_norm = std::sqrt(
+                        static_cast<double>(std::max(
+                            0.0L, slope_weighted_transformed_norm_sq[
+                                      static_cast<std::size_t>(rhs)])));
+                    for (int group = 0; group < indexer.num_groups; ++group) {
+                        const double diagonal =
+                            sums(group, canonical_diag_base + moment);
+                        const double value = sums(group, base + rhs);
+                        if (!hdfe::detail::ieee_finite(diagonal) ||
+                            !hdfe::detail::ieee_finite(value) || diagonal < 0.0) {
+                            slope_block_finite = false;
+                            continue;
+                        }
+                        bool active = diagonal > 0.0;
+                        if (active && slope) {
+                            const bool intercept_moment =
+                                slope->include_intercept && moment == 0;
+                            if (!intercept_moment) {
+                                if (slope->include_intercept) {
+                                    const double sw =
+                                        sums(group, canonical_diag_base);
+                                    const double sz = sums(group, rank_cross_col);
+                                    const double det = sw * diagonal - sz * sz;
+                                    const double scale =
+                                        std::max(1.0, sw * diagonal);
+                                    active = sw > 0.0 &&
+                                             det > 1.0e-12 * scale;
+                                } else {
+                                    active = diagonal >
+                                             1.0e-12 *
+                                                 std::max(1.0, diagonal);
+                                }
+                            }
+                        }
+                        const double diagonal_scaled =
+                            diagonal > 0.0
+                                ? std::abs(value) / std::sqrt(diagonal)
+                                : (value == 0.0
+                                       ? 0.0
+                                       : std::numeric_limits<double>::max());
+                        if (!active) {
+                            if (transformed_norm > 0.0) {
+                                worst_skipped = std::max(
+                                    worst_skipped,
+                                    diagonal_scaled / transformed_norm);
+                            } else if (diagonal_scaled > 0.0) {
+                                worst_skipped =
+                                    std::numeric_limits<double>::max();
+                            }
+                            continue;
+                        }
+                        ++active_groups;
+                        design_sum += static_cast<long double>(diagonal);
+                        moment_sum_sq +=
+                            static_cast<long double>(value) * value;
+                        diagonal_scaled_sum_sq +=
+                            static_cast<long double>(value) * value / diagonal;
+                        worst_group = std::max(worst_group, diagonal_scaled);
+                    }
+                    double eta_frobenius = 0.0;
+                    double eta_rms = 0.0;
+                    double eta_max = 0.0;
+                    if (active_groups > 0 && transformed_norm > 0.0 &&
+                        design_sum > 0.0L) {
+                        eta_frobenius =
+                            std::sqrt(static_cast<double>(moment_sum_sq)) /
+                            (std::sqrt(static_cast<double>(design_sum)) *
+                             transformed_norm);
+                        eta_rms =
+                            std::sqrt(static_cast<double>(
+                                diagonal_scaled_sum_sq)) /
+                            (std::sqrt(static_cast<double>(active_groups)) *
+                             transformed_norm);
+                        eta_max = worst_group / transformed_norm;
+                    } else if (moment_sum_sq > 0.0L || worst_group > 0.0) {
+                        eta_frobenius = eta_rms = eta_max =
+                            std::numeric_limits<double>::max();
+                    }
+                    if (!hdfe::detail::ieee_finite(eta_frobenius) ||
+                        !hdfe::detail::ieee_finite(eta_rms) ||
+                        !hdfe::detail::ieee_finite(eta_max) ||
+                        !hdfe::detail::ieee_finite(worst_skipped)) {
+                        slope_block_finite = false;
+                    }
+                    slope_block_frobenius_max =
+                        std::max(slope_block_frobenius_max, eta_frobenius);
+                    slope_block_rms_max =
+                        std::max(slope_block_rms_max, eta_rms);
+                    slope_block_group_max =
+                        std::max(slope_block_group_max, eta_max);
+                    slope_block_skipped_max =
+                        std::max(slope_block_skipped_max, worst_skipped);
+                    const double combined =
+                        std::max({eta_frobenius, eta_rms, eta_max});
+                    if (combined > slope_block_combined_max) {
+                        slope_block_combined_max = combined;
+                        slope_worst_fe = static_cast<int>(dim);
+                        slope_worst_moment = moment;
+                    }
+                }
+            }
         }
     }
 
     if (group_individual != nullptr) {
         const GroupIndividualStructure& gi = *group_individual;
-        const int values_per_individual = rhs_count;
+        const int canonical_diag_col = rhs_count;
+        const int values_per_individual =
+            rhs_count + (canonical_group_scope ? 1 : 0);
         const int chunk_count = deterministic_scatter_chunk_count(
             n, gi.num_individuals, values_per_individual);
         std::vector<CertificateMatrix> chunks;
@@ -15809,6 +16262,12 @@ void certify_absorption_result(
                             "Cannot certify absorption: invalid individual index");
                     }
                     local_operator += multiplier * multiplier;
+                    if (canonical_group_scope) {
+                        local(individual, canonical_diag_col) +=
+                            weight *
+                            gi.group_scale[static_cast<std::size_t>(group)] *
+                            gi.group_scale[static_cast<std::size_t>(group)];
+                    }
                     local(individual, 0) +=
                         multiplier * result.y_tilde[group];
                     for (int rhs = 1; rhs < rhs_count; ++rhs) {
@@ -15838,6 +16297,77 @@ void certify_absorption_result(
             residual_norm_sq[static_cast<std::size_t>(rhs)] +=
                 static_cast<long double>(residual_sq);
         }
+        if (canonical_group_scope) {
+            for (int individual = 0; individual < gi.num_individuals;
+                 ++individual) {
+                if (sums(individual, canonical_diag_col) > 0.0) {
+                    canonical_operator_norm_sq += 1.0L;
+                }
+            }
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                const double canonical_sq = deterministic_chunked_sum<int>(
+                    gi.num_individuals, threads, [&](int individual) {
+                        const double diagonal =
+                            sums(individual, canonical_diag_col);
+                        if (!(diagonal > 0.0)) {
+                            return 0.0;
+                        }
+                        const double value = sums(individual, rhs);
+                        return value * value / diagonal;
+                    }, options.parallel_observer);
+                canonical_moment_norm_sq[static_cast<std::size_t>(rhs)] +=
+                    static_cast<long double>(canonical_sq);
+            }
+        }
+    }
+
+    auto finite_nonnegative = [](long double value) {
+        return hdfe::detail::ieee_finite(static_cast<double>(value)) &&
+               value >= 0.0L;
+    };
+    bool finite_accumulators = finite_nonnegative(operator_norm_sq);
+    for (int rhs = 0; rhs < rhs_count; ++rhs) {
+        const std::size_t index = static_cast<std::size_t>(rhs);
+        finite_accumulators =
+            finite_accumulators &&
+            finite_nonnegative(original_norm_sq[index]) &&
+            finite_nonnegative(residual_norm_sq[index]);
+        if (canonical_group_scope) {
+            finite_accumulators =
+                finite_accumulators &&
+                finite_nonnegative(canonical_moment_norm_sq[index]) &&
+                finite_nonnegative(canonical_weighted_original_norm_sq[index]) &&
+                finite_nonnegative(canonical_weighted_residual_norm_sq[index]);
+        }
+        if (slope_block_scope) {
+            finite_accumulators =
+                finite_accumulators &&
+                finite_nonnegative(
+                    slope_weighted_transformed_norm_sq[index]);
+        }
+    }
+    if (canonical_group_scope) {
+        finite_accumulators =
+            finite_accumulators &&
+            finite_nonnegative(canonical_operator_norm_sq);
+    }
+    if (!finite_accumulators || !slope_block_finite) {
+        result.abs_residual = std::numeric_limits<double>::infinity();
+        result.abs_residual_rel = std::numeric_limits<double>::infinity();
+        if (slope_block_scope) {
+            result.slope_block_residual_rel =
+                std::numeric_limits<double>::infinity();
+            result.slope_block_frobenius_rel =
+                std::numeric_limits<double>::infinity();
+            result.slope_block_rms_rel =
+                std::numeric_limits<double>::infinity();
+            result.slope_block_max_rel =
+                std::numeric_limits<double>::infinity();
+            result.slope_block_skipped_max_rel =
+                std::numeric_limits<double>::infinity();
+        }
+        result.precision_certified = false;
+        return;
     }
 
     double max_absolute = 0.0;
@@ -15861,13 +16391,79 @@ void certify_absorption_result(
     }
     result.abs_residual = max_absolute;
     result.abs_residual_rel = max_relative;
+    if (slope_block_scope) {
+        result.slope_block_residual_rel = slope_block_combined_max;
+        result.slope_block_frobenius_rel = slope_block_frobenius_max;
+        result.slope_block_rms_rel = slope_block_rms_max;
+        result.slope_block_max_rel = slope_block_group_max;
+        result.slope_block_skipped_max_rel = slope_block_skipped_max;
+        result.slope_certificate_worst_fe = slope_worst_fe;
+        result.slope_certificate_worst_moment = slope_worst_moment;
+    }
 
     const double requested_tol = effective_absorption_tolerance(options);
     const double certificate_limit =
         std::max(8.0 * std::max(0.0, requested_tol),
                  64.0 * std::numeric_limits<double>::epsilon());
-    result.precision_certified =
-        result.converged && max_relative <= certificate_limit;
+    bool canonical_group_pass = true;
+    if (canonical_group_scope) {
+        const double canonical_operator_norm = std::sqrt(static_cast<double>(
+            std::max(0.0L, canonical_operator_norm_sq)));
+        const double canonical_limit = std::max(
+            std::max(0.0, requested_tol),
+            512.0 * std::numeric_limits<double>::epsilon());
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            const double moment_norm = std::sqrt(static_cast<double>(
+                std::max(0.0L, canonical_moment_norm_sq[
+                                   static_cast<std::size_t>(rhs)])));
+            const double weighted_original_norm = std::sqrt(
+                static_cast<double>(std::max(
+                    0.0L, canonical_weighted_original_norm_sq[
+                              static_cast<std::size_t>(rhs)])));
+            const double weighted_residual_norm = std::sqrt(
+                static_cast<double>(std::max(
+                    0.0L, canonical_weighted_residual_norm_sq[
+                              static_cast<std::size_t>(rhs)])));
+            double consistent_relative = 0.0;
+            if (weighted_original_norm > 0.0) {
+                consistent_relative =
+                    weighted_residual_norm / weighted_original_norm;
+            } else if (weighted_residual_norm > 0.0) {
+                consistent_relative = std::numeric_limits<double>::max();
+            }
+            const double least_squares_scale =
+                canonical_operator_norm * weighted_residual_norm;
+            double least_squares_relative = 0.0;
+            if (least_squares_scale > 0.0) {
+                least_squares_relative =
+                    moment_norm / least_squares_scale;
+            } else if (moment_norm > 0.0) {
+                least_squares_relative =
+                    std::numeric_limits<double>::max();
+            }
+            const bool consistent_pass =
+                hdfe::detail::ieee_finite(consistent_relative) &&
+                consistent_relative <= canonical_limit;
+            const bool least_squares_pass =
+                hdfe::detail::ieee_finite(least_squares_relative) &&
+                least_squares_relative <= canonical_limit;
+            canonical_group_pass =
+                canonical_group_pass &&
+                (consistent_pass || least_squares_pass);
+        }
+    }
+    if (slope_block_scope) {
+        result.precision_certified =
+            result.converged &&
+            hdfe::detail::ieee_finite(result.slope_block_residual_rel) &&
+            result.slope_block_residual_rel <= certificate_limit;
+    } else {
+        result.precision_certified = canonical_group_scope
+                                         ? (result.converged &&
+                                            canonical_group_pass)
+                                         : (result.converged &&
+                                            max_relative <= certificate_limit);
+    }
 }
 
 bool certify_group_individual_candidate(

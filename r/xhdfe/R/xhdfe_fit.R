@@ -31,7 +31,9 @@ xhdfe_fit <- function(y, X, fes = NULL,
   storage.mode(X) <- "double"
   if (nrow(X) != n) stop("X must have the same number of rows as y", call. = FALSE)
   coef_names <- colnames(X)
-  if (is.null(coef_names)) coef_names <- paste0("x", seq_len(ncol(X)))
+  if (is.null(coef_names)) {
+    coef_names <- if (ncol(X) == 0L) character(0) else paste0("x", seq_len(ncol(X)))
+  }
 
   if (anyNA(y) || anyNA(X)) {
     stop("y/X contain missing values; the matrix interface does not drop NAs ",
@@ -156,7 +158,7 @@ xhdfe_fit <- function(y, X, fes = NULL,
 
   out <- finalize_xhdfe(res, coef_names, n, seq_len(n), cl, level,
                         backend, se_type, cluster_names, fe_labels,
-                        tolerance_mode,
+                        tolerance_mode, stats_style = stats_style,
                         model_has_cons = if (length(fes_use)) {
                           any(fe_has_intercept)
                         } else isTRUE(fit_intercept),

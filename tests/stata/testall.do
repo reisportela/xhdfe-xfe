@@ -37,11 +37,13 @@ local tests ///
     "part1/iv.do" ///
     "part1/weights-extended.do" ///
     "part1/group-individual.do" ///
+    "part1/lifecycle.do" ///
     "part1/sample-missing.do" ///
     "part1/dof-ssc.do" ///
     "part1/harness-mutation.do" ///
     "part1/reghdfe-convention-parity.do" ///
     "part1/reghdfe-parity-dof.do" ///
+    "part1/reghdfe-derived-statistics.do" ///
     "part1/reghdfe-parity-features.do" ///
     "part1/string-interactions.do" ///
     "part1/collinearity.do" ///
@@ -49,6 +51,7 @@ local tests ///
     "part1/estat.do" ///
     "part1/nosample.do" ///
     "part1/methods.do" ///
+    "part1/xfepout-cache.do" ///
     "part1/postestimation.do" ///
     "part1/predict.do" ///
     "part1/options.do" ///

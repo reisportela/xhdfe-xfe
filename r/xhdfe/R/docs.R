@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.25.1). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.26.0). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,10 +14,10 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.25.1) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.26.0) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
-#' implementation; the optional CUDA GPU absorber is validated against it and
-#' never silently replaces it. Where possible the package mirrors
+#' implementation; the optional CUDA GPU absorber is tested against it on the
+#' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
 #' \code{reghdfe}'s reporting conventions and defaults, while also exposing
 #' \pkg{fixest}-style small-sample corrections and design ideas drawn from
 #' \code{pyfixest} and \code{FixedEffectModels.jl}. Under the default
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.25.1.
+#' effects regression via a C++ backend." Version 2.26.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -378,8 +378,9 @@ NULL
 #'       working data by less than \code{tol} in relative norm -- the same
 #'       meaning \code{reghdfe} attaches to its tolerance -- so coefficients
 #'       match \code{reghdfe} at the same nominal tolerance, down to problem
-#'       conditioning. Non-accelerated solver paths use a calibrated
-#'       absorber tolerance of \code{min(tol, 1e-9)}.
+#'       conditioning. Ordinary no-slope LSMR/MLSMR uses
+#'       \code{min(effective tolerance, 1e-11)} in comparable and strict modes;
+#'       fast mode and requested tolerances at or below \code{1e-11} are unchanged.
 #'     \item \code{"xhdfe-fast"} (aliases \code{"fast"}, \code{"xhdfe"},
 #'       \code{"current"}, \code{"xhdfe_fast"}): the pre-2.7.0 stopping
 #'       rule; typically about 1.5-3x fewer absorber iterations. Its
@@ -644,7 +645,10 @@ NULL
 #' precision is data-dependent and can be looser than the nominal tolerance
 #' on ill-conditioned (e.g. sparse bipartite) designs; it is appropriate for
 #' exploration and speed benchmarking, and any published timing should state
-#' the mode used. \code{"strict-residual"} is a heavier audit mode that
+#' the mode used. Combined group/individual CUDA fits nevertheless use an
+#' internal \code{min(tol, 1e-12)} floor before certification, so fast mode
+#' cannot re-enable a materially inaccurate early GS stop.
+#' \code{"strict-residual"} is a heavier audit mode that
 #' treats the final absolute maximum group-mean residual check as
 #' authoritative, may use extra iterations up to \code{maxiter}, and reports
 #' non-convergence when the check is not met; it is not supported with
@@ -681,6 +685,18 @@ NULL
 #' \code{gpu_status} must be \code{"used"} (Stata: \code{e(gpu_used)==1},
 #' \code{e(gpu_backend)=="cuda"}, \code{e(gpu_status)=="used"}). The status
 #' taxonomy (\code{gpu_status_code} / \code{gpu_status}) is:
+#'
+#' \strong{Version 2.26.0 certification boundary.} A successful GPU-use
+#' diagnostic proves execution, not universal numerical equivalence. The exact
+#' H100 \code{sm_90} comparable-mode campaign accepted 13 of 24 core24-quick
+#' surfaces, including the difficult group/individual surface strictly. Eleven
+#' poorly connected ordinary two- or three-way FE graphs did not meet the full
+#' contract; some also failed coefficient or standard-error gates. Use
+#' \code{backend = "cpu"} for any fully certified result on such graphs,
+#' including coefficients, inference, residuals, recovered fixed effects, and
+#' FE-based predictions/decompositions. CUDA remains opt-in and never masks this
+#' boundary with a CPU fallback; see the 2.26.0 release notes for the exact
+#' failed surfaces.
 #'
 #' \tabular{lll}{
 #'   \strong{Code} \tab \strong{Label} \tab \strong{Meaning} \cr
@@ -785,7 +801,20 @@ NULL
 #'   \item{\code{XHDFE_MOBILITY_PROFILE}, \code{XHDFE_MOBILITY_MODE}}{path
 #'     and mode (\code{off}|\code{read}|\code{write}|\code{auto}) of the
 #'     mobility-diagnostics profile -- the R route to the Stata
-#'     \code{mobilityprofile}/\code{mobfile()} options.}
+#'     \code{mobilityprofile}/\code{mobfile()} options. Version-2 profiles
+#'     distinguish ordinary from group/individual fits. Group/individual
+#'     profiles require both domain-separated structural signatures to match;
+#'     standard profiles retain their FE-signature contract. Legacy version-1 files and
+#'     mismatched profiles are safe misses. In group/individual Auto, profiles
+#'     cannot promote Gauss--Seidel or symmetric Gauss--Seidel: CPU retains
+#'     joint LSMR and CUDA retains the grouped GPU solver. Profile write/auto
+#'     does not benchmark sweep methods. A profile is written only after the
+#'     requested route certifies; it suggests LSMR only after safe CPU LSMR and
+#'     otherwise records Auto. The group/individual gate uses
+#'     the preconditioned operator \eqn{A=W^{1/2}DC}, weighted residuals,
+#'     moments \eqn{CD'Wr}, and active normalized columns. Every right-hand
+#'     side must pass either the consistent-system residual ratio or the
+#'     least-squares optimality ratio.}
 #'   \item{\code{XHDFE_ABSORPTION_CACHE},
 #'     \code{XHDFE_ABSORPTION_CACHE_MODE}}{path and mode of the absorption
 #'     cache that stores transformed outcome/regressors for reuse across
@@ -975,6 +1004,15 @@ NULL
 #'     (\code{e(converged)}).}
 #'   \item{\code{abs_residual}, \code{abs_residual_rel}}{explicit absolute and
 #'     relative normal-equation residuals verified after absorption.}
+#'   \item{\code{krylov_internal_tolerance},
+#'     \code{krylov_max_final_backward_error},
+#'     \code{krylov_max_condition}, and
+#'     \code{krylov_max_condition_times_backward_error}}{ordinary no-slope
+#'     LSMR/MLSMR solve tolerance and deterministic maxima across right-hand
+#'     sides; \code{krylov_max_condition} is the maximum running condition
+#'     estimate. These fields are zero when that Krylov path was not used.}
+#'   \item{Krylov-PCG scope}{The separate PCG path is not covered by this
+#'     parity floor and reports zeros; a PCG floor remains future reviewed work.}
 #'   \item{\code{precision_certified}}{whether the verified relative residual
 #'     meets the numerical certificate limit. In the combined
 #'     \code{group}/\code{individual} path this check is authoritative:
@@ -1083,7 +1121,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.25.1.
+#' effects regression via a C++ backend." Version 2.26.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

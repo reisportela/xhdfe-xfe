@@ -32,6 +32,8 @@ def expect_error(label: str, call, *fragments: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--module-dir", required=True, type=Path)
+    parser.add_argument("--grouped-cuda", action="store_true")
+    parser.add_argument("--require-gpu", action="store_true")
     args = parser.parse_args()
     mod = load_module(args.module_dir)
 
@@ -43,6 +45,63 @@ def main() -> int:
     X = rng.normal(size=(n, 2))
     y = X @ np.array([0.4, -0.7]) + 0.1 * fe1 - 0.05 * fe2
     y += rng.normal(size=n)
+
+    lifecycle = mod.HdfeRegressor(num_threads=1, drop_singletons=False)
+    assert lifecycle.lifecycle_state_ == "empty"
+    assert lifecycle.generation_ == 0
+    assert not lifecycle.converged_ and not lifecycle.precision_certified_
+    assert np.asarray(lifecycle.coef_).size == 0
+    assert np.asarray(lifecycle.residuals_).size == 0
+    assert lifecycle.threads_used_ == 0 and not lifecycle.gpu_used_
+    assert lifecycle.absorption_method_used == mod.AbsorptionMethod.auto
+    assert "No estimation result available" in lifecycle.summary()
+
+    lifecycle.fit(y, X, [fe1, fe2])
+    assert lifecycle.lifecycle_state_ == "standard_ready"
+    assert lifecycle.generation_ == 1
+    assert lifecycle.converged_ and np.asarray(lifecycle.coef_).size > 0
+    assert "Converged: yes" in lifecycle.summary()
+
+    def assert_failed_lifecycle(expected_generation: int) -> None:
+        assert lifecycle.lifecycle_state_ == "failed"
+        assert lifecycle.generation_ == expected_generation
+        assert not lifecycle.converged_ and not lifecycle.precision_certified_
+        assert np.asarray(lifecycle.coef_).size == 0
+        assert np.asarray(lifecycle.residuals_).size == 0
+        assert np.asarray(lifecycle.covariance_).size == 0
+        assert lifecycle.absorption_method_used == mod.AbsorptionMethod.auto
+        assert lifecycle.threads_used_ == 0 and lifecycle.threads_effective_ == 0
+        assert not lifecycle.gpu_used_ and lifecycle.gpu_status_code_ == 0
+        assert "No estimation result available" in lifecycle.summary()
+
+    expect_error(
+        "lifecycle-fweights-preflight",
+        lambda: lifecycle.fit(y, X, [fe1, fe2], fweights=True),
+        "fweights=True", "weights vector",
+    )
+    assert_failed_lifecycle(2)
+    lifecycle.fit(y, X, [fe1, fe2])
+    assert lifecycle.lifecycle_state_ == "standard_ready"
+    assert lifecycle.generation_ == 3 and lifecycle.nobs_ == n
+
+    expect_error(
+        "lifecycle-y-shape-preflight",
+        lambda: lifecycle.fit(y[:, None], X, [fe1, fe2]),
+        "y must be a 1-D array",
+    )
+    assert_failed_lifecycle(4)
+    lifecycle.fit(y, X, [fe1, fe2])
+    assert lifecycle.generation_ == 5 and lifecycle.converged_
+
+    expect_error(
+        "lifecycle-weight-shape-preflight",
+        lambda: lifecycle.fit(y, X, [fe1, fe2], weights=np.ones(n - 1),
+                              fweights=True),
+        "weights must be length n",
+    )
+    assert_failed_lifecycle(6)
+    lifecycle.fit(y, X, [fe1, fe2])
+    assert lifecycle.generation_ == 7 and lifecycle.nobs_ == n
 
     def fit(y_value=y, X_value=X, fes=(fe1, fe2), clusters=None,
             instruments=None, endogenous_idx=(), slopes=None):
@@ -450,6 +509,415 @@ def main() -> int:
         warnings.simplefilter("ignore", mod.PrecisionWarning)
         chain_forced.fit(chain_y, chain_X, [chain_fe1, chain_fe2])
     assert not suppressed
+
+    # Group/individual fits are stricter than the standard best-effort surface:
+    # an exhausted CPU LSMR solve must raise before coefficients are exposed.
+    group_count = 128
+    grouped_id = np.repeat(np.arange(group_count, dtype=np.int32), 2)
+    grouped_individual = np.column_stack((
+        np.arange(group_count, dtype=np.int32),
+        np.arange(1, group_count + 1, dtype=np.int32),
+    )).reshape(-1)
+    grouped_standard = np.repeat(
+        np.arange(group_count, dtype=np.int32) % 7, 2,
+    )
+    grouped_x = np.repeat(
+        np.sin(0.17 * np.arange(group_count, dtype=np.float64)), 2,
+    )[:, None]
+    grouped_y = (
+        0.6 * grouped_x[:, 0]
+        + np.repeat(np.cos(0.11 * np.arange(group_count)), 2)
+    )
+    grouped_fail = mod.HdfeRegressor(
+        num_threads=1, drop_singletons=False, max_iter=1, tol=1e-14,
+        tolerance_mode="reghdfe-comparable", absorption_method="lsmr",
+    )
+    expect_error(
+        "grouped-cpu-fail-closed",
+        lambda: grouped_fail.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+            group=grouped_id, individual=grouped_individual,
+            aggregation="mean",
+        ),
+        "Group/individual HDFE absorption", "no estimates were produced",
+    )
+    assert not grouped_fail.converged_ and not grouped_fail.precision_certified_
+
+    # Extraction authority belongs only to the last successful, certified
+    # group/individual fit. A standard refit or any failed grouped refit must
+    # revoke it and clear stale coefficients/method state.
+    previous_backend = os.environ.get("XHDFE_GPU_BACKEND")
+    os.environ["XHDFE_GPU_BACKEND"] = "cpu"
+    try:
+        grouped_state = mod.HdfeRegressor(
+            num_threads=1, drop_singletons=False, max_iter=2_000, tol=1e-10,
+            tolerance_mode="reghdfe-comparable",
+        )
+        grouped_state.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+        )
+        expect_error(
+            "grouped-extract-after-standard",
+            lambda: grouped_state.extract_group_individual_fes(
+                grouped_y, grouped_x,
+                [grouped_individual, grouped_standard],
+                grouped_id, grouped_individual,
+                aggregation="mean",
+            ),
+            "successful", "precision-certified", "fit()",
+        )
+
+        grouped_state.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+            group=grouped_id, individual=grouped_individual,
+            aggregation="mean",
+        )
+        assert grouped_state.converged_ and grouped_state.precision_certified_
+        extracted = grouped_state.extract_group_individual_fes(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+            grouped_id, grouped_individual,
+            aggregation="mean",
+        )
+        assert extracted["converged"]
+        assert grouped_state.lifecycle_state_ == "grouped_ready"
+
+        grouped_no_x = np.empty((grouped_y.size, 0), dtype=np.float64)
+        grouped_fe_only = mod.HdfeRegressor(
+            num_threads=1, drop_singletons=False, fit_intercept=False,
+            max_iter=2_000, tol=1e-10,
+            tolerance_mode="reghdfe-comparable",
+        )
+        grouped_fe_only.fit(
+            grouped_y, grouped_no_x,
+            [grouped_individual, grouped_standard],
+            group=grouped_id, individual=grouped_individual,
+            aggregation="mean",
+        )
+        assert grouped_fe_only.lifecycle_state_ == "grouped_ready"
+        assert grouped_fe_only.converged_ and grouped_fe_only.precision_certified_
+        assert np.asarray(grouped_fe_only.coef_).size == 0
+        fe_only_extracted = grouped_fe_only.extract_group_individual_fes(
+            grouped_y, grouped_no_x,
+            [grouped_individual, grouped_standard], grouped_id,
+            grouped_individual, aggregation="mean",
+        )
+        assert fe_only_extracted["converged"]
+        assert np.isfinite(fe_only_extracted["individual_effects"]).all()
+
+        changed_fe_only_y = grouped_y.copy()
+        changed_fe_only_y[0] += 1e-6
+        expect_error(
+            "grouped-fe-only-signature",
+            lambda: grouped_fe_only.extract_group_individual_fes(
+                changed_fe_only_y, grouped_no_x,
+                [grouped_individual, grouped_standard], grouped_id,
+                grouped_individual, aggregation="mean",
+            ),
+            "inputs", "semantics", "exactly match",
+        )
+        grouped_fe_only.fit(
+            grouped_y, grouped_no_x,
+            [grouped_individual, grouped_standard],
+        )
+        expect_error(
+            "grouped-fe-only-stale-lifecycle",
+            lambda: grouped_fe_only.extract_group_individual_fes(
+                grouped_y, grouped_no_x,
+                [grouped_individual, grouped_standard], grouped_id,
+                grouped_individual, aggregation="mean",
+            ),
+            "successful", "precision-certified", "fit()",
+        )
+
+        def expect_signature_error(label, y_value=grouped_y,
+                                   X_value=grouped_x, fes_value=None,
+                                   group_value=grouped_id,
+                                   individual_value=grouped_individual,
+                                   aggregation_value="mean", weights_value=None):
+            if fes_value is None:
+                fes_value = [grouped_individual, grouped_standard]
+            expect_error(
+                label,
+                lambda: grouped_state.extract_group_individual_fes(
+                    y_value, X_value, fes_value, group_value,
+                    individual_value, weights=weights_value,
+                    aggregation=aggregation_value,
+                ),
+                "inputs", "semantics", "exactly match",
+            )
+
+        changed_y = grouped_y.copy()
+        changed_y[0] += 1e-6
+        expect_signature_error("grouped-signature-y", y_value=changed_y)
+        changed_x = grouped_x.copy()
+        changed_x[0, 0] += 1e-6
+        expect_signature_error("grouped-signature-X", X_value=changed_x)
+        changed_standard = grouped_standard.copy()
+        changed_standard[0] += 1
+        expect_signature_error(
+            "grouped-signature-fe",
+            fes_value=[grouped_individual, changed_standard],
+        )
+        changed_group = grouped_id.copy()
+        changed_group[0] += 1
+        expect_signature_error("grouped-signature-group", group_value=changed_group)
+        changed_individual = grouped_individual.copy()
+        changed_individual[0] = 10000
+        expect_signature_error(
+            "grouped-signature-individual",
+            fes_value=[changed_individual, grouped_standard],
+            individual_value=changed_individual,
+        )
+        expect_signature_error(
+            "grouped-signature-weight-presence",
+            weights_value=np.ones(grouped_y.size),
+        )
+        expect_signature_error(
+            "grouped-signature-aggregation", aggregation_value="sum",
+        )
+
+        grouped_fw = np.ones(grouped_y.size)
+        grouped_weighted = mod.HdfeRegressor(
+            num_threads=1, drop_singletons=False, max_iter=2_000, tol=1e-10,
+            tolerance_mode="reghdfe-comparable",
+        )
+        grouped_weighted.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard], weights=grouped_fw,
+            fweights=True, group=grouped_id,
+            individual=grouped_individual, aggregation="mean",
+        )
+        weighted_extract = grouped_weighted.extract_group_individual_fes(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard], grouped_id,
+            grouped_individual, weights=grouped_fw, aggregation="mean",
+        )
+        assert weighted_extract["converged"]
+        assert grouped_weighted.lifecycle_state_ == "grouped_ready"
+
+        os.environ["XHDFE_GPU_BACKEND"] = "metal"
+        expect_error(
+            "grouped-extract-inner-failure",
+            lambda: grouped_state.extract_group_individual_fes(
+                grouped_y, grouped_x,
+                [grouped_individual, grouped_standard],
+                grouped_id, grouped_individual,
+                aggregation="mean",
+            ),
+            "extraction absorption", "did not converge", "certificate",
+        )
+        os.environ["XHDFE_GPU_BACKEND"] = "cpu"
+
+        grouped_state.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+        )
+        expect_error(
+            "grouped-extract-after-standard-refit",
+            lambda: grouped_state.extract_group_individual_fes(
+                grouped_y, grouped_x,
+                [grouped_individual, grouped_standard],
+                grouped_id, grouped_individual,
+                aggregation="mean",
+            ),
+            "successful", "precision-certified", "fit()",
+        )
+        grouped_state.fit(
+            grouped_y, grouped_x,
+            [grouped_individual, grouped_standard],
+            group=grouped_id, individual=grouped_individual,
+            aggregation="mean",
+        )
+        grouped_y_bad = grouped_y.copy()
+        grouped_y_bad[0] = np.nan
+        expect_error(
+            "grouped-success-then-failure",
+            lambda: grouped_state.fit(
+                grouped_y_bad, grouped_x,
+                [grouped_individual, grouped_standard],
+                group=grouped_id, individual=grouped_individual,
+                aggregation="mean",
+            ),
+            "y", "row 0",
+        )
+        assert not grouped_state.converged_
+        assert not grouped_state.precision_certified_
+        assert np.asarray(grouped_state.coef_).size == 0
+        assert grouped_state.absorption_method_used == mod.AbsorptionMethod.auto
+        expect_error(
+            "grouped-extract-after-failed-refit",
+            lambda: grouped_state.extract_group_individual_fes(
+                grouped_y, grouped_x,
+                [grouped_individual, grouped_standard],
+                grouped_id, grouped_individual,
+                aggregation="mean",
+            ),
+            "successful", "precision-certified", "fit()",
+        )
+    finally:
+        if previous_backend is None:
+            os.environ.pop("XHDFE_GPU_BACKEND", None)
+        else:
+            os.environ["XHDFE_GPU_BACKEND"] = previous_backend
+
+    if args.grouped_cuda:
+        cuda_group_count = 48
+        cuda_members = 4
+        cuda_group = np.repeat(
+            np.arange(cuda_group_count, dtype=np.int32), cuda_members,
+        )
+        cuda_member = np.tile(
+            np.arange(cuda_members, dtype=np.int32), cuda_group_count,
+        )
+        cuda_individual = (
+            cuda_group + 11 * cuda_member
+        ) % cuda_group_count
+        cuda_standard = np.repeat(
+            np.arange(cuda_group_count, dtype=np.int32) % 7, cuda_members,
+        )
+        cuda_x_group = np.sin(
+            0.19 * np.arange(cuda_group_count, dtype=np.float64)
+        )
+        cuda_y_group = (
+            0.65 * cuda_x_group
+            + np.cos(0.13 * np.arange(cuda_group_count, dtype=np.float64))
+        )
+        cuda_x = np.repeat(cuda_x_group, cuda_members)[:, None]
+        cuda_y = np.repeat(cuda_y_group, cuda_members)
+        cuda_fes = [cuda_individual, cuda_standard]
+
+        previous_backend = os.environ.get("XHDFE_GPU_BACKEND")
+        os.environ["XHDFE_GPU_BACKEND"] = "cuda"
+        try:
+            standard_before = mod.HdfeRegressor(
+                num_threads=1, drop_singletons=False, tol=1e-10,
+            )
+            standard_before.fit(y, X, [fe1, fe2])
+            if args.require_gpu:
+                assert standard_before.gpu_used_
+
+            cuda_auto = mod.HdfeRegressor(
+                num_threads=1, drop_singletons=False, max_iter=5_000,
+                tol=1e-10, tolerance_mode="reghdfe-comparable",
+            )
+            cuda_auto.fit(
+                cuda_y, cuda_x, cuda_fes,
+                group=cuda_group, individual=cuda_individual,
+                aggregation="mean",
+            )
+            assert cuda_auto.converged_ and cuda_auto.precision_certified_
+            assert cuda_auto.gpu_used_ and cuda_auto.gpu_status_code_ == 1
+            assert cuda_auto.absorption_method_used == mod.AbsorptionMethod.lsmr
+            cuda_extracted = cuda_auto.extract_group_individual_fes(
+                cuda_y, cuda_x, cuda_fes, cuda_group, cuda_individual,
+                aggregation="mean",
+            )
+            assert cuda_extracted["converged"]
+            assert np.isfinite(cuda_extracted["individual_effects"]).all()
+
+            cuda_no_x = np.empty((cuda_y.size, 0), dtype=np.float64)
+            cuda_fe_only = mod.HdfeRegressor(
+                num_threads=1, drop_singletons=False,
+                fit_intercept=False, max_iter=5_000,
+                tol=1e-10, tolerance_mode="reghdfe-comparable",
+            )
+            cuda_fe_only.fit(
+                cuda_y, cuda_no_x, cuda_fes,
+                group=cuda_group, individual=cuda_individual,
+                aggregation="mean",
+            )
+            assert cuda_fe_only.lifecycle_state_ == "grouped_ready"
+            assert cuda_fe_only.converged_ and cuda_fe_only.precision_certified_
+            assert np.asarray(cuda_fe_only.coef_).size == 0
+            assert cuda_fe_only.gpu_used_ and cuda_fe_only.gpu_status_code_ == 1
+            assert cuda_fe_only.absorption_method_used == mod.AbsorptionMethod.lsmr
+            cuda_fe_only_extracted = cuda_fe_only.extract_group_individual_fes(
+                cuda_y, cuda_no_x, cuda_fes, cuda_group, cuda_individual,
+                aggregation="mean",
+            )
+            assert cuda_fe_only_extracted["converged"]
+            assert np.isfinite(
+                cuda_fe_only_extracted["individual_effects"],
+            ).all()
+
+            changed_cuda_fe_y = cuda_y.copy()
+            changed_cuda_fe_y[0] += 1e-6
+            expect_error(
+                "grouped-cuda-fe-only-signature",
+                lambda: cuda_fe_only.extract_group_individual_fes(
+                    changed_cuda_fe_y, cuda_no_x, cuda_fes,
+                    cuda_group, cuda_individual, aggregation="mean",
+                ),
+                "inputs", "semantics", "exactly match",
+            )
+            cuda_fe_only.fit(cuda_y, cuda_no_x, cuda_fes)
+            expect_error(
+                "grouped-cuda-fe-only-stale-lifecycle",
+                lambda: cuda_fe_only.extract_group_individual_fes(
+                    cuda_y, cuda_no_x, cuda_fes,
+                    cuda_group, cuda_individual, aggregation="mean",
+                ),
+                "successful", "precision-certified", "fit()",
+            )
+
+            for method, expected in (
+                ("gauss-seidel", mod.AbsorptionMethod.gauss_seidel),
+                ("symmetric-gauss-seidel",
+                 mod.AbsorptionMethod.symmetric_gauss_seidel),
+            ):
+                explicit = mod.HdfeRegressor(
+                    num_threads=1, drop_singletons=False, max_iter=5_000,
+                    tol=1e-8, tolerance_mode="reghdfe-comparable",
+                    absorption_method=method,
+                )
+                explicit.fit(
+                    cuda_y, cuda_x, cuda_fes,
+                    group=cuda_group, individual=cuda_individual,
+                    aggregation="mean",
+                )
+                assert explicit.converged_ and explicit.precision_certified_
+                assert explicit.gpu_used_ and explicit.gpu_status_code_ == 1
+                assert explicit.absorption_method_used == expected
+
+            explicit_lsmr = mod.HdfeRegressor(
+                num_threads=1, drop_singletons=False,
+                absorption_method="lsmr",
+            )
+            expect_error(
+                "grouped-explicit-lsmr-cuda",
+                lambda: explicit_lsmr.fit(
+                    cuda_y, cuda_x, cuda_fes,
+                    group=cuda_group, individual=cuda_individual,
+                    aggregation="mean",
+                ),
+                "absorptionmethod(lsmr)", "CPU-only", "group/individual",
+            )
+            assert not explicit_lsmr.converged_
+            assert not explicit_lsmr.precision_certified_
+            assert np.asarray(explicit_lsmr.coef_).size == 0
+
+            standard_after = mod.HdfeRegressor(
+                num_threads=1, drop_singletons=False, tol=1e-10,
+            )
+            standard_after.fit(y, X, [fe1, fe2])
+            assert standard_after.gpu_used_ and standard_after.gpu_status_code_ == 1
+            np.testing.assert_allclose(
+                standard_after.coef_, standard_before.coef_,
+                rtol=0.0, atol=1e-12,
+            )
+            np.testing.assert_allclose(
+                standard_after.residuals_, standard_before.residuals_,
+                rtol=0.0, atol=1e-12,
+            )
+        finally:
+            if previous_backend is None:
+                os.environ.pop("XHDFE_GPU_BACKEND", None)
+            else:
+                os.environ["XHDFE_GPU_BACKEND"] = previous_backend
 
     print("PASS: audit 20260804 remediation contracts")
     return 0

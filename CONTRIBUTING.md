@@ -145,7 +145,7 @@ Rscript -e 'testthat::test_local("r/xhdfe")'
   formula grammar, S3 methods, and fail-closed GPU behavior (needs `fixest`).
 - `test-regressions.R` — pinned fixes for previously found defects.
 - `test-parity-python.R` — checks the R binding against the committed reference
-  fixture `tests/testthat/fixtures/parity_reference.json` (needs `jsonlite`;
+  fixture `tests/testthat/fixtures/parity_reference_current.json` (needs `jsonlite`;
   skips if absent). Regenerating that fixture uses `r/tools/gen_parity_data.R` +
   `r/tools/gen_parity_fixture.py` and **requires a built reference Python
   module** — you need not regenerate it for a normal change; the committed

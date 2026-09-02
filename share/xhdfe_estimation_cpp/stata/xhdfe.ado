@@ -1,10 +1,10 @@
-*! version 2.25.1 27aug2026
+*! version 2.26.0 02sep2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.25.1 27aug2026"
+        local version "2.26.0 02sep2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -18,6 +18,10 @@ program define xhdfe, eclass sortpreserve
         xhdfe_display `0'
         exit
     }
+
+    // A new estimation attempt owns a fresh e() lifecycle. Replay and
+    // version queries above intentionally preserve their historical behavior.
+    ereturn clear
 
     local __xhdfe_profile_env : environment XHDFE_PROFILE_CPU
     local __xhdfe_profile 0
@@ -1720,6 +1724,12 @@ program define xhdfe, eclass sortpreserve
 
     tempname sN sNfull sNsng sDFr sDFRUnadj sDFm sDFa sDFaLevels sDFaExact sDFaNested ///
         sR2 sR2w sSig2 sRss sTss sTssw sSat sIter sConv sAbsRes sAbsResRel sPrecCert ///
+        sKryTol sKryBack sKryCond sKryCondBack ///
+        sAutoRetryPolicy sAutoRetryEligible sAutoRetryFired sAutoRetryStatus ///
+        sAutoRetryPrimaryMethod sAutoRetryPrimaryIter sAutoRetryPrimaryRel ///
+        sAutoRetryIter sAutoRetryRel sAutoRetrySeconds ///
+        sSlopeBlockRel sSlopeBlockFrob sSlopeBlockRms sSlopeBlockMax sSlopeBlockSkipped ///
+        sSlopeWorstFe sSlopeWorstMoment sSlopeRetryStages sSlopeRetryIter sSlopeInternalTol ///
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
         sGpuUsed sGpuStatus ///
         sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth sNclust sClustScale sVcvFix ///
@@ -1734,6 +1744,16 @@ program define xhdfe, eclass sortpreserve
     scalar `sFeRecConv' = .
     scalar `sFeRecIter' = .
     scalar `sFeRecMaxDelta' = .
+    scalar `sAutoRetryPolicy' = 0
+    scalar `sAutoRetryEligible' = 0
+    scalar `sAutoRetryFired' = 0
+    scalar `sAutoRetryStatus' = 0
+    scalar `sAutoRetryPrimaryMethod' = -1
+    scalar `sAutoRetryPrimaryIter' = 0
+    scalar `sAutoRetryPrimaryRel' = 0
+    scalar `sAutoRetryIter' = 0
+    scalar `sAutoRetryRel' = 0
+    scalar `sAutoRetrySeconds' = 0
 
     local have_dof_table 0
     tempname dof_table
@@ -1767,6 +1787,18 @@ program define xhdfe, eclass sortpreserve
     local cfg "`cfg's_tss=`sTss';s_tss_within=`sTssw';s_saturated=`sSat';"
     local cfg "`cfg's_iterations=`sIter';s_converged=`sConv';"
     local cfg "`cfg's_abs_residual=`sAbsRes';s_abs_residual_rel=`sAbsResRel';s_precision_certified=`sPrecCert';"
+    local cfg "`cfg's_krylov_internal_tolerance=`sKryTol';s_krylov_max_final_backward_error=`sKryBack';"
+    local cfg "`cfg's_krylov_max_condition=`sKryCond';s_krylov_max_condition_times_backward_error=`sKryCondBack';"
+    local cfg "`cfg's_auto_routing_retry_policy_enabled=`sAutoRetryPolicy';s_auto_routing_retry_eligible=`sAutoRetryEligible';"
+    local cfg "`cfg's_auto_routing_retry_fired=`sAutoRetryFired';s_auto_routing_retry_status=`sAutoRetryStatus';"
+    local cfg "`cfg's_auto_routing_retry_primary_method=`sAutoRetryPrimaryMethod';s_auto_routing_retry_primary_iterations=`sAutoRetryPrimaryIter';"
+    local cfg "`cfg's_auto_routing_retry_primary_abs_residual_rel=`sAutoRetryPrimaryRel';s_auto_routing_retry_iterations=`sAutoRetryIter';"
+    local cfg "`cfg's_auto_routing_retry_abs_residual_rel=`sAutoRetryRel';s_auto_routing_retry_elapsed_seconds=`sAutoRetrySeconds';"
+    local cfg "`cfg's_slope_block_residual_rel=`sSlopeBlockRel';s_slope_block_frobenius_rel=`sSlopeBlockFrob';"
+    local cfg "`cfg's_slope_block_rms_rel=`sSlopeBlockRms';s_slope_block_max_rel=`sSlopeBlockMax';"
+    local cfg "`cfg's_slope_block_skipped_max_rel=`sSlopeBlockSkipped';s_slope_certificate_worst_fe=`sSlopeWorstFe';"
+    local cfg "`cfg's_slope_certificate_worst_moment=`sSlopeWorstMoment';s_slope_accuracy_retry_stages=`sSlopeRetryStages';"
+    local cfg "`cfg's_slope_accuracy_retry_iterations=`sSlopeRetryIter';s_slope_internal_tolerance=`sSlopeInternalTol';"
     local cfg "`cfg's_fe_recovery_converged=`sFeRecConv';s_fe_recovery_iterations=`sFeRecIter';s_fe_recovery_max_delta=`sFeRecMaxDelta';"
     local cfg "`cfg's_threads_used=`sThr';s_threads_requested=`sThrReq';s_threads_effective=`sThrEff';"
     local cfg "`cfg's_parallel_workers_active=`sThrActive';s_thread_capacity=`sThrCap';"
@@ -2353,7 +2385,7 @@ program define xhdfe, eclass sortpreserve
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.25.1 27aug2026"
+    ereturn local version "2.26.0 02sep2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2435,6 +2467,35 @@ program define xhdfe, eclass sortpreserve
     ereturn scalar converged = scalar(`sConv')
     ereturn scalar abs_residual = scalar(`sAbsRes')
     ereturn scalar abs_residual_rel = scalar(`sAbsResRel')
+    ereturn scalar krylov_internal_tolerance = scalar(`sKryTol')
+    ereturn scalar krylov_max_final_backward_error = scalar(`sKryBack')
+    ereturn scalar krylov_max_condition = scalar(`sKryCond')
+    ereturn scalar krylov_max_cond_backerr = scalar(`sKryCondBack')
+    ereturn scalar auto_retry_policy_enabled = scalar(`sAutoRetryPolicy')
+    ereturn scalar auto_retry_eligible = scalar(`sAutoRetryEligible')
+    ereturn scalar auto_retry_fired = scalar(`sAutoRetryFired')
+    ereturn scalar auto_retry_status_code = scalar(`sAutoRetryStatus')
+    ereturn scalar auto_retry_primary_method = scalar(`sAutoRetryPrimaryMethod')
+    ereturn scalar auto_retry_primary_iterations = scalar(`sAutoRetryPrimaryIter')
+    ereturn scalar auto_retry_primary_abs_res_rel = scalar(`sAutoRetryPrimaryRel')
+    ereturn scalar auto_retry_iterations = scalar(`sAutoRetryIter')
+    ereturn scalar auto_retry_abs_res_rel = scalar(`sAutoRetryRel')
+    ereturn scalar auto_retry_elapsed_seconds = scalar(`sAutoRetrySeconds')
+    local auto_retry_status "ineligible"
+    if (scalar(`sAutoRetryStatus') == 1) local auto_retry_status "below_trigger"
+    else if (scalar(`sAutoRetryStatus') == 2) local auto_retry_status "used"
+    else if (scalar(`sAutoRetryStatus') == 3) local auto_retry_status "failed"
+    ereturn local auto_retry_status "`auto_retry_status'"
+    ereturn scalar slope_block_residual_rel = scalar(`sSlopeBlockRel')
+    ereturn scalar slope_block_frobenius_rel = scalar(`sSlopeBlockFrob')
+    ereturn scalar slope_block_rms_rel = scalar(`sSlopeBlockRms')
+    ereturn scalar slope_block_max_rel = scalar(`sSlopeBlockMax')
+    ereturn scalar slope_block_skipped_max_rel = scalar(`sSlopeBlockSkipped')
+    ereturn scalar slope_certificate_worst_fe = scalar(`sSlopeWorstFe')
+    ereturn scalar slope_certificate_worst_moment = scalar(`sSlopeWorstMoment')
+    ereturn scalar slope_accuracy_retry_stages = scalar(`sSlopeRetryStages')
+    ereturn scalar slope_accuracy_retry_iterations = scalar(`sSlopeRetryIter')
+    ereturn scalar slope_internal_tolerance = scalar(`sSlopeInternalTol')
     ereturn scalar precision_certified = scalar(`sPrecCert')
     if (`store_fes') {
         ereturn scalar fe_recovery_converged = scalar(`sFeRecConv')
@@ -2519,11 +2580,20 @@ program define xhdfe, eclass sortpreserve
         ereturn scalar df_r = min(`df_r_base', e(N_clust) - 1)
     }
 
+    local used_df_r = e(df_r_unadj)
+    if ("`statstyle'" == "reghdfe") {
+        local df_a_nested = e(df_a_nested)
+        if (missing(`df_a_nested')) local df_a_nested 0
+        local used_df_r = `used_df_r' - `df_a_nested'
+    }
+    local derived_df_positive = !missing(`used_df_r') & `used_df_r' > 0
+
     ereturn scalar df_m = `df_m_eff'
     ereturn scalar rank = cond(!missing(e(tss)) & e(tss) == 0, 0, `df_m_eff')
     // Guard: treat missing e(df_r) as invalid (Stata orders missing as +infinity,
     // so the raw comparison e(df_r) > 0 would be true for missing).
-    if (`df_m_eff' > 0 & !missing(e(df_r)) & e(df_r) > 0) {
+    if (`df_m_eff' > 0 & !missing(e(df_r)) & e(df_r) > 0 & ///
+        ("`statstyle'" != "reghdfe" | `derived_df_positive')) {
         local keep_cols
         local idx = 0
         foreach name of local cn {
@@ -2573,25 +2643,22 @@ program define xhdfe, eclass sortpreserve
         ereturn scalar ll_0 = -0.5 * (e(N)*ln(2*_pi) + e(N)*ln(e(tss_within)/e(N)) + e(N))
     }
 
-    local used_df_r = e(df_r_unadj)
-    if ("`statstyle'" == "reghdfe") {
-        local df_a_nested = e(df_a_nested)
-        if (missing(`df_a_nested')) local df_a_nested 0
-        local used_df_r = max(`used_df_r' - `df_a_nested', 0)
-    }
-    if (`used_df_r' > 0 & !missing(e(rss)) & e(rss) >= 0) {
+    if (!missing(`used_df_r') & `used_df_r' > 0 & !missing(e(rss)) & e(rss) >= 0) {
         ereturn scalar rmse = sqrt( e(rss) / `used_df_r' )
     }
-    else if ("`statstyle'" == "reghdfe" & `used_df_r' == 0 & !missing(e(rss)) & e(rss) >= 0) {
+    else if ("`statstyle'" == "reghdfe" & !missing(`used_df_r') & ///
+             `used_df_r' == 0 & !missing(e(rss)) & e(rss) >= 0) {
         ereturn scalar rmse = sqrt( e(rss) )
     }
-    if (`used_df_r' > 0 & !missing(e(tss)) & e(tss) > 0) {
+    if (!missing(`used_df_r') & `used_df_r' > 0 & !missing(e(tss)) & e(tss) > 0) {
         ereturn scalar r2_a = 1 - (e(rss)/`used_df_r') / ( e(tss) / (e(N)-`model_has_cons') )
         if (!missing(e(tss_within)) & e(tss_within) > 0) {
             ereturn scalar r2_a_within = 1 - (e(rss)/`used_df_r') / ( e(tss_within) / (`used_df_r'+e(df_m)) )
         }
     }
-    else if (`used_df_r' <= 0 & !missing(e(rss)) & !missing(e(tss)) & e(tss) > 0 & ///
+    else if (!missing(`used_df_r') & `used_df_r' <= 0 & ///
+             !missing(e(df_r)) & e(df_r) <= 0 & ///
+             !missing(e(rss)) & !missing(e(tss)) & e(tss) > 0 & ///
              e(rss) <= 1e-8 * e(tss)) {
         // Saturated model that fits within machine precision: report Adj R-squared = 1
         // to match reghdfe's display (mathematically, rss/df_r tends to 0 as rss -> 0).

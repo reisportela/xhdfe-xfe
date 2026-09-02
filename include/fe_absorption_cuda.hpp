@@ -9,6 +9,8 @@
 namespace hdfe {
 namespace detail {
 
+constexpr int kCudaForwardProbeMaxP = 16;
+
 struct GpuFeInput {
     const int* group_ids = nullptr;
     int num_groups = 0;
@@ -120,6 +122,21 @@ private:
 
 bool has_thread_gpu_backend_override() noexcept;
 GpuBackend thread_gpu_backend_override() noexcept;
+
+class ScopedCudaForwardProbeRequest {
+public:
+    explicit ScopedCudaForwardProbeRequest(bool requested) noexcept;
+    ~ScopedCudaForwardProbeRequest() noexcept;
+
+    ScopedCudaForwardProbeRequest(const ScopedCudaForwardProbeRequest&) = delete;
+    ScopedCudaForwardProbeRequest& operator=(
+        const ScopedCudaForwardProbeRequest&) = delete;
+
+private:
+    bool previous_requested_ = false;
+};
+
+bool thread_cuda_forward_probe_requested() noexcept;
 
 #ifdef HDFE_USE_CUDA
 bool cuda_backend_available();

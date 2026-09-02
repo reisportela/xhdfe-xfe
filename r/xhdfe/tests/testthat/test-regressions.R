@@ -179,6 +179,39 @@ test_that("group FE decomposition honours forwarded fit options", {
                "Unknown absorption method")
 })
 
+test_that("FE-only grouped fits extract with a zero-column design", {
+  ng <- 48L
+  members <- 4L
+  group <- rep(seq_len(ng), each = members)
+  member <- rep(0:(members - 1L), times = ng)
+  individual <- ((group - 1L + 11L * member) %% ng) + 1L
+  standard <- rep((0:(ng - 1L)) %% 7L + 1L, each = members)
+  y <- rep(cos(0.13 * (0:(ng - 1L))), each = members)
+  X0 <- matrix(numeric(0), nrow = length(y), ncol = 0L)
+  fes <- list(individual = individual, standard = standard)
+
+  fit <- xhdfe_fit(
+    y, X0, fes = fes, group = group, individual = individual,
+    aggregation = "mean", fit_intercept = FALSE,
+    drop_singletons = FALSE, tolerance_mode = "reghdfe-comparable",
+    absorption_method = "auto", threads = 1L, backend = "cpu"
+  )
+  expect_s3_class(fit, "xhdfe")
+  expect_true(fit$converged)
+  expect_true(fit$precision_certified)
+  expect_length(fit$coefficients, 0L)
+
+  decomposition <- xhdfe_group_fes(
+    y, X0, fes = fes, group = group, individual = individual,
+    aggregation = "mean", fit_intercept = FALSE,
+    drop_singletons = FALSE, tolerance_mode = "reghdfe-comparable",
+    absorption_method = "auto", threads = 1L
+  )
+  expect_s3_class(decomposition, "xhdfe_group_fes")
+  expect_true(decomposition$converged)
+  expect_true(all(is.finite(decomposition$individual_effects)))
+})
+
 test_that("xhdfe_fit rejects individual without group (audit P0.2)", {
   ds <- data.frame(f1 = rep(1:30, 10), id = rep(1:10, 30))
   ds$x <- rnorm(300)
@@ -186,6 +219,23 @@ test_that("xhdfe_fit rejects individual without group (audit P0.2)", {
   expect_error(xhdfe_fit(ds$y, cbind(x = ds$x), fes = list(ds$f1),
                          individual = ds$id),
                "requires `group`")
+})
+
+test_that("grouped CPU non-convergence cannot expose estimates", {
+  ng <- 128L
+  grp <- rep(seq_len(ng), each = 2L)
+  ind <- as.vector(rbind(seq_len(ng), seq_len(ng) + 1L))
+  std <- rep((seq_len(ng) - 1L) %% 7L, each = 2L)
+  x <- rep(sin(0.17 * (seq_len(ng) - 1L)), each = 2L)
+  y <- 0.6 * x + rep(cos(0.11 * (seq_len(ng) - 1L)), each = 2L)
+  expect_error(
+    xhdfe_fit(y, cbind(x = x), fes = list(ind = ind, std = std),
+              group = grp, individual = ind, aggregation = "mean",
+              drop_singletons = FALSE, maxiter = 1L, tol = 1e-14,
+              tolerance_mode = "reghdfe-comparable",
+              absorption_method = "lsmr", threads = 1L),
+    "Group/individual HDFE absorption.*no estimates were produced"
+  )
 })
 
 test_that("matrix interface rejects NAs in ids, weights and instruments (audit P1.3)", {
@@ -235,4 +285,130 @@ test_that("IV identification failures are loud without classifying weak full-ran
                     instruments = matrix(rd$z, n, 1), endogenous = 2)
   expect_true(weak$converged)
   expect_true(all(is.finite(weak$coefficients)))
+})
+
+test_that("derived statistics use the stats-style residual degrees of freedom", {
+  set.seed(30830)
+  firm <- rep(seq_len(100L), each = 20L)
+  state <- (firm - 1L) %/% 5L + 1L
+  x <- sin(seq_along(firm) / 17) + rnorm(length(firm))
+  y <- 0.7 * x + firm / 50 + rnorm(length(firm))
+
+  nested <- xhdfe_fit(
+    y, cbind(x = x), fes = list(firm = firm), cluster = list(state = state),
+    stats_style = "reghdfe", threads = 1L
+  )
+  d_nested <- nested$df_r_unadj - nested$df_a_nested
+  expect_gt(nested$df_a_nested, 0)
+  expect_gt(d_nested, 0)
+  expect_equal(nested$sigma2, nested$rss / d_nested, tolerance = 1e-12)
+  expect_equal(nested$rmse, sqrt(nested$rss / d_nested), tolerance = 1e-12)
+  expect_equal(
+    nested$r2_a,
+    1 - (nested$rss / d_nested) / (nested$tss / (nested$nobs - 1)),
+    tolerance = 1e-12
+  )
+  expect_equal(
+    nested$r2_a_within,
+    1 - (nested$rss / d_nested) /
+      (nested$tss_within / (d_nested + nested$df_m)),
+    tolerance = 1e-12
+  )
+  expect_true(is.finite(nested$F_stat))
+  expect_identical(nested$stats_style, "reghdfe")
+
+  legacy <- xhdfe_fit(
+    y, cbind(x = x), fes = list(firm = firm), cluster = list(state = state),
+    stats_style = "legacy", threads = 1L
+  )
+  expect_equal(
+    legacy$sigma2, legacy$rss / legacy$df_r_unadj, tolerance = 1e-12
+  )
+  expect_equal(
+    legacy$rmse, sqrt(legacy$rss / legacy$df_r_unadj), tolerance = 1e-12
+  )
+  expect_identical(legacy$stats_style, "legacy")
+
+  nonnested <- xhdfe_fit(
+    y, cbind(x = x), fes = list(state = state), cluster = list(firm = firm),
+    stats_style = "reghdfe", threads = 1L
+  )
+  expect_equal(nonnested$df_a_nested, 0)
+  expect_equal(
+    nonnested$sigma2, nonnested$rss / nonnested$df_r_unadj,
+    tolerance = 1e-12
+  )
+
+  no_intercept <- xhdfe_fit(
+    y, cbind(x = x), fit_intercept = FALSE,
+    stats_style = "reghdfe", threads = 1L
+  )
+  d_no_intercept <- no_intercept$df_r_unadj - no_intercept$df_a_nested
+  expect_equal(
+    no_intercept$r2_a,
+    1 - (no_intercept$rss / d_no_intercept) /
+      (no_intercept$tss / no_intercept$nobs),
+    tolerance = 1e-12
+  )
+
+  id1 <- integer(102L)
+  id1[1:3] <- 1L
+  id1[4:99] <- 2L + floor(((4:99) - 4L) / 2L)
+  id1[100:102] <- 50L
+  id2 <- integer(102L)
+  id2[1:2] <- 1L
+  id2[3] <- 2L
+  id2[4:99] <- id1[4:99] + ((4:99) - 4L) %% 2L
+  id2[100] <- 50L
+  id2[101:102] <- 51L
+  zx1 <- sin(seq_along(id1) * 0.19)
+  zx2 <- cos(seq_along(id1) * 0.23)
+  zy <- sin(seq_along(id1) * 0.37) + id1 / 7 - id2 / 11
+  zigzag <- xhdfe_fit(
+    zy, cbind(x1 = zx1, x2 = zx2), fes = list(id1 = id1, id2 = id2),
+    cluster = list(id1 = id1), drop_singletons = FALSE,
+    stats_style = "reghdfe", threads = 1L
+  )
+  expect_equal(zigzag$df_r_unadj - zigzag$df_a_nested, 0)
+  expect_gt(zigzag$df_r, 0)
+  expect_equal(zigzag$sigma2, zigzag$rss, tolerance = 1e-12)
+  expect_equal(zigzag$rmse, sqrt(zigzag$rss), tolerance = 1e-12)
+  expect_true(is.na(zigzag$F_stat))
+  expect_true(is.na(zigzag$F_p))
+  expect_true(is.na(zigzag$r2_a))
+  expect_true(is.na(zigzag$r2_a_within))
+
+  zigzag_legacy <- xhdfe_fit(
+    zy, cbind(x1 = zx1, x2 = zx2), fes = list(id1 = id1, id2 = id2),
+    cluster = list(id1 = id1), drop_singletons = FALSE,
+    stats_style = "legacy", threads = 1L
+  )
+  expect_equal(
+    zigzag_legacy$sigma2,
+    zigzag_legacy$rss / zigzag_legacy$df_r_unadj,
+    tolerance = 1e-12
+  )
+  expect_equal(
+    zigzag_legacy$rmse,
+    sqrt(zigzag_legacy$rss / zigzag_legacy$df_r_unadj),
+    tolerance = 1e-12
+  )
+  expect_true(is.finite(zigzag_legacy$F_stat))
+  expect_true(is.finite(zigzag_legacy$r2_a))
+  expect_true(is.finite(zigzag_legacy$r2_a_within))
+
+  grouped <- xhdfe_fit(
+    c(-1, -1, 1, 1), matrix(c(-1, -1, 1, 1), ncol = 1,
+                             dimnames = list(NULL, "x")),
+    fes = list(constant_fe = rep(1L, 4L), individual = c(1L, 2L, 2L, 3L)),
+    group = c(1L, 1L, 2L, 2L), individual = c(1L, 2L, 2L, 3L),
+    aggregation = "sum", drop_singletons = FALSE,
+    absorption_method = "gauss-seidel", stats_style = "reghdfe", threads = 1L
+  )
+  expect_equal(grouped$df_r, -2)
+  expect_lt(grouped$df_r_unadj - grouped$df_a_nested, 0)
+  expect_true(is.na(grouped$sigma2))
+  expect_true(is.na(grouped$rmse))
+  expect_equal(grouped$r2_a, 1)
+  expect_equal(grouped$r2_a_within, 1)
 })

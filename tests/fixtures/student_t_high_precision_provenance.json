@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "generator": {
+    "path": "tests/fixtures/generate_student_t_high_precision.cpp",
+    "sha256": "74e6bb5e552f8b8992a874abfd73095ea710c620efca055275855531110c77d9"
+  },
+  "fixture": {
+    "path": "tests/fixtures/student_t_high_precision_fixtures.txt",
+    "sha256": "88aff4e24952e036adc4d0347ceeb6b6de646be0ee969b479e7be09dd6ff9202"
+  },
+  "subnormal_generator": {
+    "path": "tests/fixtures/generate_student_t_subnormal_high_precision.cpp",
+    "sha256": "af768fe818598566705763b36c4cefea00f842097036c406381e7bb958755663"
+  },
+  "subnormal_fixture": {
+    "path": "tests/fixtures/student_t_subnormal_high_precision_fixtures.txt",
+    "sha256": "bbf646b4fda4475bbbfa0d546ca47cb1071420c28dc7ff362d808b72b80b9163"
+  },
+  "arithmetic": {
+    "implementation": "Boost.Math students_t_distribution with cpp_dec_float_100",
+    "decimal_digits": 100,
+    "boost_version": "1_75",
+    "boost_version_header": "/usr/include/boost/version.hpp",
+    "boost_version_header_sha256": "df8dda39f54411c1c1e6e19a5ddd9e64a2b667220f44a553c7cf5b2accbaab77",
+    "students_t_header": "/usr/include/boost/math/distributions/students_t.hpp",
+    "students_t_header_sha256": "5b4efe4757eface09009285670bd0db5d0b555f33188135a33a431afd4585944"
+  },
+  "compiler": {
+    "path": "/usr/bin/g++",
+    "sha256": "e82e1d0c22315f632cb185ff62ea270b159315b398dc5fedc6bbc908590adf43"
+  },
+  "command": "g++ -O2 -std=c++17 tests/fixtures/generate_student_t_high_precision.cpp -o GENERATOR && GENERATOR",
+  "postcondition": "Every emitted achieved_probability / target ratio was 1 to the displayed 90 decimal digits."
+}

@@ -556,6 +556,7 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.drop_singletons = parse_bool(args.get_required("drop_singletons"), "drop_singletons");
         opts.symmetric_sweep = parse_bool(args.get_required("symmetric_sweep"), "symmetric_sweep");
         opts.absorption_method = parse_absorption_method(args.get_required("absorption_method"));
+        opts.ordinary_krylov_parity_floor = true;
         opts.jacobi_relaxation = parse_double(args.get_required("jacobi_relaxation"), "jacobi_relaxation");
         opts.save_groupvar = store_groupvar;
         opts.retain_fixed_effects = false;

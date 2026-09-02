@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "package_version": "2.26.0.20260902",
+  "generated_date": "2026-09-02",
+  "python": "/home/mangelo/miniconda3/bin/python3.12",
+  "python_module_sha256": "ca95b512fa79519ecd3e3a5fc77f433cf4ce125ff9e7fcc057b7bf98adcc4363",
+  "data_generator_sha256": "017d0d4f61e15f341b02573f3e5ec8ff96bef9308c5329f97c417ce77873ea94",
+  "data_definition_sha256": "ec4955169ea104a678bc918901eb3c57ab4eb14c8ea121431be35e81cab0fb8b",
+  "fixture_generator_sha256": "2729c88bc98f257555051d07d67291e1700056911da4fb9c6914a0a139c5e559",
+  "fixture_sha256": "ff114e1ccc89b1128c617d05b2b6e2a918709c7dcb03f1c744ae493a85d6e319",
+  "spec_count": 24,
+  "reason": "Refresh R-Python parity against the final 2.26.0.20260902 CPU module after the bounded Auto retry and grouped LSMR precision floor; the previous fixture remains immutable historical evidence."
+}

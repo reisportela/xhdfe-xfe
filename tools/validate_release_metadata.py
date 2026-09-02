@@ -140,6 +140,17 @@ def validate(expected_version: str) -> None:
             "README.md is missing the required Fischer-Schroder credit: "
             + required_credit,
         )
+    readme_normalized = re.sub(r"\s+", " ", readme)
+    for required_credit in (
+        "We are especially grateful to Marta Silva",
+        "scrutinized numerical precision and the accuracy of the estimates",
+        "group()` / `individual()` models",
+    ):
+        _require(
+            required_credit in readme_normalized,
+            "README.md is missing the required Marta Silva credit: "
+            + required_credit,
+        )
     _require(
         "if(APPLE OR WIN32)" in _read("CMakeLists.txt"),
         "CMakeLists.txt must disable native CPU tuning by default on Windows",
@@ -157,8 +168,8 @@ def validate(expected_version: str) -> None:
         "stata/xhdfe.pkg version is not aligned",
     )
     _require(
-        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.12.0",
-        "stata/xfepout.pkg must remain at version 1.12.0",
+        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.13.0",
+        "stata/xfepout.pkg must record version 1.13.0",
     )
     for retired in (
         "stata/xfe.ado",

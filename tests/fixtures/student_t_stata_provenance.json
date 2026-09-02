@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-30",
+  "stata": {
+    "version": "19.5",
+    "flavor": "IC",
+    "os": "Unix",
+    "machine": "PC (64-bit x86-64)",
+    "executable": "/usr/local/stata/stata-mp",
+    "executable_sha256": "081ca1dba78dc05cee059c30c308bc9b13753d8eaaf2c3a8959abff82c804001"
+  },
+  "reproduction": {
+    "command": "stata-mp -q -b do tests/fixtures/student_t_stata_provenance.do",
+    "do_file": "tests/fixtures/student_t_stata_provenance.do",
+    "do_sha256": "e81cf446840adce1b6a69f4c8e6491fbef4395c2b84fb577511ceb29f2cbc508",
+    "log_file": "tests/fixtures/student_t_stata_provenance_log.txt",
+    "log_sha256": "52fcc36d2d2480462123e0478b9f0e6265468f53c43385a9c9cc3748de54321e"
+  },
+  "fixture_table": {
+    "path": "tests/fixtures/student_t_stata_fixtures.txt",
+    "sha256": "26978615213ad826c1d0644f1577a02c3b9f7c8ec1955a19096ba35708c703ec"
+  },
+  "notes": [
+    "The log contains no license serial, username, token, or credential.",
+    "Stata reports invttail(1,1e-300) as missing; the C++ extreme-tail test separately requires a mathematically representable Cauchy result and fail-closed behavior once the binary64 quantile is not representable."
+  ]
+}

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.25.1.20260827 LANGUAGES CXX)
+project(xhdfe VERSION 2.26.0.20260902 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -295,6 +295,50 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME xhdfe_fail_closed_entrypoints
              COMMAND $<TARGET_FILE:xhdfe_fail_closed_entrypoints>)
+
+    add_executable(xhdfe_student_t_precision
+                   tests/student_t_precision.cpp)
+    target_include_directories(xhdfe_student_t_precision PRIVATE include)
+    target_link_libraries(xhdfe_student_t_precision PRIVATE Eigen3::Eigen)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        xhdfe_enable_native_tuning(xhdfe_student_t_precision)
+        target_compile_options(xhdfe_student_t_precision PRIVATE
+            -O3
+            -ffast-math
+            -fno-finite-math-only
+            -funroll-loops
+            -ftree-vectorize
+            -fomit-frame-pointer
+            -fno-signed-zeros
+            -fno-trapping-math
+            -fassociative-math
+            -freciprocal-math)
+    endif()
+    add_test(NAME xhdfe_student_t_precision
+             COMMAND $<TARGET_FILE:xhdfe_student_t_precision>)
+
+    if(NOT CMAKE_CROSSCOMPILING)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(Python3_Interpreter_FOUND)
+            if(XHDFE_BUILD_PYTHON)
+                add_test(
+                    NAME xhdfe_public_inference_subnormal
+                    COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_public_inference_subnormal.py
+                            --module-dir $<TARGET_FILE_DIR:py_hdfe_v11>)
+                set_tests_properties(xhdfe_public_inference_subnormal PROPERTIES
+                    ENVIRONMENT "XHDFE_GPU_BACKEND=cpu")
+            endif()
+            add_test(
+                NAME xhdfe_student_t_precision_python
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_student_t_precision.py
+                        --executable $<TARGET_FILE:xhdfe_student_t_precision>
+                        --fixtures ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_stata_fixtures.txt
+                        --provenance ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_stata_provenance.json
+                        --high-precision-provenance ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_high_precision_provenance.json)
+        endif()
+    endif()
 endif()
 
 # Python bindings

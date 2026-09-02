@@ -41,7 +41,9 @@ An object of class \code{xhdfe_demean}: a list with
   filtering and, when \code{drop_singletons = TRUE}, singleton dropping),
   \code{num_singletons}, \code{fe_labels}, \code{fe_num_levels},
   \code{iterations}, \code{converged}, \code{abs_residual},
-  \code{abs_residual_rel}, \code{precision_certified},
+  \code{abs_residual_rel}, \code{krylov_internal_tolerance},
+  \code{krylov_max_final_backward_error}, \code{krylov_max_condition},
+  \code{krylov_max_condition_times_backward_error}, \code{precision_certified},
   \code{absorption_method_used}, \code{schwarz_used}, \code{mlsmr_used},
   \code{gpu_used} and \code{threads_used}.  The relative certificate is
   the maximum \eqn{\|D'W\widetilde v\|_2 /

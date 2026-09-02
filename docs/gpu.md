@@ -6,9 +6,9 @@ you from a bare machine to a verified GPU run in whichever language you use.
 
 Key facts, true for all three versions:
 
-- The GPU is **optional and opt-in per call**. CPU is the reference backend and
-  defines the numbers; the GPU produces the same results, only faster on large
-  problems.
+- The GPU is **optional and opt-in per call**. CPU is the numerical reference.
+  GPU-use diagnostics prove execution, but do not by themselves prove numerical
+  equivalence on every graph.
 - The online Stata net-install and ordinary Python/R installations are
   CPU-only. Certified releases may publish separate Linux CUDA fatbin plugins,
   but a machine-specific CUDA build still requires the source and NVIDIA
@@ -17,6 +17,20 @@ Key facts, true for all three versions:
 - The three steps are the same everywhere: **(1)** install/build with CUDA for
   your GPU, **(2)** request the GPU on a call, **(3)** verify it was actually
   used.
+
+## Version 2.26.0 certification boundary
+
+The exact Linux H100 `sm_90` comparable-mode campaign accepted 13 of 24
+core24-quick surfaces. The difficult Marta `group()`/`individual()` surface
+passed strictly. Eleven poorly connected ordinary two- or three-way FE graphs
+did not satisfy the complete contract, and some also failed coefficient or
+standard-error gates; the internal `1e-10` diagnostic retry reduced but did not
+eliminate the error. Therefore, use CPU for any fully certified result on a
+difficult ordinary graph, including coefficients, inference, residuals,
+recovered fixed effects, FE-inclusive predictions, and FE-based decompositions.
+The exact failed datasets and measured errors are recorded in the
+2.26.0 release notes. CUDA binaries remain available for testing and for the
+surfaces that passed, but are not described as universally certified.
 
 ## Requirements
 
@@ -116,8 +130,9 @@ For an explicit target, set `XHDFE_CUDA_ARCH=90`.
 
 ## Step 4 — verify the GPU was actually used
 
-The CPU and GPU produce identical numbers, so a silent CPU run is easy to miss.
-**Always confirm** with the status fields.
+CPU and GPU may be extremely close on supported surfaces, so a silent CPU run
+is easy to miss. **Always confirm execution** with the status fields, and apply
+the certification boundary above separately.
 
 Stata:
 

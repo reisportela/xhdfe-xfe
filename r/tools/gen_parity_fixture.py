@@ -3,7 +3,7 @@
 
 Reads the binary dataset exported by gen_parity_data.R, runs the canonical
 spec battery through the reference Python module (build/py_hdfe_v11), and
-writes tests/testthat/fixtures/parity_reference.json.
+writes tests/testthat/fixtures/parity_reference_current.json.
 
 Usage:
   python3 r/tools/gen_parity_fixture.py <datadir> <build_dir> <out_json>
@@ -17,7 +17,7 @@ import numpy as np
 DATADIR = Path(sys.argv[1] if len(sys.argv) > 1 else "r/tools/parity_work")
 BUILD = Path(sys.argv[2] if len(sys.argv) > 2 else "build")
 OUT = Path(sys.argv[3] if len(sys.argv) > 3 else
-           "r/xhdfe/tests/testthat/fixtures/parity_reference.json")
+           "r/xhdfe/tests/testthat/fixtures/parity_reference_current.json")
 
 sys.path.insert(0, str(BUILD))
 import py_hdfe_v11  # noqa: E402

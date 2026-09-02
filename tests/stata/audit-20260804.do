@@ -44,11 +44,14 @@ xhdfe y x1 x2, absorb(chain1 chain2) keepsingletons numthreads(1) ///
 assert e(converged) == 1
 assert e(precision_certified) == 1
 
+tempfile uncertified_profile
 xhdfe y x1 x2, absorb(chain1 chain2) keepsingletons numthreads(1) ///
     tolerance(1e-8) tolerancemode(reghdfe-comparable) ///
-    absorptionmethod(gauss-seidel)
+    absorptionmethod(gauss-seidel) mobfile(`"`uncertified_profile'"')
 assert e(converged) == 1
 assert e(precision_certified) == 0
 assert e(absorption_method_used) == 1
+capture confirm file `"`uncertified_profile'"'
+assert _rc == 601
 
 display as result "PASS: Stata audit 20260804 remediation contracts"
