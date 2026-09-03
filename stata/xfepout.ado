@@ -1,4 +1,4 @@
-*! version 1.12.0 27aug2026
+*! version 1.13.0 03sep2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfepout, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.12.0 27aug2026"
+        local version "1.13.0 03sep2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -20,6 +20,10 @@ program define xfepout, eclass sortpreserve
         if ("`e(cmd)'" != "xfepout") error 301
         exit
     }
+
+    // Clear before syntax and plugin discovery so every failed new attempt
+    // leaves no previous estimation result behind. Replay/version stay above.
+    ereturn clear
 
     local __xfe_profile_env : environment XHDFE_PROFILE_CPU
     local __xfe_profile 0
@@ -68,6 +72,32 @@ program define xfepout, eclass sortpreserve
     local optline : subinstr local optline " maxiterations(" " maxiter(", all
     local optline : subinstr local optline ",maxiterations(" ", maxiter(", all
     local optline : subinstr local optline ", maxiterations(" ", maxiter(", all
+    // Normalize long cache/profile aliases before syntax. Duplicate canonical
+    // and alias spellings then fail naturally as repeated options.
+    local optline : subinstr local optline ",absorptioncachemode(" ", abscachemode(", all
+    local optline : subinstr local optline ", absorptioncachemode(" ", abscachemode(", all
+    local optline : subinstr local optline " absorptioncachemode(" " abscachemode(", all
+    local optline : subinstr local optline ",abscachefile(" ", absorptioncache(", all
+    local optline : subinstr local optline ", abscachefile(" ", absorptioncache(", all
+    local optline : subinstr local optline " abscachefile(" " absorptioncache(", all
+    local optline : subinstr local optline ",mobilityprofilefile(" ", mobfile(", all
+    local optline : subinstr local optline ", mobilityprofilefile(" ", mobfile(", all
+    local optline : subinstr local optline " mobilityprofilefile(" " mobfile(", all
+    local optline : subinstr local optline ",mobilityfile(" ", mobfile(", all
+    local optline : subinstr local optline ", mobilityfile(" ", mobfile(", all
+    local optline : subinstr local optline " mobilityfile(" " mobfile(", all
+    local optline : subinstr local optline ",festructurecachefile(" ", fescache(", all
+    local optline : subinstr local optline ", festructurecachefile(" ", fescache(", all
+    local optline : subinstr local optline " festructurecachefile(" " fescache(", all
+    local optline : subinstr local optline ",festructurecache(" ", fescache(", all
+    local optline : subinstr local optline ", festructurecache(" ", fescache(", all
+    local optline : subinstr local optline " festructurecache(" " fescache(", all
+    local optline : subinstr local optline ",fescachemode(" ", fecachemode(", all
+    local optline : subinstr local optline ", fescachemode(" ", fecachemode(", all
+    local optline : subinstr local optline " fescachemode(" " fecachemode(", all
+    local optline : subinstr local optline ",festructurecachemode(" ", fecachemode(", all
+    local optline : subinstr local optline ", festructurecachemode(" ", fecachemode(", all
+    local optline : subinstr local optline " festructurecachemode(" " fecachemode(", all
     local 0 `"`optline'"'
 
     syntax varlist(min=1 numeric) [if] [in] [aw fw pw iw], ///
@@ -100,7 +130,7 @@ program define xfepout, eclass sortpreserve
         KEEPsingletons ///
         DOFAdjustments(string asis) ///
         GROUPVAR(name) ///
-        MOBilityProfile ///
+        MOBILITYPROFile ///
         MOBfile(string) ///
         ABSORPTIONCache(string) ///
         ABSCACHEMode(string) ///
@@ -297,6 +327,12 @@ program define xfepout, eclass sortpreserve
             di as err "absorptioncache path cannot contain ';'"
             exit 198
         }
+    }
+    if ("`absorption_cache_mode'" != "" & ///
+        "`absorption_cache_mode'" != "off" & ///
+        "`absorption_cache'" == "" & "`mobility_profile'" == "") {
+        di as err "abscachemode() requires absorptioncache()/abscachefile() or mobfile()/mobilityfile()/mobilityprofilefile()"
+        exit 198
     }
 
     // Fixed-effect structure cache (same semantics as xhdfe).
@@ -854,9 +890,6 @@ program define xfepout, eclass sortpreserve
     }
     global XFEPOUT_PLUGIN_PATH_INTERNAL "`plugin_path'"
 
-    // Clear previous results.
-    ereturn clear
-
     if (`__xfe_profile') {
         timer off 99
         quietly timer list 99
@@ -1035,7 +1068,7 @@ program define xfepout, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.12.0 27aug2026"
+    ereturn local version "1.13.0 03sep2026"
     ereturn local cmd "xfepout"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {

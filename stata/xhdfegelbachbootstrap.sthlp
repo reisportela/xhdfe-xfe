@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.0  27aug2026}{...}
+{* *! version 1.0.0  03sep2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachetable" "help xhdfegelbachetable"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachbootstrap} {hline 2}}Full-refit pairs bootstrap for Gelbach coefficient-movement accounting{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.0 (27aug2026), distributed with xhdfegelbach 1.6.0.}{p_end}
+{pstd}{bf:Version 1.0.0 (03sep2026), distributed with xhdfegelbach 1.6.0.}{p_end}
 
 
 {title:Syntax}
@@ -138,10 +138,14 @@ point covariance contract {cmd:r(cov)}, {cmd:r(total_cov)},
 
 {title:Examples}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ age) focal(educ) x2groups("human = ability : job = tenure exper") commonfes(year) fes(firm) method(pairs) reps(499) seed(42)}{p_end}
+{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ age) focal(educ)}
+{cmd:x2groups("human = ability : job = tenure exper") commonfes(year)}
+{cmd:fes(firm) method(pairs) reps(499) seed(42)}{p_end}
 {phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown) saving(gelbach.md) replace}{p_end}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ) x2groups("job = tenure exper") fes(firm) method(cluster_pairs) bootcluster(worker) reps(499) seed(42) bootci(basic)}{p_end}
+{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ)}
+{cmd:x2groups("job = tenure exper") fes(firm) method(cluster_pairs)}
+{cmd:bootcluster(worker) reps(499) seed(42) bootci(basic)}{p_end}
 {phang2}{cmd:. matrix list r(bootstrap_ledger)}{p_end}
 
 

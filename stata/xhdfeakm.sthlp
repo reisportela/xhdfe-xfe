@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.8.0  27aug2026}{...}
+{* *! version 1.8.0  03sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -296,7 +296,9 @@ overwrites existing such variables.
 {synopt:{cmd:r(thread_limit_code)} {cmd:r(thread_limit_reason)}}capacity/availability limit diagnostics{p_end}
 {synopt:{cmd:r(fwl_threads_effective)}}FWL phase budget (0 without controls){p_end}
 {synopt:{cmd:r(fwl_threads_used)} {cmd:r(fwl_parallel_workers_active)}}observed FWL team/workers (0 without controls){p_end}
-{synopt:{cmd:r(fwl_iterations)} {cmd:r(fwl_abs_residual_rel)} {cmd:r(fwl_precision_certified)}}accepted FWL iterations and independent precision certificate{p_end}
+{synopt:{cmd:r(fwl_iterations)} {cmd:r(fwl_abs_residual_rel)} {cmd:r(fwl_precision_certified)}}
+accepted FWL iterations and independent
+precision certificate{p_end}
 {synopt:{cmd:r(fwl_gpu_attempted)} {cmd:r(fwl_gpu_used)} {cmd:r(fwl_gpu_fallback)}}FWL CUDA diagnostics; all are 0 under the current CPU-reference policy{p_end}
 {synopt:{cmd:r(fwl_gpu_status_code)} {cmd:r(fwl_gpu_status)}}FWL backend status; code 8 is the certified CPU-reference policy{p_end}
 {synopt:{cmd:r(solver_threads_effective)}}two-way solver phase budget{p_end}

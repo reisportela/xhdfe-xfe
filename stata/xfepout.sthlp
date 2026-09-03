@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.12.0 27aug2026}{...}
+{* *! version 1.13.0 03sep2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -14,7 +14,8 @@
 {p2col :{cmd:xfepout} {hline 2}}Partial-out variables with respect to multiple levels of fixed effects via the xhdfe C++ absorption core{p_end}
 {p2colreset}{...}
 
-{pstd}{cmd:xfepout} is a separate package from {cmd:xhdfe} and ships its own plugin binary ({cmd:xfepout.plugin}). It is a partialling-out command (no coefficient table).{p_end}
+{pstd}{cmd:xfepout} is a separate package from {cmd:xhdfe} and ships its own plugin binary
+({cmd:xfepout.plugin}). It is a partialling-out command (no coefficient table).{p_end}
 
 {marker development}{...}
 {title:Development process}
@@ -116,7 +117,11 @@ adjustments in {cmd:e(df_a)}. {cmd:xfepout} does not estimate clustered standard
 {cmd:cl()} and {cmd:cluster()} are accepted as aliases.{p_end}
 
 {dlgtab:Optimization}
-{phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)). Since version 1.9.0 the absorber stops when one full sweep moves the working data by less than this value in relative norm (reghdfe-comparable semantics, matching the default tolerancemode used by {cmd:xhdfe}).{p_end}
+{marker opt_tolerance}{...}
+{phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)).
+Since version 1.9.0 the absorber stops when one full sweep moves the working data
+by less than this value in relative norm (reghdfe-comparable semantics, matching
+the default tolerancemode used by {cmd:xhdfe}).{p_end}
 {phang}{opt maxiter(#)} maximum absorption iterations (default 100000).{p_end}
 {phang}{opt transform(str)} accept hdfe-style transform names: {it:kac}, {it:cim}, {it:sym}. {it:sym}
 turns on symmetric sweeps; {it:kac} and {it:cim} only steer method choice when
@@ -173,11 +178,29 @@ when the plugin binary itself has not changed; for example, rerunning {cmd:xfepo
 on CPU and then with {cmd:gpubackend(cuda)} now reuses the same loaded plugin correctly.{p_end}
 
 {dlgtab:Cache and Profile}
-{phang}{opt mobilityprofile} write/update mobility profile at default path {cmd:xfepout_mobility_profile.txt}.{p_end}
-{phang}{opt mobfile(path)} mobility profile path; enables profile auto mode at that path.{p_end}
-{phang}{opt absorptioncache(path)} path for absorption cache payload.{p_end}
+{phang}{opt mobilityprofile} write/update a mobility profile at the path supplied by
+{cmd:mobfile()} or, if no path is supplied, at {cmd:xfepout_mobility_profile.txt}.{p_end}
+{phang}{opt mobfile(path)} mobility profile path; enables profile auto mode at that path.
+{cmd:mobilityfile()} and {cmd:mobilityprofilefile()} are accepted as aliases.{p_end}
+{pmore}Version-2 profiles have explicit {cmd:standard} scope and FE-structure signatures. They are
+method-selection hints, not transformed-data caches: the applicable signature and scope must match before
+reuse. Legacy version-1 files and mismatches are safe misses. A suggested method is retained only
+after convergence and independent precision certification; otherwise automatic selection restarts
+from the original data. CPU-only method hints are not forced on CUDA runs, and profiles are written
+only after convergence and certification.{p_end}
+{phang}{opt absorptioncache(path)} path for the generation-4 absorption cache payload.
+{cmd:abscachefile()} is accepted as an alias.{p_end}
 {phang}{opt abscachemode(mode)} absorption cache mode: {it:off}, {it:auto}, {it:read}, {it:write}.
 {cmd:absorptioncachemode()} is accepted as an alias.{p_end}
+{pmore}{it:read}, {it:write}, and {it:auto} require either an explicit
+{cmd:absorptioncache()}/{cmd:abscachefile()} path or a mobility profile path supplied by
+{cmd:mobfile()} or one of its aliases. Pathless {cmd:abscachemode(off)} is allowed.{p_end}
+{pmore}Cache identity covers the retained outcome, transformed-variable matrix, FE structure,
+weights, solver contract, requested tolerance/method/thread configuration, and CPU/CUDA request.
+Old cache magic, signature or dimension mismatch, truncation, corruption, nonfinite payloads, and
+trailing bytes are safe misses. {it:auto} repairs a miss only after a newly computed result converges
+and passes the independent precision certificate; {it:read} never rewrites. CPU cache material is
+never returned for an explicit CUDA request.{p_end}
 {phang}{opt fescache(path)} path for FE-structure cache payload.{p_end}
 {phang}{opt festructurecache} use default FE-structure cache path relative to {cmd:xfepout.ado}.
 {cmd:festructurecache()} and {cmd:festructurecachefile()} are accepted as aliases for
@@ -189,7 +212,8 @@ on CPU and then with {cmd:gpubackend(cuda)} now reuses the same loaded plugin co
 {phang}{opt dofadjustments(list)} reghdfe-style DoF adjustments (tokens include {it:all},
 {it:none}, {it:firstpair}/{it:first}, {it:pairwise}/{it:pair}, {it:clusters}/{it:cluster},
 {it:continuous}/{it:cont}). {cmd:dof()} is accepted as an alias.{p_end}
-{phang}{opt groupvar(newvar)} save the first mobility-group id (connected component; 1-based) as a new variable when the backend computes the relevant mobility structure.{p_end}
+{phang}{opt groupvar(newvar)} save the first mobility-group id (connected component;
+1-based) as a new variable when the backend computes the relevant mobility structure.{p_end}
 
 {dlgtab:Compatibility}
 {phang}{opt maxiterations(#)} alias for {opt maxiter(#)}.{p_end}
@@ -243,7 +267,9 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(absorption_method)}}resolved sweep-method label; inspect {cmd:e(method_used)} for the full method enum{p_end}
 {synopt:{cmd:e(gpu_backend_requested)}}requested backend from {opt gpubackend()}, when provided{p_end}
 {synopt:{cmd:e(gpu_backend)}}effective backend ({cmd:cpu}, {cmd:cuda}, or {cmd:metal}) when the command completed successfully{p_end}
-{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used}, {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged}, {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
+{cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
+{cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
 {synopt:{cmd:e(version)}}xfepout version string{p_end}
 {synopt:{cmd:e(cmd)}}{cmd:xfepout}{p_end}
 {synopt:{cmd:e(cmdline)}}command line used to invoke xfepout{p_end}

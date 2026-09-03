@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.25.1 27aug2026}{...}
+{* *! version 2.26.2 03sep2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -98,10 +98,12 @@
 {synopt : }{bf:- note:} the {cmd:individual()} option requires {cmd:group()}{p_end}
 {synopt : }{bf:- note:} {cmd:individual()} is appended to {cmd:absorb()} if not already listed{p_end}
 {synopt : }{bf:- alias:} {cmd:i(}{it:indvar}{cmd:)} is accepted as a shorthand for {cmd:individual(}{it:indvar}{cmd:)}{p_end}
-{synopt : {opth ag:gregation(xhdfe##opt_aggregation:str)}}aggregation for individual FEs within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases for mean{p_end}
+{synopt : {opth ag:gregation(xhdfe##opt_aggregation:str)}}aggregation for individual FEs
+within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases for mean{p_end}
 
 {syntab:Model {help xhdfe##opt_model:[+]}}
-{synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be {opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {help fvvarlist} (multiway){p_end}
+{synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be
+{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {help fvvarlist} (multiway){p_end}
 {synopt : {opt r:obust}}equivalent to {cmd:vce(robust)}{p_end}
 {synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)}; multiway clustering allowed; supports two-way interactions with {cmd:#}/{cmd:##}{p_end}
 {synopt : {opth res:iduals(newvar)}}save regression residuals{p_end}
@@ -121,8 +123,12 @@
 
 {syntab:Optimization {help xhdfe##opt_optimization:[+]}}
 {synopt :{opt tol:erance(#)}}convergence tolerance (default 1e-8){p_end}
-{synopt :{opt tolerancemode(str)}}absorber convergence mode: {it:reghdfe-comparable} (default since 2.7.0), {it:xhdfe-fast} (pre-2.7.0 fast trigger), or {it:strict-residual}{p_end}
-{synopt :{opt convergence(str)}}stopping criterion for heterogeneous-slope absorption ({cmd:absorb(fe#c.x)}): {it:auto} (default; follows {cmd:tolerancemode()}), {it:normchange}, {it:reghdfe}, or {it:both}{p_end}
+{synopt :{opt tolerancemode(str)}}absorber convergence mode:
+{it:reghdfe-comparable} (default since 2.7.0), {it:xhdfe-fast} (pre-2.7.0 fast trigger),
+or {it:strict-residual}{p_end}
+{synopt :{opt convergence(str)}}stopping criterion for heterogeneous-slope absorption
+({cmd:absorb(fe#c.x)}): {it:auto} (default; follows {cmd:tolerancemode()}),
+{it:normchange}, {it:reghdfe}, or {it:both}{p_end}
 {synopt :{opt fetol:erance(#)}}fixed-effect recovery tolerance for {cmd:savefe}/{cmd:savefes} MAP fallback (default 1e-6){p_end}
 {synopt :{opt ferecoverym:ethod(str)}}fixed-effect recovery method: {it:hybrid} (default) or {it:map}{p_end}
 {synopt :{opt maxit:er(#)}}maximum absorber iterations (default 100000){p_end}
@@ -183,7 +189,8 @@
 {synopt :{opth absorptioncache(filename)}}read or save an explicit absorption cache file{p_end}
 {synopt :{opt absorptioncachemode(str)}}absorption cache mode: off, auto, read, write{p_end}
 {synopt :{opt festructurecache}}build/reuse a fixed-effect structure cache in the {cmd:xhdfe.ado} directory{p_end}
-{synopt :{opth fescache(filename)}}read or save a fixed-effect structure cache file at an explicit path (aliases: {cmd:festructurecache()}, {cmd:festructurecachefile()}){p_end}
+{synopt :{opth fescache(filename)}}read or save a fixed-effect structure cache file
+at an explicit path (aliases: {cmd:festructurecache()}, {cmd:festructurecachefile()}){p_end}
 {synopt :{opt fescachemode(str)}}fixed-effect structure cache mode: off, auto, read, write{p_end}
 {synopt : }{bf:- note:} when a profile file exists and matches the data, xhdfe auto-loads it to guide absorber ordering{p_end}
 {synopt : }{bf:- note:} FE structure caches speed up repeated runs with the same {cmd:absorb()} structure; use {cmd:fescache()} for a fixed path{p_end}
@@ -251,6 +258,16 @@ absorption result, or returns a CPU cache/profile result, xhdfe exits with error
 CPU results. Rebuild the plugin with CUDA support for the intended architecture and ensure the requested backend is
 available at runtime. If the plugin was rebuilt or switched during the current Stata session, run {cmd:discard}
 (with no arguments) before rerunning the command.
+
+{phang}
+{bf:Version 2.26.2 certification boundary.} {cmd:e(gpu_used)} proves execution on the GPU; it is not by itself a
+certificate of numerical equivalence. The exact H100 {cmd:sm_90} comparable-mode campaign accepted 13 of 24
+core24-quick surfaces, including the Marta {cmd:group()}/{cmd:individual()} case strictly. Eleven difficult ordinary
+two- or three-way FE graphs did not meet the full contract; some also failed coefficient or standard-error gates.
+Until a GPU-native Krylov finish is available, use {cmd:gpubackend(cpu)} for any fully certified result on a hard,
+poorly connected ordinary graph, including coefficients, inference, residuals, recovered FEs,
+{cmd:predict, d}/{cmd:xbd}, and FE-based decompositions. The CUDA path remains opt-in and never hides this limitation with a CPU fallback;
+the exact failed surfaces and measurements are listed in the 2.26.2 release notes.
 
 {phang}
 Practical rule: after rebuilding {cmd:xhdfe.plugin}, after switching between CPU and CUDA plugin binaries, or after
@@ -567,15 +584,31 @@ two absorbed FEs and {cmd:dofadjustments(all/firstpair/pairwise)}.
 {cmd:tolerancemode(reghdfe-comparable)} is the default since version 2.7.0: the accelerated absorber
 stops when one full sweep moves the working data by less than {cmd:tolerance()} in relative norm —
 the same meaning {helpb reghdfe} attaches to its tolerance — so coefficients match reghdfe at the
-same nominal tolerance (down to the conditioning of the problem). Non-accelerated solver paths use a
-calibrated absorber tolerance of {cmd:min(tolerance(),1e-9)}.
+same nominal tolerance (down to the conditioning of the problem). Ordinary no-slope LSMR/MLSMR
+paths use {cmd:min(effective tolerance,1e-11)} in comparable and strict-residual modes; requested
+tolerances already at or below {cmd:1e-11} are unchanged. MAP/sweep, fast, CUDA,
+group()/individual(), heterogeneous-slope, and savefe semantics are unchanged.
 {cmd:tolerancemode(xhdfe-fast)} restores the pre-2.7.0 stopping rule: typically ~1.5-3x fewer
 absorber iterations, with an effective precision that is data-dependent and can be looser than the
 nominal tolerance on ill-conditioned (e.g. sparse bipartite) designs — appropriate for exploration
 and for speed benchmarking (state the mode when citing timings).
+For combined {cmd:group()}/{cmd:individual()} CUDA fits, xhdfe nevertheless applies an internal
+{cmd:min(tolerance(),1e-12)} floor before certification; fast mode never authorizes the materially
+inaccurate early GS stop that this release fixes.
 {cmd:tolerancemode(strict-residual)} is a heavier audit mode: it treats the final absolute maximum
 group-mean residual check as authoritative, may use additional iterations up to {cmd:maxiter()}, and
 reports non-convergence if that check is not met. The mode used is returned in {cmd:e(tolerance_mode)}.
+When ordinary no-slope LSMR/MLSMR runs, {cmd:e(krylov_internal_tolerance)} records
+that internal value. {cmd:e(krylov_max_final_backward_error)},
+{cmd:e(krylov_max_condition)}, and
+{cmd:e(krylov_max_cond_backerr)} are deterministic maxima
+over the outcome/design right-hand sides; the condition value is the maximum
+running estimate observed by each solve before RHS aggregation. All four are
+zero on non-Krylov paths. A nonfinite/DBL_MAX diagnostic is returned as Stata
+missing rather than as a finite-looking extreme value.
+The separate Krylov-PCG path is not covered by this parity floor and continues
+to report zeros in these fields; adopting a PCG floor remains a future reviewed
+blocker, not a claim of this release candidate.
 
 {phang}
 Independently of the stopping mode, xhdfe verifies the returned within transform against the
@@ -586,10 +619,26 @@ normal equations. {cmd:e(abs_residual)} is the largest absolute
 corresponding original, pre-absorption right-hand side.
 {cmd:e(precision_certified)} is one when this explicit check is finite and no larger than the
 documented numerical certificate limit. These diagnostics are computed after CPU, GPU, and
-cache-backed absorption. In the combined {cmd:group()}/{cmd:individual()} path the explicit
-certificate is authoritative: additional full sweeps are counted in {cmd:e(iterations)}, and
-{cmd:e(converged)} is one only when {cmd:e(precision_certified)} is also one. Other absorption
-paths retain separate convergence and certificate diagnostics.
+cache-backed absorption. For ordinary heterogeneous slopes, the authoritative certificate is
+instead scale-invariant and undiluted: every ordinary-FE intercept and slope block is checked
+separately against every transformed {it:y}/{it:X} right-hand side. It records the maximum
+Frobenius-scaled, RMS diagonal-scaled, and worst-group moment in
+{cmd:e(slope_block_residual_rel)} and the component diagnostics listed below; the legacy
+{cmd:e(abs_residual_rel)} remains unchanged for compatibility. In the combined
+{cmd:group()}/{cmd:individual()} path the explicit
+certificate additionally checks the canonical preconditioned operator {cmd:A=W^(1/2) D C}, using
+weighted residuals, moments {cmd:C D' W r}, and a Frobenius norm over active normalized columns.
+Each right-hand side must pass either the consistent-system residual ratio
+{cmd:||W^(1/2)r||/||W^(1/2)b||} or the least-squares optimality ratio
+{cmd:||C D' W r||/(||A||_F ||W^(1/2)r||)}.
+The public residual diagnostics above retain their established scale for compatibility, while
+{cmd:e(precision_certified)} requires the canonical gate. Additional full sweeps are counted in
+{cmd:e(iterations)}, and {cmd:e(converged)} is one only when {cmd:e(precision_certified)} is also
+one. Heterogeneous-slope Auto/Auto-MLSMR requests whose first sweep solution misses the new gate
+restart from the original {it:y}/{it:X} with the same GS/SGS method at bounded tighter internal tolerances; the public requested
+{cmd:tolerance()} does not change, all iterations are cumulative, and exhaustion fails closed.
+Explicit {cmd:convergence()} choices keep their stopping rule and receive the honest certificate
+without adaptive continuation. Slope-free absorption is unchanged.
 
 {phang}
 When a fit stops with {cmd:e(precision_certified)} equal to zero, xhdfe now says so in the output
@@ -616,7 +665,9 @@ previous versions. It can cut runtime by an order of magnitude on such designs (
 (active when {cmd:absorb()} contains {cmd:fe#c.x} / {cmd:fe##c.x} terms; standard absorption follows
 {cmd:tolerancemode()}). {cmd:auto} (default) follows {cmd:tolerancemode()}: under
 {it:reghdfe-comparable} the slope absorber stops on the reghdfe-style update criterion at the nominal
-{cmd:tolerance()}, and under {it:xhdfe-fast} it uses the historical norm-change trigger.
+{cmd:tolerance()}, and under {it:xhdfe-fast} it uses the historical norm-change trigger. For Auto
+requests this trigger produces a candidate only: the independent per-block certificate governs
+acceptance and may add visible same-method continuation sweeps.
 {cmd:tolerancemode(strict-residual)} is not supported with heterogeneous slopes and exits with an
 error before estimation; use {cmd:tolerancemode(reghdfe-comparable)} or {cmd:tolerancemode(xhdfe-fast)}
 for those designs. Within supported tolerance modes, explicit values override the auto mapping:
@@ -639,7 +690,9 @@ forces recovery sweeps on the partial residual.
 
 {phang}
 {opt absorptionm:ethod(str)} sets the absorption method. Valid values (case-insensitive) are
-{cmd:auto}; {cmd:gauss-seidel}/{cmd:gauss_seidel}/{cmd:gs}; {cmd:symmetric}/{cmd:sym}/{cmd:symgs}/{cmd:symmetric-gauss-seidel}/{cmd:symmetric_gauss_seidel}; {cmd:jacobi};
+{cmd:auto}; {cmd:gauss-seidel/gauss_seidel/gs};
+{cmd:symmetric/sym/symgs/symmetric-gauss-seidel/symmetric_gauss_seidel};
+{cmd:jacobi};
 {cmd:mlsmr}/{cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive};
 {cmd:lsmr}/{cmd:plain-lsmr}/{cmd:plain_lsmr}; and
 {cmd:auto-mlsmr}/{cmd:auto_mlsmr}/{cmd:mlsmr-auto}/{cmd:mlsmr_auto}.
@@ -738,8 +791,23 @@ postestimation commands that rely on {cmd:e(sample)} may not be available afterw
 {phang}
 {opt mobilityprofile} computes mobility diagnostics (connected components, sweep order) once and
 saves a profile file to {cmd:xhdfe_mobility_profile.txt} in the current working directory.
-On later runs, if the file exists and the FE signature matches, xhdfe reuses it to guide
-absorber ordering (and may enable symmetric sweeps under {cmd:absorptionmethod(auto)}).
+Version-2 profiles record an explicit {cmd:standard} or {cmd:group_individual} scope. Standard
+profiles retain FE-structure signatures. For {cmd:group()} / {cmd:individual()} models, two
+domain-separated signatures must both match and cover the post-singleton
+standard FEs, group-individual incidence and aggregation scale, weights and frequency-weight
+semantics, RHS count, threads, tolerance, backend, and solver-selection flags. A profile is a
+method-selection hint, not a transformed-data cache, and may therefore be reused across outcomes
+only when the applicable signature contract and scope match. Legacy version-1 profiles and any
+scope/signature mismatch are safe misses.
+
+{phang}
+On a matching {cmd:group()} / {cmd:individual()} run, a profile never promotes Gauss-Seidel or
+symmetric Gauss-Seidel into {cmd:absorptionmethod(auto)}. CPU Auto remains joint LSMR and CUDA Auto
+remains the grouped GPU solver; explicitly requested GS/SGS methods remain available. Profile
+write/auto does not benchmark sweep methods. A profile is written only after the requested route
+converges and certifies; it suggests LSMR only after safe CPU LSMR and otherwise records Auto, so an
+explicit GS/SGS diagnostic run cannot promote that method later. A CPU-only LSMR suggestion is never
+forced when CUDA is selected.
 When {cmd:mobilityfile()} is set, xhdfe computes or reuses the mobility profile at that path. If an
 absorption cache is also enabled and its signature matches, xhdfe can skip the absorption step on
 later identical model specifications (the cache file can be large).
@@ -977,6 +1045,31 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {synopt:{cmd:e(converged)}}1 if converged, 0 otherwise{p_end}
 {synopt:{cmd:e(abs_residual)}}verified absolute normal-equation residual after absorption{p_end}
 {synopt:{cmd:e(abs_residual_rel)}}verified relative normal-equation residual after absorption{p_end}
+{synopt:{cmd:e(krylov_internal_tolerance)}}ordinary no-slope LSMR/MLSMR internal solve tolerance; zero otherwise{p_end}
+{synopt:{cmd:e(krylov_max_final_backward_error)}}maximum final Krylov test2/backward error across right-hand sides{p_end}
+{synopt:{cmd:e(krylov_max_condition)}}maximum running Krylov condition estimate across right-hand sides; missing if nonfinite/DBL_MAX{p_end}
+{synopt:{cmd:e(krylov_max_cond_backerr)}}maximum condition times backward error across right-hand sides{p_end}
+{synopt:{cmd:e(auto_retry_policy_enabled)}}1 when the bounded CPU Auto retry policy is enabled{p_end}
+{synopt:{cmd:e(auto_retry_eligible)}}1 when all retry eligibility gates passed{p_end}
+{synopt:{cmd:e(auto_retry_fired)}}1 when the one cold MLSMR retry ran{p_end}
+{synopt:{cmd:e(auto_retry_status_code)}}0 ineligible/disabled, 1 below trigger, 2 retry used, 3 retry failed and primary returned{p_end}
+{synopt:{cmd:e(auto_retry_status)}}{cmd:ineligible}, {cmd:below_trigger}, {cmd:used}, or {cmd:failed}{p_end}
+{synopt:{cmd:e(auto_retry_primary_method)}}primary concrete absorption-method code{p_end}
+{synopt:{cmd:e(auto_retry_primary_iterations)}}primary sweep iterations{p_end}
+{synopt:{cmd:e(auto_retry_primary_abs_res_rel)}}primary canonical certificate metric{p_end}
+{synopt:{cmd:e(auto_retry_iterations)}}cold MLSMR retry iterations{p_end}
+{synopt:{cmd:e(auto_retry_abs_res_rel)}}retry canonical certificate metric{p_end}
+{synopt:{cmd:e(auto_retry_elapsed_seconds)}}retry wall time in seconds{p_end}
+{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate{p_end}
+{synopt:{cmd:e(slope_block_frobenius_rel)}}heterogeneous slopes: maximum Frobenius-scaled block moment{p_end}
+{synopt:{cmd:e(slope_block_rms_rel)}}heterogeneous slopes: maximum RMS diagonal-scaled block moment{p_end}
+{synopt:{cmd:e(slope_block_max_rel)}}heterogeneous slopes: maximum worst-group block moment{p_end}
+{synopt:{cmd:e(slope_block_skipped_max_rel)}}heterogeneous slopes: maximum diagnostic cosine in a rank-skipped group{p_end}
+{synopt:{cmd:e(slope_certificate_worst_fe)}}0-based internal FE dimension attaining the slope gate; -1 if not applicable{p_end}
+{synopt:{cmd:e(slope_certificate_worst_moment)}}0 for plain/intercept, 1 for slope; -1 if not applicable{p_end}
+{synopt:{cmd:e(slope_accuracy_retry_stages)}}number of adaptive same-method slope continuation stages{p_end}
+{synopt:{cmd:e(slope_accuracy_retry_iterations)}}slope continuation iterations beyond the primary candidate{p_end}
+{synopt:{cmd:e(slope_internal_tolerance)}}last internal slope continuation tolerance; public {cmd:tolerance()} is unchanged{p_end}
 {synopt:{cmd:e(precision_certified)}}1 if the explicit residual check meets its numerical limit{p_end}
 {synopt:{cmd:e(fe_recovery_converged)}}(only with {cmd:savefe}/{cmd:savefes}) 1 if fixed-effect recovery converged, 0 otherwise{p_end}
 {synopt:{cmd:e(fe_recovery_iterations)}}(only with {cmd:savefe}/{cmd:savefes}) iterations used to recover the fixed effects{p_end}
@@ -995,7 +1088,9 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
-{synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto, 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR, 6 MLSMR, 7 auto-MLSMR{p_end}
+{synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto,
+1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR,
+6 MLSMR, 7 auto-MLSMR{p_end}
 {synopt:{cmd:e(N_clust)}}minimum number of clusters (if clustered){p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster dimensions{p_end}
 {synopt:{cmd:e(N_clust#)}}cluster counts by dimension{p_end}
@@ -1061,8 +1156,11 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(tolerance_mode)}}absorber tolerance mode used by the command{p_end}
 {synopt:{cmd:e(nowarn)}}posted when {cmd:nowarn} was specified{p_end}
 {synopt:{cmd:e(gpu_backend_requested)}}requested backend from {cmd:gpubackend()} or the {cmd:XHDFE_GPU_BACKEND} environment variable, when provided{p_end}
-{synopt:{cmd:e(gpu_backend)}}effective backend when {cmd:gpubackend()} is supplied, or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end}
-{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used}, {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged}, {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(gpu_backend)}}effective backend when {cmd:gpubackend()} is supplied,
+or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end}
+{synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
+{cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
+{cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
 {synoptline}
 
 {synoptset 24 tabbed}{...}
@@ -1100,8 +1198,12 @@ Website: {browse "https://www.tgstavares.com":https://www.tgstavares.com}{p_end}
 {marker support}{...}
 {title:Support and updates}
 
-{pstd}Released builds of {cmd:xhdfe} are installed via {cmd:net install} from the online Stata site published by {cmd:xhdfe-xfe}: {browse "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata":https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata}.{p_end}
-{pstd}For local development checkouts or unzipped release bundles, {cmd:net install} can also point at the local {cmd:stata/} folder that contains {cmd:stata.toc}, {cmd:xhdfe.pkg}, and the platform plugin.{p_end}
+{pstd}Released builds of {cmd:xhdfe} are installed via {cmd:net install} from the
+online Stata site published by {cmd:xhdfe-xfe}:
+{browse "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata"}.{p_end}
+{pstd}For local development checkouts or unzipped release bundles,
+{cmd:net install} can also point at the local {cmd:stata/} folder that contains
+{cmd:stata.toc}, {cmd:xhdfe.pkg}, and the platform plugin.{p_end}
 {pstd}For building the plugin or running validation tests, see the repository README.{p_end}
 
 
@@ -1125,7 +1227,8 @@ benchmarking, tolerances, and {cmd:reghdfe}-comparable validation. Nelson Areal 
 {it:Speeding Up Empirical Research: Tools and Techniques for Fast Computing}
 ({browse "https://github.com/BPLIM/Workshops/tree/master/BPLIM2025":BPLIM2025}), where we
 shared an earlier version of this proof of concept. We also
-thank Universidade do Minho, Banco de Portugal, and FCT - Portuguese Foundation for Science and Technology (UID/03182/2025) for financial support. All remaining errors are
+thank Universidade do Minho, Banco de Portugal, and FCT - Portuguese Foundation
+for Science and Technology (UID/03182/2025) for financial support. All remaining errors are
 ours. The usual disclaimer applies.{p_end}
 
 
@@ -1137,7 +1240,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.25.1.
+regression via a C++ backend." Version 2.26.2.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
