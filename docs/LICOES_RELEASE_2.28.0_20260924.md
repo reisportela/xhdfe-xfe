@@ -80,3 +80,10 @@ Dois testes R tinham expectativas anteriores às correcções auditadas:
 Os reprodutores conservaram os dados e o estimador. As duas baterias R
 afectadas passaram depois de corrigir as expectativas. As advertências sobre
 inferência AKM não identificada e graus de liberdade aproximados permanecem.
+
+O teste R histórico `audit-20260804.R` esperava ainda estimativas explicitamente
+não certificadas numa chamada a Gauss-Seidel. Passa a exigir a recusa informativa,
+sem alterar o solver. O caso positivo Auto é comparado com um oráculo independente:
+as 2000 células distintas formam uma árvore de 2001 vértices, pelo que a projecção
+within é exactamente a centragem dentro de cada célula. Os desvios locais foram
+6,46e-14 em b e 5,70e-14 em V na escala do contrato. O teste completo passou.

@@ -290,6 +290,7 @@ jobs:
           R CMD build --no-build-vignettes --no-manual r/xhdfe
           R_TARBALL="xhdfe_${EXPECTED_VERSION}.tar.gz"
           test -f "$R_TARBALL"
+          cp "$R_TARBALL" artifacts/
           (
             cd /tmp
             _R_CHECK_FORCE_SUGGESTS_=false R CMD check \
@@ -298,9 +299,16 @@ jobs:
           Rscript --vanilla tools/candidate_r_openmp_probe.R \
             /tmp/xhdfe.Rcheck "$GITHUB_WORKSPACE" "$EXPECTED_VERSION" \
             "$GITHUB_WORKSPACE/artifacts/linux-native-receipts/r-package.R"
-          mv "$R_TARBALL" artifacts/
           ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
             artifacts/xhdfe_*.tar.gz
+
+      - name: Preserve R check diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts/r-check-diagnostics
+          for file in /tmp/xhdfe.Rcheck/00check.log /tmp/xhdfe.Rcheck/00install.out; do
+            if test -f "$file"; then cp "$file" artifacts/r-check-diagnostics/; fi
+          done
 
       - name: Upload Linux plugin and package artifacts
         if: always()
@@ -313,6 +321,7 @@ jobs:
             artifacts/xhdfe.plugin.linux-cuda
             artifacts/xfepout.plugin.linux-cuda
             artifacts/linux-native-receipts
+            artifacts/r-check-diagnostics
             artifacts/linux-cuda-provenance.json
             artifacts/cuda-nvcc-invocations.jsonl
             artifacts/cuda-nvcc-link-dryrun.log

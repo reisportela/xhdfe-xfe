@@ -100,20 +100,41 @@ stopifnot(chain$converged, chain$precision_certified,
           !any(grepl("independent precision certificate", messages,
                      fixed = TRUE)))
 
-forced_messages <- character()
-forced_chain <- withCallingHandlers(
+# The 2000 distinct FE cells form a connected tree on 2001 vertices.
+# Its within space is exactly the set of within-cell contrasts.
+cell <- interaction(chain1, chain2, drop = TRUE)
+stopifnot(nlevels(cell) == 2000L,
+          length(unique(chain1)) + length(unique(chain2)) == 2001L)
+within_cell <- function(v) v - ave(v, cell)
+xx <- apply(chain_X, 2L, within_cell)
+yy <- within_cell(chain_y)
+ref_b <- drop(qr.solve(xx, yy))
+ref_df <- length(chain_y) - 2000L - 2L
+ref_s2 <- sum((yy - drop(xx %*% ref_b))^2) / ref_df
+ref_v <- ref_s2 * solve(crossprod(xx))
+mean_x <- colMeans(chain_X)
+ref_full_b <- c(ref_b, mean(chain_y) - sum(mean_x * ref_b))
+ref_full_v <- rbind(
+  cbind(ref_v, -ref_v %*% mean_x),
+  c(-drop(mean_x %*% ref_v),
+    ref_s2 / length(chain_y) + drop(t(mean_x) %*% ref_v %*% mean_x))
+)
+stopifnot(chain$df_r == ref_df,
+          max(abs(chain$coefficients - ref_full_b) / pmax(1, abs(ref_full_b))) <= 1e-9,
+          max(abs(chain$vcov - ref_full_v) /
+              sqrt(outer(diag(ref_full_v), diag(ref_full_v)))) <= 1e-8)
+
+# Explicit GS must refuse a result that fails the necessary precision checks.
+forced_chain <- tryCatch(
   xhdfe_fit(chain_y, chain_X, list(chain1, chain2),
             drop_singletons = FALSE, threads = 1L, tol = 1e-8,
             tolerance_mode = "reghdfe-comparable",
             absorption_method = "gauss-seidel"),
-  message = function(condition) {
-    forced_messages <<- c(forced_messages, conditionMessage(condition))
-    invokeRestart("muffleMessage")
-  }
+  error = identity
 )
-stopifnot(forced_chain$converged, !forced_chain$precision_certified,
-          any(grepl("independent precision certificate", forced_messages,
-                    fixed = TRUE)))
+stopifnot(inherits(forced_chain, "error"),
+          grepl("precision certification failed", conditionMessage(forced_chain), fixed = TRUE),
+          grepl("No estimates returned", conditionMessage(forced_chain), fixed = TRUE))
 
 if (identical(Sys.getenv("XHDFE_AUDIT_REQUIRE_CUDA"), "1")) {
   gpu_n <- 200000L
