@@ -949,6 +949,8 @@ jobs:
       - name: Assemble per-platform Stata bundles + release assets
         run: |
           set -euo pipefail
+          shopt -s nullglob
+          EXPECTED_VERSION="$(python3 -c 'from xhdfe._version import __version__; print(__version__)')"
           mkdir -p release_assets
           NVIDIA_LICENSE_DIR="$RUNNER_TEMP/xhdfe-corresponding-inputs/licenses"
           test -f "$NVIDIA_LICENSE_DIR/NVIDIA-CUDA-12.6-EULA.pdf"
@@ -998,14 +1000,17 @@ jobs:
             local stage; stage="$(mktemp -d)"
             cp "$xhdfe_src" "$stage/xhdfe.plugin"
             cp "$xfe_src"   "$stage/xfepout.plugin"
-            local s
+            local s license_name
             for s in "${SHARED[@]}"; do cp "$s" "$stage/"; done
             for s in "${LICENSE_MATERIALS[@]}"; do
               if [[ "$s" == third_party/eigen-3.4.0/* ]]; then
-                cp "$s" "$stage/Eigen-3.4.0-$(basename "$s")"
+                license_name="Eigen-3.4.0-$(basename "$s")"
               else
-                cp "$s" "$stage/"
+                license_name="$(basename "$s")"
               fi
+              cp "$s" "$stage/$license_name"
+              printf 'f %s\n' "$license_name" >> "$stage/xhdfe.pkg"
+              printf 'f %s\n' "$license_name" >> "$stage/xfepout.pkg"
             done
             for s in "$@"; do
               test -f "$s" || { echo "MISSING runtime dependency: $s" >&2; exit 1; }
@@ -1022,9 +1027,12 @@ jobs:
                       stream.write(f'G {arch} xhdfe_libomp.dylib xhdfe_libomp.dylib\n')
                   stream.write('f LLVM-OpenMP-LICENSE.txt\nf macos-openmp-manifest.json\n')
           PY
-              bash tools/validate_stata_package_site.sh "$stage"
             fi
             if [[ "$zipname" == "xhdfe_xfe-stata-linux-cuda.zip" ]]; then
+              for license_name in NVIDIA-CUDA-12.6-EULA.pdf NVIDIA-CCCL-2.5.0-LICENSE; do
+                printf 'f %s\n' "$license_name" >> "$stage/xhdfe.pkg"
+                printf 'f %s\n' "$license_name" >> "$stage/xfepout.pkg"
+              done
               mkdir -p "$stage/artifacts"
               cp -R dl/cuda-license-files "$stage/artifacts/"
               python3 - dl/linux-cuda-provenance.json "$stage" <<'PY'
@@ -1105,8 +1113,8 @@ jobs:
               lines.extend(f"f {name}" for name in additions if name not in existing)
               pkg.write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
-              bash tools/validate_stata_package_site.sh "$stage"
             fi
+            bash tools/validate_stata_package_site.sh "$stage"
             ( cd "$stage" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/$zipname" . )
             rm -rf "$stage"
             echo "built release_assets/$zipname"

@@ -87,3 +87,11 @@ sem alterar o solver. O caso positivo Auto é comparado com um oráculo independ
 as 2000 células distintas formam uma árvore de 2001 vértices, pelo que a projecção
 within é exactamente a centragem dentro de cada célula. Os desvios locais foram
 6,46e-14 em b e 5,70e-14 em V na escala do contrato. O teste completo passou.
+
+O empacotamento dos ZIPs incluía as licenças comuns, mas só as declarava como
+instaláveis no ZIP Windows. O gate macOS detectou a omissão nas listas `.pkg`.
+Classificação: erro de harness de distribuição. A montagem passa a declarar
+as licenças em todos os ZIPs e a validar cada plataforma antes de comprimir.
+O passo inicializa também a versão e `nullglob` no seu próprio processo shell;
+essas variáveis e opções não persistem entre passos do GitHub Actions.
+Não houve alteração aos binários ou ao estimador.
