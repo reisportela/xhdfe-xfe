@@ -1,51 +1,37 @@
-# Required before the next release: OpenMP on every native target
+# OpenMP release checklist — 2.28.0.20260924
 
-Owner requirement, 6 September 2026: release builds must enable OpenMP on all
-platforms. The existing macOS exception is withdrawn. The installed/public
-2.26.2 binaries are historical artifacts; this checklist does not relabel them.
+The preflight validates the build and distribution gates below. The version-tag
+workflow repeats them; publication additionally requires validation of the exact
+version-tag CUDA assets on the maintainer H100. Local builds cannot substitute
+for those assets.
 
-Private implementation update, 13 September 2026: `release.yml` now calls
-`macos-openmp.yml`. It builds the pinned LLVM runtime and both plugins on
-native arm64/x86_64 runners, checks serial negative controls, assembles and
-signs universal bytes, and requires native tests of those final bytes before
-release assembly. The runtime, licence, receipts and rebuild sources are
-included in the package paths. Both plugin builders, CMake and normal R
-source installation require OpenMP; serial diagnostics use explicit opt-outs.
+- [x] OpenMP-capable macOS arm64/x86_64 toolchains, with deployment targets
+  macOS 11 and 10.12 respectively. Both final universal slices run natively.
+- [x] Both Stata plugins compile/link with OpenMP on every platform. Release
+  configuration refuses serial fallback. Native serial negative controls
+  demonstrate rejection for both macOS plugins on both architectures.
+- [x] CMake/Python/R production builds require OpenMP. Installed Linux/Windows
+  wheels and the checked R package report two actual estimator workers and
+  match the one-worker analytic reference.
+- [x] Final Linux CPU/CUDA-host, Windows and macOS plugins have compile/link
+  and native useful-worker evidence. CUDA device execution is validated on H100.
+- [x] Runtime closure, installation layout and provenance are checked. Windows
+  Stata embeds GNU/OpenMP/winpthreads runtimes; Python keeps its private DLL
+  closure. macOS ships a compatible LLVM runtime and source/licence materials.
+- [x] Required failures block assembly and publication. Numerical outputs,
+  actual workers, architecture, loaded runtime and exact artifact hashes are
+  checked together; compile flags alone are insufficient.
+- [x] Preflight, ZIP and net-install validation use the same gates. The active
+  private/public release workflows and production sources are synchronized.
+- [x] README/help and release notes describe the actual targets, runtime
+  requirements and remaining numerical coverage limits.
 
-Local validation passed: CMake/R configuration controls, simulated macOS
-build/packaging controls, and a real Linux SPI probe of the existing xhdfe
-and xfepout plugins with one/two observed workers and exact fixture agreement.
-The macOS toolchain and native jobs have **not** run. Linux/Windows/R/Python
-requirements outside this new macOS job retain their own pending evidence.
-The boxes below remain release requirements, not claims inferred from code.
-The canonical repositories/workflows have not been updated or published.
-
-- [ ] Configure an OpenMP-capable toolchain/runtime for macOS ARM64 and
-      x86_64, preserving the advertised minimum OS versions or explicitly
-      reviewing any change to them.
-- [ ] Compile xhdfe and xfepout with OpenMP on both slices; forbid retrying a
-      failed release compilation without OpenMP.
-- [ ] Make OpenMP required in all release CMake/Python/R builds; preserve
-      diagnostic serial builds as separate, non-release configurations.
-- [ ] Inspect final Linux, CUDA-host, Windows and macOS binaries for OpenMP
-      compile/link evidence; inspect both slices of universal Mach-O files.
-- [ ] Validate every non-system runtime dependency and its installation path;
-      package the matching runtime, licences and rebuild inputs as needed.
-      Validate loading without the build machine's compiler/Homebrew paths.
-- [ ] Execute useful estimator work with at least two observed workers on
-      each supported native architecture and compare precision with one
-      worker; preserve convergence, inference, FE recovery and performance
-      requirements in AGENTS.md. Compile/link evidence is recorded separately
-      from runtime evidence when a CI runner cannot perform both.
-- [ ] Enforce failure before artifact upload/assembly/publication if any
-      required OpenMP gate is absent or fails. Exercise a serial negative
-      control to demonstrate that the release gate rejects it.
-- [ ] Apply the same requirements to preflight builds, release ZIPs and the
-      net-install snapshot, and synchronize the public/private workflows.
-- [ ] Update release notes to describe the validated targets and runtime
-      requirements accurately; remove the previous macOS no-OpenMP exception
-      only after the corresponding implementation and tests pass.
-
-Keep the numerical estimator, tolerances, interfaces and default CPU backend
-unchanged while correcting the build. Do not publish a replacement release
-from this policy-only change.
+Evidence: [preflight native jobs](https://github.com/reisportela/xhdfe-xfe/actions/runs/36022535095)
+passed on all platforms. The separate
+[assembly retry](https://github.com/reisportela/xhdfe-xfe/actions/runs/36029203100)
+validates the packaging corrections against those authenticated native inputs.
+The release's offline bundle contains the native receipts and provider ledgers. The independent Windows
+letter-directory negative control reproduces the previous loader error; both
+static plugins then load without compiler paths and perform real parallel work.
+The numerical campaign, accepted performance costs and known CUDA refusals are
+recorded in `docs/releases/VALIDATION_2.28.0.20260924.md`.

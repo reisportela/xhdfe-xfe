@@ -86,5 +86,12 @@ Static plugin provenance authenticates the GNU link inputs and final hashes.
 
 The workflow stages a draft first. Its assets and net-install snapshot are
 published only after these gates pass; see the
-[release procedure](../release-workflow.md). CI run links and final artifact
-receipts are added when that validation completes.
+[release procedure](../release-workflow.md). The
+[preflight native jobs](https://github.com/reisportela/xhdfe-xfe/actions/runs/36022535095)
+passed on all platforms; its initial assembly failed on packaging metadata. The
+[separate assembly retry](https://github.com/reisportela/xhdfe-xfe/actions/runs/36029203100)
+validates the corrected packaging against authenticated native inputs, without
+claiming that the original run passed as a whole. Native receipts and runtime
+provenance are included in the offline release bundle; the
+[versioned release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.28.0.20260924)
+identifies the final assets and checksums.
