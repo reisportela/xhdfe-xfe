@@ -524,6 +524,10 @@ Both {cmd:endogenous()} and {cmd:instruments()} must be specified together.
 Factor-variable operators are not supported with IV, and IV is not supported in {cmd:group()} mode.
 
 {pmore}
+Redundant instrument columns are accepted when their retained span identifies the declared endogenous regressors.
+An effective zero instrument span or an underidentified model returns an error.
+
+{pmore}
 With absorbed fixed effects, the reported {cmd:_cons} is the finite
 normalization mean({it:y}) - mean({it:X})*{it:b}, under zero-mean absorbed
 contributions. It is normalization-dependent and is not a structural IV

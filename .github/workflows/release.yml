@@ -36,12 +36,12 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Linux runner: builds linux-cpu, linux-cuda-fatbin, and Windows x86_64
-  # OpenMP plugins (mingw cross) for xhdfe and xfepout. CI proves COMPILE + LINK only:
-  # GitHub-hosted runners have NO GPU and NO Stata license.
+  # Linux runner: builds linux-cpu and linux-cuda-fatbin
+  # OpenMP plugins for xhdfe and xfepout, with native CPU worker checks.
+  # GitHub-hosted runners have no GPU and no Stata license; CUDA use is checked on H100.
   # ---------------------------------------------------------------------------
   build-linux:
-    name: Build Linux (CPU + CUDA fatbin) and Windows/OpenMP
+    name: Build Linux (CPU + CUDA fatbin, Python and R)
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -208,29 +208,6 @@ jobs:
             fi
           done
 
-      # ---- Windows x86_64 CPU/OpenMP (mingw POSIX cross-compile) ----
-      # OpenMP is mandatory for production plugins. The recursively resolved
-      # GNU runtimes are linked statically: Stata letter-directory installs
-      # do not add their DLL directory to the Windows loader search path.
-      - name: Build windows-cpu OpenMP (xhdfe + xfepout, mingw cross)
-        run: |
-          set -euo pipefail
-          bash stata/tools/build-plugin.sh --windows --openmp
-          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
-          bash stata/tools/build-xfepout-plugin.sh --windows --openmp
-          cp stata/xfepout.plugin artifacts/xfepout.plugin.windows
-          cp stata/xhdfe.plugin.map artifacts/xhdfe.plugin.windows.map
-          cp stata/xfepout.plugin.map artifacts/xfepout.plugin.windows.map
-          mkdir -p artifacts/windows-stata-runtime
-          python3 tools/validate_python_release_artifacts.py --system-only \
-            --pe-binary artifacts/xhdfe.plugin.windows \
-            --pe-binary artifacts/xfepout.plugin.windows \
-            --runtime-dir artifacts/windows-stata-runtime \
-            --write-runtime-ledger artifacts/windows-stata-runtime-ledger.json \
-            --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
-          python3 tools/windows_stata_linkage.py record \
-            --artifact-dir artifacts --ledger artifacts/windows-stata-provider-ledger.json
-
       - name: Exercise actual workers in the exact Linux plugin pairs
         run: |
           set -euo pipefail
@@ -325,7 +302,7 @@ jobs:
           ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
             artifacts/xhdfe_*.tar.gz
 
-      - name: Upload Linux/Windows plugin artifacts
+      - name: Upload Linux plugin and package artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -335,12 +312,6 @@ jobs:
             artifacts/xfepout.plugin.linux-cpu
             artifacts/xhdfe.plugin.linux-cuda
             artifacts/xfepout.plugin.linux-cuda
-            artifacts/xhdfe.plugin.windows
-            artifacts/xfepout.plugin.windows
-            artifacts/xhdfe.plugin.windows.map
-            artifacts/xfepout.plugin.windows.map
-            artifacts/windows-stata-runtime-ledger.json
-            artifacts/windows-stata-provider-ledger.json
             artifacts/linux-native-receipts
             artifacts/linux-cuda-provenance.json
             artifacts/cuda-nvcc-invocations.jsonl
@@ -514,11 +485,11 @@ jobs:
           retention-days: 7
 
   test-windows-stata:
-    name: Validate exact Windows plugins in Stata installation layout
-    needs: build-linux
+    name: Build and validate Windows plugins in Stata installation layout
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/windows-stata-loader.yml
     with:
-      artifact_name: plugins-linux
+      artifact_name: ''
     permissions:
       contents: read
 

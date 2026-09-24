@@ -60,6 +60,10 @@ sem ficheiro temporário. Mantêm-se as regras PTX/SASS e os casos de expansão
 de divisão já permitidos. Vinte controlos positivos/negativos cobrem os dois
 scripts; o plugin CUDA local também passou a análise real de disassembly.
 
+O build Windows dentro do job Linux encontrou ainda um directório temporário
+criado como root pelo contentor manylinux. Passa a correr no job isolado já
+validado, com as mesmas flags e gates, sem alterar permissões do workspace.
+
 Dois testes R tinham expectativas anteriores às correcções auditadas:
 
 - Instrumentos exactamente duplicados não tornam subidentificado um modelo

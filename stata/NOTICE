@@ -31,12 +31,17 @@ Rcpp 1.1.2 (third_party/Rcpp_1.1.2.tar.gz)
   Homepage: https://www.rcpp.org
 
 MinGW runtime and compatibility libraries (binary artifacts when required)
-  Windows builds made with GNU/MinGW carry the recursively detected non-system
-  DLL closure beside the extension or Stata plugin. GCC runtimes can include
+  Windows Python builds made with GNU/MinGW carry the recursively detected
+  non-system DLL closure beside the extension. GCC runtimes can include
   libgcc, libstdc++, libgomp, libatomic, libquadmath, and libssp. Additional
   compatibility libraries can include libwinpthread and libdl. Windows runtime
   DLLs are copied byte-identically from the compiler provider; the release
   ledger records both hashes and rejects a mismatch.
+
+  Windows Stata plugins instead incorporate the GNU/OpenMP and winpthreads
+  runtimes statically. Their ledger records the selected link-input archives,
+  compiler-provider source packages and final plugin hashes. The corresponding
+  source bundle includes the matching GNU/MinGW provider sources.
 
   Linux wheels repaired by auditwheel may likewise carry a private GNU runtime
   library needed by the extension. auditwheel can rewrite ELF metadata or the

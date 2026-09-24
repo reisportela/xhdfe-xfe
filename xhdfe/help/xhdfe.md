@@ -392,12 +392,16 @@ Arguments:
 - `y`: 1-D numeric array with `n` observations.
 - `X`: 2-D numeric array with `n` rows. For large jobs, Fortran-contiguous
   arrays avoid a copy.
-- `fes`: sequence of 1-D integer arrays, one per fixed-effect dimension.
+- `fes`: sequence of 1-D identifier arrays, one per fixed-effect dimension.
 - `weights`: optional 1-D weights.
 - `clusters`: one cluster array, an `(n, q)` matrix, or a sequence of cluster
   arrays.
 - `instruments` and `endogenous_idx`: 2SLS inputs. `endogenous_idx` uses
   zero-based column positions in `X`.
+
+  Redundant instrument columns are accepted when their retained span identifies
+  the endogenous regressors. An effective zero span or an underidentified model
+  returns an error.
 
   With absorbed fixed effects, the reported intercept is the finite
   normalization `mean(y) - mean(X) @ beta`, under zero-mean absorbed

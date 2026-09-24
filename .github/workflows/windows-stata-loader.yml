@@ -28,17 +28,23 @@ jobs:
         run: |
           set -euo pipefail
           mkdir artifacts
-          bash stata/tools/build-plugin.sh --windows --openmp
-          bash stata/tools/build-xfepout-plugin.sh --windows --openmp
+          bash stata/tools/build-plugin.sh --windows --openmp --no-cuda
+          bash stata/tools/build-xfepout-plugin.sh --windows --openmp --no-cuda
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
           cp stata/xfepout.plugin artifacts/xfepout.plugin.windows
           cp stata/xhdfe.plugin.map artifacts/xhdfe.plugin.windows.map
           cp stata/xfepout.plugin.map artifacts/xfepout.plugin.windows.map
+          mkdir artifacts/windows-stata-runtime
+          python3 tools/validate_python_release_artifacts.py --system-only \
+            --pe-binary artifacts/xhdfe.plugin.windows --pe-binary artifacts/xfepout.plugin.windows \
+            --runtime-dir artifacts/windows-stata-runtime \
+            --write-runtime-ledger artifacts/windows-stata-runtime-ledger.json \
+            --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
           python3 tools/windows_stata_linkage.py record --artifact-dir artifacts --ledger artifacts/windows-stata-provider-ledger.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-stata-issue11
+          name: plugins-windows-stata
           path: artifacts/
           if-no-files-found: error
 
@@ -53,7 +59,7 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.artifact_name || 'windows-stata-issue11' }}
+          name: ${{ inputs.artifact_name || 'plugins-windows-stata' }}
           path: artifacts/input
       - name: Prepare Stata letter directories and separate executable
         shell: pwsh

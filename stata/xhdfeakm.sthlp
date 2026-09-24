@@ -186,6 +186,9 @@ confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
 sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
 
+{pstd}Bias-corrected variance components can be negative and are not clipped.
+The reported worker-firm correlation is missing unless both component variances are finite and strictly positive.
+
 {pstd}Simulation-based variance estimates can be negative in finite samples.
 The established convention truncates the corresponding component SE to zero;
 the command prints the full warning immediately and also records it in
