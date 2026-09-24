@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.8.0  03sep2026}{...}
+{* *! version 1.8.1  24sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -185,6 +185,9 @@ F statistic, the curvature-adjusted point estimate {it:theta_1}, the AM
 confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
 sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
+
+{pstd}Bias-corrected variance components can be negative and are not clipped.
+The reported worker-firm correlation is missing unless both component variances are finite and strictly positive.
 
 {pstd}Simulation-based variance estimates can be negative in finite samples.
 The established convention truncates the corresponding component SE to zero;

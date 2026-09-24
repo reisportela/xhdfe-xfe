@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.13.0 03sep2026}{...}
+{* *! version 1.13.2 24sep2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -77,6 +77,7 @@ package. No software tool or AI system is credited as an author or co-author.
 {p 4 6 2}Specify exactly one of {cmd:clear} or {cmd:generate()}. {cmd:sample()} is only allowed with
 {cmd:generate()}, while {cmd:keepvars()} and {cmd:keepids} are only allowed with {cmd:clear}.{p_end}
 {p 4 6 2}{cmd:fweight}s, {cmd:aweight}s, {cmd:pweight}s, and {cmd:iweight}s are allowed; see {help weight}.{p_end}
+{p 4 6 2}Negative importance weights are rejected; zero-weight rows are excluded.{p_end}
 
 {marker absvar}{...}
 {title:Absvar Syntax}

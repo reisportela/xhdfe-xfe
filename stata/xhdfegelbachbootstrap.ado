@@ -1,4 +1,4 @@
-*! version 1.0.0  03sep2026
+*! version 1.0.1  24sep2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve
@@ -102,7 +102,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     marksample touse
     markout `touse' `y' `x1' `x2vars' `commonfes' `fes' ///
         `cluster' `bootcluster'
-    tempvar boot_weight
+    tempvar boot_weight point_retained
     local point_weight
     if ("`weight'" != "") {
         quietly gen double `boot_weight' = `exp' if `touse'
@@ -111,14 +111,6 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     }
     quietly count if `touse'
     if (r(N) == 0) error 2000
-    if ("`method'" == "cluster_pairs") {
-        quietly levelsof `bootcluster' if `touse', local(__boot_levels)
-        local __n_boot_clusters : word count `__boot_levels'
-        if (`__n_boot_clusters' < 2) {
-            di as err "cluster-pairs bootstrap requires at least two clusters"
-            exit 198
-        }
-    }
 
     local point_options `"x1(`x1')"'
     if ("`x2groups'" != "") ///
@@ -141,7 +133,8 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     if ("`connectivityfes'" != "") ///
         local point_options "`point_options' connectivityfes(`connectivityfes')"
 
-    quietly xhdfegelbach `y' if `touse' `point_weight', `point_options'
+    quietly xhdfegelbach `y' if `touse' `point_weight', ///
+        `point_options' generate(`point_retained')
     if (r(converged) != 1) {
         di as err "the point decomposition did not converge; bootstrap aborted"
         exit 430
@@ -242,10 +235,18 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     if ("`connectivityfes'" != "") ///
         local replicate_options "`replicate_options' connectivityfes(`connectivityfes')"
 
+    if ("`method'" == "cluster_pairs") {
+        quietly levelsof `bootcluster' if `point_retained' == 1, local(__boot_levels)
+        local __n_boot_clusters : word count `__boot_levels'
+        if (`__n_boot_clusters' < 2) {
+            di as err "cluster-pairs bootstrap requires at least two retained clusters"
+            exit 198
+        }
+    }
     local rngstate "`c(rngstate)'"
     set seed `seed'
     preserve
-    quietly keep if `touse'
+    quietly keep if `point_retained' == 1
     tempfile __xgel_boot_base
     quietly save `__xgel_boot_base'
     local valid 0
@@ -413,7 +414,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return local ci_method "`bootci'"
     return local interval_status ///
         "resampling_based_not_a_nonregularity_cure"
-    return local version "1.0.0 03sep2026"
+    return local version "1.0.1 24sep2026"
     return local rng "Stata_rng_reproducible_seed"
     return local point_vce "`point_vce'"
     return local point_gpu_backend "`point_gpu_backend'"

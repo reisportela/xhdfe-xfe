@@ -1,4 +1,4 @@
-v 1.13.0
+v 1.13.2
 d xfepout: Partial-out variables with multiple fixed effects via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
@@ -18,6 +18,12 @@ f Eigen-3.4.0-COPYING.LGPL
 f Eigen-3.4.0-COPYING.MINPACK
 f Eigen-3.4.0-COPYING.MPL2
 f Eigen-3.4.0-COPYING.README
+f LLVM-OpenMP-LICENSE.txt
+f macos-openmp-manifest.json
+G MACARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G OSX.ARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G MACINTEL64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G OSX.X8664 xhdfe_libomp.dylib xhdfe_libomp.dylib
 g LINUX64 xfepout.linux64.plugin xfepout.plugin
 g LINUX64P xfepout.linux64.plugin xfepout.plugin
 g MACARM64 xfepout.macos-universal.plugin xfepout.plugin
@@ -25,9 +31,6 @@ g OSX.ARM64 xfepout.macos-universal.plugin xfepout.plugin
 g MACINTEL64 xfepout.macos-universal.plugin xfepout.plugin
 g OSX.X8664 xfepout.macos-universal.plugin xfepout.plugin
 g WIN64 xfepout.win64.plugin xfepout.plugin
-G WIN64 libgcc_s_seh-1.dll libgcc_s_seh-1.dll
-G WIN64 libgomp-1.dll libgomp-1.dll
-G WIN64 libwinpthread-1.dll libwinpthread-1.dll
 g WIN64 windows-stata-provider-ledger.json windows-stata-provider-ledger.json
 g WIN64 windows-stata-runtime-ledger.json windows-stata-runtime-ledger.json
 h xfepout.plugin

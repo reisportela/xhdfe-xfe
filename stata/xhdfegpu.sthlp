@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.26.2  03sep2026}{...}
+{* *! version 2.28.0  24sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
@@ -41,8 +41,8 @@ place, so nothing else in your setup changes — GPU runs are then requested the
 usual way with {cmd:gpubackend(cuda)}.
 
 {pstd}
-{cmd:net install} ships a CPU-only plugin because a precompiled binary cannot
-know your GPU. {cmd:xhdfegpu} fills that gap: it runs only when an NVIDIA GPU
+{cmd:net install} ships a CPU-only plugin. Separate Linux CUDA bundles target
+the architectures listed in their release notes. {cmd:xhdfegpu} instead runs only when an NVIDIA GPU
 is present, detects its compute capability, builds a plugin for that exact
 architecture, and swaps it in atomically — the CPU plugin is replaced only if
 the build succeeds.
@@ -82,11 +82,10 @@ new CUDA plugin is loaded, then verify a GPU run:
 
 {pstd}
 CPU behavior is the numerical reference. A successful CUDA status proves GPU
-execution, not universal numerical equivalence: version 2.26.2 does not certify
-the complete results on eleven difficult ordinary FE graphs, and some also
-failed coefficient or standard-error gates. See
-{helpb xhdfe##opt_gpu:help xhdfe, GPU option}; use CPU when those outputs or
-any fully certified result is required. If a {cmd:gpubackend(cuda)} run reports that
+execution, not universal numerical equivalence. Version 2.28.0 retains refusals
+on some difficult Comparable and group/individual specifications. See
+{helpb xhdfe##opt_gpu:help xhdfe, GPU option} and the release validation record;
+use CPU for those specifications. If a {cmd:gpubackend(cuda)} run reports that
 CUDA was not available, this command is how you build the matching plugin.
 
 

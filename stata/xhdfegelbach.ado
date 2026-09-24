@@ -1,4 +1,4 @@
-*! version 1.6.0  03sep2026
+*! version 1.6.1  24sep2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -207,7 +207,7 @@ program define xhdfegelbach, rclass sortpreserve
         quietly summarize `src' if `touse', meanonly
         local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
         if (!`need') {
-            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            quietly count if `touse' & `src' != floor(`src')
             local need = (r(N) > 0)
         }
         if (`need') {
@@ -224,7 +224,7 @@ program define xhdfegelbach, rclass sortpreserve
         quietly summarize `src' if `touse', meanonly
         local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
         if (!`need') {
-            quietly count if `touse' & abs(`src' - floor(`src' + 0.5)) > 1e-6
+            quietly count if `touse' & `src' != floor(`src')
             local need = (r(N) > 0)
         }
         if (`need') {
@@ -239,7 +239,7 @@ program define xhdfegelbach, rclass sortpreserve
         quietly summarize `cluster' if `touse', meanonly
         local need = (r(N) > 0 & (r(min) < -2147483648 | r(max) > 2147483647))
         if (!`need') {
-            quietly count if `touse' & abs(`cluster' - floor(`cluster' + 0.5)) > 1e-6
+            quietly count if `touse' & `cluster' != floor(`cluster')
             local need = (r(N) > 0)
         }
         if (`need') {

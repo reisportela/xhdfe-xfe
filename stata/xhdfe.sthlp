@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.26.2 03sep2026}{...}
+{* *! version 2.28.0 24sep2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -205,7 +205,8 @@ terms such as {cmd:c.x} are rejected. When using {cmd:endogenous()/instruments()
 factor-variable operators in the slope list are not supported.{p_end}
 {p 4 6 2}Supported weights are {cmd:aweight}, {cmd:fweight}, {cmd:pweight}, and {cmd:iweight}.
 With {cmd:pweight} and no {cmd:vce()}, xhdfe defaults to robust SEs; probability weights cannot
-be combined with {cmd:vce(unadjusted)}. Importance weights follow official {cmd:regress}:
+be combined with {cmd:vce(unadjusted)}. Negative importance weights are rejected; zero-weight
+rows are excluded. For supported nonnegative importance weights, xhdfe follows {cmd:regress}:
 {cmd:e(N)}, residual degrees of freedom, sums of squares, and Root MSE use the sum of weights.{p_end}
 
 {marker opt_gpu}{...}
@@ -226,8 +227,8 @@ otherwise xhdfe stops with an error instead of silently falling back to CPU.
 stops with an error instead of silently falling back to CPU.
 
 {phang}
-The online net-install and the release ZIPs ship {bf:CPU-only} plugins; the GPU cannot be obtained from the
-online material. On a Linux machine with an NVIDIA GPU, the easiest way to get CUDA is the companion command
+The online net-install ships {bf:CPU-only} plugins. Separate Linux CUDA release bundles are available;
+they must support the installed GPU. To build for a Linux machine with an NVIDIA GPU, use the companion command
 {helpb xhdfegpu}: run it once after {cmd:net install} and it detects the GPU, compiles a plugin for the local
 architecture, and installs it over the CPU plugin in place (no file renaming). On a machine without internet
 access, download the source zip and pass it in with {cmd:xhdfegpu, zip(}{it:path}{cmd:)}.
@@ -260,19 +261,18 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.26.2 certification boundary.} {cmd:e(gpu_used)} proves execution on the GPU; it is not by itself a
-certificate of numerical equivalence. The exact H100 {cmd:sm_90} comparable-mode campaign accepted 13 of 24
-core24-quick surfaces, including the Marta {cmd:group()}/{cmd:individual()} case strictly. Eleven difficult ordinary
-two- or three-way FE graphs did not meet the full contract; some also failed coefficient or standard-error gates.
-Until a GPU-native Krylov finish is available, use {cmd:gpubackend(cpu)} for any fully certified result on a hard,
-poorly connected ordinary graph, including coefficients, inference, residuals, recovered FEs,
-{cmd:predict, d}/{cmd:xbd}, and FE-based decompositions. The CUDA path remains opt-in and never hides this limitation with a CPU fallback;
-the exact failed surfaces and measurements are listed in the 2.26.2 release notes.
+{bf:Version 2.28.0 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+The 24-specification matrix across eight language/backend/mode combinations has 188 converged cells out of 192;
+every CPU and Fast cell converged. Four difficult CUDA Comparable cells still refuse estimation.
+Separate extreme-offset and {cmd:group()}/{cmd:individual()} CUDA cases also retain documented refusals.
+Use {cmd:gpubackend(cpu)} for those specifications. The release validation record documents the independent
+coefficient/covariance oracles, estimation-sample checks, FE recovery coverage and performance trade-offs.
+Fast and Comparable remain distinct approximation contracts; CUDA remains opt-in.
 
 {phang}
 Practical rule: after rebuilding {cmd:xhdfe.plugin}, after switching between CPU and CUDA plugin binaries, or after
-changing the active {cmd:adopath} entry that provides {cmd:xhdfe.ado}/{cmd:xhdfe.plugin}, run {cmd:discard}
-(not {cmd:discard xhdfe}) before rerunning {cmd:xhdfe}.
+changing the active {cmd:adopath} entry that provides {cmd:xhdfe.ado}/{cmd:xhdfe.plugin}, restart Stata
+to ensure that the intended native code is loaded. {cmd:discard} takes no command-name argument.
 
 {phang}
 Ordinary repeated calls in the same Stata session do {bf:not} require {cmd:discard} when the plugin binary itself
@@ -524,6 +524,10 @@ Both {cmd:endogenous()} and {cmd:instruments()} must be specified together.
 Factor-variable operators are not supported with IV, and IV is not supported in {cmd:group()} mode.
 
 {pmore}
+Redundant instrument columns are accepted when their retained span identifies the declared endogenous regressors.
+An effective zero instrument span or an underidentified model returns an error.
+
+{pmore}
 With absorbed fixed effects, the reported {cmd:_cons} is the finite
 normalization mean({it:y}) - mean({it:X})*{it:b}, under zero-mean absorbed
 contributions. It is normalization-dependent and is not a structural IV
@@ -607,8 +611,7 @@ running estimate observed by each solve before RHS aggregation. All four are
 zero on non-Krylov paths. A nonfinite/DBL_MAX diagnostic is returned as Stata
 missing rather than as a finite-looking extreme value.
 The separate Krylov-PCG path is not covered by this parity floor and continues
-to report zeros in these fields; adopting a PCG floor remains a future reviewed
-blocker, not a claim of this release candidate.
+to report zeros in these fields. This release does not impose an additional PCG work target.
 
 {phang}
 Independently of the stopping mode, xhdfe verifies the returned within transform against the
@@ -916,6 +919,50 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {p2col: -}{cmd:savefe}/{cmd:savefes} with both {cmd:group()} and {cmd:individual()} are not supported{p_end}
 {p2col: -}IV/2SLS with factor-variable slope syntax or with {cmd:group()}/{cmd:individual()} is not supported{p_end}
 {p2col: -}HAC or Driscoll-Kraay standard errors (see ivreghdfe in reghdfe ecosystem){p_end}
+{p2colreset}{...}
+
+{marker known_limitations}{...}
+{title:Known limitations (2.28.0)}
+
+{p2colset 8 12 12 2}{...}
+{p2col: -}A fit that converges by the solver's stopping rule but does not pass the
+precision certificate returns no estimates (r(498)) in Stata, Python and R alike.
+Ill-conditioned specifications can still require a refusal. Heterogeneous slopes under
+an explicit {cmd:convergence(reghdfe)} used to: the reghdfe stopping rule leaves the slope block
+above the certificate; the explicit rule is now continued once at tighter internal tolerances
+and the first certified stage is returned ({cmd:e(slope_accuracy_retry_stages)} counts them),
+refusing only if none certifies. {cmd:savefe}/{cmd:savefes} on designs where the
+effect-capturing sweep stops above the tolerance likewise no longer refuses: the projection is
+recomputed without effect capture by the route of the mode, certified, and the effects are
+recovered from it.{p_end}
+{p2col: -}{cmd:aggregation(sum)} without an ordinary absorbed FE: the constant is in the
+span of the membership columns only for a uniform team size or through a data-dependent
+combination of individual columns; xhdfe decides this by projecting the ones vector on the
+absorbed effects as one separate right-hand side. When the constant is not spanned, the fit has no intercept and is reported as
+one, as {cmd:regress, noconstant} would: no {cmd:_cons} row, {cmd:e(report_constant)}=0,
+uncentered {cmd:e(tss)} and {cmd:e(r2_a)}, and {cmd:predict, d} equal to the summed
+individual effects. Coefficients, RSS and residuals are unchanged from earlier versions.{p_end}
+{p2col: -}{cmd:gpubackend(cuda)} with small, ill-conditioned {cmd:group()}/{cmd:individual()}
+designs (condition number above about 1e7): the device solver can leave residuals at the 1e-6
+relative level where the CPU backend's direct projection is exact to rounding. On designs small
+enough for that projection (at most about 1,500 absorbed columns) the device result is compared
+with it and refused with an informative error (r(498), no estimates) when a retained column
+deviates by more than ten times the forward tolerance of the mode; use the CPU backend for such
+designs.{p_end}
+{p2col: -}{cmd:gpubackend(cuda)} with {cmd:tolerancemode(reghdfe-comparable)} on ill-conditioned
+ordinary designs: unweighted OLS without saved effects also checks the normal equations
+against the original regressors. A failed check receives one continuation with the same
+method and tolerance, within the remaining iteration budget. A persistent failure returns
+no estimates; it does not substitute CPU estimates. This prevents the previously reported
+inaccurate CUDA results on the directors and difficult 10M-row 3-FE benchmarks; use
+{cmd:gpubackend(cpu)} for those specifications. CUDA convergence on them remains unresolved.
+The opt-in accuracy-retry environment settings remain available, but cannot bypass this
+necessary check.{p_end}
+{p2col: -}Degrees of freedom of the individual block: one exact redundancy against an
+ordinary absorbed FE is subtracted whenever the constant is provably in the span of the
+membership columns ({cmd:aggregation(mean)}; {cmd:aggregation(sum)} with a uniform team size);
+other redundancies are not detected by default and the footnote marks the count with "?".
+{cmd:dofadjustments(exact)} computes the exact rank.{p_end}
 {p2colreset}{...}
 
 
@@ -1240,7 +1287,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.26.2.
+regression via a C++ backend." Version 2.28.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

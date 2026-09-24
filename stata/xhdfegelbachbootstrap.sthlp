@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.0  03sep2026}{...}
+{* *! version 1.0.1  24sep2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachetable" "help xhdfegelbachetable"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachbootstrap} {hline 2}}Full-refit pairs bootstrap for Gelbach coefficient-movement accounting{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.0 (03sep2026), distributed with xhdfegelbach 1.6.0.}{p_end}
+{pstd}{bf:Version 1.0.1 (24sep2026), distributed with xhdfegelbach 1.6.1.}{p_end}
 
 
 {title:Syntax}
@@ -55,6 +55,11 @@ The point VCE and the bootstrap unit are separate choices.{p_end}
 {cmd:method(cluster_pairs)} samples the blocks declared in
 {opt bootcluster()}; the unit is never inferred from {opt vce(cluster)} or
 {opt cluster()}.{p_end}
+
+{pstd}
+Both methods resample the point estimate's retained sample. Rows excluded by
+singleton removal or connectivity rules cannot re-enter a replication merely
+because they are drawn more than once.{p_end}
 
 {pstd}
 Every accepted replication resamples the outcome, X1, every observed block,
