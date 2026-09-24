@@ -124,6 +124,11 @@ class StaticStataTests(unittest.TestCase):
             root = Path(temp)
             args = source_fixtures.CorrespondingSourceBundleTests()._inputs(root)
             ledger, _ = fixture(root)
+            built_using = "gcc-13 (= 13.2.0-6ubuntu1)"
+            for entry in ledger["static_archives"]:
+                if entry["provider_id"] == "ubuntu-mingw-gcc":
+                    entry["built_using"] = built_using
+            args.metadata.append("ubuntu-mingw-gcc.built_using=" + built_using)
             path = root / "static.json"
             path.write_text(json.dumps(ledger))
             args.windows_stata_static_ledger = path
@@ -133,6 +138,13 @@ class StaticStataTests(unittest.TestCase):
             provenance = source_validator.validate(Path(args.output))
             self.assertEqual(provenance["schema_version"], 2)
             self.assertEqual(provenance["windows_stata_static_link"], ledger)
+            bad_source = root / "bad-source.zip"
+            def change_dependency(record):
+                record["windows_stata_static_link"]["static_archives"][0]["built_using"] = "gcc-13 (= wrong-version)"
+            source_fixtures.CorrespondingSourceBundleTests()._rewrite_provenance(
+                Path(args.output), bad_source, change_dependency)
+            with self.assertRaisesRegex(ValueError, "source disagree"):
+                source_validator.validate(bad_source)
             ledger["static_archives"] = [a for a in ledger["static_archives"] if a["name"] != "libgomp.a"]
             path.write_text(json.dumps(ledger))
             args.output = str(root / "bad.zip")

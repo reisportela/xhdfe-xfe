@@ -18,6 +18,10 @@ on:
         description: 'Tag/name for the draft release (manual runs only; release job is skipped unless a tag ref triggers it)'
         required: false
         default: ''
+      assembly_from_run:
+        description: 'Assembly-only diagnostic: completed run with identical native inputs; never creates or publishes a release'
+        required: false
+        default: ''
 
 # Required so the built-in GITHUB_TOKEN can create the release. No PAT/secret needed.
 permissions:
@@ -42,7 +46,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-linux:
     name: Build Linux (CPU + CUDA fatbin, Python and R)
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.assembly_from_run == '') || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -346,7 +350,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows-python:
     name: Build/import Windows Python wheel (Strawberry MinGW)
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.assembly_from_run == '') || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     permissions:
       contents: read
@@ -495,7 +499,7 @@ jobs:
 
   test-windows-stata:
     name: Build and validate Windows plugins in Stata installation layout
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.assembly_from_run == '') || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/windows-stata-loader.yml
     with:
       artifact_name: ''
@@ -505,7 +509,7 @@ jobs:
   # Both native architectures validate the exact universal bytes before upload.
   build-macos:
     name: Build and validate macOS OpenMP
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.assembly_from_run == '') || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/macos-openmp.yml
     permissions:
       contents: read
@@ -518,10 +522,16 @@ jobs:
   assemble-release:
     name: Assemble and validate release snapshot
     needs: [build-linux, build-windows-python, build-macos, test-windows-stata]
-    if: startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() &&
+      ((github.event_name == 'workflow_dispatch' && inputs.assembly_from_run != '') ||
+       ((startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')) &&
+        needs.build-linux.result == 'success' && needs.build-windows-python.result == 'success' &&
+        needs.build-macos.result == 'success' && needs.test-windows-stata.result == 'success'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -532,7 +542,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             binutils-mingw-w64-x86-64 curl ca-certificates \
-            zip unzip python3 xz-utils
+            zip unzip python3 python3-yaml xz-utils
+
+      - name: Authenticate inputs for assembly-only diagnostic
+        if: github.event_name == 'workflow_dispatch' && inputs.assembly_from_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.assembly_from_run }}
+        run: |
+          set -euo pipefail
+          python3 tools/validate_assembly_reuse.py --run-id "$SOURCE_RUN" \
+            --repo "$GITHUB_REPOSITORY" --current-sha "$GITHUB_SHA" \
+            --receipt release_assets/assembly-reuse.json
 
       - name: Download all plugin artifacts
         uses: actions/download-artifact@v4
@@ -540,12 +561,16 @@ jobs:
           path: dl
           pattern: plugins-*
           merge-multiple: true           # flatten plugins-linux + plugins-macos into dl/
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.assembly_from_run || github.run_id }}
 
       - name: Download Windows native receipts
         uses: actions/download-artifact@v4
         with:
           name: windows-stata-native-receipts
           path: dl/windows-native-validation
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.assembly_from_run || github.run_id }}
 
       - name: List downloaded plugins (fail-fast on any missing REQUIRED variant)
         run: |
@@ -896,7 +921,8 @@ jobs:
             --metadata winlibs-tools.commit=0ad30ed8b99071629e63e4c3f5531ec0e5abbc0a \
             --metadata winlibs-tools.upstream_url=https://github.com/brechtsanders/winlibs_tools/commit/0ad30ed8b99071629e63e4c3f5531ec0e5abbc0a \
             --metadata ubuntu-mingw-gcc.source_package=gcc-mingw-w64 \
-            --metadata ubuntu-mingw-gcc.source_version=26.1+gcc-13_13.2.0-6ubuntu1 \
+            --metadata ubuntu-mingw-gcc.source_version=26.1 \
+            --metadata "ubuntu-mingw-gcc.built_using=gcc-13 (= 13.2.0-6ubuntu1)" \
             --metadata ubuntu-mingw-gcc.upstream_url=https://launchpad.net/ubuntu/noble/+source/gcc-mingw-w64/26.1 \
             --metadata ubuntu-mingw-w64.source_package=mingw-w64 \
             --metadata ubuntu-mingw-w64.source_version=11.0.1-3build1 \
@@ -1355,7 +1381,7 @@ jobs:
   release:
     name: Stage DRAFT GitHub Release
     needs: [assemble-release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -1405,7 +1431,7 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-certified:
     name: Publish H100-certified draft and net-install site
-    if: startsWith(github.ref, 'refs/tags/publish-v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/publish-v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write

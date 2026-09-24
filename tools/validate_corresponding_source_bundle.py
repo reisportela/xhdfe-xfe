@@ -291,7 +291,8 @@ def validate(path: Path) -> dict[str, object]:
             for entry in static_stata["static_archives"]:
                 source = metadata(provider_map[entry["provider_id"]])
                 require(entry["source_package"] == source.get("source_package")
-                        and entry["source_version"] == source.get("source_version"),
+                        and entry["source_version"] == source.get("source_version")
+                        and entry.get("built_using", "") == source.get("built_using", ""),
                         "static archive and corresponding provider source disagree")
 
         referenced_sources: set[str] = set()
