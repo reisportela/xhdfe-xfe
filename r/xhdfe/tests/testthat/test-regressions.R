@@ -271,11 +271,19 @@ test_that("IV identification failures are loud without classifying weak full-ran
               instruments = matrix(0, n, 1), endogenous = 2),
     "zero|rank deficient"
   )
-  expect_error(
-    xhdfe_fit(rd$y, X, fes = list(rd$f1),
-              instruments = cbind(rd$z, rd$z), endogenous = 2),
-    "rank deficient"
-  )
+  single <- xhdfe_fit(rd$y, X, fes = list(rd$f1),
+                      instruments = matrix(rd$z, ncol = 1), endogenous = 2)
+  redundant <- xhdfe_fit(rd$y, X, fes = list(rd$f1),
+                         instruments = cbind(rd$z, rd$z), endogenous = 2)
+  expect_true(redundant$converged)
+  expect_equal(redundant$coefficients, single$coefficients, tolerance = 1e-10)
+  expect_equal(redundant$vcov, single$vcov, tolerance = 1e-10)
+  # Independent within transform and QR projection onto the instrument span.
+  within <- function(v) v - ave(v, rd$f1)
+  xx <- apply(X, 2, within)
+  zz <- cbind(xx[, 1], within(rd$z))
+  oracle <- drop(qr.solve(qr.fitted(qr(zz), xx), within(rd$y)))
+  expect_equal(unname(redundant$coefficients[1:2]), unname(oracle), tolerance = 1e-9)
   endo2 <- 0.4 * rd$z + rnorm(n)
   expect_error(
     xhdfe_fit(rd$y, cbind(X, endo2 = endo2), fes = list(rd$f1),

@@ -51,3 +51,28 @@ a definição do estimador, uma tolerância ou um critério de convergência.
 O teste de controlo macOS com `--out` conserva os seus recibos. Uma descoberta
 genérica de testes não inicializa esse contexto; passa a indicar explicitamente
 que é necessário usar a entrada documentada, em vez de falhar com `OUT=None`.
+
+## Outros erros de harness encontrados pelo CI
+
+O gate CUDA de disassembly parava por ausência de `TMPDIR`, antes de concluir
+a verificação SASS. A contagem auxiliar passa a ser recolhida em memória,
+sem ficheiro temporário. Mantêm-se as regras PTX/SASS e os casos de expansão
+de divisão já permitidos. Vinte controlos positivos/negativos cobrem os dois
+scripts; o plugin CUDA local também passou a análise real de disassembly.
+
+Dois testes R tinham expectativas anteriores às correcções auditadas:
+
+- Instrumentos exactamente duplicados não tornam subidentificado um modelo
+  cujo espaço de instrumentos continua suficiente. A candidata concordou
+  com 2SLS por projecção QR independente a 2,44e-15; duplicar o instrumento
+  mudou b em 1,33e-15 e V em 6,51e-19. O teste conserva as recusas para
+  instrumento nulo e subidentificação verdadeira.
+- A correcção KSS pode produzir estimativas negativas de componentes de
+  variância. No fixture com controlos, ambas são negativas; a correlação é
+  indefinida e deve ser NA. Exigir que todos os campos, incluindo essa
+  correlação, fossem finitos premiava a apresentação de um valor inválido.
+  O teste exige componentes finitas e verifica explicitamente esse NA.
+
+Os reprodutores conservaram os dados e o estimador. As duas baterias R
+afectadas passaram depois de corrigir as expectativas. As advertências sobre
+inferência AKM não identificada e graus de liberdade aproximados permanecem.

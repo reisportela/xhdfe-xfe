@@ -110,7 +110,12 @@ test_that("controls are partialled out and factor ids are accepted", {
   expect_length(fit$beta, 2L)
   expect_gte(fit$fwl_threads_used, 1L)
   expect_gte(fit$threads_used, 1L)
-  expect_true(all(is.finite(unlist(fit$kss))))
+  components <- fit$kss[setdiff(names(fit$kss), "corr_alpha_psi")]
+  expect_true(all(is.finite(unlist(components))))
+  # KSS variance estimates can be negative; their correlation is then undefined.
+  expect_lt(fit$kss$var_alpha, 0)
+  expect_lt(fit$kss$var_psi, 0)
+  expect_true(is.na(fit$kss$corr_alpha_psi))
   ref <- xhdfe_akm_kss(d$y, d$i, d$j, X = cbind(d$x1, d$x2), leverages = "exact")
   expect_equal(fit$kss, ref$kss, tolerance = 1e-12)
 })

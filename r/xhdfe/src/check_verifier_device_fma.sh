@@ -98,7 +98,7 @@ if [[ -z "$sass" ]]; then
   echo "FAIL: no hdfe_cert functions found in SASS of $OBJ (gate is fail-closed)" >&2
   exit 1
 fi
-sass_viol="$(awk '
+sass_check="$(awk '
   /^[[:space:]]*Function[[:space:]]*:/ {
     fn = $0
     allowed = ($0 ~ /bracket_decide|decide_one|xhdfe_cert_decide_device/)
@@ -117,10 +117,10 @@ sass_viol="$(awk '
     if ($0 ~ /-?RZ,[[:space:]]*RZ,/) next
     if (allowed) { allow_n++ } else { print fn; print; viol = 1 }
   }
-  END { printf "ALLOWED_COUNT=%d\n", allow_n > "/dev/stderr"; exit viol ? 0 : 0 }
-' <<<"$sass" 2>"${TMPDIR:?isolated build TMPDIR required}/fma_gate_allowed.$$")"
-allowed_count="$(sed -n 's/^ALLOWED_COUNT=//p' "${TMPDIR}/fma_gate_allowed.$$" 2>/dev/null || echo '?')"
-rm -f "${TMPDIR}/fma_gate_allowed.$$"
+  END { printf "ALLOWED_COUNT=%d\n", allow_n }
+' <<<"$sass")"
+allowed_count="$(sed -n 's/^ALLOWED_COUNT=//p' <<<"$sass_check")"
+sass_viol="$(sed '/^ALLOWED_COUNT=/d' <<<"$sass_check")"
 if [[ -n "$sass_viol" ]]; then
   echo "FAIL: SASS fma in verifier accumulation/decision functions (predication included):" >&2
   head -12 <<<"$sass_viol" >&2
