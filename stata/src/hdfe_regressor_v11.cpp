@@ -12,7 +12,11 @@
 #include <cstdio>
 #include <deque>
 #include <fstream>
+#ifdef __APPLE__
+#include <limits.h>
+#else
 #include <filesystem>
+#endif
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -2488,14 +2492,35 @@ class AtomicAbsorptionCacheFile {
 public:
     explicit AtomicAbsorptionCacheFile(const std::string& path) {
         try {
+#ifdef __APPLE__
+            // libc++ filesystem requires macOS 10.15; keep the 10.12 target.
+            char resolved[PATH_MAX];
+            if (::realpath(path.c_str(), resolved)) {
+                target_ = resolved;
+            } else {
+                const auto slash = path.find_last_of('/');
+                const std::string directory = slash == std::string::npos ? "." :
+                    (slash == 0 ? "/" : path.substr(0, slash));
+                if (!::realpath(directory.c_str(), resolved)) return;
+                target_ = std::string(resolved) + "/" +
+                    path.substr(slash == std::string::npos ? 0 : slash + 1);
+            }
+            const std::string parent = target_.substr(0, target_.find_last_of('/') + 1);
+#else
             std::error_code error;
             target_ = std::filesystem::weakly_canonical(path, error).string();
             if (error) return;
             const auto parent = std::filesystem::path(target_).parent_path();
+#endif
             std::random_device random;
             for (int attempt = 0; attempt < 16; ++attempt) {
+#ifdef __APPLE__
+                temporary_ = parent + ".xhdfe-cache-" + std::to_string(random()) +
+                             "-" + std::to_string(random()) + ".tmp";
+#else
                 temporary_ = (parent / (".xhdfe-cache-" + std::to_string(random()) +
                                         "-" + std::to_string(random()) + ".tmp")).string();
+#endif
 #ifdef _WIN32
                 const int fd = ::_open(temporary_.c_str(),
                     _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
@@ -2523,8 +2548,10 @@ public:
 #endif
                 return;
             }
+#ifndef __APPLE__
         } catch (const std::filesystem::filesystem_error&) {
             good_ = false;
+#endif
         } catch (const std::system_error&) {
             good_ = false;
         }
@@ -2546,9 +2573,13 @@ public:
         const int closed = std::fclose(file_);
         file_ = nullptr;
         if (closed != 0) return false;
+#ifdef __APPLE__
+        if (std::rename(temporary_.c_str(), target_.c_str()) != 0) return false;
+#else
         std::error_code error;
         std::filesystem::rename(temporary_, target_, error);
         if (error) return false;
+#endif
         owned_ = false;
         return true;
     }

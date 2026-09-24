@@ -231,6 +231,21 @@ jobs:
           python3 tools/windows_stata_linkage.py record \
             --artifact-dir artifacts --ledger artifacts/windows-stata-provider-ledger.json
 
+      - name: Exercise actual workers in the exact Linux plugin pairs
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O2 -Istata/tools/_deps tools/plugin_openmp_probe.cpp -ldl -o /tmp/plugin_openmp_probe
+          for variant in linux-cpu linux-cuda; do
+            for kind in xhdfe xfepout; do
+              plugin="$GITHUB_WORKSPACE/artifacts/$kind.plugin.$variant"
+              runtime="$(ldd "$plugin" | awk '/libgomp.*=>/ {print $3}')"
+              test -f "$runtime"
+              python3 tools/run_plugin_openmp_probe.py --probe /tmp/plugin_openmp_probe \
+                --plugin "$plugin" --kind "$kind" --arch x86_64 --stage final \
+                --runtime-path "$runtime" --out "artifacts/linux-native-receipts/$kind-$variant"
+            done
+          done
+
       - name: Smoke-test manylinux Python wheel and build R source package
         run: |
           set -euo pipefail
@@ -252,6 +267,9 @@ jobs:
             --expected-version "$EXPECTED_VERSION"
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install \
             --no-deps "${WHEELS[0]}"
+          /tmp/xhdfe-wheel-smoke/bin/python tools/candidate_python_openmp_probe.py \
+            --expected-prefix /tmp/xhdfe-wheel-smoke --forbid-prefix "$GITHUB_WORKSPACE" \
+            --expected-version "$EXPECTED_VERSION" --out artifacts/linux-native-receipts/python-wheel.json
           (
             cd /tmp
             /tmp/xhdfe-wheel-smoke/bin/python -c \
@@ -295,8 +313,14 @@ jobs:
           R CMD build --no-build-vignettes --no-manual r/xhdfe
           R_TARBALL="xhdfe_${EXPECTED_VERSION}.tar.gz"
           test -f "$R_TARBALL"
-          _R_CHECK_FORCE_SUGGESTS_=false R CMD check \
-            --no-build-vignettes --no-manual "$R_TARBALL"
+          (
+            cd /tmp
+            _R_CHECK_FORCE_SUGGESTS_=false R CMD check \
+              --no-build-vignettes --no-manual "$GITHUB_WORKSPACE/$R_TARBALL"
+          )
+          Rscript --vanilla tools/candidate_r_openmp_probe.R \
+            /tmp/xhdfe.Rcheck "$GITHUB_WORKSPACE" "$EXPECTED_VERSION" \
+            "$GITHUB_WORKSPACE/artifacts/linux-native-receipts/r-package.R"
           mv "$R_TARBALL" artifacts/
           ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
             artifacts/xhdfe_*.tar.gz
@@ -317,6 +341,7 @@ jobs:
             artifacts/xfepout.plugin.windows.map
             artifacts/windows-stata-runtime-ledger.json
             artifacts/windows-stata-provider-ledger.json
+            artifacts/linux-native-receipts
             artifacts/linux-cuda-provenance.json
             artifacts/cuda-nvcc-invocations.jsonl
             artifacts/cuda-nvcc-link-dryrun.log
@@ -441,6 +466,7 @@ jobs:
           $wheel = Get-ChildItem artifacts\xhdfe-*.whl
           python -m venv $env:RUNNER_TEMP\xhdfe-wheel-smoke
           $python = "$env:RUNNER_TEMP\xhdfe-wheel-smoke\Scripts\python.exe"
+          $expected = python -c 'import re; s=open("xhdfe/_version.py").read(); print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", s).group(1))'
           & $python -m pip install --upgrade pip
           & $python -m pip install $wheel.FullName
           $env:PATH = (($env:PATH -split ';') | Where-Object {
@@ -448,6 +474,9 @@ jobs:
           }) -join ';'
           Push-Location $env:RUNNER_TEMP
           try {
+            & $python "$env:GITHUB_WORKSPACE/tools/candidate_python_openmp_probe.py" `
+              --expected-prefix "$env:RUNNER_TEMP\xhdfe-wheel-smoke" --forbid-prefix $env:GITHUB_WORKSPACE `
+              --expected-version $expected --out "$env:GITHUB_WORKSPACE/artifacts/windows-python-openmp.json"
             $packageDir = & $python -c 'import importlib.util, pathlib; s=importlib.util.find_spec("xhdfe"); print(pathlib.Path(next(iter(s.submodule_search_locations))).resolve())'
             Write-Host "Installed package directory: $packageDir"
             Get-ChildItem $packageDir -File | Where-Object {
@@ -480,6 +509,7 @@ jobs:
           path: |
             artifacts/xhdfe-*.whl
             artifacts/windows-python-provider-runtimes
+            artifacts/windows-python-openmp.json
           if-no-files-found: error
           retention-days: 7
 
@@ -1135,6 +1165,9 @@ jobs:
             dl/windows-stata-provider-ledger.json \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
           cp -R dl/windows-native-validation "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
+          mkdir -p "$OFFLINE_STAGE/release-validation"
+          cp -R dl/linux-native-receipts "$OFFLINE_STAGE/release-validation/"
+          cp dl/windows-python-openmp.json "$OFFLINE_STAGE/release-validation/"
           mkdir -p "$OFFLINE_STAGE/prebuilt/macos_universal"
           cp dl/xhdfe.plugin.macos \
             "$OFFLINE_STAGE/prebuilt/macos_universal/xhdfe.plugin"

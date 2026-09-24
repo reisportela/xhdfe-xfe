@@ -1,8 +1,6 @@
 name: Windows Stata installed-layout loader
 
 on:
-  push:
-    branches: ['codex/release-2.28.0-20260924']
   workflow_call:
     inputs:
       artifact_name:

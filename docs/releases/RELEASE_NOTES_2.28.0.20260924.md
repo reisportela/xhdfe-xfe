@@ -43,3 +43,9 @@ OpenMP is mandatory across release platforms. macOS universal plugins carry
 their matching runtime and require native checks on both architectures.
 The preflight, draft and publication stages retain source/runtime provenance,
 checksums and the separate exact-asset H100 gate.
+
+The macOS cache writer uses POSIX pathname resolution and atomic rename,
+keeping the advertised Intel macOS 10.12 target without depending on the
+macOS 10.15 filesystem library. Its non-Apple preprocessed branches are
+unchanged; a permanent cache-path regression test covers publication and
+interrupted writes.

@@ -24,6 +24,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check cache pathname and atomic-publication compatibility
+        run: python3 -B tests/analytic_precision/cache_macos_compat_contract.py
       - name: Checkout pinned LLVM OpenMP sources
         uses: actions/checkout@v4
         with:
