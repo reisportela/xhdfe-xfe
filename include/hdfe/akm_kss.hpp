@@ -66,9 +66,9 @@ struct LeaveOutSetOptions {
 // Leave-out connected-set result. keep refers to the ORIGINAL input rows.
 struct LeaveOutSetResult {
     std::vector<std::uint8_t> keep;  //!< 1 = row belongs to the leave-out connected sample.
-    long long n_obs_input = 0;
-    long long n_obs_connected = 0;   //!< Rows in the largest connected set (before leave-out pruning).
-    long long n_obs = 0;             //!< Rows in the leave-out sample.
+    long long n_obs_input = 0;       //!< Input person-years (sum of frequency weights when supplied).
+    long long n_obs_connected = 0;   //!< Person-years in the largest connected set before leave-out pruning.
+    long long n_obs = 0;             //!< Person-years in the leave-out sample; keep still indexes input rows.
     int n_workers = 0;
     int n_firms = 0;
     long long n_matches = 0;

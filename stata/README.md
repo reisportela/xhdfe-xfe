@@ -7,10 +7,13 @@ This folder is self-contained: it includes the Stata wrapper (`xhdfe.ado`, `xhdf
 From this folder, run:
 
 ```bash
-bash tools/build-plugin.sh
+bash tools/build-plugin.sh --openmp
+bash tools/build-xfepout-plugin.sh --openmp
 ```
 
-This produces `xhdfe.plugin` in the same directory.
+This produces `xhdfe.plugin` and `xfepout.plugin` in the same directory.
+Production builds require OpenMP. Windows builds link the GNU/OpenMP runtimes
+statically; macOS builds need a compatible OpenMP runtime for each architecture.
 
 To build with CUDA support (GPU backend), set `XHDFE_ENABLE_CUDA=ON`, ensure `nvcc`
 is on PATH, and target your GPU's compute capability — read it with
@@ -48,7 +51,9 @@ di "`e(gpu_backend)'"
 Expected result: `e(gpu_used) == 1` and `e(gpu_backend) == "cuda"`.
 If `gpubackend(cuda)` was requested but CUDA is unavailable, the commands now stop with an error instead of silently
 returning CPU output.
-If you rebuilt or switched plugin binaries in the same Stata session, run `discard` with no arguments before rerunning the command. Do not use `discard xhdfe` or `discard xfepout`. Ordinary repeated `xhdfe`/`xfepout` calls in the same session do not require `discard` when the plugin binary itself has not changed.
+After rebuilding or switching plugin binaries, restart Stata to ensure the new
+native code is loaded. `discard` takes no command-name argument. Ordinary
+repeated calls do not require a restart when the plugin binary is unchanged.
 
 For a more detailed local build checklist, see `BUILD_CUDA.md` in this folder.
 
@@ -66,8 +71,11 @@ net install xfepout,   from("https://raw.githubusercontent.com/reisportela/xhdfe
 installations can be removed with `ado uninstall xfe` before installing
 `xfepout`; no compatibility alias is shipped.
 
-That site uses Stata platform-specific `g` lines so Linux, macOS, and Windows
+That site uses Stata platform-specific `g` lines for plugins, and uppercase
+`G` lines for external platform runtimes, so Linux, macOS, and Windows
 users receive the matching CPU plugin binary when it exists in the release.
+The Windows plugins are self-contained with respect to GNU/OpenMP runtimes;
+the loader does not depend on DLLs installed under Stata's `plus/l` directory.
 Linux CUDA fatbin plugins are distributed as separate release assets; install
 one of those bundles explicitly or build locally with `XHDFE_ENABLE_CUDA=ON`
 as shown above. For a local development checkout or an unzipped release

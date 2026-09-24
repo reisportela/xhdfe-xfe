@@ -18,19 +18,20 @@ Key facts, true for all three versions:
   your GPU, **(2)** request the GPU on a call, **(3)** verify it was actually
   used.
 
-## Version 2.26.2 certification boundary
+## Version 2.28.0 validation scope
 
-The exact Linux H100 `sm_90` comparable-mode campaign accepted 13 of 24
-core24-quick surfaces. The difficult Marta `group()`/`individual()` surface
-passed strictly. Eleven poorly connected ordinary two- or three-way FE graphs
-did not satisfy the complete contract, and some also failed coefficient or
-standard-error gates; the internal `1e-10` diagnostic retry reduced but did not
-eliminate the error. Therefore, use CPU for any fully certified result on a
-difficult ordinary graph, including coefficients, inference, residuals,
-recovered fixed effects, FE-inclusive predictions, and FE-based decompositions.
-The exact failed datasets and measured errors are recorded in the
-2.26.2 release notes. CUDA binaries remain available for testing and for the
-surfaces that passed, but are not described as universally certified.
+The current core matrix covers 24 specifications, two tolerance modes,
+CPU/CUDA and C++/Stata. Of its 192 cells, 188 converged; every CPU and Fast
+cell converged. The remaining four are the C++ and Stata CUDA Comparable
+cells for the directors and difficult 10-million-row three-FE specifications.
+They refuse estimation; use CPU for those specifications.
+
+Separate extreme-offset and group/individual CUDA tests retain known refusals.
+Successful matrix coverage does not imply that every graph or post-estimation
+surface is certified. Fixed-effect recovery has a separate 19-pair validation.
+The [validation record](releases/VALIDATION_2.28.0.20260924.md) gives the
+numerical, sample and performance evidence. Fast keeps its approximate
+contract; its difference from Comparable is not by itself an estimator error.
 
 ## Requirements
 
@@ -71,7 +72,7 @@ It gates on `nvidia-smi` (so it only builds when a GPU is present), compiles a
 plugin for the local architecture, and installs it *over* the CPU plugin in
 place (same `xhdfe.plugin` / `xfepout.plugin`). On a machine without internet, fetch
 the source zip elsewhere and pass it in: `xhdfegpu, zip("/path/to/xhdfe-src.zip")`.
-See `help xhdfegpu`. Then `discard` and use `gpubackend(cuda)` (Step 3).
+See `help xhdfegpu`. Restart Stata and use `gpubackend(cuda)` (Step 3).
 
 To build the plugin by hand instead, from a clone:
 
@@ -84,7 +85,7 @@ bash stata/tools/build-xfepout-plugin.sh --linux --openmp --cuda auto
 Then add the folder to your adopath (this writes nothing outside it):
 
 ```stata
-adopath + "/path/to/xhdfe-xfe/stata"
+adopath ++ "/path/to/xhdfe-xfe/stata"
 ```
 
 For an explicit target, use `--cuda 90`. For a single binary that runs on
@@ -190,9 +191,9 @@ device is present, or the GPU path fails), the behavior differs by version:
   `--cuda auto` for Stata or `XHDFE_ENABLE_CUDA=auto` for Python/R.
 - **Wrong architecture / no kernels run** — the build arch must match your card;
   below `sm_75` is unsupported. Re-check Step 1 and rebuild.
-- **Stata still runs on CPU after a rebuild** — run `discard` (no argument) so
-  Stata reloads the new plugin, and confirm `which xhdfe` points to your
-  `stata/` folder. Do not use `discard xhdfe`.
+- **Stata still uses an old build** — restart Stata and confirm `which xhdfe`
+  points to the intended `stata/` folder. `discard` takes no command-name
+  argument; a fresh process avoids retaining an old native library.
 - **`nvcc: command not found`** — install the CUDA toolkit and put `nvcc` on
   `PATH` (or set `CUDA_HOME`).
 

@@ -37,6 +37,7 @@ local tests ///
     "part1/iv.do" ///
     "part1/weights-extended.do" ///
     "part1/group-individual.do" ///
+    "part1/group-sum-constant.do" ///
     "part1/lifecycle.do" ///
     "part1/sample-missing.do" ///
     "part1/dof-ssc.do" ///

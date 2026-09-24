@@ -1,6 +1,9 @@
 #include "fe_absorption_cuda.hpp"
+#include "group_refinement.hpp"
 
 #include <cuda_runtime.h>
+#include "weighted_two_by_two.hpp"
+#include "additive_cell_projection.hpp"
 #include <cub/cub.cuh>
 
 #include <algorithm>
@@ -1175,7 +1178,7 @@ __global__ __launch_bounds__(256, 4) void compute_slope_coefficients_kernel(
     if (include_intercept) {
         if (sw > 0.0) {
             const double det = sw * szz - sz * sz;
-            const double scale = fmax(1.0, sw * szz);
+            const double scale = sw * szz;
             if (det > kDetTol * scale) {
                 alpha = (szz * sy - sz * szy) / det;
                 gamma = (-sz * sy + sw * szy) / det;
@@ -1184,8 +1187,7 @@ __global__ __launch_bounds__(256, 4) void compute_slope_coefficients_kernel(
             }
         }
     } else {
-        const double scale = fmax(1.0, szz);
-        if (szz > kDetTol * scale) {
+        if (szz > 0.0) {
             gamma = szy / szz;
         }
     }
@@ -1202,7 +1204,7 @@ __global__ __launch_bounds__(256, 4) void compute_slope_coefficients_kernel(
         if (include_intercept) {
             if (sw > 0.0) {
                 const double det = sw * szz - sz * sz;
-                const double scale = fmax(1.0, sw * szz);
+                const double scale = sw * szz;
                 if (det > kDetTol * scale) {
                     ax = (szz * sx - sz * szx) / det;
                     gx = (-sz * sx + sw * szx) / det;
@@ -1211,8 +1213,7 @@ __global__ __launch_bounds__(256, 4) void compute_slope_coefficients_kernel(
                 }
             }
         } else {
-            const double scale = fmax(1.0, szz);
-            if (szz > kDetTol * scale) {
+            if (szz > 0.0) {
                 gx = szx / szz;
             }
         }
@@ -2523,6 +2524,36 @@ double auto_reghdfe_cg_dominant_share_threshold_cuda() {
 // Per the project's strict non-regression mandate it is therefore disabled by default and must
 // be requested explicitly with XHDFE_GPU_CG_AUTO=1. When enabled it is still bounded by an
 // upper-n guard (XHDFE_GPU_CG_NMAX) so opted-in users never hit the large-scale regression.
+constexpr int kCudaSmallCgMaxRows = 20000;
+
+double cuda_accel_occupancy_threshold() {
+    static const double value = []() {
+        const char* e = std::getenv("XHDFE_ACCEL_OCC");
+        return e != nullptr ? std::atof(e) : 12.0;
+    }();
+    return value;
+}
+
+bool should_use_cuda_sparse_four_fe_cg(const std::vector<GpuFeInput>& fe_inputs,
+                                      int n, const Eigen::VectorXd* weights,
+                                      const HdfeOptions& options, bool store_alphas) {
+    if (!options.from_auto || options.convergence_criterion != ConvergenceCriterion::Auto ||
+        options.tolerance_mode != ToleranceMode::ReghdfeComparable ||
+        store_alphas || options.retain_fixed_effects || weights != nullptr ||
+        fe_inputs.size() != 4 || n <= kCudaSmallCgMaxRows || n > 2000000 ||
+        !(options.tol > 0.0 && options.tol <= 1.0e-10)) {
+        return false;
+    }
+    bool sparse = false;
+    for (const auto& fe : fe_inputs) {
+        if (fe.is_slope) return false;
+        const int levels = fe.num_levels_present > 0 ? fe.num_levels_present : fe.num_groups;
+        if (levels > 0 && static_cast<double>(n) / levels <= cuda_accel_occupancy_threshold())
+            sparse = true;
+    }
+    return sparse;
+}
+
 bool gpu_cg_auto_enabled() {
     const char* e = std::getenv("XHDFE_GPU_CG_AUTO");
     return e != nullptr && e[0] != '0';
@@ -2776,7 +2807,9 @@ bool should_use_cuda_reghdfe_cg(const std::vector<GpuFeInput>& fe_inputs,
     const bool pathlike =
         should_use_cuda_pathlike_cg(fe_inputs, n, weights, options,
                                     store_alphas);
-    if (!explicit_reghdfe && !auto_default && !pathlike) {
+    const bool sparse_four_fe = should_use_cuda_sparse_four_fe_cg(
+        fe_inputs, n, weights, options, store_alphas);
+    if (!explicit_reghdfe && !auto_default && !pathlike && !sparse_four_fe) {
         return false;
     }
     const std::size_t dims = fe_inputs.size();
@@ -2900,6 +2933,98 @@ bool build_tree_duplicate_edge_groups(const std::vector<GpuFeInput>& fe_inputs,
         return false;
     }
     return true;
+}
+
+__global__ void weighted_two_by_two_apply_kernel(
+    double* y,double* X,int n,int cols,const unsigned char* cells,
+    const weighted_two_by_two::Cell* values,int* bad_output) {
+    const std::size_t row=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(row>=static_cast<std::size_t>(n)) return;const int i=static_cast<int>(row);
+    const int c=cells[i];
+    const double within=weighted_two_by_two::apply(y[i],values[c]);y[i]=within;
+    if(!weighted_two_by_two::finite(within)) atomicExch(bad_output,1);
+    for(int j=0;j<cols;++j) {
+        const std::size_t at=static_cast<std::size_t>(j)*n+i;
+        const double value=weighted_two_by_two::apply(X[at],values[static_cast<std::size_t>(j+1)*4+c]);
+        X[at]=value;if(!weighted_two_by_two::finite(value)) atomicExch(bad_output,1);
+    }
+}
+
+bool absorb_weighted_two_by_two_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,const weighted_two_by_two::Plan& plan,
+    const HdfeOptions& options,AbsorptionResult& result) {
+    DeviceBuffer<double> device_y(static_cast<std::size_t>(plan.n));
+    DeviceBuffer<double> device_X(static_cast<std::size_t>(plan.n)*plan.cols);
+    DeviceBuffer<unsigned char> device_cell(plan.cell.size());
+    DeviceBuffer<weighted_two_by_two::Cell> device_values(plan.values.size());
+    DeviceBuffer<int> device_bad(1);
+    cuda_check(cudaMemcpy(device_y.data(),y.data(),sizeof(double)*plan.n,cudaMemcpyHostToDevice),
+        "cudaMemcpy 2x2 outcome failed");
+    if(plan.cols) cuda_check(cudaMemcpy(device_X.data(),X.data(),sizeof(double)*static_cast<std::size_t>(plan.n)*plan.cols,cudaMemcpyHostToDevice),
+        "cudaMemcpy 2x2 regressors failed");
+    cuda_check(cudaMemcpy(device_cell.data(),plan.cell.data(),plan.cell.size(),cudaMemcpyHostToDevice),
+        "cudaMemcpy 2x2 cell ids failed");
+    cuda_check(cudaMemcpy(device_values.data(),plan.values.data(),sizeof(weighted_two_by_two::Cell)*plan.values.size(),cudaMemcpyHostToDevice),
+        "cudaMemcpy 2x2 cell parameters failed");
+    cuda_check(cudaMemset(device_bad.data(),0,sizeof(int)),"cudaMemset 2x2 status failed");
+    const int blocks=plan.n/kBlockSize+(plan.n%kBlockSize!=0);
+    weighted_two_by_two_apply_kernel<<<blocks,kBlockSize>>>(device_y.data(),device_X.data(),plan.n,plan.cols,
+        device_cell.data(),device_values.data(),device_bad.data());
+    cuda_check(cudaGetLastError(),"2x2 weighted projection kernel launch failed");
+    int bad=0;
+    cuda_check(cudaMemcpy(&bad,device_bad.data(),sizeof(int),cudaMemcpyDeviceToHost),
+        "cudaMemcpy 2x2 projection status failed");
+    if(bad) throw std::runtime_error("2x2 weighted CUDA projection exceeds the finite output range; no estimates returned");
+    AbsorptionResult projected;projected.y_tilde.resize(plan.n);projected.X_tilde.resize(plan.n,plan.cols);
+    cuda_check(cudaMemcpy(projected.y_tilde.data(),device_y.data(),sizeof(double)*plan.n,cudaMemcpyDeviceToHost),
+        "cudaMemcpy 2x2 within outcome failed");
+    if(plan.cols) cuda_check(cudaMemcpy(projected.X_tilde.data(),device_X.data(),sizeof(double)*static_cast<std::size_t>(plan.n)*plan.cols,cudaMemcpyDeviceToHost),
+        "cudaMemcpy 2x2 within regressors failed");
+    weighted_two_by_two::metadata(plan,options,projected);
+    projected.gpu_used=true;projected.gpu_attempted=true;projected.gpu_status_code=1;
+    projected.gpu_absorption_converged=true;projected.gpu_absorption_iterations=projected.iterations;
+    result=std::move(projected);return true;
+}
+
+__global__ void additive_cell_apply_kernel(double* y,double* X,int n,int cols,int cells,
+    const unsigned char* cell,const double* means) {
+    const std::size_t row=static_cast<std::size_t>(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(row>=static_cast<std::size_t>(n)) return;
+    const int c=cell[row];y[row]=__dsub_rn(y[row],means[c]);
+    for(int j=0;j<cols;++j) {
+        const auto at=static_cast<std::size_t>(j)*n+row;
+        X[at]=__dsub_rn(X[at],means[static_cast<std::size_t>(j+1)*cells+c]);
+    }
+}
+
+bool absorb_additive_cells_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,const additive_cell_projection::Plan& plan,
+    const HdfeOptions& options,AbsorptionResult& result) {
+    DeviceBuffer<double> device_y(static_cast<std::size_t>(plan.n));
+    DeviceBuffer<double> device_X(static_cast<std::size_t>(plan.n)*plan.cols);
+    DeviceBuffer<unsigned char> device_cell(plan.cell.size());
+    DeviceBuffer<double> device_means(plan.means.size());
+    cuda_check(cudaMemcpy(device_y.data(),y.data(),sizeof(double)*plan.n,cudaMemcpyHostToDevice),
+        "cudaMemcpy additive-cell outcome failed");
+    if(plan.cols) cuda_check(cudaMemcpy(device_X.data(),X.data(),sizeof(double)*static_cast<std::size_t>(plan.n)*plan.cols,cudaMemcpyHostToDevice),
+        "cudaMemcpy additive-cell regressors failed");
+    cuda_check(cudaMemcpy(device_cell.data(),plan.cell.data(),plan.cell.size(),cudaMemcpyHostToDevice),
+        "cudaMemcpy additive-cell ids failed");
+    cuda_check(cudaMemcpy(device_means.data(),plan.means.data(),sizeof(double)*plan.means.size(),cudaMemcpyHostToDevice),
+        "cudaMemcpy additive-cell means failed");
+    const int blocks=plan.n/kBlockSize+(plan.n%kBlockSize!=0);
+    additive_cell_apply_kernel<<<blocks,kBlockSize>>>(device_y.data(),device_X.data(),plan.n,plan.cols,
+        plan.cells,device_cell.data(),device_means.data());
+    cuda_check(cudaGetLastError(),"additive-cell projection kernel launch failed");
+    AbsorptionResult projected;projected.y_tilde.resize(plan.n);projected.X_tilde.resize(plan.n,plan.cols);
+    cuda_check(cudaMemcpy(projected.y_tilde.data(),device_y.data(),sizeof(double)*plan.n,cudaMemcpyDeviceToHost),
+        "cudaMemcpy additive-cell within outcome failed");
+    if(plan.cols) cuda_check(cudaMemcpy(projected.X_tilde.data(),device_X.data(),sizeof(double)*static_cast<std::size_t>(plan.n)*plan.cols,cudaMemcpyDeviceToHost),
+        "cudaMemcpy additive-cell within regressors failed");
+    additive_cell_projection::metadata(plan,options,projected);
+    projected.gpu_used=true;projected.gpu_attempted=true;projected.gpu_status_code=1;
+    projected.gpu_absorption_converged=true;projected.gpu_absorption_iterations=projected.iterations;
+    result=std::move(projected);return true;
 }
 
 bool absorb_tree_duplicate_edges_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
@@ -3232,6 +3357,19 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const HdfeOptions& options,
                                AbsorptionMethod method,
                                AbsorptionResult& result) {
+    return absorb_fixed_effects_cuda(y, X, fe_inputs, weights, sweep_order,
+                                      options, method, result, 0.0);
+}
+
+bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+                               const Eigen::Ref<const Eigen::MatrixXd>& X,
+                               const std::vector<GpuFeInput>& fe_inputs,
+                               const Eigen::VectorXd* weights,
+                               const std::vector<std::size_t>& sweep_order,
+                               const HdfeOptions& options,
+                               AbsorptionMethod method,
+                               AbsorptionResult& result,
+                               double solver_fe_tolerance) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const int ld = static_cast<int>(X.rows());
@@ -3256,6 +3394,39 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     if (any_slope && method == AbsorptionMethod::Jacobi) {
         return false;
+    }
+    if (!any_slope && weights != nullptr && fe_inputs.size() == 2 &&
+        method != AbsorptionMethod::Lsmr && method != AbsorptionMethod::Mlsmr &&
+        options.max_iter > 0 &&
+        (fe_inputs[0].num_levels_present <= 0 || fe_inputs[0].num_levels_present == 2) &&
+        (fe_inputs[1].num_levels_present <= 0 || fe_inputs[1].num_levels_present == 2)) {
+        weighted_two_by_two::Plan plan;
+        if (weighted_two_by_two::prepare(y, X, fe_inputs[0].group_ids,
+                fe_inputs[1].group_ids, weights, options, plan)) {
+            return absorb_weighted_two_by_two_cuda(y, X, plan, options, result);
+        }
+    }
+    if (!any_slope && weights != nullptr && fe_inputs.size() > 2 &&
+        method != AbsorptionMethod::Lsmr && method != AbsorptionMethod::Mlsmr &&
+        options.max_iter > 0) {
+        std::vector<weighted_two_by_two::FeView> views;
+        views.reserve(fe_inputs.size());
+        for (const auto& input : fe_inputs)
+            views.push_back({input.group_ids, input.num_groups, input.num_levels_present});
+        weighted_two_by_two::Plan plan;
+        if (weighted_two_by_two::prepare_indexed(y, X, views, weights, options, plan)) {
+            return absorb_weighted_two_by_two_cuda(y, X, plan, options, result);
+        }
+    }
+
+    if (!any_slope && fe_inputs.size() == 2) {
+        const auto& a=fe_inputs[0];const auto& b=fe_inputs[1];
+        additive_cell_projection::Plan plan;
+        if (additive_cell_projection::prepare(y,X,
+                {a.group_ids,a.num_groups,a.num_levels_present},
+                {b.group_ids,b.num_groups,b.num_levels_present},weights,options,plan)) {
+            return absorb_additive_cells_cuda(y,X,plan,options,result);
+        }
     }
 
     // Default ON (10jun2026): restores the exact 1-iteration solve for
@@ -3296,10 +3467,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
     }
-    static const double accel_occ_threshold_gpu = []() {
-        const char* e = std::getenv("XHDFE_ACCEL_OCC");
-        return (e != nullptr) ? std::atof(e) : 12.0;  // keep in sync with kAccelOccupancyThreshold (CPU)
-    }();
+    const double accel_occ_threshold_gpu = cuda_accel_occupancy_threshold();
     const bool ill_conditioned_graph_gpu =
         fe_inputs.size() >= 2 && min_fe_occupancy_gpu >= 0.0 &&
         min_fe_occupancy_gpu <= accel_occ_threshold_gpu;
@@ -3317,7 +3485,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     // accumulation and one-block scalar reductions throughout this regime;
     // this also makes the CG stopping path invariant to global-atomic order.
     const bool deterministic_small_cg =
-        use_reghdfe_cg && n <= 20000 && !any_slope;
+        use_reghdfe_cg && n <= kCudaSmallCgMaxRows && !any_slope;
     const bool use_accel =
         use_reghdfe_cg ||
         (fe_inputs.size() >= 2 && (n >= 200000 || ill_conditioned_graph_gpu));
@@ -3410,7 +3578,10 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     bool accel_diverged = false;
     if (store_alphas && fe_tol > 0.0 && convergence_tol > 0.0) {
         constexpr double kFeTolScale = 1e-8;
-        convergence_tol = std::min(convergence_tol, fe_tol * kFeTolScale);
+        // Transporting an absolute max-update tolerance must not relax this
+        // existing relative norm stopping rule.
+        const double work_fe_tol = solver_fe_tolerance > 0.0 ? solver_fe_tolerance : fe_tol;
+        convergence_tol = std::min(convergence_tol, work_fe_tol * kFeTolScale);
     }
 
     try {
@@ -4009,6 +4180,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             accumulate_alpha(fe, alpha_scale, alpha_y_ptr, alpha_x_ptr);
         };
 
+        bool recovery_delta_requested = false;
+        DeviceBuffer<double> d_recovery_max_delta;
         auto run_demean = [&](CudaFeDevice& fe,
                               double* y_ptr,
                               double* x_ptr,
@@ -4183,6 +4356,12 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             cuda_check(cudaGetLastError(), "compute_means kernel launch failed");
             accumulate_alpha(fe, alpha_scale, alpha_y_ptr, alpha_x_ptr);
 
+            if (recovery_delta_requested) {
+                max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                    fe.sum_y.data(), fe.num_groups, d_recovery_max_delta.data());
+                cuda_check(cudaGetLastError(), "recovery delta kernel launch failed");
+            }
+
             if (compute_check) {
                 cuda_check(cudaMemset(d_sumsq.data(), 0, sizeof(double)),
                            "cudaMemset sumsq failed");
@@ -4323,6 +4502,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         } else {
             bool use_symmetric = options.symmetric_sweep && sweep_order.size() > 1;
+            bool have_cg_iteration_count = false;
             if (use_reghdfe_cg) {
                 use_symmetric = true;
             }
@@ -5331,7 +5511,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                             break;
                         }
                     }
-                    result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
+                    result.iterations = cg_iters;
+                    have_cg_iteration_count = true;
                     if (normalized_small_cg) {
                         cuda_check(
                             cudaMemcpy(
@@ -5474,10 +5655,35 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
 
+            if (converged && store_alphas && cols == 0 &&
+                fe_tol > 0.0 && result.iterations < options.max_iter) {
+                // Complete the existing necessary FE-update check on-device.
+                // Norm convergence alone does not imply the requested max delta.
+                d_recovery_max_delta.allocate(1);
+                recovery_delta_requested = true;
+                converged = false;
+                while (result.iterations < options.max_iter) {
+                    cuda_check(cudaMemset(d_recovery_max_delta.data(), 0, sizeof(double)),
+                               "recovery delta reset failed");
+                    double ignored = 0.0;
+                    run_sweep(d_y.data(), d_x.data(), sweep_order, false, ignored,
+                              &alpha_state_ptrs);
+                    ++result.iterations;
+                    double max_delta = 0.0;
+                    cuda_check(cudaMemcpy(&max_delta, d_recovery_max_delta.data(),
+                                          sizeof(double), cudaMemcpyDeviceToHost),
+                               "recovery delta read failed");
+                    if (finite_double_bits(max_delta) && max_delta <= fe_tol) {
+                        converged = true;
+                        break;
+                    }
+                }
+                recovery_delta_requested = false;
+            }
             result.converged = converged;
-            if (!converged) {
+            if (!converged && !have_cg_iteration_count) {
                 result.iterations = options.max_iter;
-            } else if (result.iterations == 0) {
+            } else if (converged && result.iterations == 0) {
                 result.iterations = 1;
             }
         }
@@ -6072,6 +6278,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     const int individuals = gi.num_individuals;
     const bool unit_weights = weights == nullptr;
     const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    // Keep the affine witness for certification/refinement at every data size.
+    const bool capture_projection = true;
     const auto solve_start = std::chrono::steady_clock::now();
     if (!valid_group_individual_lsmr_structure(gi, n, weights)) {
         return false;
@@ -6380,7 +6588,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         auto solve_one = [&](const double* raw,
                              int rhs_index,
                              int& iterations,
-                             bool& converged) {
+                             bool& converged,
+                             int iteration_limit) {
             DeviceBuffer<double>& d_b = lsmr.b;
             DeviceBuffer<double>& d_u = lsmr.u;
             DeviceBuffer<double>& d_v = lsmr.v;
@@ -6460,13 +6669,14 @@ static bool absorb_group_individual_lsmr_cuda_impl(
             const double tolerance =
                 group_individual_absorption_tolerance(options);
             const double condition_limit = 1.0e12;
+            const double forward_target = group_forward_tolerance(options);
             double final_test1 = std::numeric_limits<double>::infinity();
             double final_test2 = std::numeric_limits<double>::infinity();
             const char* stop_reason = "maxiter";
 
             converged = false;
             int k = 0;
-            for (; k < options.max_iter; ++k) {
+            for (; k < iteration_limit; ++k) {
                 apply_a(d_v.data(), d_av.data(), true);
                 gi_lsmr_affine_subtract_kernel<<<blocks_n, kBlockSize>>>(
                     d_av.data(), d_u.data(), alpha, n, d_u.data());
@@ -6596,13 +6806,27 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                                   : std::numeric_limits<double>::infinity();
                 const double residual_tolerance =
                     tolerance + tolerance * norm_a * norm_x / norm_b;
+                // Forward-error guard (same rule as the CPU solver): a dual
+                // stop is accepted only when cond(A) * test2 meets the public
+                // forward target; nearly null incidence directions otherwise
+                // pass the dual test with a large projection error.
+                const bool dual_stop = final_test2 <= tolerance;
+                const bool forward_ok = condition * final_test2 <= forward_target;
                 if (final_test1 <= residual_tolerance ||
-                    final_test2 <= tolerance || alpha == 0.0) {
+                    (dual_stop && forward_ok) || alpha == 0.0) {
                     converged = true;
                     stop_reason = final_test1 <= residual_tolerance
                                       ? "test1"
-                                      : (final_test2 <= tolerance ? "test2"
-                                                                   : "alpha_zero");
+                                      : (dual_stop ? "test2" : "alpha_zero");
+                    ++k;
+                    break;
+                }
+                if (dual_stop && !forward_ok &&
+                    final_test2 <= 64.0 * std::numeric_limits<double>::epsilon()) {
+                    // FP64 floor: the dual stop stands (an inconclusive bound
+                    // never refuses); the unresolved guard is a diagnostic.
+                    converged = true;
+                    stop_reason = "forward_guard_floor";
                     ++k;
                     break;
                 }
@@ -6613,6 +6837,12 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                 }
             }
             iterations = k;
+            result.krylov_max_condition =
+                std::max(result.krylov_max_condition, condition);
+            result.krylov_max_condition_times_backward_error =
+                std::max(result.krylov_max_condition_times_backward_error,
+                         finite_double_bits(final_test2) ? condition * final_test2
+                                                         : condition);
             if (trace) {
                 std::fprintf(stderr,
                              "gi_lsmr_rhs rhs=%d tol=%.3e iterations=%d "
@@ -6626,17 +6856,57 @@ static bool absorb_group_individual_lsmr_cuda_impl(
 
         int max_iterations = 0;
         bool all_converged = true;
+        std::vector<double> captured_coefficients;
+        if (capture_projection) {
+            captured_coefficients.resize(total_fe);
+            result.fe_alpha_y.resize(dims + 1);
+            result.fe_alpha_X.resize(dims + 1);
+            for (int d = 0; d <= dims; ++d) {
+                const int count = d < dims ? standard_fe_inputs[d].num_groups : individuals;
+                result.fe_alpha_y[d].resize(count);
+                result.fe_alpha_X[d].resize(count, cols);
+            }
+        }
+        // Applies A*solution to `target` (raw - A*solution) and folds the
+        // scaled coefficients into the captured alphas.
+        auto project_solution = [&](const double* raw, double* target,
+                                    int rhs_index, bool accumulate) {
+            apply_a(lsmr.solution.data(), lsmr.av.data(), false);
+            if (capture_projection) {
+                cuda_check(cudaMemcpy(captured_coefficients.data(), lsmr.scaled.data(),
+                                      sizeof(double) * total_fe, cudaMemcpyDeviceToHost),
+                           "GI LSMR projection coefficients copy failed");
+                for (int d = 0; d <= dims; ++d) {
+                    const int count = d < dims ? standard_fe_inputs[d].num_groups : individuals;
+                    const int offset = d < dims ? offsets[d] : individual_offset;
+                    Eigen::Map<const Eigen::VectorXd> coefficients(
+                        captured_coefficients.data() + offset, count);
+                    if (rhs_index == 0) {
+                        if (accumulate) result.fe_alpha_y[d] += coefficients;
+                        else result.fe_alpha_y[d] = coefficients;
+                    } else if (accumulate) {
+                        result.fe_alpha_X[d].col(rhs_index-1) += coefficients;
+                    } else {
+                        result.fe_alpha_X[d].col(rhs_index-1) = coefficients;
+                    }
+                }
+            }
+            const double correction = device_norm(lsmr.av.data(), n);
+            gi_lsmr_make_residual_kernel<<<blocks_n, kBlockSize>>>(
+                raw, lsmr.av.data(), n, target);
+            cuda_check(cudaGetLastError(),
+                       "GI LSMR residual kernel launch failed");
+            return correction;
+        };
+        // Primary solve of one right-hand side (2.26.2 semantics).
+        std::vector<int> rhs_iterations(static_cast<std::size_t>(cols) + 1U, 0);
         auto solve_and_project = [&](const double* raw,
                                      double* residual,
                                      int rhs_index) {
-            int iterations = 0;
+            int& iterations = rhs_iterations[static_cast<std::size_t>(rhs_index)];
             bool converged = false;
-            solve_one(raw, rhs_index, iterations, converged);
-            apply_a(lsmr.solution.data(), lsmr.av.data(), false);
-            gi_lsmr_make_residual_kernel<<<blocks_n, kBlockSize>>>(
-                raw, lsmr.av.data(), n, residual);
-            cuda_check(cudaGetLastError(),
-                       "GI LSMR residual kernel launch failed");
+            solve_one(raw, rhs_index, iterations, converged, options.max_iter);
+            project_solution(raw, residual, rhs_index, false);
             max_iterations = std::max(max_iterations, iterations);
             all_converged = all_converged && converged;
         };
@@ -6650,19 +6920,157 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                 column + 1);
         }
 
-        result.y_tilde.resize(n);
-        staged_memcpy_d2h(result.y_tilde.data(),
-                          lsmr.residual_y.data(),
-                          sizeof(double) * n, workspace.h_stage,
-                          "cudaMemcpy GI LSMR y_tilde failed");
-        result.X_tilde.resize(ld, cols);
-        if (cols > 0) {
-            staged_memcpy_d2h(result.X_tilde.data(),
-                              lsmr.residual_x.data(),
-                              sizeof(double) * static_cast<std::size_t>(ld) * cols,
-                              workspace.h_stage,
-                              "cudaMemcpy GI LSMR X_tilde failed");
+        auto copy_residuals_to_host = [&]() {
+            result.y_tilde.resize(n);
+            staged_memcpy_d2h(result.y_tilde.data(),
+                              lsmr.residual_y.data(),
+                              sizeof(double) * n, workspace.h_stage,
+                              "cudaMemcpy GI LSMR y_tilde failed");
+            result.X_tilde.resize(ld, cols);
+            if (cols > 0) {
+                staged_memcpy_d2h(result.X_tilde.data(),
+                                  lsmr.residual_x.data(),
+                                  sizeof(double) * static_cast<std::size_t>(ld) * cols,
+                                  workspace.h_stage,
+                                  "cudaMemcpy GI LSMR X_tilde failed");
+            }
+        };
+
+        // Residual refinement (reghdfe-comparable and strict-residual modes;
+        // same rules as the CPU solver, see absorb_group_individual_lsmr_cpu):
+        // in comparable mode applied to every right-hand side or to none;
+        // when it changes the projection beyond the contract's resolution the
+        // primary solution is certified first and the refinement is kept only
+        // if it passes; never in xhdfe-fast. A correction below the forward
+        // target of the mode leaves the projection within the contract;
+        // strict-residual refines to the limit of its maximum-FE-mean gate
+        // with a larger budget and keeps every stage (the gate adjudicates).
+        if (all_converged && options.tolerance_mode != ToleranceMode::XhdfeFast) {
+            const bool strict_mode =
+                options.tolerance_mode == ToleranceMode::StrictResidual;
+            const double refinement_target = strict_mode
+                    ? std::max(std::max(0.0, options.tol),
+                               64.0 * std::numeric_limits<double>::epsilon())
+                    : group_forward_tolerance(options);
+            const int max_stages = strict_mode ? 4 : 3;
+            const std::size_t x_count = static_cast<std::size_t>(ld) * cols;
+            auto device_copy = [&](double* dst, const double* src, std::size_t count,
+                                   const char* what) {
+                if (count == 0) return;
+                cuda_check(cudaMemcpy(dst, src, sizeof(double) * count,
+                                      cudaMemcpyDeviceToDevice), what);
+            };
+            DeviceBuffer<double> primary_y(static_cast<std::size_t>(n));
+            DeviceBuffer<double> primary_x;
+            if (cols > 0) primary_x.allocate(x_count);
+            device_copy(primary_y.data(), lsmr.residual_y.data(), n,
+                        "GI LSMR residual backup failed");
+            device_copy(primary_x.data(), lsmr.residual_x.data(), x_count,
+                        "GI LSMR residual backup failed");
+            const std::vector<Eigen::VectorXd> primary_alpha_y = result.fe_alpha_y;
+            const std::vector<Eigen::MatrixXd> primary_alpha_x = result.fe_alpha_X;
+            bool significant = false;
+            auto refine_rhs = [&](double* residual, int rhs_index) {
+                int& iterations = rhs_iterations[static_cast<std::size_t>(rhs_index)];
+                int budget = strict_mode ? std::max(32, iterations / 2)
+                                         : std::max(16, iterations / 4);
+                for (int stage = 0; stage < max_stages && budget > 0 &&
+                                    iterations < options.max_iter; ++stage) {
+                    const double residual_norm = device_norm(residual, n);
+                    if (!finite_double_bits(residual_norm)) return false;
+                    if (!(residual_norm > 0.0)) return true;
+                    int extra = 0;
+                    bool extra_converged = false;
+                    solve_one(residual, rhs_index, extra, extra_converged,
+                              std::min(budget, options.max_iter - iterations));
+                    iterations += extra;
+                    budget -= extra;
+                    if (extra == 0) return false;
+                    const double correction =
+                        project_solution(residual, residual, rhs_index, true);
+                    if (trace) {
+                        std::fprintf(stderr,
+                                     "gi_lsmr_refine rhs=%d stage=%d iterations=%d "
+                                     "correction=%.3e residual=%.3e\n",
+                                     rhs_index, stage + 1, extra, correction,
+                                     residual_norm);
+                    }
+                    if (!finite_double_bits(correction)) return false;
+                    if (correction <= refinement_target * residual_norm) return true;
+                    significant = true;
+                }
+                return false;
+            };
+            bool complete = refine_rhs(lsmr.residual_y.data(), 0);
+            for (int column = 0; (complete || strict_mode) && column < cols; ++column) {
+                complete = refine_rhs(
+                    lsmr.residual_x.data() + static_cast<std::size_t>(column) * ld,
+                    column + 1) && complete;
+            }
+            bool keep = complete || strict_mode;
+            bool gate = true;
+            bool gate_checked = false;
+            if (keep && significant) {
+                // Certify the primary solution (host copy) before keeping a
+                // refinement that changed the projection materially.
+                DeviceBuffer<double> refined_y(static_cast<std::size_t>(n));
+                DeviceBuffer<double> refined_x;
+                if (cols > 0) refined_x.allocate(x_count);
+                device_copy(refined_y.data(), lsmr.residual_y.data(), n,
+                            "GI LSMR refined backup failed");
+                device_copy(refined_x.data(), lsmr.residual_x.data(), x_count,
+                            "GI LSMR refined backup failed");
+                const std::vector<Eigen::VectorXd> refined_alpha_y = result.fe_alpha_y;
+                const std::vector<Eigen::MatrixXd> refined_alpha_x = result.fe_alpha_X;
+                device_copy(lsmr.residual_y.data(), primary_y.data(), n,
+                            "GI LSMR residual restore failed");
+                device_copy(lsmr.residual_x.data(), primary_x.data(), x_count,
+                            "GI LSMR residual restore failed");
+                result.fe_alpha_y = primary_alpha_y;
+                result.fe_alpha_X = primary_alpha_x;
+                copy_residuals_to_host();
+                std::vector<Eigen::VectorXi> fes;
+                fes.reserve(static_cast<std::size_t>(dims));
+                for (int d = 0; d < dims; ++d) {
+                    fes.emplace_back(Eigen::Map<const Eigen::VectorXi>(
+                        standard_fe_inputs[static_cast<std::size_t>(d)].group_ids, n));
+                }
+                result.converged = true;
+                certify_absorption_result(y, X, fes, weights, options, {}, result, &gi);
+                gate = result.precision_certified;
+                gate_checked = true;
+                if (gate) {
+                    device_copy(lsmr.residual_y.data(), refined_y.data(), n,
+                                "GI LSMR refined restore failed");
+                    device_copy(lsmr.residual_x.data(), refined_x.data(), x_count,
+                                "GI LSMR refined restore failed");
+                    result.fe_alpha_y = refined_alpha_y;
+                    result.fe_alpha_X = refined_alpha_x;
+                } else {
+                    keep = false;
+                }
+            } else if (!keep) {
+                device_copy(lsmr.residual_y.data(), primary_y.data(), n,
+                            "GI LSMR residual restore failed");
+                device_copy(lsmr.residual_x.data(), primary_x.data(), x_count,
+                            "GI LSMR residual restore failed");
+                result.fe_alpha_y = primary_alpha_y;
+                result.fe_alpha_X = primary_alpha_x;
+            }
+            for (int rhs = 0; rhs <= cols; ++rhs) {
+                max_iterations = std::max(
+                    max_iterations, rhs_iterations[static_cast<std::size_t>(rhs)]);
+            }
+            if (trace) {
+                std::fprintf(stderr,
+                             "gi_lsmr_refine_outcome significant=%d gate_checked=%d gate=%d "
+                             "complete=%d kept=%d iterations=%d\n",
+                             significant ? 1 : 0, gate_checked ? 1 : 0, gate ? 1 : 0,
+                             complete ? 1 : 0, keep ? 1 : 0, max_iterations);
+            }
         }
+        copy_residuals_to_host();
+
         result.iterations = max_iterations;
         result.converged = all_converged;
         result.precision_certified = false;
@@ -7350,10 +7758,11 @@ bool fe_recovery_max_delta_cuda_cached(const Eigen::Ref<const Eigen::VectorXd>& 
         }
         for (std::size_t d = 0; d < dims; ++d) {
             const int groups = fe_inputs[d].num_groups;
-            if (groups <= 0 || fe_inputs[d].weight_sums == nullptr) {
+            if (groups <= 0 || fe_inputs[d].group_ids == nullptr ||
+                fe_inputs[d].weight_sums == nullptr) {
                 return false;
             }
-            const CudaFeDevice& dev = workspace.fe_dev[d];
+            CudaFeDevice& dev = workspace.fe_dev[d];
             if (dev.num_groups != groups ||
                 dev.num_levels_present != fe_inputs[d].num_levels_present ||
                 dev.gid.size() < static_cast<std::size_t>(n) ||
@@ -7361,6 +7770,13 @@ bool fe_recovery_max_delta_cuda_cached(const Eigen::Ref<const Eigen::VectorXd>& 
                 dev.sum_y.size() < static_cast<std::size_t>(groups)) {
                 return false;
             }
+            // Reuse allocated buffers, not FE contents identified only by shape.
+            cuda_check(cudaMemcpy(dev.gid.data(), fe_inputs[d].group_ids, sizeof(int) * n,
+                                  cudaMemcpyHostToDevice),
+                       "fe_recovery_max_delta_cached: refresh group_ids failed");
+            cuda_check(cudaMemcpy(dev.weight_sums.data(), fe_inputs[d].weight_sums,
+                                  sizeof(double) * groups, cudaMemcpyHostToDevice),
+                       "fe_recovery_max_delta_cached: refresh weight_sums failed");
         }
 
         const bool unit_weights = (weights == nullptr);

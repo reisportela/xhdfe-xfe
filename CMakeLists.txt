@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.26.2.20260903 LANGUAGES CXX)
+project(xhdfe VERSION 2.28.0.20260924 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,6 +43,9 @@ option(XHDFE_ENABLE_MARCH_NATIVE "Enable -march=native optimizations when suppor
 option(XHDFE_BUILD_PYTHON "Build the Python bindings (pybind11)." ON)
 option(XHDFE_ENABLE_CUDA "Enable CUDA backend for GPU acceleration." OFF)
 option(XHDFE_ENABLE_METAL "Enable Metal backend for GPU acceleration." OFF)
+option(XHDFE_REQUIRE_OPENMP
+       "Require OpenMP for production builds; OFF is for local diagnostics only."
+       ON)
 set(XHDFE_GPU_BACKEND_DEFAULT "cpu" CACHE STRING "Default GPU backend (cpu|cuda|metal).")
 
 function(xhdfe_enable_native_tuning target_name)
@@ -140,8 +143,22 @@ if(XHDFE_BUILD_PYTHON)
     endif()
 endif()
 
-# OpenMP (optional)
-find_package(OpenMP)
+# OpenMP is mandatory by default.  The OFF mode preserves the historical
+# optional lookup for local diagnostics, but is forbidden for release builds.
+if(XHDFE_REQUIRE_OPENMP)
+    find_package(OpenMP REQUIRED COMPONENTS CXX)
+else()
+    if(DEFINED ENV{XHDFE_RELEASE_BUILD} AND
+       "$ENV{XHDFE_RELEASE_BUILD}" STREQUAL "1")
+        message(FATAL_ERROR
+            "XHDFE_RELEASE_BUILD=1 cannot be combined with "
+            "-DXHDFE_REQUIRE_OPENMP=OFF.")
+    endif()
+    find_package(OpenMP COMPONENTS CXX)
+    message(STATUS
+        "XHDFE_REQUIRE_OPENMP=OFF: diagnostic build; OpenMP is used when "
+        "found, otherwise the historical serial fallback is retained.")
+endif()
 
 # Core library (v11 implementation)
 set(XHDFE_SOURCES
@@ -210,6 +227,19 @@ endif()
 if(OpenMP_CXX_FOUND)
     target_link_libraries(xhdfe PUBLIC OpenMP::OpenMP_CXX)
     target_compile_definitions(xhdfe PUBLIC HDFE_USE_OPENMP)
+    if(XHDFE_ENABLE_CUDA)
+        # OpenMP's imported CXX target does not forward compile flags to nvcc.
+        separate_arguments(_xhdfe_cuda_host_openmp_flags NATIVE_COMMAND "${OpenMP_CXX_FLAGS}")
+        foreach(_xhdfe_omp_flag IN LISTS _xhdfe_cuda_host_openmp_flags)
+            if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+                target_compile_options(xhdfe PRIVATE
+                    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${_xhdfe_omp_flag}>")
+            else()
+                target_compile_options(xhdfe PRIVATE
+                    "$<$<COMPILE_LANGUAGE:CUDA>:${_xhdfe_omp_flag}>")
+            endif()
+        endforeach()
+    endif()
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

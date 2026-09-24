@@ -550,6 +550,9 @@ ToleranceMode parse_tolerance_mode(const std::string& raw) {
 
 DofAdjustmentMethod parse_dof_method(const std::string& raw) {
     const std::string name = to_lower(raw);
+    if (name == "exact") {
+        return DofAdjustmentMethod::Exact;
+    }
     if (name == "all") {
         return DofAdjustmentMethod::All;
     }
@@ -599,6 +602,7 @@ ParsedDofAdjustments parse_dofadjustments(std::optional<std::string> raw_opt) {
     bool seen_pairwise = false;
     bool seen_clusters = false;
     bool seen_continuous = false;
+    bool seen_exact = false;
 
     std::string raw = *raw_opt;
     std::replace(raw.begin(), raw.end(), ',', ' ');
@@ -609,6 +613,12 @@ ParsedDofAdjustments parse_dofadjustments(std::optional<std::string> raw_opt) {
         }
         const std::string tok = to_lower(token);
         token.clear();
+        if (tok == "exact") {
+            seen_exact = true;
+            parsed.method = DofAdjustmentMethod::Exact;
+            parsed.mobility_groups = true;
+            return;
+        }
         if (tok == "all") {
             seen_all = true;
             parsed.method = DofAdjustmentMethod::All;
@@ -656,8 +666,10 @@ ParsedDofAdjustments parse_dofadjustments(std::optional<std::string> raw_opt) {
     flush();
     const int token_classes = static_cast<int>(seen_all) + static_cast<int>(seen_none) +
                               static_cast<int>(seen_firstpair) + static_cast<int>(seen_pairwise) +
-                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous);
+                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous) +
+                              static_cast<int>(seen_exact);
     if ((seen_all && token_classes > 1) || (seen_none && token_classes > 1) ||
+        (seen_exact && token_classes > 1) ||
         (seen_firstpair && seen_pairwise)) {
         throw_with_prefix("xhdfe plugin: ", "mutually exclusive dofadjustments tokens");
     }
@@ -1323,7 +1335,7 @@ hdfe::akm::LeverageMethod parse_akm_leverage_method(const std::string& name) {
 }
 
 void akm_save_scalar(const char* name, double value) {
-    const ST_retcode rc = SF_scal_save(const_cast<char*>(name), value);
+    const ST_retcode rc = SF_scal_save(const_cast<char*>(name), stata_value_or_missing(value));
     if (rc) {
         throw_with_prefix("xhdfe plugin: ", std::string("failed to save scalar: ") + name);
     }
@@ -1747,9 +1759,10 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
         const bool kept = res.sample.keep[static_cast<std::size_t>(i)] != 0;
         SF_vstore(idx_keep, row, kept ? 1.0 : 0.0);
         if (store_effects) {
-            if (kept) {
-                SF_vstore(idx_alpha, row, res.alpha[static_cast<Eigen::Index>(kept_cursor)]);
-                SF_vstore(idx_psi, row, res.psi[static_cast<Eigen::Index>(kept_cursor)]);
+            if (kept && kept_cursor < static_cast<std::size_t>(res.alpha.size()) &&
+                kept_cursor < static_cast<std::size_t>(res.psi.size())) {
+                SF_vstore(idx_alpha, row, stata_value_or_missing(res.alpha[static_cast<Eigen::Index>(kept_cursor)]));
+                SF_vstore(idx_psi, row, stata_value_or_missing(res.psi[static_cast<Eigen::Index>(kept_cursor)]));
             } else {
                 SF_vstore(idx_alpha, row, missval);
                 SF_vstore(idx_psi, row, missval);
@@ -1825,7 +1838,7 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
     auto read_id = [&](int var_idx, int obs_no) {
         const double z = read_numeric(var_idx, obs_no);
         const double r = std::floor(z + 0.5);
-        if (std::abs(z - r) > 1e-6) {
+        if (z != r) {
             throw_with_prefix("xhdfe plugin: ", "ids must be integers");
         }
         if (r < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
@@ -2272,9 +2285,11 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.jacobi_relaxation = parse_double(args.get_required("jacobi_relaxation"), "jacobi_relaxation");
         opts.level = parse_double(args.get_required("level"), "level");
         opts.save_groupvar = store_groupvar;
+        bool importance_weights = false;
         if (has_weight) {
             if (auto val = args.get_optional("weight_type")) {
                 const std::string wt = to_lower(*val);
+                importance_weights = wt == "iweight" || wt == "iw";
                 if (wt == "fweight" || wt == "fw") {
                     opts.weights_are_frequencies = true;
                 } else if (wt == "aweight" || wt == "aw" || wt == "pweight" || wt == "pw" ||
@@ -2740,6 +2755,8 @@ STDLL stata_call(int argc, char* argv[]) {
         const std::optional<std::string> s_df_a_levels = args.get_optional("s_df_a_levels");
         const std::optional<std::string> s_df_a_exact = args.get_optional("s_df_a_exact");
         const std::optional<std::string> s_df_a_nested = args.get_optional("s_df_a_nested");
+        const std::optional<std::string> s_model_has_constant =
+            args.get_optional("s_model_has_constant");
         const std::optional<std::string> s_r2 = args.get_optional("s_r2");
         const std::optional<std::string> s_r2_within = args.get_optional("s_r2_within");
         const std::optional<std::string> s_sigma2 = args.get_optional("s_sigma2");
@@ -2983,6 +3000,7 @@ STDLL stata_call(int argc, char* argv[]) {
                 const Eigen::VectorXd* wptr_g = w_g ? &(*w_g) : nullptr;
                 const std::vector<Eigen::VectorXi>* cptr_g = c_g ? &(*c_g) : nullptr;
                 reg.fit(y_g, X_g, fes_g, wptr_g, cptr_g, nullptr, {});
+                if (importance_weights) reg.apply_importance_weights(*wptr_g);
 
                 const hdfe::HdfeResults& r = reg.results();
 
@@ -2999,6 +3017,7 @@ STDLL stata_call(int argc, char* argv[]) {
                 maybe_save_scalar(s_df_a_levels, r.df_a_levels);
                 maybe_save_scalar(s_df_a_exact, r.df_a_exact);
                 maybe_save_scalar(s_df_a_nested, r.df_a_nested);
+                maybe_save_scalar(s_model_has_constant, r.model_has_constant ? 1.0 : 0.0);
                 maybe_save_scalar(s_r2, r.r2);
                 maybe_save_scalar(s_r2_within, r.r2_within);
                 maybe_save_scalar(s_sigma2, r.sigma2);
@@ -3129,6 +3148,7 @@ STDLL stata_call(int argc, char* argv[]) {
             const GroupAggregation agg = parse_aggregation(args.get_required("aggregation"));
 
             reg.fit_grouped(y, X, fes, group_ids, &individual_ids, agg, w_ptr, c_ptr);
+            if (importance_weights) reg.apply_importance_weights(*w_ptr);
             const hdfe::HdfeResults& r = reg.results();
 
             store_row_vector(bmat, r.coefficients);
@@ -3144,6 +3164,7 @@ STDLL stata_call(int argc, char* argv[]) {
             maybe_save_scalar(s_df_a_levels, r.df_a_levels);
             maybe_save_scalar(s_df_a_exact, r.df_a_exact);
             maybe_save_scalar(s_df_a_nested, r.df_a_nested);
+            maybe_save_scalar(s_model_has_constant, r.model_has_constant ? 1.0 : 0.0);
             maybe_save_scalar(s_r2, r.r2);
             maybe_save_scalar(s_r2_within, r.r2_within);
             maybe_save_scalar(s_sigma2, r.sigma2);
@@ -3240,6 +3261,7 @@ STDLL stata_call(int argc, char* argv[]) {
         const auto fit_standard_t0 = std::chrono::steady_clock::now();
         reg.fit(y, X, fes, w_ptr, c_ptr, inst_ptr, endogenous_idx,
                 slopes.empty() ? nullptr : &slopes);
+        if (importance_weights) reg.apply_importance_weights(*w_ptr);
         plugin_cpu_profile_log_elapsed("fit_standard", fit_standard_t0);
         const hdfe::HdfeResults& r = reg.results();
 
@@ -3256,6 +3278,7 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_df_a_levels, r.df_a_levels);
         maybe_save_scalar(s_df_a_exact, r.df_a_exact);
         maybe_save_scalar(s_df_a_nested, r.df_a_nested);
+        maybe_save_scalar(s_model_has_constant, r.model_has_constant ? 1.0 : 0.0);
         maybe_save_scalar(s_r2, r.r2);
         maybe_save_scalar(s_r2_within, r.r2_within);
         maybe_save_scalar(s_sigma2, r.sigma2);
@@ -3414,6 +3437,13 @@ STDLL stata_call(int argc, char* argv[]) {
             msg.push_back('\n');
         }
         const bool numerical_failure =
+            msg.find(": did not converge;") != std::string::npos ||
+            msg.find(": precision certification failed;") != std::string::npos ||
+            msg.find("fixed-effect recovery did not converge") != std::string::npos ||
+            msg.find("Fixed-effect recovery did not converge") != std::string::npos ||
+            msg.find("FE extraction absorption did not converge") != std::string::npos ||
+            msg.find("group FE rank is numerically ambiguous") != std::string::npos ||
+            msg.find("dofadjustments(exact): rational rank") != std::string::npos ||
             msg.find(
                 "Group/individual HDFE absorption did not converge; "
                 "no estimates were produced") != std::string::npos ||

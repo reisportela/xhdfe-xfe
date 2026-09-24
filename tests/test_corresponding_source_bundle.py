@@ -557,13 +557,11 @@ class CorrespondingSourceBundleTests(unittest.TestCase):
             return
         workflow = workflow_path.read_text(encoding="utf-8")
         for fragment in (
-            'test "${#STATA_RUNTIME_DLLS[@]}" -eq 3',
-            '"libgcc_s_seh-1.dll",',
-            'STATA_LIBGCC="$(one_file \'libgcc_s_*.dll\'',
-            '--runtime-binary "windows-stata-libgcc=$STATA_LIBGCC"',
-            '--runtime-provider windows-stata-libgcc=ubuntu-mingw-gcc',
-            "--metadata windows-stata-libgcc.release_path="
-            "xhdfe_xfe-stata-windows-cpu.zip/libgcc_s_seh-1.dll",
+            'test "${#STATA_RUNTIME_DLLS[@]}" -eq 0',
+            '--windows-stata-static-ledger dl/windows-stata-provider-ledger.json',
+            'tools/validate_python_release_artifacts.py --system-only',
+            'needs: [build-linux, build-windows-python, build-macos, test-windows-stata]',
+            "receipt['plugin_sha256'] == record['sha256']",
         ):
             self.assertIn(fragment, workflow)
 

@@ -23,9 +23,6 @@ import warnings
 import numpy as np
 import pandas as pd
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
-
 
 def read_matrix(path):
     return pd.read_csv(path, na_values=["."]).to_numpy(dtype=float)
@@ -998,7 +995,7 @@ def run_frontends(args, td, data, stata_template, r_template):
     subprocess.run(
         [args.rscript, str(r_path), os.path.abspath(args.r_lib),
          os.path.abspath(args.rcpp_lib), str(data_path), str(td),
-         str(int(args.gpu)), str(REPO_ROOT)],
+         str(int(args.gpu)), str(Path(__file__).resolve().parent)],
         cwd=td, check=True, timeout=420,
     )
 
@@ -1621,7 +1618,7 @@ def main():
         # remains available through --gpu.
         os.environ["XHDFE_GPU_BACKEND"] = "cpu"
 
-    repo = str(REPO_ROOT)
+    repo = os.path.dirname(os.path.abspath(__file__))
     if args.module_dir:
         sys.path.insert(0, os.path.abspath(args.module_dir))
         __import__("py_hdfe_v11")

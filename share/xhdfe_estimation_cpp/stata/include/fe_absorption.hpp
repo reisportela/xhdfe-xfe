@@ -4,12 +4,15 @@
 #include <Eigen/Dense>
 
 #include <type_traits>
+#include <memory>
 #include <vector>
 
 #include "hdfe/hdfe_regressor.hpp"
 
 namespace hdfe {
 namespace detail {
+
+struct N1FeEvidence;
 
 struct CudaForwardProbeSummary {
     int status = 0;  // 0 not run, 1 ok, 2 fit error, 3 CUDA error, 4 ineligible
@@ -36,6 +39,7 @@ struct GroupIndividualStructure {
 };
 
 struct AbsorptionResult {
+    std::shared_ptr<N1FeEvidence> n1_fe;
     Eigen::VectorXd y_tilde;
     Eigen::MatrixXd X_tilde;
     std::vector<int> fe_levels;
@@ -120,6 +124,29 @@ void certify_absorption_result(
 // The norm-change proxy is only a candidate trigger: this routine certifies
 // the explicit backward error (and the strict maximum-mean condition when
 // requested), then makes converged and precision_certified agree.
+// Forward-error target accepted by the group/individual Krylov solver: the
+// running LSMR condition estimate times the dual residual test must not
+// exceed it before a dual stop is accepted. Derived from the public
+// tolerance of the mode (100 x the mode's dual tolerance, floored at 1e-8)
+// unless options.group_forward_tolerance carries an explicit value.
+double group_forward_tolerance(const HdfeOptions& options);
+
+// Weighted relative residual sum of squares of the ones vector projected on
+// the span of the absorbed effects (ordinary FEs and the group/individual
+// incidence). Decides whether a design spans the constant when its structure
+// alone cannot (sum aggregation, no ordinary FE, uneven team sizes). One
+// right-hand side solved by the exact direct route when the design is
+// eligible, otherwise by the LSMR of the backend that did the absorption
+// (gpu_cuda), outside the certificate, refinement and retry machinery: a
+// consistent system has no dual residual to certify, and the decision only
+// needs the residual norm.
+double group_constant_projection_residual_rel(
+    const std::vector<Eigen::VectorXi>& standard_fes,
+    const GroupIndividualStructure& gi,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    bool gpu_cuda);
+
 bool certify_group_individual_candidate(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -172,12 +199,38 @@ FeRecoveryResult recover_fixed_effects(const Eigen::VectorXd& partial,
                                        const Eigen::VectorXd* weights,
                                        const HdfeOptions& options);
 
+FeRecoveryResult recover_fixed_effects(const Eigen::VectorXd& partial,
+                                       const std::vector<Eigen::VectorXi>& fes,
+                                       const Eigen::VectorXd* weights,
+                                       const HdfeOptions& options,
+                                       double solver_fe_tolerance);
+
 FeRecoveryResult recover_fixed_effects_group_ids(const Eigen::VectorXd& partial,
                                                  const std::vector<std::vector<int>>& fe_group_ids,
                                                  const std::vector<int>& fe_levels,
                                                  const Eigen::VectorXd* weights,
                                                  const HdfeOptions& options,
                                                  const std::vector<Eigen::VectorXd>* weight_sums_override = nullptr);
+
+FeRecoveryResult recover_fixed_effects_group_ids(const Eigen::VectorXd& partial,
+                                                 const std::vector<std::vector<int>>& fe_group_ids,
+                                                 const std::vector<int>& fe_levels,
+                                                 const Eigen::VectorXd* weights,
+                                                 const HdfeOptions& options,
+                                                 const std::vector<Eigen::VectorXd>* weight_sums_override,
+                                                 double solver_fe_tolerance);
+
+// Explicit coordinates for a correction in an already-normalized problem.
+// Existing overloads retain automatic normalization and their ABI.
+FeRecoveryResult recover_fixed_effects_group_ids(const Eigen::VectorXd& partial,
+                                                 const std::vector<std::vector<int>>& fe_group_ids,
+                                                 const std::vector<int>& fe_levels,
+                                                 const Eigen::VectorXd* weights,
+                                                 const HdfeOptions& options,
+                                                 const std::vector<Eigen::VectorXd>* weight_sums_override,
+                                                 double solver_fe_tolerance,
+                                                 int coordinate_exponent);
+
 
 double fe_recovery_max_delta(Eigen::VectorXd& residual,
                              const std::vector<std::vector<int>>& fe_group_ids,

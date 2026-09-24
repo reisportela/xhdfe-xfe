@@ -24,7 +24,7 @@ enum class ConvergenceCriterion { Auto, NormChange, Reghdfe, Both };
 enum class FeRecoveryMethod { Map, Hybrid };
 
 /** \brief Degree-of-freedom adjustment strategy for absorbed fixed effects (reghdfe-style). */
-enum class DofAdjustmentMethod { All, None, FirstPair, Pairwise };
+enum class DofAdjustmentMethod { All, None, FirstPair, Pairwise, Exact };
 
 /** \brief Fixed-effect DoF counting strategy for SSC (fixest-style). */
 enum class FixefDofMethod { Full, None, Nonnested };
@@ -53,6 +53,10 @@ struct HdfeOptions {
                                                            //!< XhdfeFast restores the pre-2.7.0 fast trigger;
                                                            //!< StrictResidual is the audited certificate mode.
     double fe_tolerance = 1e-6;                            //!< Convergence tolerance for fixed-effect recovery (savefes).
+    double group_forward_tolerance = 0.0;                  //!< Internal: forward-error target of the group/individual Krylov
+                                                           //!< solver (condition estimate x dual residual). 0 derives it from
+                                                           //!< the public tolerance of the mode; internal retries carry the
+                                                           //!< public value so a tighter dual tolerance never tightens it.
     FeRecoveryMethod fe_recovery_method = FeRecoveryMethod::Hybrid; //!< Fixed-effect recovery strategy.
     int max_iter = 100000;                                 //!< Maximum alternating-projection iterations.
     int convergence_check_interval = 1;                    //!< Check convergence every k absorption iterations (1 = every iteration).
@@ -125,6 +129,7 @@ struct HdfeResults {
     double df_a_levels = 0.0;      //!< Raw FE level count (sum of levels across dimensions).
     double df_a_exact = 0.0;       //!< Exact FE DoF after redundancy (sum of non-redundant levels).
     double df_a_nested = 0.0;      //!< FE DoF nested within clusters (used in SSC adjustments).
+    bool model_has_constant = true; //!< The fitted model contains a constant: an explicit intercept or one spanned by the absorbed effects. False for noconstant fits without absorbed levels and for group/individual sum aggregation whose membership columns do not span the constant.
     double r2 = 0.0;               //!< Overall (between) R-squared.
     double r2_within = 0.0;        //!< Within R-squared measured on transformed data.
     double sigma2 = 0.0;           //!< Estimated variance of residuals under the selected covariance model.

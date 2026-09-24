@@ -288,9 +288,11 @@ def bootstrap(
     if method == "pairs":
         bootstrap_cluster_name = None
 
-    point = decompose(
-        y, x1, x2_groups=x2_groups, fes=fes, **decompose_kwargs
-    )
+    sample_info = decompose_kwargs.get("sample_info", False)
+    if not isinstance(sample_info, (bool, np.bool_)):
+        raise TypeError("sample_info must be True or False")
+    point_kwargs = dict(decompose_kwargs, sample_info=True)
+    point = decompose(y, x1, x2_groups=x2_groups, fes=fes, **point_kwargs)
     if not point["converged"]:
         raise RuntimeError(
             "the point decomposition did not converge; bootstrap aborted"
@@ -299,6 +301,24 @@ def bootstrap(
         raise RuntimeError(
             "GPU use was required but the point estimate used a fallback"
         )
+
+    retained = point["sample_index"].copy()
+    if method == "cluster_pairs":
+        _, retained_codes = np.unique(
+            bootstrap_cluster[retained], return_inverse=True
+        )
+        n_boot_clusters = int(retained_codes.max()) + 1
+        if n_boot_clusters < 2:
+            raise ValueError(
+                "cluster-pairs bootstrap requires at least two retained clusters"
+            )
+        cluster_groups = [retained[retained_codes == code]
+                          for code in range(n_boot_clusters)]
+    if not sample_info:
+        point["sample_info_requested"] = False
+        for key in ("sample_index", "sample_mask", "sample_hash",
+                    "sample_hash_algorithm", "sample_index_scope"):
+            point[key] = None
 
     point_arrays = _point_arrays(point)
     master = np.random.SeedSequence(seed)
@@ -310,7 +330,9 @@ def bootstrap(
     for replication, child_sequence in enumerate(child_sequences, start=1):
         rng = np.random.Generator(np.random.PCG64(child_sequence))
         if method == "pairs":
-            indices = rng.integers(0, n, size=n, dtype=np.int64)
+            indices = retained[rng.integers(
+                0, retained.size, size=retained.size, dtype=np.int64
+            )]
         else:
             selected = rng.integers(
                 0, len(cluster_groups), size=len(cluster_groups),
@@ -457,6 +479,8 @@ def bootstrap(
             "observation" if method == "pairs" else "declared_cluster"
         ),
         "bootstrap_cluster_name": bootstrap_cluster_name,
+        "resampling_population": "point_retained_sample",
+        "n_rows_population": int(retained.size),
         "seed": seed,
         "rng": "numpy.SeedSequence+PCG64_per_replication",
         "reps_requested": reps,

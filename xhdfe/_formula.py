@@ -38,6 +38,11 @@ _FORMULA_METADATA = (
     "endog_names_",
     "instrument_names_",
     "endogenous_index_",
+    "group_name_",
+    "individual_name_",
+    "aggregation_",
+    "group_levels_",
+    "individual_levels_",
 )
 
 
@@ -400,7 +405,7 @@ def _encode_ids(value: Any, n_rows: int, label: str, pd: Any):
     return np.ascontiguousarray(codes, dtype=np.int64), np.asarray(levels)
 
 
-def _frequency_weight_vector(value: Any, n_rows: int, pd: Any) -> np.ndarray:
+def _frequency_weight_vector(value: Any, n_rows: int, pd: Any, *, check_total: bool = True) -> np.ndarray:
     array = _as_vector(value, n_rows, "weights")
     _require_no_missing(array, "weights", pd)
     converted = np.empty(n_rows, dtype=np.float64)
@@ -427,9 +432,10 @@ def _frequency_weight_vector(value: Any, n_rows: int, pd: Any) -> np.ndarray:
                 f"frequency weight at row {position} cannot be represented exactly "
                 "by the current float64 Python binding"
             )
-        total += exact
-        if total > int64_max:
-            raise ValueError("the cumulative frequency-weight total overflows int64")
+        if check_total:
+            total += exact
+            if total > int64_max:
+                raise ValueError("the cumulative frequency-weight total overflows int64")
         converted[position] = numeric
     return converted
 
@@ -441,12 +447,13 @@ def _resolve_weights(
     pd: Any,
     *,
     fweights: bool,
+    grouped: bool = False,
 ):
     if weights is None:
         return None
     value = _column(data, weights) if isinstance(weights, str) else weights
     if fweights:
-        return _frequency_weight_vector(value, n_rows, pd)
+        return _frequency_weight_vector(value, n_rows, pd, check_total=not grouped)
     return _numeric_vector(value, n_rows, "weights", pd)
 
 
@@ -935,6 +942,8 @@ class _MaterializedFormula:
     weights: Optional[np.ndarray]
     clusters: Optional[tuple[np.ndarray, ...]]
     fweights: bool
+    iweights: bool
+    pweights: bool
     fit_intercept: bool
     coef_names: tuple[str, ...]
     intercept_index: Optional[int]
@@ -950,6 +959,13 @@ class _MaterializedFormula:
     endogenous_index: tuple[int, ...] = ()
     endog_names: tuple[str, ...] = ()
     instrument_names: tuple[str, ...] = ()
+    group: Optional[np.ndarray] = None
+    individual: Optional[np.ndarray] = None
+    aggregation: str = "mean"
+    group_name: Optional[str] = None
+    individual_name: Optional[str] = None
+    group_levels: Optional[np.ndarray] = None
+    individual_levels: Optional[np.ndarray] = None
 
 
 def _require_disjoint_iv_names(
@@ -989,9 +1005,14 @@ def _materialize_formula(
     weights: Any,
     clusters: Any,
     fweights: bool,
+    iweights: bool = False,
+    pweights: bool = False,
     na_action: str,
     context: Optional[Mapping[str, Any]],
     force_formulaic: bool = False,
+    group: Any = None,
+    individual: Any = None,
+    aggregation: str = "mean",
 ) -> _MaterializedFormula:
     if na_action != "raise":
         raise NotImplementedError(
@@ -1003,6 +1024,23 @@ def _materialize_formula(
     if not isinstance(fweights, (bool, np.bool_)):
         raise TypeError("fweights must be a boolean")
     fweights = bool(fweights)
+    if not isinstance(iweights, (bool, np.bool_)):
+        raise TypeError("iweights must be a boolean")
+    iweights = bool(iweights)
+    if not isinstance(pweights, (bool, np.bool_)):
+        raise TypeError("pweights must be a boolean")
+    pweights = bool(pweights)
+    if individual is not None and group is None:
+        raise ValueError("individual requires group")
+    if not isinstance(aggregation, str):
+        raise TypeError("aggregation must be 'mean' or 'sum'")
+    aggregation = aggregation.strip().lower()
+    if aggregation in {"average", "avg"}:
+        aggregation = "mean"
+    if aggregation not in {"mean", "sum"}:
+        raise ValueError("aggregation must be 'mean' or 'sum'")
+    if int(fweights) + int(iweights) + int(pweights) > 1:
+        raise ValueError("fweights, iweights and pweights are mutually exclusive")
 
     parsed = _parse_formula(formula)
     lhs, rhs, fixed_effect_rhs = _formula_parts(parsed.main)
@@ -1055,15 +1093,42 @@ def _materialize_formula(
         if levels is not None:
             fe_levels[name] = levels
 
+    group_name = group if isinstance(group, str) else None
+    individual_name = individual if isinstance(individual, str) else None
+    group_codes = group_levels = individual_codes = individual_levels = None
+    if group is not None:
+        group_codes, group_levels = _encode_ids(
+            _column(data, group) if group_name is not None else group, n_rows, "group", pd
+        )
+    if individual is not None:
+        individual_codes, individual_levels = _encode_ids(
+            _column(data, individual) if individual_name is not None else individual,
+            n_rows, "individual", pd
+        )
+        if not any(np.array_equal(individual_codes, fe) for fe in fes):
+            # Stata appends the individual FE when the option names it explicitly.
+            label = individual_name or "individual"
+            while label in fe_names:
+                label += " [group]"
+            fe_names = (*fe_names, label)
+            fes.append(individual_codes)
+            if individual_levels is not None:
+                fe_levels[label] = individual_levels
+
     resolved_weights = _resolve_weights(
         weights,
         data,
         n_rows,
         pd,
         fweights=fweights,
+        grouped=group is not None,
     )
     if fweights and resolved_weights is None:
         raise ValueError("fweights=True requires weights")
+    if iweights and resolved_weights is None:
+        raise ValueError("iweights=True requires weights")
+    if pweights and resolved_weights is None:
+        raise ValueError("pweights=True requires weights")
     resolved_clusters, cluster_levels, cluster_names = _resolve_clusters(
         clusters, data, n_rows, pd
     )
@@ -1087,6 +1152,8 @@ def _materialize_formula(
         clusters=tuple(resolved_clusters) if resolved_clusters is not None else None,
         fweights=fweights,
         fit_intercept=fit_intercept,
+        iweights=iweights,
+        pweights=pweights,
         coef_names=coef_names,
         intercept_index=intercept_index,
         fe_names=fe_names,
@@ -1101,6 +1168,13 @@ def _materialize_formula(
         endogenous_index=endogenous_index,
         endog_names=design.endog_names,
         instrument_names=design.instrument_names,
+        group=group_codes,
+        individual=individual_codes,
+        aggregation=aggregation,
+        group_name=group_name,
+        individual_name=individual_name,
+        group_levels=group_levels,
+        individual_levels=individual_levels,
     )
 
 
@@ -1142,6 +1216,10 @@ def _freeze_materialized(materialized: _MaterializedFormula) -> _MaterializedFor
         fe_levels=MappingProxyType(levels),
         cluster_levels=MappingProxyType(cluster_levels),
         data_index=_readonly_copy(materialized.data_index),
+        group=_readonly_copy(materialized.group) if materialized.group is not None else None,
+        individual=_readonly_copy(materialized.individual) if materialized.individual is not None else None,
+        group_levels=_readonly_copy(materialized.group_levels) if materialized.group_levels is not None else None,
+        individual_levels=_readonly_copy(materialized.individual_levels) if materialized.individual_levels is not None else None,
     )
 
 
@@ -1153,9 +1231,14 @@ def _formula_regressor_class():
         """Native regressor with formula metadata attached after fitting."""
 
         def fit(self, *args, **kwargs):
-            for name in _FORMULA_METADATA:
-                self.__dict__.pop(name, None)
-            return super().fit(*args, **kwargs)
+            generation = self.generation_
+            try:
+                return super().fit(*args, **kwargs)
+            finally:
+                # Argument conversion can fail before the native fit starts.
+                if self.generation_ != generation:
+                    for name in _FORMULA_METADATA:
+                        self.__dict__.pop(name, None)
 
         def tidy(self):
             """Return named coefficient results as a pandas DataFrame."""
@@ -1197,6 +1280,10 @@ def _fit_materialized(
             "remove the intercept"
         )
     options["fit_intercept"] = materialized.fit_intercept
+    if materialized.clusters and "se_type" not in options:
+        options["se_type"] = "cluster"
+    elif materialized.pweights and "se_type" not in options:
+        options["se_type"] = "robust"
     regressor_class = _formula_regressor_class()
     model = regressor_class(**options)
     fit_options = {
@@ -1210,6 +1297,15 @@ def _fit_materialized(
     }
     if materialized.fweights:
         fit_options["fweights"] = True
+    if materialized.iweights:
+        fit_options["iweights"] = True
+    if materialized.pweights:
+        fit_options["pweights"] = True
+    if materialized.group is not None:
+        fit_options["group"] = materialized.group
+    if materialized.individual is not None:
+        fit_options["individual"] = materialized.individual
+    fit_options["aggregation"] = materialized.aggregation
     if materialized.endogenous_index:
         fit_options["instruments"] = materialized.instruments
         fit_options["endogenous_idx"] = list(materialized.endogenous_index)
@@ -1225,7 +1321,7 @@ def _fit_materialized(
     model.fe_levels_ = materialized.fe_levels
     model.cluster_levels_ = materialized.cluster_levels
     model.cluster_names_ = materialized.cluster_names
-    model.se_type_ = _normalized_se_type(regressor_options)
+    model.se_type_ = _normalized_se_type(options)
     model.var_labels_ = materialized.var_labels
     model.model_spec_ = materialized.model_spec
     model.endog_names_ = materialized.endog_names
@@ -1235,6 +1331,11 @@ def _fit_materialized(
     sample = np.asarray(model.sample_index_, dtype=np.int64)
     model.estimation_index_ = materialized.data_index[sample].copy()
     model.used_fast_path_ = materialized.used_fast_path
+    model.group_name_ = materialized.group_name
+    model.individual_name_ = materialized.individual_name
+    model.aggregation_ = materialized.aggregation
+    model.group_levels_ = materialized.group_levels
+    model.individual_levels_ = materialized.individual_levels
     return model
 
 
@@ -1266,6 +1367,18 @@ class PreparedFormula:
     @property
     def fes(self) -> tuple[np.ndarray, ...]:
         return self._materialized.fes
+
+    @property
+    def group(self) -> Optional[np.ndarray]:
+        return self._materialized.group
+
+    @property
+    def individual(self) -> Optional[np.ndarray]:
+        return self._materialized.individual
+
+    @property
+    def aggregation(self) -> str:
+        return self._materialized.aggregation
 
     @property
     def instruments(self) -> Optional[np.ndarray]:
@@ -1308,6 +1421,11 @@ def prepare_formula(
     weights: Any = None,
     clusters: Any = None,
     fweights: bool = False,
+    iweights: bool = False,
+    pweights: bool = False,
+    group: Any = None,
+    individual: Any = None,
+    aggregation: str = "mean",
     na_action: str = "raise",
     context: Optional[Mapping[str, Any]] = None,
     **regressor_options: Any,
@@ -1319,6 +1437,11 @@ def prepare_formula(
         weights=weights,
         clusters=clusters,
         fweights=fweights,
+        iweights=iweights,
+        pweights=pweights,
+        group=group,
+        individual=individual,
+        aggregation=aggregation,
         na_action=na_action,
         context=context,
     )
@@ -1332,6 +1455,11 @@ def feols(
     weights: Any = None,
     clusters: Any = None,
     fweights: bool = False,
+    iweights: bool = False,
+    pweights: bool = False,
+    group: Any = None,
+    individual: Any = None,
+    aggregation: str = "mean",
     na_action: str = "raise",
     context: Optional[Mapping[str, Any]] = None,
     **regressor_options: Any,
@@ -1341,6 +1469,13 @@ def feols(
     The supported fixed-effect syntax is ``y ~ x1 + x2 | firm + year``.
     Formulaic handles RHS categories and interactions; the fixed-effect branch
     accepts bare column names and is passed to the unchanged native absorber.
+
+    ``group`` and ``individual`` accept column names or positional vectors.
+    ``aggregation`` is ``"mean"`` or ``"sum"``; a named individual effect is
+    appended when absent from the fixed-effect part. As in Stata, include an
+    ordinary constant FE when a varying-size sum model needs an intercept that
+    its membership columns do not supply. ``dofadjustments="exact"`` requests
+    the bounded algebraic rank calculation for group/individual inference.
 
     A third part requests 2SLS, matching the R frontend's grammar:
     ``y ~ x1 | firm + year | d1 + d2 ~ z1 + z2``.  Its left side lists the
@@ -1354,6 +1489,11 @@ def feols(
         weights=weights,
         clusters=clusters,
         fweights=fweights,
+        iweights=iweights,
+        pweights=pweights,
+        group=group,
+        individual=individual,
+        aggregation=aggregation,
         na_action=na_action,
         context=context,
     )

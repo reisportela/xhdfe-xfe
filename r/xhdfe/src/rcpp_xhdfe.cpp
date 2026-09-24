@@ -14,6 +14,7 @@
 // shifted in the R wrapper.
 
 #include <Rcpp.h>
+#include "hdfe/ieee_bits.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -169,10 +170,15 @@ void apply_dofadjustments(hdfe::HdfeOptions& opts, const std::vector<std::string
     bool seen_pairwise = false;
     bool seen_clusters = false;
     bool seen_continuous = false;
+    bool seen_exact = false;
     for (const std::string& raw : tokens) {
         const std::string token = to_lower(raw);
         if (token.empty()) continue;
-        if (token == "all") {
+        if (token == "exact") {
+            seen_exact = true;
+            opts.dof_method = hdfe::DofAdjustmentMethod::Exact;
+            opts.dof_mobility_groups = true;
+        } else if (token == "all") {
             seen_all = true;
             opts.dof_method = hdfe::DofAdjustmentMethod::All;
             opts.dof_mobility_groups = true;
@@ -201,8 +207,10 @@ void apply_dofadjustments(hdfe::HdfeOptions& opts, const std::vector<std::string
     }
     const int token_classes = static_cast<int>(seen_all) + static_cast<int>(seen_none) +
                               static_cast<int>(seen_firstpair) + static_cast<int>(seen_pairwise) +
-                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous);
+                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous) +
+                              static_cast<int>(seen_exact);
     if ((seen_all && token_classes > 1) || (seen_none && token_classes > 1) ||
+        (seen_exact && token_classes > 1) ||
         (seen_firstpair && seen_pairwise)) {
         throw std::runtime_error("Mutually exclusive dofadjustments tokens");
     }
@@ -473,6 +481,7 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["df_a_levels"] = res.df_a_levels;
     out["df_a_exact"] = res.df_a_exact;
     out["df_a_nested"] = res.df_a_nested;
+    out["model_has_constant"] = res.model_has_constant;
 
     out["r2"] = res.r2;
     out["r2_within"] = res.r2_within;
@@ -605,6 +614,11 @@ Rcpp::List xhdfe_cpp_fit(Rcpp::NumericVector y,
     hdfe::HdfeOptions options;
     hdfe::v11::ThreadingOptions threading;
     parse_options(opts, options, threading);
+    const bool importance_weights = opts.containsElementNamed("weights_are_importance") &&
+        Rcpp::as<bool>(opts["weights_are_importance"]);
+    if (importance_weights && (Rf_isNull(weights) || options.weights_are_frequencies)) {
+        throw std::runtime_error("importance weights require a non-frequency weights vector");
+    }
 
     // Zero-copy views over the R storage (R vectors/matrices are
     // column-major doubles, exactly Eigen's default layout).
@@ -682,6 +696,15 @@ Rcpp::List xhdfe_cpp_fit(Rcpp::NumericVector y,
                 slopes_ptr);
     }
 
+    if (importance_weights) reg.apply_importance_weights(*weights_ptr);
+    if (has_group && !Rf_isNull(individual) &&
+        std::any_of(reg.results().fe_inexact.begin(), reg.results().fe_inexact.end(),
+                    [](int value) { return value != 0; })) {
+        Rcpp::warning(
+            "Group/individual degrees of freedom use an approximation; "
+            "standard errors are not based on exact design rank. "
+            "Use dof='exact' for a bounded direct rank calculation.");
+    }
     return build_results(reg);
 }
 
@@ -998,7 +1021,11 @@ Rcpp::List akm_components_to_list(const hdfe::akm::AkmComponents& c,
     out["cov_alpha_psi"] = c.cov_alpha_psi;
     // derived summary (pytwoway-style at-a-glance quantities)
     out["corr_alpha_psi"] =
-        c.cov_alpha_psi / std::sqrt(c.var_alpha * c.var_psi);
+        hdfe::detail::ieee_finite(c.var_alpha) && hdfe::detail::ieee_finite(c.var_psi) &&
+        c.var_alpha > 0.0 && c.var_psi > 0.0
+            ? (c.cov_alpha_psi / std::sqrt(std::max(c.var_alpha, c.var_psi))) /
+                  std::sqrt(std::min(c.var_alpha, c.var_psi))
+            : NA_REAL;
     out["var_alpha_plus_psi"] =
         c.var_alpha + c.var_psi + 2.0 * c.cov_alpha_psi;
     if (var_y > 0.0) {

@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "purpose": "Focused valid-input controls required in addition to the historical 1719-row campaign",
+  "policy": {
+    "valid_input_refusal": "FAIL_VALID_REFUSAL",
+    "returned_wrong_result": "FAIL",
+    "unsupported_expected": "Only a feature combination documented as unsupported before execution",
+    "historical_outputs_are_oracles": false,
+    "core24_x8_still_required": true,
+    "group_individual_near_null_default_protection_required": true
+  },
+  "files": [
+    {
+      "target": "supplemental/exact_wls_reference.py",
+      "source": "Verifications/group_indiv/audit_20260906/exact_wls_reference.py",
+      "source_sha256": "5d66b205b5ff30b54ebbdb1805783cb28c23220b4530025a1b171a7e99fa97ed",
+      "target_sha256": "5d66b205b5ff30b54ebbdb1805783cb28c23220b4530025a1b171a7e99fa97ed",
+      "role": "independent exact WLS helper"
+    },
+    {
+      "target": "supplemental/savefe_no_intercept_contract.py",
+      "source": "Verifications/group_indiv/audit_20260906/savefe_no_intercept_contract.py",
+      "source_sha256": "050a82661048fedf4d9a0b8a0c5daf7642053ebc7427110b28093a285332c2cb",
+      "target_sha256": "050a82661048fedf4d9a0b8a0c5daf7642053ebc7427110b28093a285332c2cb",
+      "role": "savefe noconstant reconstruction"
+    },
+    {
+      "target": "supplemental/savefe_extended_normalization_contract.py",
+      "source": "Verifications/group_indiv/audit_20260906/savefe_extended_normalization_contract.py",
+      "source_sha256": "78f5baac469592bb3f3c3f3228a56842d62ee55431e5865bee791060bc4fef97",
+      "target_sha256": "78f5baac469592bb3f3c3f3228a56842d62ee55431e5865bee791060bc4fef97",
+      "role": "Python savefe normalization and identity"
+    },
+    {
+      "target": "supplemental/savefe_extended_normalization_contract.R",
+      "source": "Verifications/group_indiv/audit_20260906/savefe_extended_normalization_contract.R",
+      "source_sha256": "128831e9a81d1f29de446c1657760a1854961da5820314d0dff2a5b8ebb39e68",
+      "target_sha256": "97370c2139b96e3ef6fb0e1f821949a6fe44e2c522c831d3b4b0fd1c7e9f0166",
+      "role": "R savefe normalization and identity",
+      "t01_change": "Pin xhdfe package/DLL and apply explicit Comparable beta/V limits"
+    },
+    {
+      "target": "supplemental/pure_slope_stata_semantics.do",
+      "source": "Verifications/group_indiv/audit_20260906/pure_slope_stata_semantics.do",
+      "source_sha256": "e8d73f83c727f86add519efd7fd442c8ca73c2065e3db76dff65910290ed6bfc",
+      "target_sha256": "f0766c25a40c4e61449e373d90de2fdc1ce97541c03d92bca0a2e0d35c9b68a6",
+      "role": "Stata pure-slope intercept and residual semantics",
+      "t01_change": "Pin xhdfe ado/plugin, use explicit OLS as oracle, and require a terminal PASS marker"
+    },
+    {
+      "target": "supplemental/ordinary_weak_weights_contract.py",
+      "source": "build-worktrees/convergence-inference-20260906/tests/analytic_precision/ordinary_weak_weights_contract.py",
+      "source_sha256": "636a66668e5287df0e5cc8c68ccea092b86da27d5590ac472fcf78031d02ebbf",
+      "target_sha256": "e52399d82d5791e7498210b833b3a0cac72cc599eeba56733acdf517fba361cd",
+      "role": "exact positive-weight 2x2 fits",
+      "t01_change": "Every valid-input refusal is FAIL_VALID_REFUSAL; no exponent-based expected refusal"
+    },
+    {
+      "target": "supplemental/exact_weighted_2x2_oracle.py",
+      "source": "Verifications/group_indiv/audit_20260906/exact_weighted_2x2_oracle.py",
+      "source_sha256": "ae1a02ae4909c4bf5b6c2137eec6ac12323cefbc7ff2e8c4790e58d459599280",
+      "target_sha256": "ae1a02ae4909c4bf5b6c2137eec6ac12323cefbc7ff2e8c4790e58d459599280",
+      "role": "Fraction oracle for weak weighted 2x2"
+    },
+    {
+      "target": "supplemental/exact_weighted_2x2_oracle.json",
+      "source": "Verifications/group_indiv/audit_20260906/exact_weighted_2x2_oracle.json",
+      "source_sha256": "52fc54805c3335ccf81c2800c237a5b045444456d647c2d72942b0615b18400d",
+      "target_sha256": "52fc54805c3335ccf81c2800c237a5b045444456d647c2d72942b0615b18400d",
+      "role": "frozen rational oracle output"
+    },
+    {
+      "target": "supplemental/ordinary_leverage_noise_contract.py",
+      "source": "Verifications/group_indiv/audit_20260906/ordinary_leverage_noise_contract.py",
+      "source_sha256": "71827e35a91c55ba0abe125ea444f4f3895131da6113504978ce443107e9db5b",
+      "target_sha256": "0e6c98b8de6e452f27b8a33add588ea6f70cd9da52ed1ec6a88372340e90b16f",
+      "role": "well-conditioned HC1 low-noise fit",
+      "t01_change": "Every valid-input refusal is FAIL_VALID_REFUSAL"
+    },
+    {
+      "target": "supplemental/ordinary_leverage_noise_exact_reference.json",
+      "source": "Verifications/group_indiv/audit_20260906/ordinary_leverage_noise_exact_reference.json",
+      "source_sha256": "510950aaf896616e5a555c063ffb367b1801493fdcfb9bdc8d6b4b368a97f0c3",
+      "target_sha256": "510950aaf896616e5a555c063ffb367b1801493fdcfb9bdc8d6b4b368a97f0c3",
+      "role": "frozen leverage/noise reference"
+    },
+    {
+      "target": "supplemental/ordinary_redundant_fe_contract.py",
+      "source": "Verifications/group_indiv/audit_20260906/ordinary_redundant_fe_contract.py",
+      "source_sha256": "b49dfe548a415b250b6ef65f87b40662ce8216bc17cc79f5eddf6393962ad1eb",
+      "target_sha256": "da2951479ef06ffef1846f108984e707326ad57e7023119f7a201c9fb0c0fe3b",
+      "role": "invariance to redundant FE representation",
+      "t01_change": "Every valid-input refusal is FAIL_VALID_REFUSAL"
+    },
+    {
+      "target": "supplemental/product_probe_2262.json",
+      "source": "Verifications/group_indiv/audit_20260906/covariance_guard_stress_20260909/product_probe_2262.json",
+      "source_sha256": "c370d2219ba206447442d9715c8242f7f5fbe70154c269524b3eb9030836e892",
+      "target_sha256": "c370d2219ba206447442d9715c8242f7f5fbe70154c269524b3eb9030836e892",
+      "role": "historical evidence only for the distinct 2.26.2 weak-direction omission"
+    }
+  ]
+}

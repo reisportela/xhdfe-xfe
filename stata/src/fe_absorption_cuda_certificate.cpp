@@ -1,4 +1,5 @@
 #include "fe_absorption_cuda.hpp"
+#include "n1_checks.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -327,6 +328,7 @@ void certify_cuda_absorption_result(
     result.abs_residual = 0.0;
     result.abs_residual_rel = 0.0;
     result.precision_certified = result.converged;
+    result.n1_fe = n1_capture_active ? std::make_shared<N1FeEvidence>() : nullptr;
 
     const int n = static_cast<int>(y.size());
     if (!result.gpu_used || X.rows() != n ||
@@ -387,11 +389,12 @@ void certify_cuda_absorption_result(
         const HeterogeneousSlopeTerm* slope = slope_lookup[dim];
         const int moment_count =
             slope ? (slope->include_intercept ? 2 : 1) : 1;
-        const int values_per_group = rhs_count * moment_count;
+        const int n1_extras = rhs_count * moment_count;
+        const int values_per_group = n1_extras + (result.n1_fe ? 3 * moment_count : 0);
         const bool groups_contiguous =
             input_has_contiguous_groups(input, n);
         const CertificateAccumulationPlan plan = choose_certificate_plan(
-            n, input.num_groups, values_per_group, moment_count,
+            n, input.num_groups, n1_extras, moment_count,
             groups_contiguous, unit_weights, slope != nullptr);
         // The budget is the dense accumulation cost plus the bounded index
         // and partial overheads — the same quantities the plan now reports
@@ -555,12 +558,21 @@ void certify_cuda_absorption_result(
                             unit_weights ? 1.0 : weight_ptr[row];
                         for (int moment = 0; moment < moment_count; ++moment) {
                             double multiplier = base_weight;
+                            double design_value = 1.0;
                             if (slope) {
                                 const bool intercept_moment =
                                     slope->include_intercept && moment == 0;
                                 if (!intercept_moment) {
                                     multiplier *= slope_values[row];
+                                    design_value = slope_values[row];
                                 }
+                            }
+                            if (result.n1_fe) {
+                                task_locals[static_cast<std::size_t>(n1_extras + 3 * moment)] +=
+                                    base_weight * design_value * design_value;
+                                task_locals[static_cast<std::size_t>(n1_extras + 3 * moment + 1)] +=
+                                    multiplier * multiplier;
+                                task_locals[static_cast<std::size_t>(n1_extras + 3 * moment + 2)] += 1.0;
                             }
                             const int base_vi = moment * rhs_count;
                             for (int rhs = 0; rhs < rhs_count; ++rhs) {
@@ -610,6 +622,33 @@ void certify_cuda_absorption_result(
                 residual_norm_sq[static_cast<std::size_t>(rhs)] +=
                     static_cast<long double>(residual_sq);
             }
+        }
+        if (result.n1_fe)
+            result.n1_fe->add_block(std::move(sums), rhs_count, moment_count,
+                                    n1_extras, chunk_count);
+    }
+    // Match the ordinary CPU certificate's dominant-origin normalization.
+    if (n > 0 && slopes.empty() &&
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable) {
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            const double* raw = rhs == 0 ? y.data() : X.col(rhs - 1).data();
+            const long double sum = deterministic_chunked_sum<int>(
+                n, threads, [&](int row) { return raw[row]; }, options.parallel_observer);
+            const std::size_t index = static_cast<std::size_t>(rhs);
+            if (!(sum * (sum / n) > (1.0L - 1.0L / 1024.0L) * original_norm_sq[index]))
+                continue;
+            const long double origin = raw[0];
+            long double shifted_sum = 0.0L;
+            for (int row = 0; row < n; ++row)
+                shifted_sum += static_cast<long double>(raw[row]) - origin;
+            const long double mean = shifted_sum / n;
+            long double centered_sq = 0.0L;
+            for (int row = 0; row < n; ++row) {
+                const long double delta = static_cast<long double>(raw[row]) - origin - mean;
+                centered_sq += delta * delta;
+            }
+            if (centered_sq > 0.0L && centered_sq < original_norm_sq[index] / 1024.0L)
+                original_norm_sq[index] = centered_sq;
         }
     }
     // WP1_STANDARD_CERTIFICATE_END

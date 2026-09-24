@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.26.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.28.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -18,7 +18,7 @@ Stata command, a Python package, and an R package all call the **same compiled
 C++ core**. CPU is the reference backend; an optional CUDA GPU absorber is
 available for large problems.
 
-As an illustration, the table below reports median estimator-call runtimes for
+As a historical illustration, the table below reports median estimator-call runtimes for
 an AKM-style wage regression using Portuguese matched employer-employee data.
 The specification uses 55,947,171 observations and absorbs 5,948,793 worker,
 799,265 firm, and 36 year fixed effects. It includes common seniority controls
@@ -38,13 +38,14 @@ and clusters standard errors at the worker level:
 
 The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 `reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
-The CUDA rows are performance measurements, not a universal residual/FE
-certificate. In the exact 2.26.0 H100 comparable-mode campaign, 13/24
-core24-quick surfaces passed; eleven difficult ordinary FE graphs did not meet
-the full contract, and some also failed coefficient or standard-error gates.
-Use CPU for any fully certified result on such graphs, including estimates,
-inference, residuals, recovered FEs and FE-based predictions/decompositions; see the
-[GPU guide](docs/gpu.md) and release notes.
+These historical timings are not a benchmark of every 2.28.0 workflow.
+The current validation covers 24 specifications across eight language,
+backend and tolerance-mode combinations: 188 of 192 cells converged, including
+every CPU and Fast cell. Four difficult CUDA Comparable cells still refuse
+estimation; use CPU for those specifications. See the
+[2.28.0 validation record](docs/releases/VALIDATION_2.28.0.20260924.md) for
+numerical checks, recovery coverage, measured performance costs and remaining
+CUDA limitations. GPU execution alone does not certify every output.
 
 ## Features
 
@@ -59,7 +60,7 @@ inference, residuals, recovered FEs and FE-based predictions/decompositions; see
 - **Fixed-effect recovery** — `savefe` / `savefes` (Stata), `fixef()` (R), `retain_fes` (Python).
 - **Group-level outcomes with individual fixed effects** — the `group()` / `individual()` machinery.
 - **Mobility groups** and connected-component diagnostics.
-- **Optional GPU** — CUDA absorber with explicit request and status reporting; fail-closed (never a silent CPU fallback).
+- **Optional GPU** — CUDA absorber with status reporting. Stata and R reject an unfulfilled explicit request; Python callers must inspect GPU-use diagnostics.
 - **AKM / worker-firm post-estimation** — plug-in, AGSU, and KSS leave-out
   variance decompositions; exact or Johnson-Lindenstrauss leverages; component
   inference; and leave-one-out connected-set preparation. See
@@ -86,6 +87,10 @@ every companion command:
 ```stata
 net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 ```
+
+Restart Stata before testing an updated native plugin. The Windows plugins
+include their GNU/OpenMP runtimes, so no MinGW installation or DLL search-path
+workaround is needed. macOS plugins include the matching OpenMP runtime.
 
 The installed commands are:
 
@@ -217,8 +222,9 @@ print(reg.coef_)
 print(reg.summary())
 ```
 
-On macOS, the standard AppleClang source build is supported but has no OpenMP
-threading. For a multi-threaded build, install Homebrew GCC and use its
+OpenMP is required by production builds on every platform. On macOS,
+AppleClang needs a separately configured OpenMP runtime. One source-build
+option is Homebrew GCC; use its
 versioned C++ compiler (replace `15` below if Homebrew reports a different
 major version):
 
@@ -472,7 +478,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.26.2.
+> effects regression via a C++ backend.* Version 2.28.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

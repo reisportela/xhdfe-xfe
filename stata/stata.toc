@@ -1,4 +1,4 @@
 v 3
-d xhdfe 2.26.2 / xfepout 1.13.0: high-dimensional fixed effects via C++
-p xhdfe xhdfe 2.26.2: high-dimensional fixed effects regression via a C++ plugin
-p xfepout xfepout 1.13.0: partial-out variables with multiple fixed effects via a C++ plugin
+d xhdfe 2.28.0 / xfepout 1.13.2: high-dimensional fixed effects via C++
+p xhdfe xhdfe 2.28.0: high-dimensional fixed effects regression via a C++ plugin
+p xfepout xfepout 1.13.2: partial-out variables with multiple fixed effects via a C++ plugin

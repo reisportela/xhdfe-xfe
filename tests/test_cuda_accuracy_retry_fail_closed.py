@@ -1,5 +1,10 @@
 """Focused H100 regression for a rejected Candidate2 CUDA accuracy retry.
 
+Since 22sep2026 a retry that cannot reach the opt-in 1e-10 target no longer
+refuses the fit: the primary already passed the public certificate, so the
+best certified device candidate is returned (precision contract: an unmet
+stricter target is never a refusal reason).
+
 Run with an sm_90 CUDA build, for example:
 
     XHDFE_TEST_BUILD_DIR=build_candidate2b_failclosed_cuda_sm90_20260829 \
@@ -98,7 +103,7 @@ class CudaAccuracyRetryFailClosedTest(unittest.TestCase):
             else:
                 os.environ[name] = value
 
-    def test_rejected_retry_maps_to_status3_and_revokes_results(self):
+    def test_rejected_retry_returns_best_certified_result(self):
         canonical = CORE_COPIES[0].read_bytes()
         for mirror in CORE_COPIES[1:]:
             self.assertEqual(mirror.read_bytes(), canonical)
@@ -109,13 +114,15 @@ class CudaAccuracyRetryFailClosedTest(unittest.TestCase):
         )
         rejection_block = source[rejection:return_site]
         for required in (
-            "retried.gpu_used = false;",
-            "retried.gpu_status_code = 3;",
-            "retried.gpu_absorption_converged = false;",
-            "retried.converged = false;",
-            "retried.precision_certified = false;",
+            "consider_best(retried);",
+            "return finalize_backend_status(std::move(best_certified));",
         ):
             self.assertIn(required, rejection_block)
+        for forbidden in (
+            "retried.gpu_status_code = 3;",
+            "retried.precision_certified = false;",
+        ):
+            self.assertNotIn(forbidden, rejection_block)
 
         y, X, fes = difficult_fixture()
         os.environ["XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_RETRY"] = "0"
@@ -132,27 +139,26 @@ class CudaAccuracyRetryFailClosedTest(unittest.TestCase):
         self.assertEqual(control.gpu_status_code_, 1)
         self.assertGreater(control.abs_residual_rel_, 1e-10)
 
+        # The retry cannot reach 1e-10 within max_iter=300 on this fixture:
+        # the fit must still return, certified, with the best device
+        # candidate (never worse than the primary the default route accepts).
         os.environ["XHDFE_CUDA_AUTO_COMPARABLE_ACCURACY_RETRY"] = "1"
         rejected = make_regressor()
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "Requested GPU backend did not converge during HDFE absorption",
-        ):
-            rejected.fit(y, X, fes=fes)
-
-        self.assertEqual(rejected.lifecycle_state_, "failed")
-        self.assertFalse(rejected.converged_)
-        self.assertFalse(rejected.precision_certified_)
-        self.assertEqual(rejected.gpu_status_code_, 0)
-        self.assertEqual(np.asarray(rejected.coef_).size, 0)
-        self.assertEqual(np.asarray(rejected.stderr_).size, 0)
-        self.assertEqual(np.asarray(rejected.residuals_).size, 0)
-        self.assertEqual(np.asarray(rejected.covariance_).size, 0)
-        self.assertEqual(
-            rejected.summary(),
-            "No estimation result available (state: failed)\n",
-        )
-
+        rejected.fit(y, X, fes=fes)
+        self.assertTrue(rejected.converged_)
+        self.assertTrue(rejected.precision_certified_)
+        self.assertTrue(rejected.gpu_used_)
+        self.assertEqual(rejected.gpu_status_code_, 1)
+        self.assertLessEqual(rejected.abs_residual_rel_,
+                             control.abs_residual_rel_ * (1.0 + 1e-6))
+        self.assertGreaterEqual(rejected.num_iterations_, control.num_iterations_)
+        self.assertEqual(np.asarray(rejected.coef_).shape,
+                         np.asarray(control.coef_).shape)
+        self.assertLess(
+            float(np.max(np.abs(np.asarray(rejected.coef_) - np.asarray(control.coef_)))),
+            1e-6)
+        self.assertNotEqual(np.asarray(rejected.residuals_).size, 0)
+        self.assertNotIn("No estimation result", rejected.summary())
 
 if __name__ == "__main__":
     unittest.main()

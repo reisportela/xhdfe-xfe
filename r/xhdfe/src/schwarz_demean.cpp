@@ -202,7 +202,7 @@ bool schwarz_impl(double* Y, double* X, int64_t n, int k,
         #pragma omp parallel for schedule(static)
         for (int64_t fm = 0; fm < nf; ++fm) { double* rn = &rN[(na + fm) * S]; const double* zs = &zsol[(na + fm) * S]; for (int c = 0; c < NC; ++c) rn[c] = -zs[c]; }
         #pragma omp parallel for schedule(static)
-        for (int64_t g = 0; g < totE; ++g) { double inv = 1.0 / degE[g]; double* re = &rE[g * S]; for (int c = 0; c < NC; ++c) re[c] *= inv; }
+        for (int64_t g = 0; g < totE; ++g) { double inv = degE[g] > 0.0 ? 1.0 / degE[g] : 0.0; double* re = &rE[g * S]; for (int c = 0; c < NC; ++c) re[c] *= inv; }
         for (int c = 0; c < NC; ++c) { rN[na * S + c] = 0.0; }                    // pin firm0
         for (size_t e = 0; e < extras.size(); ++e) for (int c = 0; c < NC; ++c) rE[eoff[e] * S + c] = 0.0;  // pin each extra ref0
     };

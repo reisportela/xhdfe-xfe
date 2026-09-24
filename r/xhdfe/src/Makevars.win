@@ -17,7 +17,15 @@ XHDFE_OPTFLAGS = -O3 -Wall $(XHDFE_MARCH_FLAG) \
 
 override CXX17FLAGS += $(XHDFE_OPTFLAGS)
 
-XHDFE_OMP_DEF = $(if $(SHLIB_OPENMP_CXXFLAGS),-DHDFE_USE_OPENMP,)
+XHDFE_ALLOW_SERIAL_BUILD ?=
+ifeq ($(strip $(XHDFE_RELEASE_BUILD)),1)
+ifeq ($(strip $(XHDFE_ALLOW_SERIAL_BUILD)),1)
+$(error XHDFE_RELEASE_BUILD=1 forbids XHDFE_ALLOW_SERIAL_BUILD=1)
+endif
+endif
+# R reads Makeconf after Makevars.win. Evaluate the flags and compiler only
+# once those variables exist, as in the Unix Makevars.
+XHDFE_OMP_DEF = $(if $(strip $(SHLIB_OPENMP_CXXFLAGS)),-DHDFE_USE_OPENMP,)
 
 PKG_CPPFLAGS = -I. -Iinclude -Ieigen -DNDEBUG $(XHDFE_OMP_DEF) \
     -DXHDFE_REFERENCE_MATH_CONTRACT=1 \
@@ -29,6 +37,23 @@ PKG_LIBS = $(SHLIB_OPENMP_CXXFLAGS)
 
 XHDFE_CPP_SOURCES = $(filter-out fe_absorption_cuda_certificate.cpp,$(wildcard *.cpp))
 OBJECTS = $(patsubst %.cpp,%.o,$(XHDFE_CPP_SOURCES))
+
+.PHONY: all
+all: $(SHLIB)
+
+xhdfe_openmp_gate:
+	@if [ -z "$(strip $(SHLIB_OPENMP_CXXFLAGS))" ]; then \
+	  if [ "$(strip $(XHDFE_ALLOW_SERIAL_BUILD))" != "1" ]; then \
+	    echo "OpenMP is required; set SHLIB_OPENMP_CXXFLAGS or use XHDFE_ALLOW_SERIAL_BUILD=1 only for a diagnostic build" >&2; exit 1; \
+	  fi; \
+	else \
+	  printf '%s\n' '#if defined(HDFE_USE_OPENMP) && !defined(_OPENMP)' '#error HDFE_USE_OPENMP requires compiler OpenMP support' '#endif' 'int main(void) { return 0; }' \
+	    | $(CXX17) $(CXX17STD) $(SHLIB_OPENMP_CXXFLAGS) -DHDFE_USE_OPENMP -x c++ -c -o /dev/null - >/dev/null 2>&1 \
+	    || { echo "OpenMP compile gate failed: HDFE_USE_OPENMP requires _OPENMP" >&2; exit 1; }; \
+	fi
+
+$(OBJECTS): | xhdfe_openmp_gate
+.PHONY: xhdfe_openmp_gate
 
 ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 $(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported by the Windows R Makevars yet; install a CPU build)

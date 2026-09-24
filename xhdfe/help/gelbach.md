@@ -1,6 +1,6 @@
 # xhdfe Gelbach decomposition help
 
-Release version: xhdfe 2.26.2.20260903 (`xhdfegelbach` 1.6.0). This version
+Release version: xhdfe 2.28.0.20260924 (`xhdfegelbach` 1.6.1). This version
 includes the bootstrap, table and waterfall interfaces documented below.
 Inspect the installed package version with `python -m xhdfe --version`.
 
@@ -543,6 +543,10 @@ PyFixest 0.50.1. `method="pairs"` samples observations with replacement.
 point-estimate `vce` or `cluster` arguments: inferential clustering and
 resampling design are separate choices.
 
+Both methods resample the point estimate's retained sample, after singleton
+and connectivity exclusions. Excluded rows cannot re-enter a replication
+merely because they are drawn more than once.
+
 The point estimate retains every `decompose_kwargs` setting. Each bootstrap
 replication resamples `y`, `x1`, every observed block, every common and added
 FE identifier, and analytic weights together; it then runs the same public
@@ -566,7 +570,8 @@ command fails closed unless at least
 `min_valid_reps` succeed; the default is 90 percent of `reps`.
 
 The complete `result["bootstrap"]` metadata schema is `method`,
-`resampling_unit`, `bootstrap_cluster_name`, `seed`, `rng`, `reps_requested`,
+`resampling_unit`, `bootstrap_cluster_name`, `resampling_population`,
+`n_rows_population`, `seed`, `rng`, `reps_requested`,
 `reps_valid`, `reps_failed`, `min_valid_reps`, `conf_level`, `ci_method`,
 `interval_status`, `share_tol`, `component_names`, `coefficient_names`,
 `ledger`, `failure_counts`, `intervals`, `draws`, `draws_stored`, `point_vce`,

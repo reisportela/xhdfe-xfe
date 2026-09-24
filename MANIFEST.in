@@ -4,6 +4,7 @@ include LICENSE
 include NOTICE
 recursive-include third_party/licenses *
 include README.md
+include QUICK_START.md
 include setup.py
 include pyproject.toml
 include py_hdfe_v11.py
@@ -19,4 +20,5 @@ recursive-include third_party/eigen-3.4.0 *
 recursive-include third_party/pybind11-2.11.1 *
 prune build
 prune build_cuda
+prune benchmarks/_out
 global-exclude __pycache__ *.py[cod] *.so *.pyd *.dylib

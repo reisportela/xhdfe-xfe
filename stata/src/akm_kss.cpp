@@ -55,6 +55,7 @@
 
 #include "hdfe/hdfe_regressor_v11.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "akm_lincom_projection.hpp"
 
 #ifdef HDFE_USE_CUDA
 #include "hdfe/akm_kss_cuda.hpp"
@@ -513,7 +514,8 @@ SampleBuild build_leave_out_sample(const Eigen::VectorXi& worker_ids,
                              : std::max(1, omp_get_max_threads());
 #endif
     SampleBuild out;
-    out.set.n_obs_input = static_cast<long long>(n);
+    out.set.n_obs_input = fw ? std::accumulate(fw->begin(), fw->end(), 0LL)
+                            : static_cast<long long>(n);
     if (n == 0) {
         return out;
     }
@@ -1158,12 +1160,12 @@ struct TwoWaySolver {
             if (cuda_ctx != nullptr) {
                 use_cuda = true;
             } else {
-                notes += "CUDA unavailable for the AKM solver; using CPU. ";
+                notes += "Warning: CUDA unavailable for the requested AKM solver; using CPU (gpu_used=0). ";
             }
         }
 #else
-        if (opt.use_gpu) {
-            notes += "CUDA not compiled in; AKM solver on CPU. ";
+        if (opt.use_gpu && Jr > 0) {
+            notes += "Warning: CUDA not compiled in; requested AKM solver on CPU (gpu_used=0). ";
         }
 #endif
         if (!use_cuda && Jr > 0 && J <= opt.direct_max_firms && fill_est <= opt.direct_max_nnz) {
@@ -2417,7 +2419,21 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
     }
 
-    if (n_kept < 3 || N < 1 || J < 1 || n_py - 1.0 <= 0.0) {
+    res.n_rows = static_cast<long long>(R);
+    if (n_py < 3.0 || N < 1 || J < 1) {
+        const double missing = std::numeric_limits<double>::quiet_NaN();
+        res.plugin = res.agsu = res.kss = {missing, missing, missing};
+        res.var_y = res.sigma2_ho = res.max_pii = res.mean_pii = missing;
+        res.se_var_psi = res.se_cov_alpha_psi = res.se_var_alpha = missing;
+        res.theta_c_var_psi = res.theta_c_cov_alpha_psi = res.theta_c_var_alpha = missing;
+        for (double* values : {res.eig_lambda1, res.eig_share1, res.eig_share2,
+                res.eig_share3, res.lindeberg_max_x1bar_sq, res.gamma_sq, res.f_stat,
+                res.theta_1, res.ci_lb, res.ci_ub, res.curvature, res.b_1,
+                res.cov_r1_11, res.cov_r1_12, res.cov_r1_22})
+            std::fill(values, values + 3, missing);
+        res.gpu_requested = options.use_gpu;
+        res.gpu_status_code = 6;
+        res.gpu_status = "not_applicable";
         res.converged = false;
         res.notes = "leave-out sample too small for a variance decomposition. ";
         vprog.say("stopped: leave-out sample too small for a variance decomposition");
@@ -4829,13 +4845,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         for (std::size_t k = 0; k < n_kept; ++k) {
             wy[static_cast<Eigen::Index>(k)] = psi[sb.row_f[k]];
         }
-        const Eigen::MatrixXd ZtZ = Zt.transpose() * Zt;
-        const Eigen::LDLT<Eigen::MatrixXd> zz(ZtZ);
-        const Eigen::VectorXd num = zz.solve(Zt.transpose() * wy);
-        res.lincom_coef.resize(r);
-        res.lincom_se_kss.resize(r);
-        res.lincom_se_white.resize(r);
-        res.lincom_t.resize(r);
+        const detail::AkmLincomProjection projection(Zt, wy);
+        const double missing = std::numeric_limits<double>::quiet_NaN();
+        res.lincom_coef.setConstant(r, missing);
+        res.lincom_se_kss.setConstant(r, missing);
+        res.lincom_se_white.setConstant(r, missing);
+        res.lincom_t.setConstant(r, missing);
+        for (int qq = 0; qq < r; ++qq) {
+            if (!projection.identified(qq + 1))
+                res.notes += "lincom Z column " + std::to_string(qq) + " omitted as collinear (zero-based). ";
+        }
         const int se_block = akm_se_block_env();
         if (se_block >= 1) {
             [&]() XHDFE_AKM_OUTLINE {
@@ -4847,9 +4866,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             std::vector<Eigen::VectorXd> l_zw(static_cast<std::size_t>(r));
             std::vector<Eigen::VectorXd> l_zf(static_cast<std::size_t>(r));
             for (int qq = 0; qq < r; ++qq) {
-                Eigen::VectorXd eq = Eigen::VectorXd::Zero(r + 1);
-                eq[qq + 1] = 1.0;
-                const Eigen::VectorXd vw = Zt * zz.solve(eq);   // n_py vector
+                const Eigen::VectorXd vw = projection.weights(qq + 1);
                 Eigen::VectorXd& tf_q = l_tf[static_cast<std::size_t>(qq)];
                 tf_q = Eigen::VectorXd::Zero(J);
                 for (std::size_t k = 0; k < n_kept; ++k) {
@@ -4867,6 +4884,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             std::vector<char> okv;
             solver.solve_K_multi(twp, tfp, l_zw, l_zf, okv, cg_iters, true);
             for (int qq = 0; qq < r; ++qq) {
+                if (!projection.identified(qq + 1)) continue;
                 if (!okv[static_cast<std::size_t>(qq)]) {
                     res.converged = false;
                     res.notes += "lincom solve did not converge. ";
@@ -4883,19 +4901,18 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                     den_white += eta[static_cast<Eigen::Index>(m)] *
                                  eta[static_cast<Eigen::Index>(m)] * xr * xr;
                 }
-                res.lincom_coef[qq] = num[qq + 1];
+                res.lincom_coef[qq] = projection.coefficient(qq + 1);
                 res.lincom_se_kss[qq] = std::sqrt(den_kss);
                 res.lincom_se_white[qq] = std::sqrt(den_white);
-                res.lincom_t[qq] = num[qq + 1] / std::sqrt(den_kss);
+                res.lincom_t[qq] = projection.coefficient(qq + 1) / std::sqrt(den_kss);
             }
             }();
         } else {
         Eigen::VectorXd tw0 = Eigen::VectorXd::Zero(N);
         Eigen::VectorXd tf(J), zw_l(N), zf_l(J), scr_w(N), scr_f(J);
         for (int qq = 0; qq < r; ++qq) {
-            Eigen::VectorXd eq = Eigen::VectorXd::Zero(r + 1);
-            eq[qq + 1] = 1.0;
-            const Eigen::VectorXd vw = Zt * zz.solve(eq);   // n_py vector
+            if (!projection.identified(qq + 1)) continue;
+            const Eigen::VectorXd vw = projection.weights(qq + 1);
             tf.setZero();
             for (std::size_t k = 0; k < n_kept; ++k) {
                 tf[sb.row_f[k]] += vw[static_cast<Eigen::Index>(k)];
@@ -4914,10 +4931,10 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 den_white += eta[static_cast<Eigen::Index>(m)] *
                              eta[static_cast<Eigen::Index>(m)] * xr * xr;
             }
-            res.lincom_coef[qq] = num[qq + 1];
+            res.lincom_coef[qq] = projection.coefficient(qq + 1);
             res.lincom_se_kss[qq] = std::sqrt(den_kss);
             res.lincom_se_white[qq] = std::sqrt(den_white);
-            res.lincom_t[qq] = num[qq + 1] / std::sqrt(den_kss);
+            res.lincom_t[qq] = projection.coefficient(qq + 1) / std::sqrt(den_kss);
         }
         }
         res.solver_iterations = cg_iters + solver.cuda_iters;

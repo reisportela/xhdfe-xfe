@@ -29,6 +29,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  XHDFE_RELEASE_BUILD: '1'
   # CUDA fatbin SM targets. SM 70 dropped: the build scripts hard-reject arch < 75
   # (build-plugin.sh line ~289). H100 (sm_90) requires CUDA >= 12.0.
   XHDFE_CUDA_ARCHS: '75,80,86,89,90'
@@ -42,7 +43,7 @@ jobs:
   build-linux:
     name: Build Linux (CPU + CUDA fatbin) and Windows/OpenMP
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -134,6 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD:/w" -w /w \
+            -e XHDFE_RELEASE_BUILD=1 \
             -e XHDFE_CUDA_ARCHS="$XHDFE_CUDA_ARCHS" \
             -e XHDFE_CUDA_EULA=/w/artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf \
             quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4 \
@@ -208,8 +210,8 @@ jobs:
 
       # ---- Windows x86_64 CPU/OpenMP (mingw POSIX cross-compile) ----
       # OpenMP is mandatory for production plugins. The recursively resolved
-      # non-system runtime closure is shipped beside the plugins so Windows'
-      # loader does not depend on a machine-wide MinGW installation.
+      # GNU runtimes are linked statically: Stata letter-directory installs
+      # do not add their DLL directory to the Windows loader search path.
       - name: Build windows-cpu OpenMP (xhdfe + xfepout, mingw cross)
         run: |
           set -euo pipefail
@@ -217,116 +219,17 @@ jobs:
           cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
           bash stata/tools/build-xfepout-plugin.sh --windows --openmp
           cp stata/xfepout.plugin artifacts/xfepout.plugin.windows
-          LIBGOMP="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libgomp-1.dll)")"
-          LIBWINPTHREAD="$(readlink -e "$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread-1.dll)")"
-          test -f "$LIBGOMP"
-          test -f "$LIBWINPTHREAD"
-          x86_64-w64-mingw32-g++ --version
+          cp stata/xhdfe.plugin.map artifacts/xhdfe.plugin.windows.map
+          cp stata/xfepout.plugin.map artifacts/xfepout.plugin.windows.map
           mkdir -p artifacts/windows-stata-runtime
-          python3 tools/validate_python_release_artifacts.py \
+          python3 tools/validate_python_release_artifacts.py --system-only \
             --pe-binary artifacts/xhdfe.plugin.windows \
             --pe-binary artifacts/xfepout.plugin.windows \
-            --runtime-search-dir "$(dirname "$LIBGOMP")" \
-            --runtime-search-dir "$(dirname "$LIBWINPTHREAD")" \
             --runtime-dir artifacts/windows-stata-runtime \
             --write-runtime-ledger artifacts/windows-stata-runtime-ledger.json \
-            --mingw-objdump "$(command -v x86_64-w64-mingw32-objdump)"
-          python3 - artifacts/windows-stata-runtime-ledger.json <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-          import subprocess
-          import sys
-
-          def output(*args: str) -> str:
-              return subprocess.check_output(args, text=True).strip()
-
-          closure = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          license_files = {
-              "GPL-3.0-or-later WITH GCC-exception-3.1":
-                  "GCC-13.2.0-COPYING.RUNTIME",
-              "MIT AND BSD-3-Clause":
-                  "mingw-w64-11.0.1-winpthreads-COPYING",
-              "MIT": "dlfcn-win32-1.4.1-COPYING",
-          }
-          entries = []
-          for runtime in closure["runtimes"]:
-              source = Path(runtime["source_path"]).resolve(strict=True)
-              provider = output("dpkg-query", "-S", str(source)).split(":", 1)[0]
-              fields = output(
-                  "dpkg-query",
-                  "-W",
-                  "-f=${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\t${Built-Using}\tEND",
-                  provider,
-              ).split("\t")
-              if len(fields) != 6 or fields[-1] != "END":
-                  raise SystemExit(f"unexpected dpkg metadata for {provider}: {fields!r}")
-              payload = source.read_bytes()
-              source_hash = hashlib.sha256(payload).hexdigest()
-              if source_hash != runtime["source_sha256"] or source_hash != runtime["member_sha256"]:
-                  raise SystemExit(f"runtime/provider hash mismatch for {source}")
-              entry = {
-                  "name": source.name,
-                  "sha256": source_hash,
-                  "size": len(payload),
-                  "source_path": str(source),
-                  "runtime_package": fields[0],
-                  "runtime_version": fields[1],
-                  "source_package": fields[2],
-                  "source_version": fields[3],
-                  "built_using": fields[4],
-                  "license": runtime["license"],
-                  "license_file": license_files[runtime["license"]],
-                  "packaged_sha256": runtime["member_sha256"],
-              }
-              entries.append(entry)
-              print("WINDOWS_STATA_RUNTIME " + json.dumps(entry, sort_keys=True))
-
-          ledger = {
-              "schema_version": 1,
-              "artifact": "xhdfe-xfe-stata-windows-cpu",
-              "compiler": {
-                  "target": output("x86_64-w64-mingw32-g++", "-dumpmachine"),
-                  "version": output(
-                      "x86_64-w64-mingw32-g++", "-dumpfullversion", "-dumpversion"
-                  ),
-              },
-              "closure_ledger": "windows-stata-runtime-ledger.json",
-              "entries": sorted(entries, key=lambda item: item["name"].lower()),
-          }
-          Path("artifacts/windows-stata-provider-ledger.json").write_text(
-              json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-          )
-          PY
-
-      - name: Verify windows-cpu plugins (PE32+ + OpenMP runtime)
-        run: |
-          set -euo pipefail
-          for f in artifacts/xhdfe.plugin.windows artifacts/xfepout.plugin.windows; do
-            test -f "$f"
-            file "$f" | grep -Eq 'PE32\+|PE32 '
-            file "$f" | grep -q 'ELF' && {
-              echo "ERROR: $f is ELF, not a Windows PE plugin." >&2
-              exit 1
-            }
-            x86_64-w64-mingw32-objdump -p "$f" |
-              grep -qi 'DLL Name: libgomp-1.dll' || {
-                echo "ERROR: OpenMP runtime dependency missing in $f." >&2
-                exit 1
-              }
-          done
-          shopt -s nullglob
-          RUNTIME_DLLS=(artifacts/windows-stata-runtime/*.dll)
-          test "${#RUNTIME_DLLS[@]}" -ge 2
-          for f in "${RUNTIME_DLLS[@]}"; do
-            file "$f" | grep -Eq 'PE32\+|PE32 '
-          done
-          python3 tools/validate_python_release_artifacts.py \
-            --pe-binary artifacts/xhdfe.plugin.windows \
-            --pe-binary artifacts/xfepout.plugin.windows \
-            --runtime-dir artifacts/windows-stata-runtime \
-            --runtime-ledger artifacts/windows-stata-runtime-ledger.json \
-            --mingw-objdump "$(command -v x86_64-w64-mingw32-objdump)"
+            --mingw-objdump /usr/bin/x86_64-w64-mingw32-objdump
+          python3 tools/windows_stata_linkage.py record \
+            --artifact-dir artifacts --ledger artifacts/windows-stata-provider-ledger.json
 
       - name: Smoke-test manylinux Python wheel and build R source package
         run: |
@@ -410,7 +313,8 @@ jobs:
             artifacts/xfepout.plugin.linux-cuda
             artifacts/xhdfe.plugin.windows
             artifacts/xfepout.plugin.windows
-            artifacts/windows-stata-runtime
+            artifacts/xhdfe.plugin.windows.map
+            artifacts/xfepout.plugin.windows.map
             artifacts/windows-stata-runtime-ledger.json
             artifacts/windows-stata-provider-ledger.json
             artifacts/linux-cuda-provenance.json
@@ -579,103 +483,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ---------------------------------------------------------------------------
-  # macOS Apple Silicon runner: builds a universal (x86_64 + arm64) Mach-O
-  # bundle for both xhdfe and xfepout. No OpenMP (Apple clang rejects bare -fopenmp;
-  # the script forces OpenMP OFF on Darwin). The xfepout script is run under Homebrew
-  # bash 5.x to dodge a `set -u` empty `metal_flags[@]` bug present only in
-  # build-xfepout-plugin.sh (breaks under macOS stock bash 3.2).
-  # ---------------------------------------------------------------------------
-  build-macos:
-    name: Build macOS universal (CPU, no OpenMP)
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-14                    # arm64 / Apple Silicon
+  test-windows-stata:
+    name: Validate exact Windows plugins in Stata installation layout
+    needs: build-linux
+    uses: ./.github/workflows/windows-stata-loader.yml
+    with:
+      artifact_name: plugins-linux
     permissions:
       contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
 
-      - name: Cache build dependencies (Eigen, stplugin.h/.c)
-        uses: actions/cache@v4
-        with:
-          path: stata/tools/_deps
-          key: xhdfe-deps-${{ runner.os }}-eigen340-v1
-
-      - name: Install bash 5.x (for the xfepout build script's empty-array safety)
-        run: |
-          set -euo pipefail
-          brew install bash
-          BREW_BASH="$(brew --prefix)/bin/bash"
-          "$BREW_BASH" --version | head -1
-          echo "BREW_BASH=$BREW_BASH" >> "$GITHUB_ENV"
-
-      - name: Prepare artifacts dir
-        run: mkdir -p artifacts
-
-      # macOS: do NOT pass --openmp (Apple clang rejects bare -fopenmp; the script
-      # forces OpenMP off on Darwin anyway). Pass --linux: on Darwin the script maps
-      # it to the Unix path but the Darwin-specific -bundle/lipo/APPLEMAC branches
-      # still fire because they key on `uname -s == Darwin`. Always builds a
-      # universal x86_64+arm64 bundle.
-      - name: Build macos universal (xhdfe + xfepout)
-        run: |
-          set -euo pipefail
-          bash stata/tools/build-plugin.sh --linux
-          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.macos
-          # Run xfepout under Homebrew bash 5.x if available, else fall back to /bin/bash.
-          BREW_BASH="${BREW_BASH:-$(brew --prefix)/bin/bash}"
-          if [ -x "$BREW_BASH" ]; then
-            echo "Using Homebrew bash: $BREW_BASH"
-            "$BREW_BASH" stata/tools/build-xfepout-plugin.sh --linux
-          else
-            echo "WARN: Homebrew bash not found; falling back to system bash (3.2 metal_flags bug risk)"
-            bash stata/tools/build-xfepout-plugin.sh --linux
-          fi
-          cp stata/xfepout.plugin artifacts/xfepout.plugin.macos
-
-      - name: Ad-hoc codesign (cosmetic; not notarized)
-        run: |
-          set -euo pipefail
-          codesign -s - --force artifacts/xhdfe.plugin.macos || true
-          codesign -s - --force artifacts/xfepout.plugin.macos || true
-
-      - name: "Verify macos universal plugins (Mach-O fat: x86_64 + arm64)"
-        run: |
-          set -euo pipefail
-          for f in artifacts/xhdfe.plugin.macos artifacts/xfepout.plugin.macos; do
-            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
-            ls -la "$f"; file "$f"
-            file "$f" | grep -q 'Mach-O' \
-              || { echo "ERROR: not a Mach-O object: $f" >&2; exit 1; }
-            echo "-- lipo -archs --"
-            ARCHS="$(lipo -archs "$f")" || {
-              echo "ERROR: lipo could not inspect $f" >&2
-              exit 1
-            }
-            echo "$ARCHS"
-            echo "$ARCHS" | grep -qw 'arm64' || {
-              echo "ERROR: missing required arm64 slice in $f" >&2
-              exit 1
-            }
-            echo "$ARCHS" | grep -qw 'x86_64' || {
-              echo "ERROR: missing required x86_64 slice in $f" >&2
-              exit 1
-            }
-            echo "OK: required universal slices present (arm64 + x86_64)"
-            echo "-- otool -L --"
-            otool -L "$f" || true
-          done
-
-      - name: Upload macOS plugin artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugins-macos            # unique per job (v4 immutability)
-          path: |
-            artifacts/xhdfe.plugin.macos
-            artifacts/xfepout.plugin.macos
-          if-no-files-found: error
-          retention-days: 7
+  # Both native architectures validate the exact universal bytes before upload.
+  build-macos:
+    name: Build and validate macOS OpenMP
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/macos-openmp.yml
+    permissions:
+      contents: read
 
   # ---------------------------------------------------------------------------
   # Release staging: assemble and validate per-platform Stata bundles,
@@ -684,9 +507,9 @@ jobs:
   # ---------------------------------------------------------------------------
   assemble-release:
     name: Assemble and validate release snapshot
-    needs: [build-linux, build-windows-python, build-macos]
+    needs: [build-linux, build-windows-python, build-macos, test-windows-stata]
     if: startsWith(github.ref, 'refs/tags/preflight-v') || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -707,6 +530,12 @@ jobs:
           path: dl
           pattern: plugins-*
           merge-multiple: true           # flatten plugins-linux + plugins-macos into dl/
+
+      - name: Download Windows native receipts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-stata-native-receipts
+          path: dl/windows-native-validation
 
       - name: List downloaded plugins (fail-fast on any missing REQUIRED variant)
         run: |
@@ -729,12 +558,13 @@ jobs:
             dl/xhdfe.plugin.macos dl/xfepout.plugin.macos ; do
             test -f "$f" || { echo "MISSING required plugin: $f" >&2; exit 1; }
           done
+          mkdir -p dl/windows-stata-runtime
           STATA_RUNTIME_DLLS=(dl/windows-stata-runtime/*.dll)
           WINPY_PROVIDER_DLLS=(dl/windows-python-provider-runtimes/*.dll)
           MANYLINUX_PROVIDER_DLLS=(dl/linux-wheel-provider-runtime/*)
           MANYLINUX_PACKAGED_DLLS=(dl/linux-wheel-packaged-runtime/*)
           MANYLINUX_SOURCE_RPMS=(dl/corresponding-source/*.src.rpm dl/corresponding-source/*.nosrc.rpm)
-          test "${#STATA_RUNTIME_DLLS[@]}" -eq 3
+          test "${#STATA_RUNTIME_DLLS[@]}" -eq 0
           test "${#WINPY_PROVIDER_DLLS[@]}" -ge 5
           test "${#MANYLINUX_PROVIDER_DLLS[@]}" -eq 1
           test "${#MANYLINUX_PACKAGED_DLLS[@]}" -eq 1
@@ -746,11 +576,7 @@ jobs:
           def dlls(path: str) -> set[str]:
               return {item.name.casefold() for item in Path(path).glob("*.dll")}
 
-          stata_expected = {
-              "libgcc_s_seh-1.dll",
-              "libgomp-1.dll",
-              "libwinpthread-1.dll",
-          }
+          stata_expected = set()
           python_expected = {
               "libdl.dll",
               "libgcc_s_seh-1.dll",
@@ -774,10 +600,24 @@ jobs:
           test "${#PY_SDISTS[@]}" -eq 1
           test "${#R_TARBALLS[@]}" -eq 1
 
+      - name: Revalidate macOS runtime and native receipts
+        run: |
+          set -euo pipefail
+          python3 tools/validate_macos_openmp.py verify \
+            --xhdfe dl/xhdfe.plugin.macos --xfepout dl/xfepout.plugin.macos \
+            --runtime-dir dl/macos-openmp-runtime
+          python3 - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          record = json.loads(Path('dl/macos-openmp-runtime/macos-openmp-manifest.json').read_text())
+          archive = Path('dl/LLVM-OpenMP-20.1.8-source.tar.gz')
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == record['source_archive_sha256']
+          PY
+
       - name: Revalidate downloaded Windows runtime closures
         run: |
           set -euo pipefail
-          python3 tools/validate_python_release_artifacts.py \
+          python3 tools/validate_python_release_artifacts.py --system-only \
             --pe-binary dl/xhdfe.plugin.windows \
             --pe-binary dl/xfepout.plugin.windows \
             --runtime-dir dl/windows-stata-runtime \
@@ -804,40 +644,25 @@ jobs:
             "$INPUTS/licenses" \
             "$INPUTS/windows-python-packaged"
 
-          python3 - dl/windows-stata-provider-ledger.json <<'PY'
-          import json, sys
-
-          ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
-          entries = {item["name"].casefold(): item for item in ledger["entries"]}
-          expected = {
-              "libgcc_s_seh-1.dll": {
-                  "runtime_version": "13.2.0-6ubuntu1+26.1",
-                  "source_package": "gcc-mingw-w64",
-                  "source_version": "26.1",
-                  "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
-              },
-              "libgomp-1.dll": {
-                  "runtime_version": "13.2.0-6ubuntu1+26.1",
-                  "source_package": "gcc-mingw-w64",
-                  "source_version": "26.1",
-                  "built_using": "gcc-13 (= 13.2.0-6ubuntu1)",
-              },
-              "libwinpthread-1.dll": {
-                  "runtime_version": "11.0.1-3build1",
-                  "source_package": "mingw-w64",
-                  "source_version": "11.0.1-3build1",
-                  "built_using": "",
-              },
-          }
-          if set(entries) != set(expected):
-              raise SystemExit("Windows Stata provider set changed; source mapping is stale")
-          for name, fields in expected.items():
-              for field, value in fields.items():
-                  if entries[name][field] != value:
-                      raise SystemExit(
-                          f"{name}: expected {field}={value!r}, got {entries[name][field]!r}"
-                      )
-          PY
+          python3 tools/windows_stata_linkage.py verify \
+            --artifact-dir dl --ledger dl/windows-stata-provider-ledger.json
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          ledger = json.loads(Path('dl/windows-stata-provider-ledger.json').read_text())
+          for item in ledger['static_archives']:
+              source = (item['source_package'], item['source_version'])
+              if source not in {('gcc-mingw-w64', '26.1'), ('mingw-w64', '11.0.1-3build1')}:
+                  raise SystemExit(f"Static archive source mapping changed: {source}")
+              if source[0] == 'gcc-mingw-w64' and item['built_using'] != 'gcc-13 (= 13.2.0-6ubuntu1)':
+                  raise SystemExit('Static GCC Built-Using source changed')
+          for kind in ('xhdfe', 'xfepout'):
+              receipt = json.loads(Path(f'dl/windows-native-validation/windows-native-receipts/{kind}/RESULT.json').read_text())
+              record = next(item for item in ledger['plugins'] if item['name'] == f'{kind}.plugin.windows')
+              assert receipt['status'] == 'PASS' and receipt['release_artifact_gate_pass']
+              assert receipt['runtime_identity_pass'] and receipt['plugin_sha256'] == record['sha256']
+              assert receipt['loaded_runtime_sha256'] == record['sha256']
+          PYCODE
 
           fetch_sha256() {
             local url="$1" output="$2" expected="$3"
@@ -988,9 +813,6 @@ jobs:
           WINPY_LIBGOMP="$(one_file 'libgomp-*.dll' "$WINPY_PACKAGED")"
           WINPY_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' "$WINPY_PACKAGED")"
           WINPY_LIBDL="$(one_file 'libdl.dll' "$WINPY_PACKAGED")"
-          STATA_LIBGCC="$(one_file 'libgcc_s_*.dll' dl/windows-stata-runtime)"
-          STATA_LIBGOMP="$(one_file 'libgomp-*.dll' dl/windows-stata-runtime)"
-          STATA_LIBWINPTHREAD="$(one_file 'libwinpthread-*.dll' dl/windows-stata-runtime)"
           MANY_PACKAGED="$(one_file '*' dl/linux-wheel-packaged-runtime)"
           MANY_PROVIDER="$(one_file '*' dl/linux-wheel-provider-runtime)"
           MANY_SRPM="$(one_file '*.src.rpm' dl/corresponding-source)"
@@ -1020,21 +842,11 @@ jobs:
           print(matches[0])
           PY
           }
-          stata_runtime_source_path() {
-            python3 - dl/windows-stata-runtime-ledger.json "$1" <<'PY'
-          import json, sys
-          ledger = json.loads(open(sys.argv[1], encoding="utf-8").read())
-          matches = [item["source_path"] for item in ledger["runtimes"] if item["member"].casefold() == sys.argv[2].casefold()]
-          if len(matches) != 1:
-              raise SystemExit(f"expected one Stata runtime member {sys.argv[2]!r}; found {len(matches)}")
-          print(matches[0])
-          PY
-          }
-
           mkdir -p release_assets
           python3 tools/build_corresponding_source_bundle.py \
             --output "release_assets/xhdfe-${EXPECTED_VERSION}-corresponding-source.zip" \
             --version "$EXPECTED_VERSION" \
+            --windows-stata-static-ledger dl/windows-stata-provider-ledger.json \
             --contains-cuda \
             --license-dir "$INPUTS/licenses" \
             --component "gcc=$INPUTS/components/gcc-13.2.0.tar.xz" \
@@ -1060,15 +872,6 @@ jobs:
             --runtime-binary "windows-python-libdl=$WINPY_LIBDL" \
             --runtime-provider windows-python-libdl=dlfcn-win32 \
             --provider-binary "windows-python-libdl=$WINPY_PROVIDER/$(basename "$WINPY_LIBDL")" \
-            --runtime-binary "windows-stata-libgcc=$STATA_LIBGCC" \
-            --runtime-provider windows-stata-libgcc=ubuntu-mingw-gcc \
-            --provider-binary "windows-stata-libgcc=$STATA_LIBGCC" \
-            --runtime-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
-            --runtime-provider windows-stata-libgomp=ubuntu-mingw-gcc \
-            --provider-binary "windows-stata-libgomp=$STATA_LIBGOMP" \
-            --runtime-binary "windows-stata-libwinpthread=$STATA_LIBWINPTHREAD" \
-            --runtime-provider windows-stata-libwinpthread=ubuntu-mingw-w64 \
-            --provider-binary "windows-stata-libwinpthread=$STATA_LIBWINPTHREAD" \
             --runtime-binary "manylinux-wheel-libgomp=$MANY_PACKAGED" \
             --runtime-provider manylinux-wheel-libgomp=manylinux-libgomp \
             --provider-binary "manylinux-wheel-libgomp=$MANY_PROVIDER" \
@@ -1102,12 +905,6 @@ jobs:
             --metadata "windows-python-libwinpthread.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBWINPTHREAD")")" \
             --metadata "windows-python-libdl.release_path=wheel/xhdfe/$(basename "$WINPY_LIBDL")" \
             --metadata "windows-python-libdl.provider_path=$(runtime_source_path "$(basename "$WINPY_LIBDL")")" \
-            --metadata windows-stata-libgcc.release_path=xhdfe_xfe-stata-windows-cpu.zip/libgcc_s_seh-1.dll \
-            --metadata "windows-stata-libgcc.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBGCC")")" \
-            --metadata windows-stata-libgomp.release_path=xhdfe_xfe-stata-windows-cpu.zip/libgomp-1.dll \
-            --metadata "windows-stata-libgomp.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBGOMP")")" \
-            --metadata windows-stata-libwinpthread.release_path=xhdfe_xfe-stata-windows-cpu.zip/libwinpthread-1.dll \
-            --metadata "windows-stata-libwinpthread.provider_path=$(stata_runtime_source_path "$(basename "$STATA_LIBWINPTHREAD")")" \
             --metadata "manylinux-wheel-libgomp.release_path=$(metadata_value dl/linux-wheel-runtime-ledger.json repaired_wheel.private_libraries.0.member)" \
             --metadata "manylinux-wheel-libgomp.provider_path=$MANY_PROVIDER_PATH"
           python3 tools/validate_corresponding_source_bundle.py \
@@ -1178,6 +975,19 @@ jobs:
               test -f "$s" || { echo "MISSING runtime dependency: $s" >&2; exit 1; }
               cp "$s" "$stage/"
             done
+            if [[ "$zipname" == "xhdfe_xfe-stata-macos-universal.zip" ]]; then
+              python3 - "$stage" <<'PY'
+          from pathlib import Path
+          import sys
+          stage = Path(sys.argv[1])
+          for name in ('xhdfe.pkg', 'xfepout.pkg'):
+              with (stage/name).open('a') as stream:
+                  for arch in ('MACARM64', 'OSX.ARM64', 'MACINTEL64', 'OSX.X8664'):
+                      stream.write(f'G {arch} xhdfe_libomp.dylib xhdfe_libomp.dylib\n')
+                  stream.write('f LLVM-OpenMP-LICENSE.txt\nf macos-openmp-manifest.json\n')
+          PY
+              bash tools/validate_stata_package_site.sh "$stage"
+            fi
             if [[ "$zipname" == "xhdfe_xfe-stata-linux-cuda.zip" ]]; then
               mkdir -p "$stage/artifacts"
               cp -R dl/cuda-license-files "$stage/artifacts/"
@@ -1275,9 +1085,13 @@ jobs:
             dl/linux-cuda-provenance.json \
             dl/cuda-nvcc-invocations.jsonl \
             dl/cuda-nvcc-link-dryrun.log
-          bundle xhdfe_xfe-stata-macos-universal.zip dl/xhdfe.plugin.macos      dl/xfepout.plugin.macos
+          bundle xhdfe_xfe-stata-macos-universal.zip \
+            dl/xhdfe.plugin.macos dl/xfepout.plugin.macos \
+            dl/macos-openmp-runtime/xhdfe_libomp.dylib \
+            dl/macos-openmp-runtime/LLVM-OpenMP-LICENSE.txt \
+            dl/macos-openmp-runtime/macos-openmp-manifest.json
           WINDOWS_RUNTIME_FILES=(dl/windows-stata-runtime/*.dll)
-          test "${#WINDOWS_RUNTIME_FILES[@]}" -ge 2
+          test "${#WINDOWS_RUNTIME_FILES[@]}" -eq 0
           bundle xhdfe_xfe-stata-windows-cpu.zip \
             dl/xhdfe.plugin.windows dl/xfepout.plugin.windows \
             "${WINDOWS_RUNTIME_FILES[@]}" \
@@ -1288,6 +1102,7 @@ jobs:
 
           # Source-only archive used by xhdfegpu and offline local builds.
           # The builder performs its own closure and pinned-Rcpp validation.
+          XHDFE_MACOS_OPENMP_SOURCE="$GITHUB_WORKSPACE/dl/LLVM-OpenMP-20.1.8-source.tar.gz" \
           bash tools/make_source_dist_zip.sh \
             "$GITHUB_WORKSPACE/release_assets/xhdfe-src.zip"
 
@@ -1295,7 +1110,8 @@ jobs:
           # Build from the exact tagged tree; never select a historical dist/*.zip.
           # The archive contains every tracked source/build input (including vendored
           # Eigen, pybind11, Rcpp, and stplugin inputs) plus the exact CI Linux,
-          # Windows, and macOS plugins. CI itself proves compile/link only. Publication remains
+          # Windows, and macOS plugins. macOS has native SPI/OpenMP gates on both
+          # final slices; CUDA hardware validation remains external. Publication remains
           # blocked until those exact CUDA bytes are downloaded from this run and
           # exercised on the maintainer H100; only then is a publish-v* marker pushed.
           OFFLINE_NAME="xhdfe_xfe-offline-source-and-platform-binaries.zip"
@@ -1315,21 +1131,26 @@ jobs:
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/xhdfe.plugin"
           cp dl/xfepout.plugin.windows \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/xfepout.plugin"
-          cp dl/windows-stata-runtime/*.dll \
-            "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
           cp dl/windows-stata-runtime-ledger.json \
             dl/windows-stata-provider-ledger.json \
             "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
+          cp -R dl/windows-native-validation "$OFFLINE_STAGE/prebuilt/windows_x86_64/"
           mkdir -p "$OFFLINE_STAGE/prebuilt/macos_universal"
           cp dl/xhdfe.plugin.macos \
             "$OFFLINE_STAGE/prebuilt/macos_universal/xhdfe.plugin"
           cp dl/xfepout.plugin.macos \
             "$OFFLINE_STAGE/prebuilt/macos_universal/xfepout.plugin"
+          cp dl/macos-openmp-runtime/xhdfe_libomp.dylib \
+            dl/macos-openmp-runtime/LLVM-OpenMP-LICENSE.txt \
+            dl/macos-openmp-runtime/macos-openmp-manifest.json \
+            "$OFFLINE_STAGE/prebuilt/macos_universal/"
+          cp dl/LLVM-OpenMP-20.1.8-source.tar.gz "$OFFLINE_STAGE/third_party/"
           mkdir -p "$OFFLINE_STAGE/packages/python" "$OFFLINE_STAGE/packages/R"
           cp dl/xhdfe-*.whl dl/xhdfe-*.tar.gz \
             "$OFFLINE_STAGE/packages/python/"
           cp dl/xhdfe_*.tar.gz "$OFFLINE_STAGE/packages/R/"
           mkdir -p "$OFFLINE_STAGE/provenance"
+          cp -R dl/macos-openmp-evidence "$OFFLINE_STAGE/provenance/"
           cp dl/linux-cuda-provenance.json \
             dl/cuda-nvcc-invocations.jsonl \
             dl/cuda-nvcc-link-dryrun.log \
@@ -1354,14 +1175,18 @@ jobs:
 
           `stata/xhdfe.plugin` and `stata/xfepout.plugin` are portable Linux CPU/OpenMP
           defaults. `prebuilt/` also contains the exact Linux CUDA fatbins,
-          Windows x86_64 OpenMP plugins and runtime DLLs, and macOS universal
-          plugins from the release workflow. The root-level corresponding-source
+          Windows x86_64 plugins with embedded OpenMP runtimes, and macOS universal
+          plugins with xhdfe_libomp.dylib, its licence and native test manifest.
+          The pinned OpenMP sources in third_party/ support offline rebuilding.
+          The root-level corresponding-source
           ZIP closes the GNU/MinGW runtime source mappings, while the NVIDIA
           CUDA 12.6 EULA and CCCL 2.5.0 notices accompany the CUDA fatbins.
 
-          GitHub-hosted CI has no Stata licence or GPU and therefore certifies only
-          compilation, linking, binary format, OpenMP linkage, and embedded CUDA
-          architectures. The release remains a draft until the exact CUDA plugins
+          Native macOS CI loads the final plugins through SPI on both architectures,
+          checks real OpenMP workers and a fixed analytic fixture, and rejects serial
+          controls. These tests do not exercise the Stata ado layer. GitHub-hosted
+          CI has no Stata licence or GPU for the CUDA hardware gate.
+          The release remains a draft until the exact CUDA plugins
           from this workflow have been executed successfully on the maintainer H100.
           The `publish-v*` marker records completion of that external runtime gate.
           EOF
@@ -1386,6 +1211,7 @@ jobs:
             --linux-xfepout   dl/xfepout.plugin.linux-cpu \
             --macos-xhdfe dl/xhdfe.plugin.macos \
             --macos-xfepout   dl/xfepout.plugin.macos \
+            --macos-runtime-dir dl/macos-openmp-runtime \
             --windows-xhdfe dl/xhdfe.plugin.windows \
             --windows-xfepout   dl/xfepout.plugin.windows \
             --windows-runtime-dir dl/windows-stata-runtime \
@@ -1427,9 +1253,11 @@ jobs:
           Stata plugins built automatically on GitHub-hosted runners.
 
           > GitHub-hosted CI imports and exercises the Python wheels and runs
-          > \`R CMD check\`. For the Stata plugins it proves **COMPILE + LINK only**:
-          > the runners have **no Stata license**, and they have **no GPU** for CUDA
-          > runtime validation. The workflow initially stages this release as a
+          > \`R CMD check\`. The final macOS Stata plugins additionally pass native
+          > SPI, observed OpenMP-worker and analytic-fixture tests on both architectures,
+          > including serial negative controls. Windows tests the exact plugin pair
+          > in a Stata-style installation layout with a clean DLL search path. The Stata ado layer and CUDA runtime
+          > validation still require external licensed/hardware checks. The workflow initially stages this release as a
           > draft and permits publication only after the exact plugins contained in
           > the attached Linux CUDA bundle pass
           > Stata CPU/CUDA functional validation on real hardware (an NVIDIA H100,
@@ -1457,7 +1285,7 @@ jobs:
           - \`xhdfe_xfe-stata-linux-cpu.zip\` — **Linux x86_64, CPU/OpenMP** (portable ELF, links libgomp; no \`-march=native\`).
           - \`xhdfe_xfe-stata-linux-cuda.zip\` — **Linux x86_64, CUDA fatbin** (SASS \`sm_75/80/86/89/90\` + \`compute_90\` PTX; incorporates the static CUDA runtime/device runtime and dynamically links libgomp). CI compile-verifies this path; publication additionally requires the external H100 runtime gate.
           - \`xhdfe_xfe-stata-windows-cpu.zip\` — **Windows x86_64, CPU/OpenMP** (PE32+ plugins plus their validated MinGW runtime closure; intended for 64-bit Windows 10/11).
-          - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU** (Mach-O bundle, no OpenMP). Unsigned/unnotarized: end users may need \`xattr -dr com.apple.quarantine xhdfe.plugin xfepout.plugin\` before Stata loads them.
+          - \`xhdfe_xfe-stata-macos-universal.zip\` — **macOS universal (x86_64 + arm64), CPU/OpenMP**, with \`xhdfe_libomp.dylib\`, its licence and native test manifest. Both final slices pass the SPI/worker fixture. Ad-hoc signed, not notarized.
 
           ### Python and R packages
           - \`xhdfe-${EXPECTED_VERSION}-*manylinux*.whl\` — Linux x86_64 CPU
@@ -1490,9 +1318,9 @@ jobs:
           | Linux x86_64 | Stata CPU/OpenMP | ubuntu-latest | portable, libgomp-linked |
           | Linux x86_64 | Stata CUDA fatbin | ubuntu-latest | sm_75/80/86/89/90 + compute_90 PTX; CI compile-verified, published release H100-certified externally |
           | Linux x86_64 | Python CPU wheel | manylinux_2_28 + ubuntu-latest | repaired manylinux wheel; clean installed-wheel formula smoke |
-          | Windows x86_64 | Stata CPU/OpenMP | ubuntu-latest (mingw POSIX cross) | PE32+ plugins + validated colocated runtime DLL closure; intended for Windows 10/11 |
+          | Windows x86_64 | Stata CPU/OpenMP | Ubuntu 24.04 MinGW POSIX cross; native Windows loader test | Static GNU/OpenMP runtimes; Stata letter-directory loading, real workers and numerical parity |
           | Windows x86_64, CPython 3.12 | Python CPU/OpenMP wheel | GitHub-hosted Windows x86-64 (Strawberry MinGW 5.42 / GCC 13.2) | generic recursive non-system DLL closure; intended for Windows 10/11; import and formula smoke without Strawberry on PATH |
-          | macOS x86_64+arm64 | Stata CPU | macos-14 | universal bundle, no OpenMP |
+          | macOS x86_64+arm64 | Stata CPU/OpenMP | macos-15-intel + macos-15 | final universal bytes tested natively; packaged runtime, real workers and serial controls |
           EOF
           echo "---- release body ----"
           cat release_body.md
@@ -1515,7 +1343,7 @@ jobs:
     name: Stage DRAFT GitHub Release
     needs: [assemble-release]
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -1565,7 +1393,7 @@ jobs:
   publish-certified:
     name: Publish H100-certified draft and net-install site
     if: startsWith(github.ref, 'refs/tags/publish-v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

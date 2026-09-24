@@ -118,9 +118,9 @@ sass_viol="$(awk '
     if (allowed) { allow_n++ } else { print fn; print; viol = 1 }
   }
   END { printf "ALLOWED_COUNT=%d\n", allow_n > "/dev/stderr"; exit viol ? 0 : 0 }
-' <<<"$sass" 2>/tmp/fma_gate_allowed.$$)"
-allowed_count="$(sed -n 's/^ALLOWED_COUNT=//p' /tmp/fma_gate_allowed.$$ 2>/dev/null || echo '?')"
-rm -f /tmp/fma_gate_allowed.$$
+' <<<"$sass" 2>"${TMPDIR:?isolated build TMPDIR required}/fma_gate_allowed.$$")"
+allowed_count="$(sed -n 's/^ALLOWED_COUNT=//p' "${TMPDIR}/fma_gate_allowed.$$" 2>/dev/null || echo '?')"
+rm -f "${TMPDIR}/fma_gate_allowed.$$"
 if [[ -n "$sass_viol" ]]; then
   echo "FAIL: SASS fma in verifier accumulation/decision functions (predication included):" >&2
   head -12 <<<"$sass_viol" >&2

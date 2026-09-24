@@ -1,4 +1,4 @@
-*! version 1.13.0 03sep2026
+*! version 1.13.2 24sep2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfepout, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.13.0 03sep2026"
+        local version "1.13.2 24sep2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -37,8 +37,8 @@ program define xfepout, eclass sortpreserve
 
     local cmdline : copy local 0
 
-    // Normalize hdfe/reghdfe-style aliases to keep xfepout drop-in friendly.
-    local optline : copy local 0
+    // Normalize aliases only after the first unbound comma.
+    _parse comma cmdprefix optline : 0
     local optline : subinstr local optline ",a(" ", absorb(", all
     local optline : subinstr local optline ", a(" ", absorb(", all
     local optline : subinstr local optline " a(" " absorb(", all
@@ -98,7 +98,7 @@ program define xfepout, eclass sortpreserve
     local optline : subinstr local optline ",festructurecachemode(" ", fecachemode(", all
     local optline : subinstr local optline ", festructurecachemode(" ", fecachemode(", all
     local optline : subinstr local optline " festructurecachemode(" " fecachemode(", all
-    local 0 `"`optline'"'
+    local 0 `"`cmdprefix' `optline'"'
 
     syntax varlist(min=1 numeric) [if] [in] [aw fw pw iw], ///
         ABSorb(string asis) ///
@@ -591,6 +591,13 @@ program define xfepout, eclass sortpreserve
     }
     // Keep string absorb()/cluster()/group()/individual() variables in sample marking.
     markout `touse' `markvars', strok
+    if ("`weight'" == "iweight") {
+        quietly count if `touse' & `wvar' < 0
+        if (r(N) > 0) {
+            di as err "negative importance weights are not supported"
+            exit 198
+        }
+    }
     if (`has_weight') {
         quietly replace `touse' = 0 if `wvar' <= 0 | missing(`wvar')
     }
@@ -1068,7 +1075,7 @@ program define xfepout, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.13.0 03sep2026"
+    ereturn local version "1.13.2 24sep2026"
     ereturn local cmd "xfepout"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {

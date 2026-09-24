@@ -65,7 +65,7 @@ copy_tree "${ROOT_DIR}/examples" "${PKG}/examples"
 copy_tree "${ROOT_DIR}/stata/src"     "${PKG}/stata/src"
 copy_tree "${ROOT_DIR}/stata/include" "${PKG}/stata/include"
 mkdir -p "${PKG}/stata/tools/_deps"
-for f in build-plugin.sh build-xfepout-plugin.sh cuda-common.sh mingw_stdio_shim.h; do
+for f in build-plugin.sh build-xfepout-plugin.sh cuda-common.sh macos-openmp.sh mingw_stdio_shim.h; do
   cp -a "${ROOT_DIR}/stata/tools/${f}" "${PKG}/stata/tools/${f}"
 done
 # Vendored Stata plugin dependencies (offline): Eigen tarball + stplugin SDK.
@@ -108,6 +108,29 @@ cp -a "${ROOT_DIR}/third_party/Rcpp_1.1.2.tar.gz" \
       "${ROOT_DIR}/third_party/RCPP_SOURCE_PROVENANCE.md" \
       "${PKG}/third_party/"
 
+MACOS_OPENMP_SOURCE="${XHDFE_MACOS_OPENMP_SOURCE:-}"
+if [[ "${XHDFE_RELEASE_BUILD:-0}" == "1" && -z "${MACOS_OPENMP_SOURCE}" ]]; then
+  echo "XHDFE_RELEASE_BUILD=1 requires XHDFE_MACOS_OPENMP_SOURCE" >&2
+  exit 1
+fi
+if [[ -n "${MACOS_OPENMP_SOURCE}" ]]; then
+  [[ -f "${MACOS_OPENMP_SOURCE}" && ! -L "${MACOS_OPENMP_SOURCE}" ]] || {
+    echo "invalid XHDFE_MACOS_OPENMP_SOURCE: ${MACOS_OPENMP_SOURCE}" >&2
+    exit 1
+  }
+  tar -tzf "${MACOS_OPENMP_SOURCE}" > "${STAGE}/macos-openmp-source.list"
+  grep -Eq '(^|/)openmp/' "${STAGE}/macos-openmp-source.list" || {
+    echo "macOS OpenMP source archive lacks pinned openmp sources" >&2
+    exit 1
+  }
+  grep -Eq '(^|/)cmake/' "${STAGE}/macos-openmp-source.list" || {
+    echo "macOS OpenMP source archive lacks the LLVM cmake support tree" >&2
+    exit 1
+  }
+  cp -a "${MACOS_OPENMP_SOURCE}" \
+    "${PKG}/third_party/LLVM-OpenMP-20.1.8-source.tar.gz"
+fi
+
 printf '%s\n' "${VERSION}" > "${PKG}/VERSION"
 
 cat > "${PKG}/BUILD_OFFLINE.md" <<EOF
@@ -127,14 +150,19 @@ inputs). Python runtime dependencies must be present in the local environment.
 - Optional Python formula interface: Formulaic >= 1.2.1,<2 and its pandas/SciPy
   dependencies already installed; these optional runtime packages are not
   vendored in this archive.
-- R builds: R >= 4.0 and its source-package build toolchain. Rcpp itself is
-  bundled and does not need to be downloaded or preinstalled.
+- R builds: R >= 4.0, its source-package build toolchain, and OpenMP support.
+  Rcpp itself is bundled and does not need to be downloaded or preinstalled.
+  \`XHDFE_ALLOW_SERIAL_BUILD=1\` is reserved for explicit diagnostic builds and
+  is forbidden for releases.
 - Stata builds: none beyond the C++ (and CUDA) toolchain.
+- macOS Stata release builds: CMake >= 3.20, Python 3, the native Apple build
+  tools, and the pinned LLVM OpenMP source archive in
+  \`third_party/LLVM-OpenMP-20.1.8-source.tar.gz\` on a native macOS build host.
 
 ## Stata plugin
 
 \`\`\`bash
-# CPU (OpenMP recommended)
+# CPU (OpenMP required for production)
 bash stata/tools/build-plugin.sh     --linux --openmp
 bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 # GPU (auto-detect the local NVIDIA architecture)
@@ -144,6 +172,28 @@ XHDFE_ENABLE_CUDA=auto bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 
 Produces \`stata/xhdfe.plugin\` and \`stata/xfepout.plugin\`. Put them on the Stata
 adopath (next to \`xhdfe.ado\`). The \`xhdfegpu\` command automates the GPU case.
+
+On a native macOS host, extract the bundled source, build the SDK for that
+host's architecture, and build both plugins against its absolute SDK path:
+
+\`\`\`bash
+mkdir llvm-openmp-20.1.8-source
+tar -xzf third_party/LLVM-OpenMP-20.1.8-source.tar.gz \\
+  -C llvm-openmp-20.1.8-source
+sdk_root="\$PWD/macos-openmp-sdk"
+arch="\$(uname -m)"
+bash tools/build_macos_openmp_runtime.sh \\
+  "\$PWD/llvm-openmp-20.1.8-source" "\$sdk_root" "\$arch"
+XHDFE_MACOS_ARCHS="\$arch" XHDFE_OPENMP_ROOT="\$sdk_root" \\
+  bash stata/tools/build-plugin.sh --openmp
+XHDFE_MACOS_ARCHS="\$arch" XHDFE_OPENMP_ROOT="\$sdk_root" \\
+  bash stata/tools/build-xfepout-plugin.sh --openmp
+\`\`\`
+
+The builders run \`validate_macos_openmp.py inspect\` on each native file. A
+universal release requires separate native arm64 and x86_64 SDKs, followed by
+the release manifest assembly and native validation on both architectures;
+the SDK directory alone is not an input to the final \`verify\` command.
 
 ## Python package
 

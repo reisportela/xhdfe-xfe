@@ -54,6 +54,10 @@ assert missing(e(r2_a_within))
 
 * The existing group/individual saturated toy has negative inferential df_r.
 * Its machine-precision fit retains the established adjusted-R2 display of 1.
+* Since 2.27.0 the individual block counts one exact redundancy against the
+* ordinary FE whenever the constant is provably in the span of the membership
+* columns (mean aggregation, or sum aggregation with a uniform team size):
+* df_a = 1 + (3 - 1) = 3 and df_r = 2 - 3 = -1 (2.26.2 reported 4 and -2).
 clear
 input double(y x) byte(group individual)
 -1 -1 1 1
@@ -65,7 +69,7 @@ generate byte constant_fe = 1
 quietly xhdfe y x, absorb(constant_fe individual) group(group) individual(individual) ///
     aggregation(sum) keepsingletons absorptionmethod(gauss-seidel) ///
     statstyle(reghdfe) noheader notable nofootnote
-assert e(df_r) == -2
+assert e(df_r) == -1
 assert e(df_r_unadj) - e(df_a_nested) < 0
 assert e(r2_a) == 1
 assert e(r2_a_within) == 1

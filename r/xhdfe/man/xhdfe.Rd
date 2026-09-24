@@ -6,7 +6,7 @@
 \usage{
 xhdfe(fml, data = NULL,
       vcov = NULL, cluster = NULL,
-      weights = NULL, weights_type = c("analytic", "frequency"),
+      weights = NULL, weights_type = c("analytic", "frequency", "importance", "probability"),
       subset = NULL,
       group = NULL, individual = NULL, aggregation = "mean",
       save_fe = FALSE, groupvar = FALSE,
@@ -36,6 +36,10 @@ xhdfe(fml, data = NULL,
   \code{I(x^2)}, \code{poly(x, 2)}) are accepted. Use \code{0 +} (or
   \code{- 1}) to remove the constant, the analogue of Stata's
   \code{noconstant}.
+  Known \code{offset()} terms are subtracted from the response for estimation
+  and restored in predictions. Fit statistics (including R-squared and TSS)
+  describe the offset-adjusted response; coefficients, covariance and
+  residuals have their usual offset-model interpretation.
 
   \emph{Part 2 -- absorbed fixed effects.} A \code{+}-separated list of
   fixed-effect terms (see the \emph{Absorbing fixed effects} section for
@@ -115,9 +119,12 @@ of observations equal to the number of rows. \code{"frequency"} treats
 them like Stata \code{fweight}s: each row counts \code{weights} times,
 with \emph{exact replicated-rows semantics} -- observation counts,
 degrees of freedom, and the \code{*_effective} count fields use the sum
-of the weights, matching a physically duplicated dataset. For Stata
-\code{pweight} behavior combine analytic weights with
-\code{vcov = "robust"}.}
+of the weights, matching a physically duplicated dataset.
+\code{"importance"} follows Stata \code{iweight}: classical inference
+uses unnormalized weights and \code{floor(sum(weights))} for N; robust
+or clustered inference follows the analytic-weight convention.
+\code{"probability"} follows \code{pweight} and defaults to robust
+inference unless clustering is specified.}
 
 \item{subset}{an optional expression evaluated in \code{data} (like the
 \code{subset} argument of \code{\link[stats]{lm}}): either a logical
@@ -179,8 +186,8 @@ Its exact meaning depends on \code{tolerance_mode}; under the default
 \item{maxiter}{maximum number of absorber iterations; default
 \code{100000} (the analogue of Stata's \code{maxiter()} /
 \code{iterate()}). If the absorber does not converge within
-\code{maxiter} iterations a warning is issued and the (untrustworthy)
-estimates are still returned with \code{converged = FALSE}.}
+\code{maxiter} iterations, or fails its numerical certificate, an
+informative error is raised and no new estimates are returned.}
 
 \item{tolerance_mode}{the absorber convergence mode; the mode used is
 recorded in the \code{tolerance_mode} field (Stata
@@ -350,7 +357,19 @@ only the listed tokens are enabled} (reghdfe semantics):
     \code{reghdfe}'s continuous-interaction checks (currently a
     no-op).}
 }
-Example: \code{dof = c("firstpair", "clusters")}.}
+Example: \code{dof = c("firstpair", "clusters")}.
+For \code{group}/\code{individual} models, \code{dof = "exact"}
+(alone) computes the algebraic rank of the combined membership and
+ordinary-FE design using checked rational arithmetic. It counts all
+absorbed dimensions, including FE nested in clusters. The selected VCE,
+weights and other small-sample conventions still apply. The calculation
+is bounded to 25 million design elements and finite arithmetic, storage
+and operation budgets; a limit raises an error without estimates or an
+approximate-rank fallback. The default grouped count is approximate and
+emits a warning. A guaranteed shared constant for mean aggregation or
+equal-size sum aggregation is removed when an ordinary FE supplies it;
+this can change inference relative to earlier releases. Exact FE rank
+and solver convergence are separate requirements.}
 
 \item{ssc}{\pkg{fixest}-style small-sample corrections. Either a named
 list with entries among \code{ssc_k_adj} (logical), \code{ssc_k_fixef}
@@ -509,8 +528,8 @@ are given where applicable).
   \item{\code{df_m}}{model degrees of freedom (\code{e(df_m)}).}
   \item{\code{rank}}{effective model rank, omitted coefficients excluded
     (\code{e(rank)}).}
-  \item{\code{df_a}}{absorbed degrees of freedom, using the exact
-    fixed-effect rank (\code{e(df_a)}).}
+  \item{\code{df_a}}{absorbed degrees of freedom under the selected
+    convention (\code{e(df_a)}); inspect \code{fe_inexact} for approximate counts.}
   \item{\code{df_a_levels}}{absorbed levels (\code{e(df_a_levels)}).}
   \item{\code{df_a_exact}}{absorbed levels adjusted for collinearity
     (\code{e(df_a_exact)}).}
@@ -688,7 +707,8 @@ dimension, mirroring \code{reghdfe}'s degrees-of-freedom footnote table,
     recorded at fit time so \code{predict(..., newdata = )} expands
     factors exactly as during estimation.}
   \item{\code{data_name}}{deparsed name of the \code{data} argument.}
-  \item{\code{weights_type}}{\code{"analytic"} or \code{"frequency"}
+  \item{\code{weights_type}}{\code{"analytic"}, \code{"frequency"},
+    \code{"importance"}, or \code{"probability"}
     when weights were supplied, otherwise \code{NULL}.}
   \item{\code{group_name}, \code{individual_name},
     \code{aggregation}}{deparsed group/individual arguments and the
@@ -842,17 +862,73 @@ diagnostics on the result object: \code{gpu_used} must be \code{1} and
 \code{e(gpu_backend)=="cuda"}, \code{e(gpu_status)=="used"}). The status
 taxonomy (\code{gpu_status_code} / \code{gpu_status}) is:
 
-\strong{Version 2.26.2 certification boundary.} A successful GPU-use
-diagnostic proves execution, not universal numerical equivalence. The exact
-H100 \code{sm_90} comparable-mode campaign accepted 13 of 24 core24-quick
-surfaces, including the difficult group/individual surface strictly. Eleven
-poorly connected ordinary two- or three-way FE graphs did not meet the full
-contract; some also failed coefficient or standard-error gates. Use
-\code{backend = "cpu"} for any fully certified result on such graphs,
-including coefficients, inference, residuals, recovered fixed effects, and
-FE-based predictions/decompositions. CUDA remains opt-in and never masks this
-boundary with a CPU fallback; see the 2.26.2 release notes for the exact
-failed surfaces.
+\strong{Certification boundary.} A GPU-use diagnostic proves execution,
+not universal numerical equivalence. Validation identifies the tested data,
+specifications and exact artifacts. A failed convergence or precision check
+raises an informative error and returns no estimates. Explicit CUDA requests
+cannot substitute CPU estimates, and Metal requests are rejected until that
+backend is implemented. Poor conditioning can amplify a small residual;
+no fixed tolerance guarantees arbitrary coefficient accuracy on every model.
+
+Small group/individual designs (at most 1500 FE columns and two million
+cells after merging identical incidence rows) are projected by a dense
+column-pivoted QR with iterative refinement, exact to rounding, in every
+tolerance mode; directions whose relative pivot is below 1e-10 are
+either exact redundancies (dropped) or, when the exact rational rank of
+the incidence design exceeds the numerical rank, FP64-ambiguous: such a
+fit is refused only when the fitted residual depends on the unresolved
+direction (FE-space forward certificate), never for data that do not.
+Larger designs use the Krylov solver, whose dual stopping test is accepted
+only when the running condition estimate times the dual residual meets
+the public forward target (100 times the mode's dual tolerance, at least
+1e-8); in reghdfe-comparable and strict-residual modes a residual
+refinement then removes nearly null incidence directions, applied to all
+right-hand sides or to none and only after the primary solution passes
+the per-column certificate, so 2.26.2 results are the floor and xhdfe-fast
+keeps its 2.26.2 stopping rule. The shared OLS stage uses
+additional arithmetic precision only when the FP64 rank decision is not
+separated from its threshold. Large level offsets alone do not justify
+omitting a regressor with within variation: the collinearity rule compares
+the within variation with the centered scale of the column whenever the
+model contains a constant. Heavy sufficient certificates (FE-space forward
+bound, exact redundancy proofs, per-row N1 evidence) run only under
+\code{XHDFE_CERTIFY=1}.
+
+Known limitations (2.28.0). A fit that converges by the solver's rule but
+does not pass the precision certificate returns no estimates in R, Python
+and Stata alike. Ill-conditioned specifications can still require a refusal.
+Heterogeneous slopes under an explicit \code{convergence = "reghdfe"}
+used to, and that rule is now continued once at tighter internal tolerances
+with the first certified stage returned (the default \code{"auto"} polishes
+the slope block further); \code{retain_fes = TRUE} on designs where the
+effect-capturing sweep stops above the tolerance no longer refuses: the
+projection is recomputed without effect capture, certified, and the effects
+are recovered from it. \code{aggregation = "sum"} without an ordinary
+absorbed fixed effect spans the constant only for a uniform team size or
+through a data-dependent combination of individual columns, decided by
+projecting the ones vector on the absorbed effects as one separate
+right-hand side; when it is not spanned
+the fit has no intercept and is reported as one (\code{model_has_constant}
+is \code{FALSE}, no \code{(Intercept)} entry, uncentered total sum of
+squares), with coefficients, RSS and residuals unchanged. CUDA with small, ill-conditioned group/individual
+designs can leave residuals at the 1e-6 relative level where the CPU
+direct projection is exact; on designs small enough for that projection the
+device result is compared with it and refused with an informative error when
+a retained column deviates by more than ten times the forward tolerance of
+the mode; use the CPU backend for such designs. CUDA with
+\code{tolerance_mode = "reghdfe-comparable"} on ill-conditioned ordinary
+designs also checks original-regressor normal equations for unweighted OLS
+without saved effects. A failed check receives one continuation with the same
+method and tolerance, within the remaining iteration budget. A persistent
+failure returns no estimates and does not substitute CPU estimates. This
+prevents the previously reported inaccurate CUDA results on directors and the
+difficult 10M-row 3-FE benchmark; use \code{backend = "cpu"} for these cases.
+CUDA convergence on them remains unresolved. The opt-in accuracy-retry settings
+cannot bypass this necessary check. The
+individual block subtracts one exact redundancy against an ordinary fixed
+effect whenever the constant is provably in the span of the membership
+columns (mean aggregation, or sum with a uniform team size);
+\code{dofadjustments = "exact"} computes the exact rank.
 
 \tabular{lll}{
   \strong{Code} \tab \strong{Label} \tab \strong{Meaning} \cr
@@ -899,19 +975,20 @@ uniquely identify observations (the Stata help's
 }
 The individual dimension is appended (last) to the absorbed dimensions
 for stability if not already present, exactly as in Stata. In
-group/individual mode the core estimates on the collapsed group-level
-rows: the \code{residuals} field is then at the group level,
-\code{sample} is empty, \code{grouped_fit} is \code{TRUE}, and the
-prediction caches are unavailable. \strong{Note:} singleton bookkeeping
+grouped modes the core estimates on one representative row per group:
+\code{sample} identifies those rows in the original input, residuals and
+predictions are aligned to the input with \code{NA} outside that sample,
+and \code{grouped_fit} is \code{TRUE}. \strong{Note:} singleton bookkeeping
 happens \emph{after} the representative-row construction, so
 \code{num_singletons} can differ from \code{reghdfe}'s pre-collapse row
 count even when the effective estimation sample is identical.
 
 On CPU, \code{absorption_method = "auto"} uses joint matrix-free LSMR
 for the standard and individual dimensions; explicit \code{"lsmr"} selects
-the same CPU route. If an automatic LSMR solve cannot pass its independent
-certificate, the previous sweep path is retried from the original data and
-the effective method is reported. CUDA \code{"auto"} keeps the existing
+the same CPU route. The independent certificate remains mandatory after
+any bounded refinement or tighter retry; the original final tolerance,
+iteration budget and requested backend are preserved. Failure raises an
+informative error without new estimates. CUDA \code{"auto"} keeps the existing
 group/individual GPU solver and accepts it only after the authoritative
 certificate passes. Explicit \code{"gauss-seidel"} and
 \code{"symmetric-gauss-seidel"} remain supported; \code{"jacobi"},
@@ -919,6 +996,14 @@ certificate passes. Explicit \code{"gauss-seidel"} and
 
 IV/2SLS, heterogeneous slopes, and (with both \code{group} and
 \code{individual}) \code{save_fe} are not supported in group mode.
+
+Membership columns span a constant under \code{aggregation = "mean"}
+and under \code{"sum"} with equal group sizes. Unequal-size sum
+aggregation need not span a constant. If the intended model requires one,
+include an ordinary FE, for example a variable \code{c} equal to one in
+\code{y ~ x | c + inventor}. A reported intercept alone does not add that
+missing direction to the grouped model. There is one residual per retained
+group, on its selected input row; other group members have \code{NA}.
 }
 
 \section{Missing features and restrictions}{
@@ -1028,9 +1113,8 @@ The C++ core reads the following runtime knobs:
     plus interaction.
   \item \emph{Recovered fixed effects are contributions}, not group ids,
     and may not be separately identified in all designs.
-  \item \emph{Non-convergence.} If the absorber hits \code{maxiter}, the
-    estimates are returned with a warning and \code{converged = FALSE};
-    they should not be trusted.
+  \item \emph{Non-convergence.} An exhausted iteration budget or failed
+    numerical certificate raises an informative error without new estimates.
 }
 }
 
@@ -1124,7 +1208,7 @@ stopifnot(mg$gpu_used == 1, mg$gpu_status == "used")
 }
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.26.2.
+effects regression via a C++ backend." Version 2.28.0.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

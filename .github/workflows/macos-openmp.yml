@@ -1,0 +1,226 @@
+name: macOS OpenMP artifacts
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  XHDFE_RELEASE_BUILD: '1'
+
+jobs:
+  build-slices:
+    name: Build and test macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned LLVM OpenMP sources
+        uses: actions/checkout@v4
+        with:
+          repository: llvm/llvm-project
+          ref: 87f0227cb60147a26a1eeb4fb06e3b505e9c7261 # llvmorg-20.1.8
+          path: _llvm
+          sparse-checkout: |
+            openmp
+            cmake
+          persist-credentials: false
+      - name: Build OpenMP runtime for the native architecture
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          test "$(git -C _llvm rev-parse HEAD)" = 87f0227cb60147a26a1eeb4fb06e3b505e9c7261
+          mkdir -p slice
+          /bin/bash tools/build_macos_openmp_runtime.sh \
+            "$GITHUB_WORKSPACE/_llvm" "$GITHUB_WORKSPACE/openmp-sdk" '${{ matrix.arch }}' \
+            2>&1 | tee slice/runtime-build.log
+          git -C _llvm archive --format=tar HEAD openmp cmake | gzip -n \
+            > slice/LLVM-OpenMP-20.1.8-source.tar.gz
+      - name: Build plugins with required OpenMP
+        env:
+          XHDFE_MACOS_ARCHS: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          export XHDFE_OPENMP_ROOT="$GITHUB_WORKSPACE/openmp-sdk"
+          /bin/bash stata/tools/build-plugin.sh --linux --openmp 2>&1 | tee slice/xhdfe-build.log
+          /bin/bash stata/tools/build-xfepout-plugin.sh --linux --openmp 2>&1 | tee slice/xfepout-build.log
+          cp stata/xhdfe.plugin stata/xfepout.plugin stata/xhdfe_libomp.dylib slice/
+          cp stata/tools/_deps/stplugin.h slice/
+          cp "openmp-sdk/${{ matrix.arch }}/LLVM-OpenMP-LICENSE.txt" slice/
+          clang++ -std=c++17 -O2 -Istata/tools/_deps tools/plugin_openmp_probe.cpp -o plugin_openmp_probe
+      - name: Exercise actual workers and numerical agreement
+        run: |
+          set -euo pipefail
+          for kind in xhdfe xfepout; do
+            python3 tools/run_plugin_openmp_probe.py \
+              --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
+              --plugin "$GITHUB_WORKSPACE/slice/$kind.plugin" --kind "$kind" \
+              --arch '${{ matrix.arch }}' --stage thin \
+              --runtime-path "$GITHUB_WORKSPACE/slice/xhdfe_libomp.dylib" \
+              --out "$GITHUB_WORKSPACE/thin-$kind"
+            cp "thin-$kind/RESULT.json" "slice/thin-$kind.json"
+          done
+      - name: Reject separate serial builds of both plugins
+        env:
+          XHDFE_RELEASE_BUILD: '0'
+          XHDFE_MACOS_ARCHS: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          /bin/bash stata/tools/build-plugin.sh --linux --no-openmp 2>&1 | tee slice/xhdfe-serial-build.log
+          /bin/bash stata/tools/build-xfepout-plugin.sh --linux --no-openmp 2>&1 | tee slice/xfepout-serial-build.log
+          for kind in xhdfe xfepout; do
+            python3 tools/run_plugin_openmp_probe.py \
+              --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
+              --plugin "$GITHUB_WORKSPACE/stata/$kind.plugin" --kind "$kind" \
+              --arch '${{ matrix.arch }}' --stage thin --expect-serial \
+              --out "$GITHUB_WORKSPACE/serial-$kind"
+            cp "serial-$kind/RESULT.json" "slice/serial-$kind.json"
+          done
+          tar -C slice -cf 'macos-slice-${{ matrix.arch }}.tar' .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-slice-${{ matrix.arch }}
+          path: macos-slice-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble-universal:
+    needs: build-slices
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-slice-*
+          merge-multiple: true
+          path: slices
+      - name: Assemble and sign the universal bytes
+        run: |
+          set -euo pipefail
+          mkdir -p slices/arm64 slices/x86_64 universal
+          tar -C slices/arm64 -xf slices/macos-slice-arm64.tar
+          tar -C slices/x86_64 -xf slices/macos-slice-x86_64.tar
+          cmp slices/arm64/LLVM-OpenMP-LICENSE.txt slices/x86_64/LLVM-OpenMP-LICENSE.txt
+          cmp slices/arm64/stplugin.h slices/x86_64/stplugin.h
+          cmp slices/arm64/LLVM-OpenMP-20.1.8-source.tar.gz slices/x86_64/LLVM-OpenMP-20.1.8-source.tar.gz
+          for name in xhdfe.plugin xfepout.plugin xhdfe_libomp.dylib; do
+            lipo -create -output "universal/$name" "slices/arm64/$name" "slices/x86_64/$name"
+            codesign --force --sign - --timestamp=none "universal/$name"
+            codesign --verify --strict "universal/$name"
+          done
+          cp slices/arm64/LLVM-OpenMP-LICENSE.txt slices/arm64/LLVM-OpenMP-20.1.8-source.tar.gz universal/
+          cp slices/arm64/stplugin.h universal/
+          for arch in arm64 x86_64; do
+            for kind in xhdfe xfepout; do
+              cp "slices/$arch/serial-$kind.json" "universal/serial-$arch-$kind.json"
+              cp "slices/$arch/thin-$kind.json" "universal/thin-$arch-$kind.json"
+              cp "slices/$arch/$kind-build.log" "universal/build-$arch-$kind.log"
+            done
+            cp "slices/$arch/runtime-build.log" "universal/runtime-build-$arch.log"
+            python3 tools/validate_macos_openmp.py inspect --file universal/xhdfe.plugin --arch "$arch" --kind plugin
+            python3 tools/validate_macos_openmp.py inspect --file universal/xfepout.plugin --arch "$arch" --kind plugin
+            python3 tools/validate_macos_openmp.py inspect --file universal/xhdfe_libomp.dylib --arch "$arch" --kind runtime
+          done
+          tar -C universal -cf macos-universal-unvalidated.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal-unvalidated
+          path: macos-universal-unvalidated.tar
+          if-no-files-found: error
+          retention-days: 7
+
+  validate-universal:
+    needs: assemble-universal
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-universal-unvalidated
+      - name: Test final universal plugins in their installation layout
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = '${{ matrix.arch }}'
+          mkdir -p installed/x native-receipts
+          tar -C installed/x -xf macos-universal-unvalidated.tar
+          clang++ -std=c++17 -O2 -Iinstalled/x tools/plugin_openmp_probe.cpp -o plugin_openmp_probe
+          for kind in xhdfe xfepout; do
+            codesign --verify --strict "installed/x/$kind.plugin"
+            python3 tools/run_plugin_openmp_probe.py \
+              --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
+              --plugin "$GITHUB_WORKSPACE/installed/x/$kind.plugin" --kind "$kind" \
+              --arch '${{ matrix.arch }}' --stage final \
+              --runtime-path "$GITHUB_WORKSPACE/installed/x/xhdfe_libomp.dylib" \
+              --out "$GITHUB_WORKSPACE/final-$kind"
+            cp "final-$kind/RESULT.json" "native-receipts/final-${{ matrix.arch }}-$kind.json"
+          done
+          codesign --verify --strict installed/x/xhdfe_libomp.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-${{ matrix.arch }}
+          path: native-receipts/*.json
+          if-no-files-found: error
+          retention-days: 7
+
+  seal-artifacts:
+    needs: validate-universal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-universal-unvalidated
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-native-*
+          merge-multiple: true
+          path: native-receipts
+      - name: Seal only the natively validated macOS artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p universal artifacts/macos-openmp-runtime artifacts/macos-openmp-evidence
+          tar -C universal -xf macos-universal-unvalidated.tar
+          cp universal/xhdfe.plugin artifacts/xhdfe.plugin.macos
+          cp universal/xfepout.plugin artifacts/xfepout.plugin.macos
+          cp universal/xhdfe_libomp.dylib universal/LLVM-OpenMP-LICENSE.txt artifacts/macos-openmp-runtime/
+          cp universal/LLVM-OpenMP-20.1.8-source.tar.gz artifacts/
+          receipts=()
+          for arch in arm64 x86_64; do
+            for kind in xhdfe xfepout; do
+              receipts+=( --native-receipt "native-receipts/final-$arch-$kind.json" )
+              receipts+=( --native-receipt "universal/serial-$arch-$kind.json" )
+            done
+          done
+          python3 tools/validate_macos_openmp.py manifest \
+            --xhdfe artifacts/xhdfe.plugin.macos --xfepout artifacts/xfepout.plugin.macos \
+            --runtime-dir artifacts/macos-openmp-runtime \
+            --source-archive artifacts/LLVM-OpenMP-20.1.8-source.tar.gz \
+            "${receipts[@]}" --out artifacts/macos-openmp-runtime/macos-openmp-manifest.json
+          python3 tools/validate_macos_openmp.py verify \
+            --xhdfe artifacts/xhdfe.plugin.macos --xfepout artifacts/xfepout.plugin.macos \
+            --runtime-dir artifacts/macos-openmp-runtime
+          cp universal/*-build*.log universal/build-*.log universal/thin-*.json \
+            artifacts/macos-openmp-evidence/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugins-macos
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7

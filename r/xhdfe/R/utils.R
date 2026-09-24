@@ -58,14 +58,20 @@ split_xhdfe_formula <- function(fml) {
   }
 }
 
+# Parentheses group the FE grammar; they do not request arithmetic evaluation.
+unwrap_fe_parentheses <- function(expr) {
+  while (is.call(expr) && identical(expr[[1L]], as.name("("))) expr <- expr[[2L]]
+  expr
+}
+
 # Decompose the fixed-effects part into additive terms.
 split_plus_terms <- function(expr) {
-  out <- list()
-  while (is.call(expr) && identical(expr[[1L]], as.name("+"))) {
-    out <- c(list(expr[[3L]]), out)
-    expr <- expr[[2L]]
+  expr <- unwrap_fe_parentheses(expr)
+  if (is.call(expr) && identical(expr[[1L]], as.name("+"))) {
+    if (length(expr) == 2L) return(split_plus_terms(expr[[2L]]))
+    return(c(split_plus_terms(expr[[2L]]), split_plus_terms(expr[[3L]])))
   }
-  c(list(expr), out)
+  list(expr)
 }
 
 # Parse one FE term. Grammar (fixest-compatible):
@@ -75,6 +81,25 @@ split_plus_terms <- function(expr) {
 #   f1^f2       combined fixed effect (interaction of two or more ids)
 # Returns list(fe_expr, slope_exprs (list), include_intercept, label).
 parse_fe_term <- function(term) {
+  term <- unwrap_fe_parentheses(term)
+  if (is.call(term) && identical(term[[1L]], as.name("^"))) {
+    left <- parse_fe_term(term[[2L]])
+    right <- parse_fe_term(term[[3L]])
+    if (length(left$slopes)) {
+      stop("place slopes after the complete FE interaction, e.g. (a^b)[s]", call. = FALSE)
+    }
+    carrier <- call("^", left$fe_expr, right$fe_expr)
+    if (length(right$slopes)) {
+      right$fe_expr <- carrier
+      right$label <- paste0("(", deparse1(carrier), ")",
+                            if (right$include_intercept) "[" else "[[",
+                            paste(vapply(right$slopes, deparse1, ""), collapse = ","),
+                            if (right$include_intercept) "]" else "]]")
+      return(right)
+    }
+    return(list(fe_expr = carrier, slopes = list(), include_intercept = TRUE,
+                label = deparse1(term)))
+  }
   if (is.call(term) && identical(term[[1L]], as.name("[["))) {
     fe_expr <- term[[2L]]
     slopes <- as.list(term)[-(1:2)]
@@ -95,12 +120,37 @@ parse_fe_term <- function(term) {
 
 # Evaluate an FE expression in `data`; `a^b` combines ids.
 eval_fe_expr <- function(expr, data, env) {
+  expr <- unwrap_fe_parentheses(expr)
   if (is.call(expr) && identical(expr[[1L]], as.name("^"))) {
     left <- eval_fe_expr(expr[[2L]], data, env)
     right <- eval_fe_expr(expr[[3L]], data, env)
     return(interaction(left, right, drop = TRUE, lex.order = TRUE))
   }
   eval(expr, data, env)
+}
+
+regressor_terms <- function(spec, data, env) {
+  fml <- stats::as.formula(call("~", spec$regressors), env = env)
+  if (!"." %in% all.names(spec$regressors)) return(stats::terms(fml, data = data))
+  excluded <- unique(c(all.vars(spec$lhs), all.vars(spec$fe),
+                       all.vars(spec$endogenous), all.vars(spec$instruments)))
+  dot_data <- if (is.null(names(data))) data else data[setdiff(names(data), excluded)]
+  empty_dot <- !is.null(data) && !length(names(dot_data))
+  if (empty_dot) {
+    marker <- ".__xhdfe_empty_dot__"
+    while (marker %in% c(names(data), all.names(fml))) marker <- paste0(marker, "_")
+    dot_data <- setNames(list(0), marker)
+  }
+  fml <- stats::as.formula(call("~", spec$lhs, spec$regressors), env = env)
+  terms <- stats::delete.response(stats::terms(fml, data = dot_data))
+  if (empty_dot) {
+    factors <- attr(terms, "factors")
+    if (marker %in% rownames(factors)) {
+      remove <- which(factors[marker, ] != 0)
+      if (length(remove)) terms <- stats::drop.terms(terms, remove, keep.response = FALSE)
+    }
+  }
+  terms
 }
 
 # Convert an arbitrary id vector to int32 codes for the C++ core.

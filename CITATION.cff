@@ -12,8 +12,8 @@ authors:
     affiliation: "NIPE / Universidade do Minho"
     email: "tgstavares@eeg.uminho.pt"
     website: "https://www.tgstavares.com"
-version: "2.26.2"
-date-released: 2026-09-03
+version: "2.28.0"
+date-released: 2026-09-24
 url: "https://github.com/reisportela/xhdfe-xfe"
 license: MIT
 references:

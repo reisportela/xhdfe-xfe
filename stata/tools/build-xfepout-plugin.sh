@@ -74,8 +74,13 @@ Targets:
   --linux      Build a Linux (ELF) plugin using the native toolchain.
 
 OpenMP:
-  --openmp     Enable OpenMP (may require shipping libgomp on Windows).
-  --no-openmp  Disable OpenMP (default on Windows).
+  --openmp     Enable OpenMP (GNU runtimes are embedded on Windows).
+  --no-openmp  Diagnostic serial build; forbidden when XHDFE_RELEASE_BUILD=1.
+
+macOS OpenMP:
+  XHDFE_OPENMP_ROOT     SDK root containing ARCH/include/omp.h and
+                       ARCH/lib/xhdfe_libomp.dylib for each requested slice.
+  XHDFE_MACOS_ARCHS     x86_64, arm64, or "x86_64 arm64" (default: both).
 
 GPU:
   --cuda [auto|ARCH]
@@ -225,7 +230,7 @@ if [[ "${TARGET}" == "windows" ]]; then
   STRIP_BIN="${STRIP_BIN:-x86_64-w64-mingw32-strip}"
   SYSTEM_DEF="STWIN32"
   if [[ -z "${OPENMP_MODE}" ]]; then
-    OPENMP_MODE="off"
+    OPENMP_MODE="on"
   fi
 else
   if [[ "${UNAME_S}" == "Darwin" ]]; then
@@ -235,13 +240,21 @@ else
   fi
   STRIP_BIN="${STRIP_BIN:-strip}"
   if [[ -z "${OPENMP_MODE}" ]]; then
-    if [[ "${UNAME_S}" == "Darwin" ]]; then
-      OPENMP_MODE="off"
-    else
-      OPENMP_MODE="auto"
-    fi
+    OPENMP_MODE="on"
   fi
 fi
+
+case "$OPENMP_MODE" in
+  on|auto) OPENMP_MODE="on" ;;
+  off) ;;
+  *) echo "Error: XHDFE_OPENMP must be on, auto, or off." >&2; exit 2 ;;
+esac
+if [[ "${XHDFE_RELEASE_BUILD:-0}" == 1 && "$OPENMP_MODE" != on ]]; then
+  echo "Error: release plugins require OpenMP; serial builds are diagnostic only." >&2
+  exit 1
+fi
+openmp_compile_flags=( -DHDFE_USE_OPENMP -fopenmp )
+openmp_link_flags=( -fopenmp )
 
 if ! command -v "${CXX}" >/dev/null 2>&1; then
   if [[ "${TARGET}" == "windows" ]] && command -v g++ >/dev/null 2>&1; then
@@ -303,6 +316,14 @@ if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" 
   fi
 fi
 common_link_flags=( "${link_flag}" )
+if [[ "${TARGET}" == "windows" ]]; then
+  # Keep the plugin independent of Stata's runtime-DLL installation directories.
+  common_link_flags+=( -static "-Wl,-Map,${OUT_PLUGIN}.map" )
+  if [[ "${OPENMP_MODE}" != "off" ]]; then
+    printf 'EXPORTS\nomp_get_max_threads\n' > "${BUILD_DIR}/openmp-runtime.def"
+    common_link_flags+=( "${BUILD_DIR}/openmp-runtime.def" )
+  fi
+fi
 static_gnu_link_flags=()
 if [[ "${TARGET}" != "windows" && "${UNAME_S}" != "Darwin" && "${XHDFE_STATIC_GNU_LIBS:-}" =~ ^(1|ON|on|true|yes)$ ]]; then
   static_libstdcxx="$("${CXX}" -print-file-name=libstdc++.a)"
@@ -440,7 +461,7 @@ compile_plugin() {
       "${CXX}" "${cxx_flags[@]}" -x c++ -c "${stplugin_src}" -o "${obj}"
       rc=$?
       if [[ $rc -ne 0 ]]; then
-        break
+        exit "$rc"
       fi
       objs+=( "${obj}" )
       for src in "${srcs[@]}"; do
@@ -498,11 +519,6 @@ compile_plugin() {
         fi
       fi
       set -e
-      if [[ "${build_openmp}" -eq 1 && "${OPENMP_MODE}" != "on" ]]; then
-        echo "OpenMP build failed; retrying without OpenMP..."
-        build_openmp=0
-        continue
-      fi
       exit $rc
     done
 
@@ -515,35 +531,32 @@ compile_plugin() {
   else
     if [[ "${OPENMP_MODE}" == "on" ]]; then
       "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
-        -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
-    elif [[ "${OPENMP_MODE}" == "off" ]]; then
+        "${openmp_compile_flags[@]}" -x c++ "${stplugin_src}" -x none "${srcs[@]}" \
+        "${openmp_link_flags[@]}" -o "${out}"
+    else
       "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
         -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
-    else
-      set +e
-      "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
-        -DHDFE_USE_OPENMP -fopenmp -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
-      rc=$?
-      set -e
-      if [[ $rc -ne 0 ]]; then
-        echo "OpenMP build failed; retrying without OpenMP..."
-        "${CXX}" "${common_compile_flags[@]}" "${common_link_flags[@]}" ${static_gnu_link_flags[@]+"${static_gnu_link_flags[@]}"} ${extra_flags[@]+"${extra_flags[@]}"} "${pthread_flag[@]}" \
-          -x c++ "${stplugin_src}" -x none "${srcs[@]}" -o "${out}"
-      fi
     fi
   fi
 }
 
 if [[ "${UNAME_S}" == "Darwin" && "${TARGET}" != "windows" ]]; then
-  echo "Building ${OUT_PLUGIN} (universal: x86_64 + arm64)"
-  tmp_x86="${BUILD_DIR}/xfepout.plugin.x86_64"
-  tmp_arm="${BUILD_DIR}/xfepout.plugin.arm64"
-  compile_plugin "${tmp_x86}" -target x86_64-apple-macos10.12 "${metal_flags[@]+${metal_flags[@]}}"
-  compile_plugin "${tmp_arm}" -target arm64-apple-macos11 "${metal_flags[@]+${metal_flags[@]}}"
-  lipo -create -output "${OUT_PLUGIN}" "${tmp_x86}" "${tmp_arm}"
+  source "${SCRIPT_DIR}/macos-openmp.sh"
+  xhdfe_macos_architectures
+  echo "Building ${OUT_PLUGIN} (macOS: ${macos_archs[*]})"
+  macos_slices=()
+  for arch in "${macos_archs[@]}"; do
+    if [[ "$arch" == x86_64 ]]; then target=x86_64-apple-macos10.12; else target=arm64-apple-macos11; fi
+    xhdfe_macos_openmp_flags "$arch" "$target"
+    slice="${BUILD_DIR}/xfepout.plugin.${arch}"
+    compile_plugin "$slice" -target "$target" ${metal_flags[@]+"${metal_flags[@]}"}
+    macos_slices+=( "$slice" )
+  done
+  lipo -create -output "${OUT_PLUGIN}" "${macos_slices[@]}"
+  xhdfe_macos_bundle_runtime
 else
   echo "Building ${OUT_PLUGIN}"
-  compile_plugin "${OUT_PLUGIN}" "${metal_flags[@]+${metal_flags[@]}}"
+  compile_plugin "${OUT_PLUGIN}" ${metal_flags[@]+"${metal_flags[@]}"}
 fi
 
 if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
@@ -551,6 +564,16 @@ if command -v "${STRIP_BIN}" >/dev/null 2>&1; then
     "${STRIP_BIN}" -x "${OUT_PLUGIN}" || true
   else
     "${STRIP_BIN}" "${OUT_PLUGIN}" || true
+  fi
+fi
+
+if [[ "${UNAME_S}" == Darwin && "${TARGET}" != windows ]]; then
+  codesign --force --sign - --timestamp=none "${OUT_PLUGIN}"
+  if [[ "$OPENMP_MODE" == on ]]; then
+    for arch in "${macos_archs[@]}"; do
+      python3 "${STATA_DIR}/../tools/validate_macos_openmp.py" inspect \
+        --file "${OUT_PLUGIN}" --arch "$arch" --kind plugin
+    done
   fi
 fi
 

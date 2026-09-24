@@ -11,6 +11,9 @@ import re
 import sys
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_stata_linkage import validate as validate_static_stata
+
 
 SCHEMA_VERSION = 1
 REQUIRED_COMPONENTS = {
@@ -218,7 +221,13 @@ def validate(path: Path) -> dict[str, object]:
             archive.read(f"{root}/PROVENANCE.json"),
             object_pairs_hook=no_duplicate_json_keys,
         )
-        require(provenance.get("schema_version") == SCHEMA_VERSION, "schema mismatch")
+        require(provenance.get("schema_version") in (SCHEMA_VERSION, 2), "schema mismatch")
+        static_stata = provenance.get("windows_stata_static_link")
+        if provenance["schema_version"] == 2:
+            require(isinstance(static_stata, dict), "static Stata link ledger missing")
+            validate_static_stata(static_stata)
+        else:
+            require(static_stata is None, "static Stata linkage requires schema 2")
         require(provenance.get("package") == "xhdfe", "package mismatch")
         require(root == f"xhdfe-{provenance.get('version')}-corresponding-source", "version/root mismatch")
 
@@ -273,7 +282,17 @@ def validate(path: Path) -> dict[str, object]:
         )
         require(REQUIRED_COMPONENTS <= set(component_map), "source component closure incomplete")
         require(REQUIRED_PROVIDERS <= set(provider_map), "provider-source closure incomplete")
-        require(set(RUNTIME_PROVIDERS) <= set(runtime_map), "runtime evidence closure incomplete")
+        required_runtimes = {key for key in RUNTIME_PROVIDERS
+                             if static_stata is None or not key.startswith("windows-stata-")}
+        require(required_runtimes <= set(runtime_map), "runtime evidence closure incomplete")
+        if static_stata is not None:
+            require(not any(key.startswith("windows-stata-") for key in runtime_map),
+                    "static Stata runtimes cannot also be shipped DLLs")
+            for entry in static_stata["static_archives"]:
+                source = metadata(provider_map[entry["provider_id"]])
+                require(entry["source_package"] == source.get("source_package")
+                        and entry["source_version"] == source.get("source_version"),
+                        "static archive and corresponding provider source disagree")
 
         referenced_sources: set[str] = set()
         for entry in components:

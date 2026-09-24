@@ -1543,6 +1543,8 @@ def bootstrap(y, x1, x2_groups=None, fes=None, *, method="pairs",
     requires ``bootstrap_cluster`` and samples those blocks; the resampling
     unit is deliberately not inferred from ``vce='cluster'``. Each replication
     receives an independent deterministic RNG stream derived from ``seed``.
+    Both methods resample the retained point-estimation sample, after singleton
+    and connectivity exclusions; excluded rows cannot re-enter a replication.
     Failed fits are retained in an auditable ledger and the procedure fails
     closed below ``min_valid_reps``.
 

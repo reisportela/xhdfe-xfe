@@ -12,9 +12,11 @@
 #include <sstream>
 #include <string>
 #include <cstdint>
+#include <type_traits>
 #include <unordered_map>
 
 #include "hdfe/akm_kss.hpp"
+#include "hdfe/ieee_bits.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
 
 namespace py = pybind11;
@@ -53,6 +55,12 @@ public:
     }
 
     void commit() noexcept { committed_ = true; }
+
+    void require_probability_inference() const {
+        if (owner_.options_.se_type == hdfe::StandardErrorType::Homoskedastic) {
+            throw std::runtime_error("pweights require se_type='robust' or se_type='cluster'");
+        }
+    }
 
 private:
     HdfeRegressorV11& owner_;
@@ -313,6 +321,68 @@ GroupAggregation parse_group_aggregation(const std::string& name) {
     throw std::runtime_error("Unknown aggregation: " + name);
 }
 
+template<typename Value, typename Getter>
+Eigen::VectorXi parse_numeric_labels(ssize_t n, const char* label, Getter&& get_value) {
+    Eigen::VectorXi ids(static_cast<int>(n));
+    auto validate = [&](Value value) {
+        if constexpr (std::is_floating_point_v<Value>) {
+            if (!hdfe::detail::ieee_finite(value))
+                throw std::runtime_error(std::string(label) + " must contain finite IDs");
+        }
+        if constexpr (std::is_signed_v<Value>) {
+            if (value < 0)
+                throw std::runtime_error(std::string(label) +
+                    " must contain nonnegative IDs; encode missing categories before fitting");
+        }
+    };
+    ssize_t i = 0;
+    for (; i < n; ++i) {
+        const Value value = get_value(i);
+        validate(value);
+        bool integral = true;
+        if constexpr (std::is_floating_point_v<Value>) integral = std::floor(value) == value;
+        if (!integral || value > static_cast<Value>(std::numeric_limits<int>::max())) break;
+        ids(static_cast<int>(i)) = static_cast<int>(value);
+    }
+    if (i == n) return ids;
+    // Fractional floats and large unsigned integers are labels, not int64
+    // values to truncate. Preserve every represented equality class.
+    std::unordered_map<Value, int> levels;
+    levels.reserve(static_cast<std::size_t>(std::min<ssize_t>(n, 1000000)));
+    int next = 0;
+    for (i = 0; i < n; ++i) {
+        const Value value = get_value(i);
+        validate(value);
+        const auto found = levels.find(value);
+        if (found != levels.end()) {
+            ids(static_cast<int>(i)) = found->second;
+        } else {
+            if (next == std::numeric_limits<int>::max())
+                throw std::runtime_error(std::string(label) + " has too many distinct IDs");
+            ids(static_cast<int>(i)) = next;
+            levels.emplace(value, next++);
+        }
+    }
+    return ids;
+}
+
+void require_exact_object_ids(const py::array& original, const py::array& converted,
+                              const char* label) {
+    auto equal = py::array_t<bool, py::array::c_style | py::array::forcecast>(
+        py::module_::import("numpy").attr("equal")(original, converted));
+    const bool* same = equal.data();
+    py::object flat = original.attr("flat");
+    for (ssize_t i = 0; i < original.size(); ++i) {
+        if (same[i]) continue;
+        py::object value = flat.attr("__getitem__")(i);
+        // Preserve the existing integer-string input, whose int64 conversion
+        // already rejects fractional strings and overflow.
+        if (py::isinstance<py::str>(value) || py::isinstance<py::bytes>(value)) continue;
+        throw std::runtime_error(std::string(label) +
+            " needs a numeric dtype or exact integer category codes");
+    }
+}
+
 Eigen::VectorXi parse_index_vector(const py::handle& obj,
                                   const char* label,
                                   ssize_t expected_n) {
@@ -323,7 +393,7 @@ Eigen::VectorXi parse_index_vector(const py::handle& obj,
     if (py::isinstance<py::array>(obj)) {
         raw = py::reinterpret_borrow<py::array>(obj);
     } else {
-        auto converted = py::array_t<std::int64_t, py::array::forcecast>::ensure(obj);
+        auto converted = py::array::ensure(obj);
         if (!converted) {
             throw std::runtime_error(std::string(label) + " must be array-like");
         }
@@ -340,6 +410,18 @@ Eigen::VectorXi parse_index_vector(const py::handle& obj,
     }
 
     const auto dtype = raw.dtype();
+    if (dtype.kind() == 'f') {
+        if (dtype.itemsize() > static_cast<ssize_t>(sizeof(double)))
+            throw std::runtime_error(std::string(label) + " needs integer codes for extended-precision labels");
+        auto arr = py::array_t<double, py::array::c_style | py::array::forcecast>(raw);
+        const double* data = arr.data();
+        return parse_numeric_labels<double>(expected_n, label, [data](ssize_t i) { return data[i]; });
+    }
+    if (dtype.is(py::dtype::of<std::uint64_t>())) {
+        auto arr = py::array_t<std::uint64_t, py::array::c_style | py::array::forcecast>(raw);
+        const auto* data = arr.data();
+        return parse_numeric_labels<std::uint64_t>(expected_n, label, [data](ssize_t i) { return data[i]; });
+    }
     if (dtype.is(py::dtype::of<std::int32_t>())) {
         auto arr = py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>(raw);
         return Eigen::Map<const Eigen::VectorXi>(arr.data(),
@@ -353,6 +435,7 @@ Eigen::VectorXi parse_index_vector(const py::handle& obj,
         });
     }
     auto arr = py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>(raw);
+    if (dtype.kind() == 'O' || dtype.kind() == 'c') require_exact_object_ids(raw, arr, label);
     const std::int64_t* data = arr.data();
     return remap_or_cast_int64_ids(expected_n, label, [data](ssize_t i) {
         return data[i];
@@ -367,6 +450,24 @@ Eigen::VectorXi parse_index_matrix_column(const py::array& arr,
         return Eigen::VectorXi();
     }
     const auto dtype = arr.dtype();
+    if (dtype.kind() == 'f') {
+        if (dtype.itemsize() > static_cast<ssize_t>(sizeof(double)))
+            throw std::runtime_error(std::string(label) + " needs integer codes for extended-precision labels");
+        auto values = py::array_t<double, py::array::c_style | py::array::forcecast>(arr);
+        const double* data = values.data();
+        const ssize_t stride = arr.shape(1);
+        return parse_numeric_labels<double>(row, label, [data, stride, col](ssize_t i) {
+            return data[i * stride + col];
+        });
+    }
+    if (dtype.is(py::dtype::of<std::uint64_t>())) {
+        auto values = py::array_t<std::uint64_t, py::array::c_style | py::array::forcecast>(arr);
+        const auto* data = values.data();
+        const ssize_t stride = arr.shape(1);
+        return parse_numeric_labels<std::uint64_t>(row, label, [data, stride, col](ssize_t i) {
+            return data[i * stride + col];
+        });
+    }
     if (dtype.is(py::dtype::of<std::int32_t>())) {
         auto c_arr =
             py::array_t<std::int32_t, py::array::c_style | py::array::forcecast>(arr);
@@ -387,6 +488,7 @@ Eigen::VectorXi parse_index_matrix_column(const py::array& arr,
         });
     }
     auto c_arr = py::array_t<std::int64_t, py::array::c_style | py::array::forcecast>(arr);
+    if (dtype.kind() == 'O' || dtype.kind() == 'c') require_exact_object_ids(arr, c_arr, label);
     const std::int64_t* data = c_arr.data();
     const ssize_t stride = arr.shape(1);
     return remap_or_cast_int64_ids(row, label, [data, stride, col](ssize_t i) {
@@ -540,9 +642,16 @@ ParsedDofAdjustments parse_dofadjustments(py::object dof_obj) {
     bool seen_pairwise = false;
     bool seen_clusters = false;
     bool seen_continuous = false;
+    bool seen_exact = false;
     for (const auto& tok_raw : tokens) {
         const std::string tok = normalize(tok_raw);
         if (tok.empty()) {
+            continue;
+        }
+        if (tok == "exact") {
+            seen_exact = true;
+            parsed.method = DofAdjustmentMethod::Exact;
+            parsed.mobility_groups = true;
             continue;
         }
         if (tok == "all") {
@@ -585,8 +694,10 @@ ParsedDofAdjustments parse_dofadjustments(py::object dof_obj) {
 
     const int token_classes = static_cast<int>(seen_all) + static_cast<int>(seen_none) +
                               static_cast<int>(seen_firstpair) + static_cast<int>(seen_pairwise) +
-                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous);
+                              static_cast<int>(seen_clusters) + static_cast<int>(seen_continuous) +
+                              static_cast<int>(seen_exact);
     if ((seen_all && token_classes > 1) || (seen_none && token_classes > 1) ||
+        (seen_exact && token_classes > 1) ||
         (seen_firstpair && seen_pairwise)) {
         throw std::runtime_error("Mutually exclusive dofadjustments tokens");
     }
@@ -697,7 +808,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                          py::object ssc_g_adj,
                          py::object ssc_g_df,
                          py::object ssc_t_df,
-                         const std::string& tolerance_mode) {
+                         const std::string& tolerance_mode,
+                         double fe_tolerance,
+                         const std::string& fe_recovery_method,
+                         const std::string& stats_style) {
                  if (num_threads < 0 || default_threads < 0 ||
                      max_threads < 0) {
                      throw std::invalid_argument(
@@ -728,6 +842,13 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                      opts.drop_singletons = drop_singletons;
                  }
                  opts.retain_fixed_effects = retain_fes;
+                 opts.fe_tolerance = fe_tolerance;
+                 if (fe_recovery_method == "hybrid") opts.fe_recovery_method = hdfe::FeRecoveryMethod::Hybrid;
+                 else if (fe_recovery_method == "map") opts.fe_recovery_method = hdfe::FeRecoveryMethod::Map;
+                 else throw std::runtime_error("fe_recovery_method must be hybrid or map");
+                 if (stats_style == "reghdfe") opts.stats_style = hdfe::StatsStyle::Reghdfe;
+                 else if (stats_style == "legacy") opts.stats_style = hdfe::StatsStyle::Legacy;
+                 else throw std::runtime_error("stats_style must be reghdfe or legacy");
                  opts.symmetric_sweep = symmetric_sweep;
                  opts.absorption_method = parse_absorption_method(absorption_method);
                  opts.jacobi_relaxation = jacobi_relaxation;
@@ -804,7 +925,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
              py::arg("ssc_g_adj") = py::none(),
              py::arg("ssc_g_df") = py::none(),
              py::arg("ssc_t_df") = py::none(),
-             py::arg("tolerance_mode") = "reghdfe-comparable")
+             py::arg("tolerance_mode") = "reghdfe-comparable",
+             py::arg("fe_tolerance") = 1e-6,
+             py::arg("fe_recovery_method") = "hybrid",
+             py::arg("stats_style") = "reghdfe")
         .def(
             "fit",
             [precision_warning](HdfeRegressorV11& self,
@@ -819,8 +943,20 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                py::object individual_obj,
                const std::string& aggregation,
                py::object slopes_obj,
-               bool fweights) {
+               bool fweights,
+               bool iweights,
+               bool pweights) {
                 hdfe::v11::BindingAttemptGuard attempt(self, fweights);
+                if (int(fweights) + int(iweights) + int(pweights) > 1) {
+                    throw std::runtime_error("fweights, iweights and pweights are mutually exclusive");
+                }
+                if (iweights && weights_obj.is_none()) {
+                    throw std::runtime_error("iweights=True requires a weights vector");
+                }
+                if (pweights && weights_obj.is_none()) {
+                    throw std::runtime_error("pweights=True requires a weights vector");
+                }
+                if (pweights) attempt.require_probability_inference();
                 if (fweights && weights_obj.is_none()) {
                     throw std::runtime_error(
                         "fweights=True requires a weights vector");
@@ -991,14 +1127,19 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                         self.fit(y_vec, X_mat, fes, w_ptr, c_ptr, inst_ptr, endogenous, slopes_ptr);
                     }
                 }
-                if (!self.results().precision_certified) {
-                    if (PyErr_WarnEx(
-                            precision_warning.ptr(),
-                            "xhdfe fit did not pass the independent "
-                            "precision certificate; inspect "
-                            "abs_residual_rel_ and consider a stricter "
-                            "tolerance mode",
-                            1) < 0) {
+                if (iweights) self.apply_importance_weights(*w_ptr);
+                if (!self.results().converged || !self.results().precision_certified ||
+                    !self.results().fe_recovery_converged) {
+                    throw std::runtime_error(
+                        "xhdfe failed convergence or precision certification; no estimates returned");
+                }
+                if (group_vec && individual_vec &&
+                    std::any_of(self.results().fe_inexact.begin(), self.results().fe_inexact.end(),
+                                [](int value) { return value != 0; })) {
+                    if (PyErr_WarnEx(PyExc_RuntimeWarning,
+                        "Group/individual degrees of freedom use an approximation; "
+                        "standard errors are not based on exact design rank. "
+                        "Use dofadjustments='exact' for a bounded direct rank calculation.", 1) < 0) {
                         throw py::error_already_set();
                     }
                 }
@@ -1016,13 +1157,17 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             py::arg("aggregation") = "mean",
             py::arg("slopes") = py::none(),
             py::arg("fweights") = false,
+            py::arg("iweights") = false,
+            py::arg("pweights") = false,
             R"doc(
 Fit the HDFE model.
 
 By default, ``weights`` follow the package's analytic-weight convention. Set
 ``fweights=True`` to interpret each positive-integer weight as literal row
 replication for sample-size, degrees-of-freedom, singleton, and variance
-bookkeeping. The flag is reset on every call and requires ``weights``.
+bookkeeping. Set ``iweights=True`` for Stata's importance-weight counts and
+inference convention. ``pweights=True`` requires robust or clustered inference.
+All weight-type flags require ``weights`` and are mutually exclusive.
 )doc")
         .def(
             "extract_group_individual_fes",
@@ -1299,6 +1444,9 @@ bookkeeping. The flag is reset on every call and requires ``weights``.
         })
         .def_property_readonly("df_a_nested_", [](const HdfeRegressorV11& self) {
             return self.results().df_a_nested;
+        })
+        .def_property_readonly("model_has_constant_", [](const HdfeRegressorV11& self) {
+            return self.results().model_has_constant;
         })
         .def_property_readonly("r2_", [](const HdfeRegressorV11& self) {
             return self.results().r2;
@@ -1726,7 +1874,11 @@ bookkeeping. The flag is reset on every call and requires ``weights``.
                 cd["cov_alpha_psi"] = c.cov_alpha_psi;
                 // derived summary (pytwoway-style at-a-glance quantities)
                 cd["corr_alpha_psi"] =
-                    c.cov_alpha_psi / std::sqrt(c.var_alpha * c.var_psi);
+                    hdfe::detail::ieee_finite(c.var_alpha) && hdfe::detail::ieee_finite(c.var_psi) &&
+                    c.var_alpha > 0.0 && c.var_psi > 0.0
+                        ? (c.cov_alpha_psi / std::sqrt(std::max(c.var_alpha, c.var_psi))) /
+                              std::sqrt(std::min(c.var_alpha, c.var_psi))
+                        : std::numeric_limits<double>::quiet_NaN();
                 cd["var_alpha_plus_psi"] =
                     c.var_alpha + c.var_psi + 2.0 * c.cov_alpha_psi;
                 if (r.var_y > 0.0) {

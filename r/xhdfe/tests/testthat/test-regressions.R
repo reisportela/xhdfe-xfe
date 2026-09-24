@@ -222,7 +222,10 @@ test_that("xhdfe_fit rejects individual without group (audit P0.2)", {
 })
 
 test_that("grouped CPU non-convergence cannot expose estimates", {
-  ng <- 128L
+  # Since 2.27.0 designs with at most 1500 absorbed columns are projected
+  # exactly by the direct route and never iterate, so maxiter = 1 cannot
+  # starve them; 1600 individuals keep this chain on the Krylov solver.
+  ng <- 1600L
   grp <- rep(seq_len(ng), each = 2L)
   ind <- as.vector(rbind(seq_len(ng), seq_len(ng) + 1L))
   std <- rep((seq_len(ng) - 1L) %% 7L, each = 2L)
@@ -234,7 +237,8 @@ test_that("grouped CPU non-convergence cannot expose estimates", {
               drop_singletons = FALSE, maxiter = 1L, tol = 1e-14,
               tolerance_mode = "reghdfe-comparable",
               absorption_method = "lsmr", threads = 1L),
-    "Group/individual HDFE absorption.*no estimates were produced"
+    # 2.26.2 wording "no estimates were produced"; 2.27.0 "No estimates returned"
+    "[Gg]roup/individual HDFE absorption.*[Nn]o estimates"
   )
 })
 
@@ -405,7 +409,11 @@ test_that("derived statistics use the stats-style residual degrees of freedom", 
     aggregation = "sum", drop_singletons = FALSE,
     absorption_method = "gauss-seidel", stats_style = "reghdfe", threads = 1L
   )
-  expect_equal(grouped$df_r, -2)
+  # Since 2.27.0 the individual block counts one exact redundancy against the
+  # ordinary FE when the constant is provably in the span of the membership
+  # columns (mean aggregation, or sum with a uniform team size):
+  # df_a = 1 + (3 - 1) = 3 and df_r = 2 - 3 = -1 (2.26.2 reported 4 and -2).
+  expect_equal(grouped$df_r, -1)
   expect_lt(grouped$df_r_unadj - grouped$df_a_nested, 0)
   expect_true(is.na(grouped$sigma2))
   expect_true(is.na(grouped$rmse))

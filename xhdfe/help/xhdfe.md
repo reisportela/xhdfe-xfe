@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.26.2.20260903. Use `python -m xhdfe --version`
+Package documentation version: 2.28.0.20260924. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -496,6 +496,50 @@ the joint LSMR implementation is CPU-only. Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
+## Known limitations (2.28.0)
+
+- A fit that converges by the solver's stopping rule but does not pass the
+  precision certificate raises an error and returns no estimates, in Python,
+  R and Stata alike. Ill-conditioned specifications can still require a refusal.
+  Heterogeneous slopes under an explicit `convergence="reghdfe"`
+  used to, and that rule is now continued once at tighter internal
+  tolerances with the first certified stage returned
+  (`slope_accuracy_retry_stages_` counts them); the default
+  `convergence="auto"` polishes the slope block further.
+- `aggregation="sum"` without an ordinary absorbed fixed effect: the
+  constant is in the span of the membership columns only for a uniform team
+  size or through a data-dependent combination of individual columns, which
+  xhdfe decides by projecting the ones vector on the absorbed effects as one
+  separate right-hand side. When
+  the constant is not spanned the fit has no intercept and is reported as one:
+  `model_has_constant_` is `False`, the trailing intercept entry of `coef_` is
+  NaN, `tss_` is uncentered and the R-squared derives from it; coefficients,
+  RSS and residuals are unchanged from earlier versions and equal those of the
+  no-intercept model.
+- CUDA with small, ill-conditioned `group`/`individual` designs (condition
+  number above about 1e7): the device solver can leave residuals at the 1e-6
+  relative level where the CPU direct projection is exact to rounding. On
+  designs small enough for that projection (at most about 1,500 absorbed
+  columns) the device result is compared with it and refused with an
+  informative `RuntimeError` when a retained column deviates by more than ten
+  times the forward tolerance of the mode; use the CPU backend for such
+  designs.
+- CUDA with `tolerance_mode="reghdfe-comparable"` on ill-conditioned ordinary
+  designs: unweighted OLS without saved effects also checks the normal
+  equations against the original regressors. A failed check receives one
+  continuation at the same method and tolerance, within the remaining
+  iteration budget. A persistent failure returns no estimates and does not
+  substitute CPU estimates. This prevents the previously reported inaccurate
+  CUDA results on directors and the difficult 10M-row 3-FE benchmark; select
+  the CPU backend for those specifications. CUDA convergence on them remains
+  unresolved. The opt-in accuracy-retry environment settings remain available,
+  but cannot bypass this necessary check.
+- Degrees of freedom of the individual block: one exact redundancy against an
+  ordinary fixed effect is subtracted whenever the constant is provably in the
+  span of the membership columns (`aggregation="mean"`, or `"sum"` with a
+  uniform team size); other redundancies are not detected by default
+  (`dofadjustments="exact"` computes the exact rank).
+
 ## Fixed-effect recovery
 
 Use `retain_fes=True` in the constructor:
@@ -635,16 +679,14 @@ XHDFE_GPU_BACKEND=metal
 CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device.
 Metal is currently reserved.
 
-For version 2.26.2, `gpu_used_ == 1` proves GPU execution, not universal
-numerical certification. The exact H100 `sm_90` comparable-mode campaign
-accepted 13 of 24 core24-quick surfaces, including the difficult
-group/individual case strictly. Eleven poorly connected ordinary two- or
-three-way FE graphs did not satisfy the full contract; some also failed
-coefficient or standard-error gates. Use CPU for any fully certified result on
-such a graph, including coefficients, inference, residuals, recovered fixed
-effects, `predict`/FE contributions, and FE-based decompositions. CUDA remains
-opt-in and does not hide this boundary with a CPU fallback; the exact failed
-surfaces are reported in the 2.26.2 release notes.
+In 2.28.0, `gpu_used_ == 1` proves GPU execution, not universal numerical
+certification. The current core matrix has 188 converged cells out of 192;
+every CPU and Fast cell converged. Four difficult CUDA Comparable cells still
+refuse estimation. Separate extreme-offset and group/individual CUDA cases
+also retain documented refusals; use CPU for those specifications. Consult
+the release validation record for the exact scope. Python callers must check
+`gpu_used_` and `gpu_status_code_`: an unavailable CUDA backend can return a
+CPU result. Fast and Comparable remain distinct approximation contracts.
 
 ## Mobility profiles
 

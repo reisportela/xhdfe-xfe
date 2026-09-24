@@ -1,4 +1,4 @@
-*! version 1.8.0  03sep2026
+*! version 1.8.1  24sep2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
 *! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
@@ -93,12 +93,12 @@ program define xhdfeakm, rclass sortpreserve
     if ("`generate'" != "") {
         local store_effects 1
         foreach suff in alpha psi keep {
+            confirm name `generate'_`suff'
             capture confirm new variable `generate'_`suff'
             if (_rc & "`replace'" == "") {
                 di as err "variable `generate'_`suff' already exists (use replace)"
                 exit 110
             }
-            capture drop `generate'_`suff'
         }
     }
 
@@ -241,7 +241,8 @@ program define xhdfeakm, rclass sortpreserve
         local va = return(`est'_var_alpha)
         local vp = return(`est'_var_psi)
         local cv = return(`est'_cov)
-        return scalar `est'_corr = `cv' / sqrt(`va' * `vp')
+        return scalar `est'_corr = cond(`va'>0 & `va'<. & `vp'>0 & `vp'<., ///
+            (`cv'/sqrt(max(`va',`vp')))/sqrt(min(`va',`vp')), .)
         return scalar `est'_var_sum = `va' + `vp' + 2 * `cv'
         if (return(var_y) > 0) {
             return scalar `est'_share_alpha = `va' / return(var_y)
@@ -265,6 +266,10 @@ program define xhdfeakm, rclass sortpreserve
     }
 
     if (`store_effects') {
+        // Commit generated variables only after the backend returned.
+        foreach suff in alpha psi keep {
+            capture drop `generate'_`suff'
+        }
         quietly gen double `generate'_alpha = `effalpha'
         quietly gen double `generate'_psi = `effpsi'
         label variable `generate'_alpha "AKM worker effect (leave-out sample)"

@@ -10,7 +10,7 @@ discard
 
 which xhdfe
 quietly xhdfe, version
-assert "`e(version)'" == "2.26.2 03sep2026"
+assert "`e(version)'" == "2.27.0 20sep2026"
 
 local N 24000
 local fit_tol 1e-10

@@ -1,7 +1,7 @@
 # Low-level matrix interface (mirrors the Python HdfeRegressor().fit() call).
 
 xhdfe_fit <- function(y, X, fes = NULL,
-                      weights = NULL, weights_type = c("analytic", "frequency"),
+                      weights = NULL, weights_type = c("analytic", "frequency", "importance", "probability"),
                       cluster = NULL, vcov = NULL,
                       instruments = NULL, endogenous = NULL,
                       slopes = NULL,
@@ -64,6 +64,13 @@ xhdfe_fit <- function(y, X, fes = NULL,
   cluster_names <- names(cluster_list)
   cluster_use <- lapply(cluster_list, to_ids, label = "cluster")
   se_type <- resolve_vcov(vcov, length(cluster_use) > 0L)
+  if (weights_type %in% c("importance", "probability") && is.null(weights)) {
+    stop("weights_type requires a weights vector", call. = FALSE)
+  }
+  if (weights_type == "probability" && se_type == "unadjusted") {
+    if (!is.null(vcov)) stop("probability weights require robust or clustered inference", call. = FALSE)
+    se_type <- "robust"
+  }
 
   if (!is.null(weights)) {
     weights <- as.numeric(weights)
@@ -159,13 +166,11 @@ xhdfe_fit <- function(y, X, fes = NULL,
   out <- finalize_xhdfe(res, coef_names, n, seq_len(n), cl, level,
                         backend, se_type, cluster_names, fe_labels,
                         tolerance_mode, stats_style = stats_style,
-                        model_has_cons = if (length(fes_use)) {
-                          any(fe_has_intercept)
-                        } else isTRUE(fit_intercept),
+                        model_has_cons = isTRUE(fit_intercept) || any(fe_has_intercept),
                         weights_sum = if (is.null(weights) ||
                                           length(res$sample_index0) == 0L) NULL
                                       else sum(weights[res$sample_index0 + 1L]),
-                        X_used = X, y_used = y)
+                        X_used = X, y_used = y, grouped_fit = !is.null(group_use))
   out$weights_type <- if (is.null(weights)) NULL else weights_type
   out
 }

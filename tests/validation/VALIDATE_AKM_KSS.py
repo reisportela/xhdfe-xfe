@@ -13,7 +13,7 @@ Checks the C++ `akm_kss` / `akm_leave_out_set` bindings against:
 Every check prints dataset / oracle / tolerance. Exit code 0 = all pass.
 
 Usage:
-  python tests/validation/VALIDATE_AKM_KSS.py [--module-dir build] [--pytwoway VENV_PYTHON]
+  python VALIDATE_AKM_KSS.py [--module-dir build] [--pytwoway VENV_PYTHON]
 """
 
 import argparse
@@ -26,10 +26,6 @@ import warnings
 
 import numpy as np
 
-REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
-sys.path.insert(0, REPO_ROOT)
 FAILURES = []
 
 
@@ -831,7 +827,7 @@ def main():
 
     # ---- 3b. Front-end helpers (M6 subsampling + M7 exports) ---------------
     try:
-        sys.path.insert(0, REPO_ROOT)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import xhdfe.akm as xakm
         have_helpers = True
     except ImportError as exc:
@@ -948,7 +944,8 @@ def main():
         import pandas as pd
         import shutil
         lot2w = os.path.abspath(args.matlab_lot2w)
-        driver = os.path.join(REPO_ROOT, "tools", "akm_kss_matlab_driver.m")
+        driver = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                              "tools", "akm_kss_matlab_driver.m"))
         mat_cases = []
         if os.path.exists(args.felsdvsimul):
             df = pd.read_stata(args.felsdvsimul).sort_values(["i", "t"])

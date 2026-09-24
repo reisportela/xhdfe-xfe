@@ -57,6 +57,8 @@ Fits the ordinary \code{xhdfe_gelbach()} result and completely re-estimates
 it under observation-pairs or explicitly declared cluster-pairs
 resampling. Replications use independent L'Ecuyer-CMRG streams, record
 failures in a ledger and fail closed below \code{min_valid_reps}.
+Both methods resample the point estimate's retained sample, after singleton
+and connectivity exclusions; excluded rows cannot re-enter a replication.
 The same integer seed is reproducible within R, but does not request the
 same resamples as Python's PCG64 streams or Stata's native sequential RNG.
 Frequency-weight pairs bootstrap is refused because resampling compressed

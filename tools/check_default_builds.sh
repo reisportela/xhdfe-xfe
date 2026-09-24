@@ -18,6 +18,34 @@ cache_value() {
     sed -n "s/^${key}:[^=]*=//p" "$cache" | head -n 1
 }
 
+# CMakeLists.txt adds -march=native per target (target_compile_options), not
+# through CMAKE_CXX_FLAGS_RELEASE, so read the flags each target is actually
+# compiled with.
+target_has_flag() {
+    local dir="$1" target="$2" flag="$3"
+    local flags_make="$repo_root/$dir/CMakeFiles/$target.dir/flags.make"
+    if [[ -f "$flags_make" ]]; then
+        grep -E '^CXX_FLAGS' "$flags_make" | grep -q -- " $flag"
+        return
+    fi
+    local commands="$repo_root/$dir/compile_commands.json"
+    [[ -f "$commands" ]] && grep -F "CMakeFiles/$target.dir/" "$commands" | grep -q -- " $flag"
+}
+
+# ldd | grep libgomp also matches NVIDIA HPC SDK's libnvomp, which that SDK
+# installs as libgomp.so.1 and which LD_LIBRARY_PATH can put first. Require the
+# GNU runtime that users load.
+check_openmp_runtime() {
+    local binary="$1" resolved
+    command -v ldd >/dev/null 2>&1 || return 0
+    resolved="$(ldd "$binary" 2>/dev/null | awk '/libgomp/ {print $3; exit}')"
+    if [[ -z "$resolved" ]]; then
+        violation "${binary#$repo_root/} does not link libgomp (OpenMP required)"
+    elif [[ "$(readlink -f "$resolved")" == *nvomp* ]]; then
+        violation "${binary#$repo_root/} resolves libgomp to NVIDIA libnvomp ($resolved); rerun with 'env -u LD_LIBRARY_PATH' so the GNU OpenMP runtime is measured"
+    fi
+}
+
 check_build() {
     local name="$1" dir="$2" require_cuda="$3"
     local cache="$repo_root/$dir/CMakeCache.txt"
@@ -32,9 +60,13 @@ check_build() {
     build_type="$(cache_value "$cache" CMAKE_BUILD_TYPE)"
     flags="$(cache_value "$cache" CMAKE_CXX_FLAGS_RELEASE)"
     [[ "$build_type" == "Release" ]] || violation "$dir CMAKE_BUILD_TYPE='$build_type' (need Release)"
-    for required in -O3 -DNDEBUG -march=native; do
+    for required in -O3 -DNDEBUG; do
         [[ " $flags " == *" $required "* ]] ||
             violation "$dir CMAKE_CXX_FLAGS_RELEASE lacks $required: '$flags'"
+    done
+    for target in xhdfe py_hdfe_v11; do
+        target_has_flag "$dir" "$target" -march=native ||
+            violation "$dir target $target is not compiled with -march=native"
     done
     if [[ "$require_cuda" == 1 ]]; then
         cuda_arch="$(cache_value "$cache" CMAKE_CUDA_ARCHITECTURES)"
@@ -53,6 +85,7 @@ check_build() {
     marker_count="$(strings "${modules[0]}" | grep -c XHDFE_UNCAP_LARGE_N || true)"
     [[ "$marker_count" -ge 1 ]] ||
         violation "${modules[0]#$repo_root/} lacks XHDFE_UNCAP_LARGE_N provenance marker"
+    check_openmp_runtime "${modules[0]}"
     printf '%s module sha256=%s path=%s\n' "$name" \
         "$(sha256sum "${modules[0]}" | cut -c1-12)" "${modules[0]#$repo_root/}"
 }
@@ -70,10 +103,7 @@ check_plugin() {
     marker_count="$(strings "$plugin" | grep -c XHDFE_UNCAP_LARGE_N || true)"
     [[ "$marker_count" -ge 1 ]] ||
         violation "${plugin#$repo_root/} lacks XHDFE_UNCAP_LARGE_N provenance marker"
-    if command -v ldd >/dev/null 2>&1; then
-        ldd "$plugin" 2>/dev/null | grep -q libgomp ||
-            violation "${plugin#$repo_root/} does not link libgomp (OpenMP required)"
-    fi
+    check_openmp_runtime "$plugin"
     printf '%s plugin sha256=%s path=%s\n' "$name" \
         "$(sha256sum "$plugin" | cut -c1-12)" "${plugin#$repo_root/}"
 }

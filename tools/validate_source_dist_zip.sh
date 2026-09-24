@@ -61,6 +61,7 @@ required_entries=(
   "xhdfe-src/stata/tools/build-plugin.sh"
   "xhdfe-src/stata/tools/build-xfepout-plugin.sh"
   "xhdfe-src/stata/tools/cuda-common.sh"
+  "xhdfe-src/stata/tools/macos-openmp.sh"
   "xhdfe-src/stata/tools/_deps/eigen-3.4.0.tar.gz"
   "xhdfe-src/stata/tools/_deps/stplugin.h"
   "xhdfe-src/stata/LICENSE"
@@ -69,9 +70,12 @@ required_entries=(
   "xhdfe-src/tools/check_verifier_device_fma.sh"
   "xhdfe-src/tools/validate_python_release_artifacts.py"
   "xhdfe-src/tools/validate_release_metadata.py"
+  "xhdfe-src/tools/build_macos_openmp_runtime.sh"
+  "xhdfe-src/tools/validate_macos_openmp.py"
   "xhdfe-src/tools/build_corresponding_source_bundle.py"
   "xhdfe-src/tools/record_linux_release_provenance.py"
   "xhdfe-src/tools/validate_corresponding_source_bundle.py"
+  "xhdfe-src/tools/windows_stata_linkage.py"
   "xhdfe-src/tests/ieee_bits_liveness.cpp"
   "xhdfe-src/tests/fail_closed_entrypoints.cpp"
   "xhdfe-src/tests/audit_20260804_contracts.py"
@@ -86,6 +90,14 @@ for entry in "${required_entries[@]}"; do
   }
 done
 
+MACOS_OPENMP_ARCHIVE="xhdfe-src/third_party/LLVM-OpenMP-20.1.8-source.tar.gz"
+if [[ "${XHDFE_RELEASE_BUILD:-0}" == "1" ]]; then
+  grep -Fxq "${MACOS_OPENMP_ARCHIVE}" "${TMP_DIR}/listing.txt" || {
+    echo "release source archive lacks ${MACOS_OPENMP_ARCHIVE}" >&2
+    exit 1
+  }
+fi
+
 unzip -q "${ARCHIVE}" -d "${TMP_DIR}/unpacked"
 
 rcpp_path="${TMP_DIR}/unpacked/${RCPP_ARCHIVE}"
@@ -98,6 +110,8 @@ bash -n \
   "${source_root}/stata/tools/build-plugin.sh" \
   "${source_root}/stata/tools/build-xfepout-plugin.sh" \
   "${source_root}/stata/tools/cuda-common.sh" \
+  "${source_root}/stata/tools/macos-openmp.sh" \
+  "${source_root}/tools/build_macos_openmp_runtime.sh" \
   "${source_root}/tools/check_verifier_device_fma.sh"
 
 command -v python3 >/dev/null 2>&1 || {
@@ -113,9 +127,22 @@ python3 -m py_compile \
   "${source_root}/tests/test_corresponding_source_bundle.py" \
   "${source_root}/tools/validate_python_release_artifacts.py" \
   "${source_root}/tools/validate_release_metadata.py" \
+  "${source_root}/tools/validate_macos_openmp.py" \
   "${source_root}/tools/build_corresponding_source_bundle.py" \
   "${source_root}/tools/record_linux_release_provenance.py" \
   "${source_root}/tools/validate_corresponding_source_bundle.py"
+
+if [[ -f "${TMP_DIR}/unpacked/${MACOS_OPENMP_ARCHIVE}" ]]; then
+  tar -tzf "${TMP_DIR}/unpacked/${MACOS_OPENMP_ARCHIVE}" > "${TMP_DIR}/macos-openmp-source.list"
+  grep -Eq '(^|/)openmp/' "${TMP_DIR}/macos-openmp-source.list" || {
+    echo "bundled macOS OpenMP archive lacks pinned openmp sources" >&2
+    exit 1
+  }
+  grep -Eq '(^|/)cmake/' "${TMP_DIR}/macos-openmp-source.list" || {
+    echo "bundled macOS OpenMP archive lacks the LLVM cmake support tree" >&2
+    exit 1
+  }
+fi
 
 (
   cd "${source_root}"
@@ -156,6 +183,22 @@ grep -Fq "${EXPECTED_RCPP_SHA256}" "${provenance_path}" || {
 }
 grep -Fq "Rcpp_${EXPECTED_RCPP_VERSION}.tar.gz" "${offline_doc}" || {
   echo "BUILD_OFFLINE.md does not give the pinned Rcpp install path" >&2
+  exit 1
+}
+grep -Fq 'tools/build_macos_openmp_runtime.sh' "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md lacks native macOS OpenMP rebuild instructions" >&2
+  exit 1
+}
+grep -Fq 'tar -xzf third_party/LLVM-OpenMP-20.1.8-source.tar.gz' "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md does not extract the bundled macOS OpenMP source" >&2
+  exit 1
+}
+grep -Fq 'XHDFE_MACOS_ARCHS="$arch" XHDFE_OPENMP_ROOT="$sdk_root"' "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md lacks the native plugin OpenMP SDK environment" >&2
+  exit 1
+}
+grep -Fq 'XHDFE_ALLOW_SERIAL_BUILD=1' "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md lacks the R diagnostic serial opt-in boundary" >&2
   exit 1
 }
 grep -Fq "Formulaic >= 1.2.1,<2" "${offline_doc}" || {

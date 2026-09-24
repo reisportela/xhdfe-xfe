@@ -142,19 +142,22 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                            slopes_use, opts)
   })
 
-  if (!isTRUE(res$precision_certified)) {
-    message("xhdfe within-transform did not pass the independent precision ",
-            "certificate; inspect abs_residual_rel and consider ",
-            "tolerance_mode = \"strict-residual\"")
+  if (!isTRUE(res$converged) || !isTRUE(res$precision_certified)) {
+    stop("xhdfe: within-transform did not pass convergence and precision checks; ",
+         "no transformed data returned", call. = FALSE)
   }
 
   out_mat <- cbind(res$y_tilde, res$X_tilde)
   colnames(out_mat) <- c(deparse1(spec$lhs), colnames(X))
   # With drop_singletons = TRUE the core removes rows; realign `rows` to the
   # rows actually present in `demeaned` (identity map otherwise).
-  if (length(res$sample_index0) == nrow(out_mat)) {
-    rows_used <- rows_used[res$sample_index0 + 1L]
+  if (length(res$sample_index0) != nrow(out_mat) || anyNA(res$sample_index0) ||
+      any(res$sample_index0 < 0L | res$sample_index0 >= length(rows_used)) ||
+      anyDuplicated(res$sample_index0)) {
+    stop("xhdfe: within-transform sample mapping is invalid; no transformed data returned",
+         call. = FALSE)
   }
+  rows_used <- rows_used[res$sample_index0 + 1L]
   structure(list(demeaned = out_mat,
                  rows = rows_used,
                  num_singletons = res$num_singletons,

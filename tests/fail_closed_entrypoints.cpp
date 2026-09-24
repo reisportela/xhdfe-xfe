@@ -5,9 +5,44 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+namespace {
+class ScopedGroupDirectSwitch {
+public:
+    explicit ScopedGroupDirectSwitch(const char* value) {
+        const char* previous = std::getenv("XHDFE_GI_DIRECT");
+        was_set_ = previous != nullptr;
+        if (previous) previous_ = previous;
+        if (assign(value) != 0) {
+            throw std::runtime_error("Failed to set the grouped-solver test switch");
+        }
+    }
+    ~ScopedGroupDirectSwitch() {
+        if (assign(was_set_ ? previous_.c_str() : nullptr) != 0) {
+            std::fputs("FAIL: could not restore the grouped-solver test switch\n", stderr);
+            std::abort();
+        }
+    }
+    ScopedGroupDirectSwitch(const ScopedGroupDirectSwitch&) = delete;
+    ScopedGroupDirectSwitch& operator=(const ScopedGroupDirectSwitch&) = delete;
+private:
+    static int assign(const char* value) {
+#ifdef _WIN32
+        return _putenv_s("XHDFE_GI_DIRECT", value ? value : "");
+#else
+        return value ? ::setenv("XHDFE_GI_DIRECT", value, 1)
+                     : ::unsetenv("XHDFE_GI_DIRECT");
+#endif
+    }
+    bool was_set_ = false;
+    std::string previous_;
+};
+}  // namespace
 
 int main() {
     if (hdfe::detail::thread_cuda_forward_probe_requested()) {
@@ -674,13 +709,59 @@ int main() {
         return 1;
     }
 
-    bool grouped_fit_threw = false;
-    try {
-        fail_reg.fit_grouped(
+    {
+        // The mean-incidence chain has full row rank: its leading 128-column
+        // submatrix is triangular with diagonal 1/2. The default direct route
+        // can therefore solve this saturated model within one reported step.
+        ScopedGroupDirectSwitch direct_default(nullptr);
+        hdfe::detail::ScopedGpuBackendOverride force_cpu(
+            hdfe::detail::GpuBackend::Cpu);
+        hdfe::v11::HdfeRegressorV11 direct_reg(fail_options);
+        direct_reg.fit_grouped(
             chain_y, chain_X, chain_fes, chain_group, &chain_individual,
             hdfe::v11::GroupAggregation::Mean);
-    } catch (const std::runtime_error&) {
-        grouped_fit_threw = true;
+        const auto& direct_result = direct_reg.results();
+        const double residual_limit = std::max(
+            fail_options.tol, 64.0 * std::numeric_limits<double>::epsilon()) *
+            std::max(1.0, chain_y.cwiseAbs().maxCoeff());
+        if (!direct_result.converged || !direct_result.precision_certified ||
+            direct_result.nobs != chain_groups ||
+            direct_result.coefficients.size() != 2 ||
+            direct_result.omitted_reason.size() != 2 ||
+            direct_result.coefficients[0] != 0.0 ||
+            direct_result.omitted_reason[0] == 0 ||
+            direct_result.residuals.size() != chain_groups ||
+            !direct_result.residuals.allFinite() ||
+            direct_result.residuals.cwiseAbs().maxCoeff() > residual_limit ||
+            !std::isfinite(direct_result.rss) || direct_result.rss < 0.0 ||
+            direct_result.rss > chain_groups * residual_limit * residual_limit ||
+            direct_result.df_resid_unadj > 0.0 ||
+            std::string(direct_reg.lifecycle_state_name()) != "grouped_ready") {
+            std::fprintf(stderr,
+                         "FAIL: direct grouped saturated solve disagrees with exact rank oracle\n");
+            return 1;
+        }
+    }
+
+    bool grouped_fit_threw = false;
+    {
+        // Only this negative control requires exhaustion of an iterative solve.
+        ScopedGroupDirectSwitch iterative_only("0");
+        hdfe::detail::ScopedGpuBackendOverride force_cpu(
+            hdfe::detail::GpuBackend::Cpu);
+        try {
+            fail_reg.fit_grouped(
+                chain_y, chain_X, chain_fes, chain_group, &chain_individual,
+                hdfe::v11::GroupAggregation::Mean);
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            if (message.find("did not converge") == std::string::npos ||
+                message.find("iterations=1/1") == std::string::npos) {
+                std::fprintf(stderr, "FAIL: unexpected grouped failure: %s\n", error.what());
+                return 1;
+            }
+            grouped_fit_threw = true;
+        }
     }
     if (!grouped_fit_threw) {
         std::fprintf(stderr,

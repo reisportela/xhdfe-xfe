@@ -150,6 +150,16 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                AbsorptionMethod method,
                                AbsorptionResult& result);
 
+bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+                               const Eigen::Ref<const Eigen::MatrixXd>& X,
+                               const std::vector<GpuFeInput>& fe_inputs,
+                               const Eigen::VectorXd* weights,
+                               const std::vector<std::size_t>& sweep_order,
+                               const HdfeOptions& options,
+                               AbsorptionMethod method,
+                               AbsorptionResult& result,
+                               double solver_fe_tolerance);
+
 bool absorb_fixed_effects_group_individual_cuda(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -188,6 +198,17 @@ inline bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>&,
                                       const HdfeOptions&,
                                       AbsorptionMethod,
                                       AbsorptionResult&) {
+    return false;
+}
+
+inline bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>&,
+                                      const Eigen::Ref<const Eigen::MatrixXd>&,
+                                      const std::vector<GpuFeInput>&,
+                                      const Eigen::VectorXd*,
+                                      const std::vector<std::size_t>&,
+                                      const HdfeOptions&,
+                                      AbsorptionMethod,
+                                      AbsorptionResult&, double) {
     return false;
 }
 

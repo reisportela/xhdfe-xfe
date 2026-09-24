@@ -26,8 +26,6 @@ import warnings
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT))
 
 FAILURES: list[str] = []
 
@@ -668,7 +666,8 @@ def main():
     if args.module_dir:
         sys.path.insert(0, os.path.abspath(args.module_dir))
         __import__("py_hdfe_v11")
-    sys.path.insert(0, str(REPO_ROOT))
+    repo = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, repo)
     from xhdfe import gelbach
 
     data = fixture()

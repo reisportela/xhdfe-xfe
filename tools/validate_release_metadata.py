@@ -168,8 +168,8 @@ def validate(expected_version: str) -> None:
         "stata/xhdfe.pkg version is not aligned",
     )
     _require(
-        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.13.0",
-        "stata/xfepout.pkg must record version 1.13.0",
+        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.13.2",
+        "stata/xfepout.pkg must record version 1.13.2",
     )
     for retired in (
         "stata/xfe.ado",

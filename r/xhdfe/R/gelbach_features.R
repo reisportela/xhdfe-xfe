@@ -109,6 +109,8 @@
 #' it under observation-pairs or explicitly declared cluster-pairs
 #' resampling. Replications use independent L'Ecuyer-CMRG streams, record
 #' failures in a ledger and fail closed below \code{min_valid_reps}.
+#' Both methods resample the point estimate's retained sample, after singleton
+#' and connectivity exclusions; excluded rows cannot re-enter a replication.
 #' The same integer seed is reproducible within R, but does not request the
 #' same resamples as Python's PCG64 streams or Stata's native sequential RNG.
 #' Frequency-weight pairs bootstrap is refused because resampling compressed
@@ -227,9 +229,16 @@ xhdfe_gelbach_bootstrap <- function(
     }
   }
 
+  sample_info <- dots$sample_info
+  if (is.null(sample_info)) sample_info <- FALSE
+  if (length(sample_info) != 1L || is.na(sample_info) || !is.logical(sample_info)) {
+    stop("sample_info must be one non-missing logical value", call. = FALSE)
+  }
+  point_dots <- dots
+  point_dots$sample_info <- TRUE
   point_args <- c(
     list(y = y, x1 = x1, x2_groups = x2_groups, fes = fes),
-    dots
+    point_dots
   )
   point <- do.call(xhdfe_gelbach, point_args)
   if (!isTRUE(point$converged)) {
@@ -241,6 +250,24 @@ xhdfe_gelbach_bootstrap <- function(
          call. = FALSE)
   }
 
+  retained <- point$sample_index + 1L
+  if (identical(method, "cluster_pairs")) {
+    retained_cluster <- bootstrap_cluster[retained]
+    cluster_code <- match(retained_cluster, unique(retained_cluster))
+    cluster_groups <- split(retained, cluster_code)
+    if (length(cluster_groups) < 2L) {
+      stop("cluster-pairs bootstrap requires at least two retained clusters",
+           call. = FALSE)
+    }
+  }
+  if (!sample_info) {
+    point$sample_info_requested <- FALSE
+    for (key in c("sample_index", "sample_mask", "sample_hash",
+                  "sample_hash_algorithm", "sample_index_scope")) {
+      point[[key]] <- NULL
+    }
+  }
+
   streams_state <- .gelbach_boot_streams(reps, seed)
   on.exit(streams_state$restore(), add = TRUE)
   valid <- list()
@@ -250,7 +277,7 @@ xhdfe_gelbach_bootstrap <- function(
     assign(".Random.seed", streams_state$streams[[replication]],
            envir = .GlobalEnv)
     if (identical(method, "pairs")) {
-      index <- sample.int(n, n, replace = TRUE)
+      index <- retained[sample.int(length(retained), length(retained), replace = TRUE)]
     } else {
       selected <- sample.int(
         length(cluster_groups), length(cluster_groups), replace = TRUE
@@ -433,6 +460,8 @@ xhdfe_gelbach_bootstrap <- function(
       "observation"
     } else "declared_cluster",
     bootstrap_cluster_name = bootstrap_cluster_name,
+    resampling_population = "point_retained_sample",
+    n_rows_population = length(retained),
     seed = seed,
     rng = "LEcuyer-CMRG_independent_stream_per_replication",
     reps_requested = reps,

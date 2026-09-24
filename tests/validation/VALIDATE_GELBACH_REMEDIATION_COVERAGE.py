@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Monte Carlo gates for the 25Jul2026 Gelbach remediation.
 
-This validator deliberately lives outside the ordinary fast test suite. Its
-strict defaults reproduce the reduced coverage exercises used for the
-25Jul2026 Gelbach release certification:
+This validator deliberately lives outside the ordinary fast test suite.  Its
+strict defaults reproduce the reduced coverage exercises required by
+XHDFEGELBACH_CODEX_REMEDIATION_PROMPT_20260725.md:
 
 * a weak share denominator at |t| approximately one, with at least 250 outer
   samples and a full-refit pairs bootstrap; and
@@ -24,10 +24,6 @@ import warnings
 
 import numpy as np
 
-REPO_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..")
-)
-sys.path.insert(0, REPO_ROOT)
 
 FAIL = []
 
@@ -384,7 +380,7 @@ def main():
     if args.module_dir:
         sys.path.insert(0, os.path.abspath(args.module_dir))
         __import__("py_hdfe_v11")
-    sys.path.insert(0, REPO_ROOT)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from xhdfe import gelbach
 
     fieller_gate_sweep(gelbach)

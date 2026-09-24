@@ -1,0 +1,65 @@
+{
+  "status": "EXACT_WLS_HC1_PASS",
+  "rows": [
+    {
+      "exponent": 10,
+      "offset": 1.0,
+      "variance": "1/3932160"
+    },
+    {
+      "exponent": 10,
+      "offset": 16.0,
+      "variance": "1/3932160"
+    },
+    {
+      "exponent": 10,
+      "offset": 64.0,
+      "variance": "1/3932160"
+    },
+    {
+      "exponent": 20,
+      "offset": 1.0,
+      "variance": "1/4123168604160"
+    },
+    {
+      "exponent": 20,
+      "offset": 16.0,
+      "variance": "1/4123168604160"
+    },
+    {
+      "exponent": 20,
+      "offset": 64.0,
+      "variance": "1/4123168604160"
+    },
+    {
+      "exponent": 30,
+      "offset": 1.0,
+      "variance": "1/4323455642275676160"
+    },
+    {
+      "exponent": 30,
+      "offset": 16.0,
+      "variance": "1/4323455642275676160"
+    },
+    {
+      "exponent": 30,
+      "offset": 64.0,
+      "variance": "1/4323455642275676160"
+    },
+    {
+      "exponent": 40,
+      "offset": 1.0,
+      "variance": "1/4533471823554859405148160"
+    },
+    {
+      "exponent": 40,
+      "offset": 16.0,
+      "variance": "1/4533471823554859405148160"
+    },
+    {
+      "exponent": 40,
+      "offset": 64.0,
+      "variance": "1/4533471823554859405148160"
+    }
+  ]
+}

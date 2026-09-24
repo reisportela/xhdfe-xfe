@@ -45,8 +45,8 @@ Requires a model estimated through the formula interface.}
 \value{
 A numeric vector. With \code{newdata}, of length
   \code{nrow(newdata)}; otherwise of length \code{object$n_input} with
-  \code{NA} outside the estimation sample. In group()/individual() fits
-  the in-sample statistics are at the collapsed group level.
+  \code{NA} outside the estimation sample. In grouped fits, the sample
+  consists of the retained representative rows of the original input.
 }
 \description{
 Mirrors the statistics of the Stata command's \code{predict}

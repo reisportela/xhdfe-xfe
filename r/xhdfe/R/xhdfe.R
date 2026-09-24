@@ -2,7 +2,7 @@
 
 xhdfe <- function(fml, data = NULL,
                   vcov = NULL, cluster = NULL,
-                  weights = NULL, weights_type = c("analytic", "frequency"),
+                  weights = NULL, weights_type = c("analytic", "frequency", "importance", "probability"),
                   subset = NULL,
                   group = NULL, individual = NULL, aggregation = "mean",
                   save_fe = FALSE, groupvar = FALSE,
@@ -23,6 +23,9 @@ xhdfe <- function(fml, data = NULL,
   subset_expr <- substitute(subset)
   backend <- match.arg(backend)
   weights_type <- match.arg(weights_type)
+  if (weights_type %in% c("importance", "probability") && is.null(weights)) {
+    stop("weights_type requires weights", call. = FALSE)
+  }
   na.action <- match.arg(na.action)
   env <- environment(fml)
   if (is.null(env)) env <- parent.frame()
@@ -36,10 +39,10 @@ xhdfe <- function(fml, data = NULL,
   y <- as.numeric(y)
 
   # ---- regressor design ---------------------------------------------------
-  rhs_fml <- stats::as.formula(call("~", spec$regressors), env = env)
-  tf <- stats::terms(rhs_fml, data = data)
+  tf <- regressor_terms(spec, data, env)
   fit_intercept <- attr(tf, "intercept") == 1L
   mf <- stats::model.frame(tf, data = data, na.action = stats::na.pass)
+  offset <- stats::model.offset(mf)
   X <- stats::model.matrix(tf, mf)
   xlevels <- stats::.getXlevels(tf, mf)
   contrasts_fit <- attr(X, "contrasts")
@@ -52,12 +55,14 @@ xhdfe <- function(fml, data = NULL,
   Z <- NULL
   endo_tf <- NULL
   endo_xlevels <- NULL
+  endo_contrasts <- NULL
   if (!is.null(spec$endogenous)) {
     endo_fml <- stats::as.formula(call("~", spec$endogenous), env = env)
     endo_tf <- stats::terms(endo_fml, data = data)
     endo_mf <- stats::model.frame(endo_tf, data = data,
                                   na.action = stats::na.pass)
     Xe <- stats::model.matrix(endo_tf, endo_mf)
+    endo_contrasts <- attr(Xe, "contrasts")
     endo_xlevels <- stats::.getXlevels(endo_tf, endo_mf)
     ic <- match("(Intercept)", colnames(Xe))
     if (!is.na(ic)) Xe <- Xe[, -ic, drop = FALSE]
@@ -132,6 +137,10 @@ xhdfe <- function(fml, data = NULL,
   }
   cluster_list <- normalize_cluster_spec(cluster, data, env)
   se_type <- resolve_vcov(vcov, length(cluster_list) > 0L)
+  if (weights_type == "probability" && se_type == "unadjusted") {
+    if (!is.null(vcov)) stop("probability weights require robust or clustered inference", call. = FALSE)
+    se_type <- "robust"
+  }
   cluster_names <- names(cluster_list)
   for (v in cluster_list) {
     if (length(v) != n_input) stop("cluster variable has the wrong length", call. = FALSE)
@@ -187,6 +196,7 @@ xhdfe <- function(fml, data = NULL,
     }
   }
   ok <- !is.na(y) & stats::complete.cases(X)
+  if (!is.null(offset)) ok <- ok & !is.na(offset)
   if (!is.null(Z)) ok <- ok & stats::complete.cases(Z)
   for (v in fe_raw) ok <- ok & !is.na(v)
   for (s in slope_meta) ok <- ok & !is.na(s$values)
@@ -205,6 +215,7 @@ xhdfe <- function(fml, data = NULL,
   subset_vec <- function(v) if (is.null(v)) NULL else v[rows_used]
 
   y_use <- y[rows_used]
+  if (!is.null(offset)) y_use <- y_use - offset[rows_used]
   X_use <- X[rows_used, , drop = FALSE]
   Z_use <- if (is.null(Z)) NULL else Z[rows_used, , drop = FALSE]
   fes_use <- lapply(fe_raw, function(v) to_ids(subset_vec(v), "fixed effect"))
@@ -247,18 +258,22 @@ xhdfe <- function(fml, data = NULL,
   out <- finalize_xhdfe(res, coef_names, n_input, rows_used, cl, level,
                         backend, se_type, cluster_names, fe_labels,
                         tolerance_mode, stats_style = stats_style,
-                        model_has_cons = if (length(fes_use)) {
-                          any(fe_has_intercept)
-                        } else isTRUE(fit_intercept),
+                        model_has_cons = isTRUE(fit_intercept) || any(fe_has_intercept),
                         weights_sum = if (is.null(weights_use) ||
                                           length(res$sample_index0) == 0L) NULL
                                       else sum(weights_use[res$sample_index0 + 1L]),
-                        X_used = X_use, y_used = y_use)
+                        X_used = X_use, y_used = y_use, grouped_fit = !is.null(group_use))
+  if (!is.null(offset)) {
+    out$offset <- offset
+    out$xb_cache[out$sample] <- out$xb_cache[out$sample] + offset[out$sample]
+    out$y_cache[out$sample] <- y[out$sample]
+  }
   out$fml <- fml
-  out$terms <- tf
-  out$terms_endo <- endo_tf
+  out$terms <- attr(mf, "terms")
+  out$terms_endo <- if (is.null(endo_tf)) NULL else attr(endo_mf, "terms")
   out$xlevels <- c(xlevels, endo_xlevels)
   out$contrasts <- contrasts_fit
+  out$contrasts_endo <- endo_contrasts
   out$data_name <- deparse1(substitute(data))
   out$weights_type <- if (is.null(weights)) NULL else weights_type
   out$group_name <- if (!is.null(group)) deparse1(substitute(group)) else NULL

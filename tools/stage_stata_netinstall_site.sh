@@ -11,6 +11,9 @@ Plugin options:
   --linux-xfepout PATH         Linux x86_64 xfepout.plugin source
   --macos-xhdfe PATH       macOS universal/ARM xhdfe.plugin source
   --macos-xfepout PATH         macOS universal/ARM xfepout.plugin source
+  --macos-runtime-dir PATH
+                           Directory containing exactly xhdfe_libomp.dylib,
+                           LLVM-OpenMP-LICENSE.txt, and macos-openmp-manifest.json
   --windows-xhdfe PATH     Windows x86_64 xhdfe.plugin source
   --windows-xfepout PATH       Windows x86_64 xfepout.plugin source
   --windows-runtime-dir PATH
@@ -43,6 +46,7 @@ linux_xhdfe=""
 linux_xfe=""
 macos_xhdfe=""
 macos_xfe=""
+macos_runtime_dir=""
 windows_xhdfe=""
 windows_xfe=""
 windows_runtime_dir=""
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --linux-xfepout) linux_xfe="${2:?}"; shift 2 ;;
     --macos-xhdfe) macos_xhdfe="${2:?}"; shift 2 ;;
     --macos-xfepout) macos_xfe="${2:?}"; shift 2 ;;
+    --macos-runtime-dir) macos_runtime_dir="${2:?}"; shift 2 ;;
     --windows-xhdfe) windows_xhdfe="${2:?}"; shift 2 ;;
     --windows-xfepout) windows_xfe="${2:?}"; shift 2 ;;
     --windows-runtime-dir) windows_runtime_dir="${2:?}"; shift 2 ;;
@@ -153,8 +158,32 @@ has_macos=0
 has_windows=0
 copy_optional_pair "$linux_xhdfe" "$linux_xfe" \
   xhdfe.linux64.plugin xfepout.linux64.plugin && has_linux=1
-copy_optional_pair "$macos_xhdfe" "$macos_xfe" \
-  xhdfe.macos-universal.plugin xfepout.macos-universal.plugin && has_macos=1
+if [[ -n "$macos_xhdfe" || -n "$macos_xfe" ]]; then
+  [[ -n "$macos_xhdfe" && -n "$macos_xfe" && -n "$macos_runtime_dir" ]] || {
+    echo "macOS plugins require a complete pair and --macos-runtime-dir." >&2
+    exit 1
+  }
+  [[ -d "$macos_runtime_dir" && ! -L "$macos_runtime_dir" ]] || {
+    echo "Invalid macOS runtime directory: $macos_runtime_dir" >&2
+    exit 1
+  }
+  mapfile -t macos_runtime_entries < <(find "$macos_runtime_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+  [[ "${macos_runtime_entries[*]}" == "LLVM-OpenMP-LICENSE.txt macos-openmp-manifest.json xhdfe_libomp.dylib" ]] || {
+    echo "macOS runtime directory must contain exactly the three required files." >&2
+    exit 1
+  }
+  python3 "$repo_root/tools/validate_macos_openmp.py" verify \
+    --xhdfe "$macos_xhdfe" --xfepout "$macos_xfe" --runtime-dir "$macos_runtime_dir"
+  copy_optional_pair "$macos_xhdfe" "$macos_xfe" \
+    xhdfe.macos-universal.plugin xfepout.macos-universal.plugin
+  for name in xhdfe_libomp.dylib LLVM-OpenMP-LICENSE.txt macos-openmp-manifest.json; do
+    copy_required "$macos_runtime_dir/$name" "$outdir/$name"
+  done
+  has_macos=1
+elif [[ -n "$macos_runtime_dir" ]]; then
+  echo "--macos-runtime-dir was supplied without a macOS plugin pair." >&2
+  exit 1
+fi
 copy_optional_pair "$windows_xhdfe" "$windows_xfe" \
   xhdfe.win64.plugin xfepout.win64.plugin && has_windows=1
 
@@ -170,7 +199,7 @@ if [[ "$has_windows" -eq 1 ]]; then
     exit 1
   }
   runtime_names_output="$(python3 - "$windows_runtime_dir" \
-    "$windows_runtime_provider_ledger" "$windows_runtime_closure_ledger" "$outdir" <<'PY'
+    "$windows_runtime_provider_ledger" "$windows_runtime_closure_ledger" "$outdir" "$repo_root/tools" <<'PY'
 import hashlib
 import json
 from pathlib import Path, PurePath
@@ -219,7 +248,13 @@ if compiler["target"] != "x86_64-w64-mingw32":
 if not isinstance(compiler.get("version"), str) or not compiler["version"]:
     raise SystemExit("Windows runtime compiler version is missing")
 entries = ledger["entries"]
-if not isinstance(entries, list) or not entries:
+if ledger.get("linkage") == "static":
+    sys.path.insert(0, sys.argv[5])
+    from windows_stata_linkage import validate, validate_closure
+    validate(ledger, plugin_paths={f"{kind}.plugin.windows": outdir / f"{kind}.win64.plugin"
+                                  for kind in ("xhdfe", "xfepout")})
+    validate_closure(ledger, json.loads(closure_ledger_path.read_bytes(), object_pairs_hook=no_duplicates))
+elif not isinstance(entries, list) or not entries:
     raise SystemExit("Windows runtime ledger has no entries")
 
 required_entry = {
@@ -330,10 +365,6 @@ PY
   while IFS= read -r runtime_name; do
     [[ -z "$runtime_name" ]] || windows_runtime_names+=("$runtime_name")
   done <<< "$runtime_names_output"
-  [[ "${#windows_runtime_names[@]}" -gt 0 && -n "${windows_runtime_names[0]}" ]] || {
-    echo "Windows runtime ledger produced an empty closure." >&2
-    exit 1
-  }
 elif [[ -n "$windows_runtime_dir" || -n "$windows_runtime_provider_ledger" \
   || -n "$windows_runtime_closure_ledger" ]]; then
   echo "Windows runtime inputs were supplied without a Windows plugin pair." >&2
@@ -411,6 +442,16 @@ EOF
     cat >> "$pkg" <<'EOF'
 f NVIDIA-CUDA-12.6-EULA.pdf
 f NVIDIA-CCCL-2.5.0-LICENSE
+EOF
+  fi
+  if [[ "$has_macos" -eq 1 ]]; then
+    cat >> "$pkg" <<'EOF'
+f LLVM-OpenMP-LICENSE.txt
+f macos-openmp-manifest.json
+G MACARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G OSX.ARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G MACINTEL64 xhdfe_libomp.dylib xhdfe_libomp.dylib
+G OSX.X8664 xhdfe_libomp.dylib xhdfe_libomp.dylib
 EOF
   fi
 
@@ -495,9 +536,9 @@ The package manifests use Stata's platform-specific g lines:
 LINUX64/LINUX64P, MACARM64/OSX.ARM64, MACINTEL64/OSX.X8664, and WIN64 when
 the corresponding release binary was built.  Each platform-specific server
 file is installed under the canonical runtime name xhdfe.plugin or xfepout.plugin.
-Windows packages download every runtime DLL named and hashed by the release's
-windows-stata-provider-ledger.json into the Stata system directories. The independent PE graph is in
-windows-stata-runtime-ledger.json; the dependency set is not hard-coded here.
+Windows plugins embed their GNU/OpenMP runtimes and need no external runtime DLLs.
+windows-stata-provider-ledger.json records the static link inputs and plugin hashes;
+windows-stata-runtime-ledger.json records their system-only PE dependencies.
 Every package installs the exact GNU/MinGW and Eigen license texts. When the
 two NVIDIA license inputs are supplied, their CUDA 12.6/CCCL 2.5.0 materials
 are also listed in both package manifests.

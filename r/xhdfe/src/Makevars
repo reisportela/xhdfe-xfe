@@ -39,7 +39,18 @@ override CXX17FLAGS += $(XHDFE_OPTFLAGS)
 # HDFE_USE_OPENMP when R actually provides OpenMP flags for this toolchain
 # (SHLIB_OPENMP_CXXFLAGS is empty on OpenMP-less builds, e.g. stock macOS
 # clang); the core has a serial fallback.
-XHDFE_OMP_DEF = $(if $(SHLIB_OPENMP_CXXFLAGS),-DHDFE_USE_OPENMP,)
+XHDFE_ALLOW_SERIAL_BUILD ?=
+ifeq ($(strip $(XHDFE_RELEASE_BUILD)),1)
+ifeq ($(strip $(XHDFE_ALLOW_SERIAL_BUILD)),1)
+$(error XHDFE_RELEASE_BUILD=1 forbids XHDFE_ALLOW_SERIAL_BUILD=1)
+endif
+endif
+# R reads this Makevars before its own etc/Makeconf, so SHLIB_OPENMP_CXXFLAGS,
+# CXX17 and CXX17STD are still empty while this file is parsed. The OpenMP
+# requirement and the compile gate are therefore evaluated in the recipe of
+# `xhdfe_openmp_gate` (an order-only prerequisite of every object), where the
+# toolchain variables are defined; XHDFE_OMP_DEF stays a deferred expression.
+XHDFE_OMP_DEF = $(if $(strip $(SHLIB_OPENMP_CXXFLAGS)),-DHDFE_USE_OPENMP,)
 
 PKG_CPPFLAGS = -I. -Iinclude -Ieigen -DNDEBUG $(XHDFE_OMP_DEF) \
     -DXHDFE_REFERENCE_MATH_CONTRACT=1 \
@@ -59,6 +70,20 @@ OBJECTS = $(patsubst %.cpp,%.o,$(XHDFE_CPP_SOURCES)) $(CUDA_OBJECTS) $(CUDA_HOST
 # would silently reuse a stale xhdfe.so.
 .PHONY: all
 all: $(SHLIB)
+
+xhdfe_openmp_gate:
+	@if [ -z "$(strip $(SHLIB_OPENMP_CXXFLAGS))" ]; then \
+	  if [ "$(strip $(XHDFE_ALLOW_SERIAL_BUILD))" != "1" ]; then \
+	    echo "OpenMP is required; set SHLIB_OPENMP_CXXFLAGS or use XHDFE_ALLOW_SERIAL_BUILD=1 only for a diagnostic build" >&2; exit 1; \
+	  fi; \
+	else \
+	  printf '%s\n' '#if defined(HDFE_USE_OPENMP) && !defined(_OPENMP)' '#error HDFE_USE_OPENMP requires compiler OpenMP support' '#endif' 'int main(void) { return 0; }' \
+	    | $(CXX17) $(CXX17STD) $(SHLIB_OPENMP_CXXFLAGS) -DHDFE_USE_OPENMP -x c++ -c -o /dev/null - >/dev/null 2>&1 \
+	    || { echo "OpenMP compile gate failed: HDFE_USE_OPENMP requires _OPENMP" >&2; exit 1; }; \
+	fi
+
+$(OBJECTS): | xhdfe_openmp_gate
+.PHONY: xhdfe_openmp_gate
 
 ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 ifeq ($(UNAME_S),Darwin)

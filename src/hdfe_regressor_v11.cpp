@@ -1,4 +1,5 @@
 #include "hdfe/hdfe_regressor_v11.hpp"
+#include "audit/ordinary_certification.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,25 +12,44 @@
 #include <cstdio>
 #include <deque>
 #include <fstream>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "fe_absorption.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "group_exact_rank.hpp"
+#include "group_forward_certificate.hpp"
+#include "cache_digest.hpp"
+#include "wide_float.hpp"
+#include "fe_recovery_scale.hpp"
+#include "n1_checks.hpp"
 #include "hdfe/deterministic_parallel.hpp"
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 #include "hdfe/student_t_detail.hpp"
 #include "iv.hpp"
 #include "ols.hpp"
+#include "ols_precision.hpp"
+#include "additive_cell_projection.hpp"
+#include "audit/ordinary_post_ols.hpp"
 
 #ifdef HDFE_USE_OPENMP
 #include <omp.h>
@@ -38,8 +58,6 @@
 namespace hdfe {
 namespace v11 {
 namespace {
-
-constexpr int kMaxSingletonIterations = 100;
 
 class ScopedBoolOverride final {
 public:
@@ -376,6 +394,8 @@ double weighted_mean(const Eigen::Ref<const Eigen::VectorXd>& values,
     return static_cast<double>(sum_yw.sum / denom);
 }
 
+double centered_sum_of_squares(const Eigen::Ref<const Eigen::VectorXd>& x);
+
 double psd_scale_sample_standard_deviation(
     const Eigen::Ref<const Eigen::VectorXd>& values,
     const Eigen::VectorXd* weights,
@@ -385,34 +405,32 @@ double psd_scale_sample_standard_deviation(
         if (n_rows <= 1.0) {
             return 0.0;
         }
-        const double sum = values.sum();
-        const double sum_squares = values.squaredNorm();
-        return std::sqrt(std::max(
-            0.0,
-            (sum_squares - sum * sum / n_rows) / (n_rows - 1.0)));
+        return std::sqrt(centered_sum_of_squares(values) / (n_rows - 1.0));
     }
 
     const double* value_ptr = values.data();
     const double* weight_ptr = weights->data();
     KahanSum sum_weights;
     KahanSum weighted_sum;
-    KahanSum weighted_sum_squares;
+    const long double origin = values.size() ? static_cast<long double>(values[0]) : 0.0L;
     for (Eigen::Index i = 0; i < values.size(); ++i) {
-        const long double value = static_cast<long double>(value_ptr[i]);
+        const long double value = static_cast<long double>(value_ptr[i]) - origin;
         const long double weight = static_cast<long double>(weight_ptr[i]);
         sum_weights.add(weight);
         weighted_sum.add(weight * value);
-        weighted_sum_squares.add(weight * value * value);
     }
     const long double expanded_n = sum_weights.sum;
     if (!(expanded_n > 1.0L)) {
         return 0.0;
     }
-    const long double centered_sum_squares =
-        weighted_sum_squares.sum -
-        weighted_sum.sum * weighted_sum.sum / expanded_n;
+    const long double mean = weighted_sum.sum / expanded_n;
+    KahanSum centered_sum_squares;
+    for (Eigen::Index i = 0; i < values.size(); ++i) {
+        const long double value = static_cast<long double>(value_ptr[i]) - origin - mean;
+        centered_sum_squares.add(static_cast<long double>(weight_ptr[i]) * value * value);
+    }
     const long double variance =
-        std::max(0.0L, centered_sum_squares / (expanded_n - 1.0L));
+        std::max(0.0L, centered_sum_squares.sum / (expanded_n - 1.0L));
     return std::sqrt(static_cast<double>(variance));
 }
 
@@ -745,7 +763,38 @@ bool fix_psd(Eigen::MatrixXd& V) {
     if (V.rows() == 0 || V.cols() == 0) {
         return false;
     }
-    V = 0.5 * (V + V.transpose());
+    V = (0.5 * (V + V.transpose())).eval();
+    double largest = 0.0;
+    double smallest = std::numeric_limits<double>::infinity();
+    for (Eigen::Index j = 0; j < V.rows(); ++j) {
+        const double magnitude = std::abs(V(j,j));
+        if (magnitude > 0.0) {
+            largest = std::max(largest, magnitude);
+            smallest = std::min(smallest, magnitude);
+        }
+    }
+    if (hdfe::detail::ieee_finite(largest) && smallest > 0.0 &&
+        largest / smallest > 16777216.0) {
+        using WideMatrix = Eigen::Matrix<detail::OlsWide, Eigen::Dynamic, Eigen::Dynamic>;
+        const WideMatrix wide = V.cast<detail::OlsWide>();
+        Eigen::SelfAdjointEigenSolver<WideMatrix> solver(wide);
+        if (solver.info() != Eigen::Success)
+            throw std::runtime_error("Multiway covariance PSD projection did not converge; no estimates returned");
+        auto values = solver.eigenvalues().eval();
+        bool changed = false;
+        for (Eigen::Index j = 0; j < values.size(); ++j) {
+            if (values[j] < detail::OlsWide(0.0)) {
+                values[j] = detail::OlsWide(0.0);
+                changed = true;
+            }
+        }
+        if (changed) {
+            const WideMatrix projected =
+                solver.eigenvectors() * values.asDiagonal() * solver.eigenvectors().transpose();
+            V = projected.cast<double>();
+        }
+        return changed;
+    }
     Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(V);
     if (es.info() != Eigen::Success) {
         return false;
@@ -909,7 +958,8 @@ ClusterInterceptMeat compute_multiway_intercept_meat(
     const std::vector<Eigen::VectorXi>& clusters,
     ClusterDofMethod g_df,
     bool g_adj,
-    double df_resid) {
+    double df_resid,
+    double n_effective) {
     const int m = static_cast<int>(clusters.size());
     if (m <= 0) {
         throw std::runtime_error("At least one cluster dimension is required");
@@ -966,7 +1016,7 @@ ClusterInterceptMeat compute_multiway_intercept_meat(
 
     double scale = 1.0;
     if (df_resid > 0.0) {
-        scale *= (static_cast<double>(n) - 1.0) / df_resid;
+        scale *= (n_effective - 1.0) / df_resid;
     }
     if (g_df == ClusterDofMethod::Min && g_adj && min_clusters > 1) {
         scale *= static_cast<double>(min_clusters) /
@@ -1049,7 +1099,7 @@ bool update_intercept_covariance(
         }
     } else {
         bool used_cached_cluster_intercept = false;
-        if (se_type == StandardErrorType::Cluster && clusters && clusters->size() == 1 &&
+        if (k_active > 0 && se_type == StandardErrorType::Cluster && clusters && clusters->size() == 1 &&
             !weights && ols_result.cluster_ux.size() == k_active &&
             hdfe::detail::ieee_finite(ols_result.cluster_u2) &&
             ols_result.cov_scale > 0.0 && hdfe::detail::ieee_finite(ols_result.cov_scale) &&
@@ -1149,7 +1199,8 @@ bool update_intercept_covariance(
             } else {
                 const ClusterInterceptMeat meat = compute_multiway_intercept_meat(
                     score_X_tilde, residuals, weights, c_vec, *clusters, g_df, g_adj,
-                    ols_result.df_resid);
+                    ols_result.df_resid,
+                    weights && weights_are_frequencies ? sum_w : static_cast<double>(n));
                 if (k_active > 0) {
                     cov_beta_alpha = ols_result.xtx_inv * meat.cross;
                 }
@@ -1600,6 +1651,83 @@ struct FeDofInfo {
     int df_a_exact = 0;
 };
 
+FeDofInfo compute_grouped_dof_exact(
+    const std::vector<Eigen::VectorXi>& standard_fes,
+    const detail::GroupIndividualStructure& gi,
+    GroupAggregation aggregation,
+    const Eigen::VectorXd* weights) {
+    // Bound the optional algebraic calculation independently of FE absorption.
+    constexpr std::int64_t max_cells = 25000000;
+    const int n = gi.num_groups;
+    FeDofInfo info;
+    std::vector<std::unordered_map<int, int>> levels;
+    std::int64_t columns = gi.num_individuals;
+    for (const auto& fe : standard_fes) {
+        std::unordered_map<int, int> ids;
+        for (int row = 0; row < n; ++row) {
+            const int next = static_cast<int>(ids.size());
+            ids.emplace(fe[row], next);
+        }
+        info.levels.push_back(static_cast<int>(ids.size()));
+        columns += static_cast<std::int64_t>(ids.size());
+        levels.push_back(std::move(ids));
+    }
+    info.levels.push_back(gi.num_individuals);
+    if (n <= 0 || columns <= 0 || columns > max_cells ||
+        static_cast<std::int64_t>(n) > max_cells / columns) {
+        std::ostringstream message;
+        message << "dofadjustments(exact): group FE design has " << n << " rows and "
+                << columns << " columns; the exact rank design limit is " << max_cells
+                << " matrix elements. No estimates returned; no approximate DoF fallback.";
+        throw std::runtime_error(message.str());
+    }
+    detail::ExactRankBudget budget;
+    auto rank_of = [&](std::size_t ordinary_count, bool with_individual) {
+        detail::ExactRankAccumulator accumulator(budget);
+        for (int row = 0; row < n; ++row) {
+            if (weights && !((*weights)[row] > 0.0)) continue;
+            detail::ExactRankAccumulator::Row values;
+            int offset = 0;
+            if (with_individual) {
+                for (int edge = gi.group_ptr[row]; edge < gi.group_ptr[row + 1]; ++edge) {
+                    accumulator.insert(values, gi.group_individual[edge], 1);
+                }
+                offset = gi.num_individuals;
+            }
+            // Multiplying a mean-aggregation row by its team size clears all
+            // denominators and preserves rank. Positive weights preserve it too.
+            const int scale = with_individual && aggregation == GroupAggregation::Mean
+                ? gi.group_ptr[row + 1] - gi.group_ptr[row] : 1;
+            for (std::size_t dim = 0; dim < ordinary_count; ++dim) {
+                accumulator.insert(values, offset + levels[dim].at(standard_fes[dim][row]), scale);
+                offset += info.levels[dim];
+            }
+            accumulator.append(std::move(values));
+        }
+        return accumulator.rank();
+    };
+    int previous_rank = 0;
+    for (std::size_t dim = 0; dim < info.levels.size(); ++dim) {
+        const int count = info.levels[dim];
+        const bool full = dim == standard_fes.size();
+        const int rank = rank_of(full ? standard_fes.size() : dim + 1, full);
+        if (rank < previous_rank || rank - previous_rank > count) {
+            throw std::runtime_error(
+                "dofadjustments(exact): rational rank failed its dimension invariant; "
+                "no estimates returned and no approximate rank fallback");
+        }
+        const int increment = rank - previous_rank;
+        info.num_coefs.push_back(increment);
+        info.redundant.push_back(count - increment);
+        info.inexact.push_back(0);
+        previous_rank = rank;
+    }
+    info.df_a_levels = static_cast<int>(columns);
+    info.df_a_exact = previous_rank;
+    info.df_a = previous_rank;
+    return info;
+}
+
 struct UnionFind {
     std::vector<int> parent;
     std::vector<uint8_t> rank;
@@ -1740,6 +1868,197 @@ bool cuda_backend_env_requested() {
         return false;
     }
     return to_lower_ascii(trim_ascii(raw)) == "cuda";
+}
+
+bool require_cuda_compatible_method(const HdfeOptions& options,
+                                    std::size_t fe_dimensions) {
+    const bool required = cuda_backend_env_requested();
+    if (!required && gpu_backend_env_requested()) {
+        throw std::runtime_error(
+            "The requested Metal backend is not implemented; select CPU or CUDA. "
+            "No estimates returned.");
+    }
+    if (required && fe_dimensions == 0) {
+        throw std::runtime_error(
+            "CUDA absorption requires at least one fixed-effect dimension; "
+            "select CPU for ordinary least squares. No estimates returned.");
+    }
+    if (required &&
+        (options.absorption_method == AbsorptionMethod::Lsmr ||
+         options.absorption_method == AbsorptionMethod::Mlsmr)) {
+        throw std::runtime_error(
+            "absorptionmethod(lsmr/mlsmr) is CPU-only; "
+            "choose CPU explicitly or a CUDA-compatible absorption method");
+    }
+    if (required && !detail::cuda_backend_available()) {
+        throw std::runtime_error(
+            "Requested GPU backend is unavailable; CPU fallback is disabled");
+    }
+    return required;
+}
+
+void require_cuda_execution(bool required, const detail::AbsorptionResult& result) {
+    if (required && !result.gpu_used) {
+        throw std::runtime_error(
+            "Requested CUDA backend was not used; refusing a CPU absorption result");
+    }
+}
+
+void require_accepted_absorption(const HdfeOptions& options,
+                                 const detail::AbsorptionResult& result,
+                                 const char* phase,
+                                 const std::string& measured_criteria = {}) {
+    if (result.converged && result.precision_certified) return;
+    const bool slope_continuation = result.slope_accuracy_retry_stages > 0;
+    std::ostringstream message;
+    if (result.gpu_status_code == 2) {
+        message << "Requested GPU backend was unavailable during ";
+    } else if (result.gpu_status_code == 3) {
+        message << (slope_continuation
+            ? "Requested GPU backend did not satisfy absorption acceptance during "
+            : "Requested GPU backend did not converge during ");
+    } else if (result.gpu_status_code == 4) {
+        message << "Requested GPU backend failed during ";
+    } else if (result.gpu_status_code == 5) {
+        message << "Requested GPU backend was bypassed by CPU cache/profile state during ";
+    }
+    message << phase;
+    if (slope_continuation) {
+        message << ": heterogeneous-slope acceptance criteria not met after continuation";
+    } else {
+        message << (result.converged ? ": precision certification failed" : ": did not converge");
+    }
+    message << "; iterations=" << result.iterations << "/" << options.max_iter
+            << "; requested tolerance=" << std::scientific << options.tol
+            << "; relative residual=" << result.abs_residual_rel << measured_criteria;
+    if (slope_continuation) {
+        // Report the existing limits; final flags do not retain the last solve's state.
+        const double effective_tol =
+            options.tolerance_mode == ToleranceMode::ReghdfeComparable
+                ? std::min(options.tol, 1.0e-9) : options.tol;
+        const double arithmetic_floor = 64.0 * std::numeric_limits<double>::epsilon();
+        message << "; slope block residual=" << result.slope_block_residual_rel
+                << "; block certificate limit="
+                << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
+                << "; continuation target=" << std::max(effective_tol, arithmetic_floor)
+                << "; continuation stages=" << result.slope_accuracy_retry_stages
+                << "; last internal tolerance=" << result.slope_internal_tolerance;
+    }
+    message << ". No estimates returned.";
+    if (result.iterations >= options.max_iter) {
+        message << " The iteration limit was reached; increase max_iter/maxiter() and retry.";
+    } else if (slope_continuation) {
+        message << " The continuation sequence was exhausted with iteration budget remaining.";
+    } else {
+        message << " Check variable scaling and model identification; do not treat a solver stop as a precision certificate.";
+    }
+    throw std::runtime_error(message.str());
+}
+
+std::string group_failure_criteria(
+    const Eigen::VectorXd& y, const Eigen::MatrixXd& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const detail::GroupIndividualStructure& gi,
+    const Eigen::VectorXd* weights, const HdfeOptions& options,
+    const detail::AbsorptionResult& result) {
+    if (result.y_tilde.size() != y.size() || result.X_tilde.rows() != y.size() ||
+        result.X_tilde.cols() != X.cols()) return "; final residual dimensions are invalid";
+    if (!hdfe::detail::ieee_all_finite(result.y_tilde) ||
+        !hdfe::detail::ieee_all_finite(result.X_tilde)) return "; final projected values are not finite";
+    const int n = static_cast<int>(y.size());
+    const int rhs_count = static_cast<int>(X.cols()) + 1;
+    std::vector<long double> moment_norm_sq(rhs_count, 0.0L);
+    long double max_mean = 0.0L;
+    int active_columns = 0;
+    auto residual = [&](int row, int rhs) -> long double {
+        return rhs ? result.X_tilde(row, rhs - 1) : result.y_tilde[row];
+    };
+    auto collect = [&](const std::vector<long double>& diagonal,
+                       const Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic>& moments) {
+        for (int column = 0; column < static_cast<int>(diagonal.size()); ++column) {
+            if (!(diagonal[column] > 0.0L)) continue;
+            ++active_columns;
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                const long double value = moments(column, rhs);
+                moment_norm_sq[rhs] += value * value / diagonal[column];
+                max_mean = std::max(max_mean, std::abs(value / diagonal[column]));
+            }
+        }
+    };
+    for (const auto& fe : fes) {
+        std::unordered_map<int, int> ids;
+        for (int row = 0; row < n; ++row) ids.emplace(fe[row], static_cast<int>(ids.size()));
+        std::vector<long double> diagonal(ids.size(), 0.0L);
+        Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic> moments =
+            Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic>::Zero(ids.size(), rhs_count);
+        for (int row = 0; row < n; ++row) {
+            const int id = ids.at(fe[row]);
+            const long double weight = weights ? (*weights)[row] : 1.0L;
+            diagonal[id] += weight;
+            for (int rhs = 0; rhs < rhs_count; ++rhs) moments(id, rhs) += weight * residual(row, rhs);
+        }
+        collect(diagonal, moments);
+    }
+    std::vector<long double> diagonal(gi.num_individuals, 0.0L);
+    Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic> moments =
+        Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic>::Zero(gi.num_individuals, rhs_count);
+    for (int row = 0; row < n; ++row) {
+        const long double weight = weights ? (*weights)[row] : 1.0L;
+        const long double scale = gi.group_scale[row];
+        for (int edge = gi.group_ptr[row]; edge < gi.group_ptr[row + 1]; ++edge) {
+            const int id = gi.group_individual[edge];
+            diagonal[id] += weight * scale * scale;
+            for (int rhs = 0; rhs < rhs_count; ++rhs) moments(id, rhs) += weight * scale * residual(row, rhs);
+        }
+    }
+    collect(diagonal, moments);
+    long double canonical = 0.0L;
+    for (int rhs = 0; rhs < rhs_count; ++rhs) {
+        long double norm_original = 0.0L, norm_residual = 0.0L;
+        for (int row = 0; row < n; ++row) {
+            const long double weight = weights ? (*weights)[row] : 1.0L;
+            const long double original = rhs ? X(row, rhs - 1) : y[row];
+            norm_original += weight * original * original;
+            norm_residual += weight * residual(row, rhs) * residual(row, rhs);
+        }
+        const long double consistent = norm_original > 0.0L ? std::sqrt(norm_residual / norm_original)
+            : (norm_residual > 0.0L ? std::numeric_limits<long double>::infinity() : 0.0L);
+        const long double ls = norm_residual > 0.0L && active_columns > 0
+            ? std::sqrt(moment_norm_sq[rhs] / (active_columns * norm_residual))
+            : (moment_norm_sq[rhs] > 0.0L ? std::numeric_limits<long double>::infinity() : 0.0L);
+        canonical = std::max(canonical, std::min(consistent, ls));
+    }
+    std::ostringstream message;
+    const double effective_tolerance = options.tolerance_mode == ToleranceMode::ReghdfeComparable
+        ? std::min(options.tol, 1.0e-9) : options.tol;
+    message << std::scientific << "; recomputed group certificate=" << static_cast<double>(canonical)
+            << "; group certificate limit="
+            << std::max(effective_tolerance, 512.0 * std::numeric_limits<double>::epsilon());
+    if (options.tolerance_mode == ToleranceMode::StrictResidual) {
+        message << "; strict max weighted FE mean=" << static_cast<double>(max_mean)
+                << "; strict limit=" << std::max(options.tol, 64.0 * std::numeric_limits<double>::epsilon());
+    }
+    message << "; these are measured stopping criteria, not coefficient-error bounds";
+    if (result.krylov_max_condition > 0.0) {
+        message << "; LSMR condition estimate (lower bound)=" << result.krylov_max_condition
+                << "; forward projection error bound (condition x dual residual)="
+                << result.krylov_max_condition_times_backward_error
+                << "; forward target=" << detail::group_forward_tolerance(options);
+        if (result.krylov_max_condition_times_backward_error >
+            detail::group_forward_tolerance(options)) {
+            message << "; the group/individual incidence design is too ill-conditioned for the"
+                       " FP64 Krylov solver to certify this tolerance (nearly null FE directions)";
+        }
+    }
+    if (detail::ordinary_audit_enabled()) {
+        const auto forward = detail::certify_group_forward_space(y, X, fes, gi, weights, options, result);
+        if (forward.eligible) {
+            message << "; FE-space orthogonality bound / allowed error=" << forward.worst_ratio
+                    << "; full certification also checks affine reconstruction and residual error against the original data";
+            if (!forward.unavailable.empty()) message << "; forward check unavailable: " << forward.unavailable;
+        }
+    }
+    return message.str();
 }
 
 std::uint64_t mobility_backend_tag() {
@@ -1990,37 +2309,37 @@ std::uint64_t hash_fe_signature_sample_from_indexers(const std::vector<FeIndexer
     return hash;
 }
 
-std::uint64_t hash_fe_structure_cache_signature(const std::vector<Eigen::VectorXi>& fes,
+using FeStructureDigest = std::array<std::uint8_t, 32>;
+
+FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::VectorXi>& fes,
                                                 const Eigen::VectorXd* weights,
                                                 bool drop_singletons,
-                                                bool weights_are_frequencies) {
-    std::uint64_t hash = hash_fe_signature(fes, drop_singletons);
-    hash = fnv1a_update(hash, weights_are_frequencies ? 1ULL : 0ULL);
+                                                bool weights_are_frequencies,
+                                                int threads,
+                                                detail::ParallelWorkObserver* observer) {
+    detail::CacheDigestBuilder hash(UINT64_C(0x4645535452554332));
+    hash.word(drop_singletons);
+    hash.word(weights_are_frequencies);
+    hash.word(fes.size());
+    for (const auto& fe : fes) hash.data(fe.data(), fe.size() * sizeof(int));
     if (drop_singletons && weights_are_frequencies && weights) {
-        hash = fnv1a_update(hash, static_cast<std::uint64_t>(weights->size()));
-        for (Eigen::Index i = 0; i < weights->size(); ++i) {
-            const double w_raw = (*weights)(i);
-            if (!hdfe::detail::ieee_finite(w_raw) || !(w_raw > 0.0)) {
-                // Include a sentinel so invalid weights cannot accidentally reuse a cache entry.
-                hash = fnv1a_update(hash, 0ULL);
-                continue;
-            }
-            const std::int64_t w = static_cast<std::int64_t>(std::llround(w_raw));
-            hash = fnv1a_update(hash, static_cast<std::uint64_t>(w));
-        }
+        hash.data(weights->data(), weights->size() * sizeof(double));
     }
-    return hash;
+    return hash.finish(threads, observer);
 }
 
-constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v4";
+constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
-constexpr std::uint64_t kAbsorptionSolveContractGeneration = 4ULL;
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414433ULL;
 constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
 
 struct AbsorptionCacheKey {
     std::uint64_t sig1 = 0;
     std::uint64_t sig2 = 0;
+    std::array<std::uint64_t,2> tail{};
+    int hash_threads = 1;
+    detail::ParallelWorkObserver* hash_observer = nullptr;
 };
 
 struct AbsorptionCacheRecord {
@@ -2056,8 +2375,19 @@ std::uint64_t hash_double_bits(double value) {
     return bits;
 }
 
+std::uint64_t cache_hash_update(std::uint64_t hash, std::uint64_t value) {
+    // Mix high bits down before the rolling update. In particular, a sign-bit
+    // change must not remain a toggle of the hash's top bit.
+    value ^= value >> 33;
+    value *= UINT64_C(0xff51afd7ed558ccd);
+    value ^= value >> 33;
+    value *= UINT64_C(0xc4ceb9fe1a85ec53);
+    value ^= value >> 33;
+    return fnv1a_update(hash, value);
+}
+
 void hash_update_double(std::uint64_t& hash, double value) {
-    hash = fnv1a_update(hash, hash_double_bits(value));
+    hash = cache_hash_update(hash, hash_double_bits(value));
 }
 
 bool gpu_backend_env_requested();
@@ -2068,11 +2398,9 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
                                              const Eigen::VectorXd* weights,
                                              const HdfeOptions& options,
                                              std::uint64_t solve_contract_generation) {
-    std::uint64_t h1 = kFnvOffset64;
-    std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
+    detail::CacheDigestBuilder hash(UINT64_C(0x5848444645494e50));
     auto update = [&](std::uint64_t value) {
-        h1 = fnv1a_update(h1, value);
-        h2 = fnv1a_update(h2, value + kAbsorptionCacheSalt);
+        hash.word(value);
     };
 
     update(static_cast<std::uint64_t>(y.size()));
@@ -2080,12 +2408,17 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(static_cast<std::uint64_t>(X.cols()));
     update(static_cast<std::uint64_t>(fes.size()));
     update(solve_contract_generation);
+    update(hdfe::detail::ordinary_audit_enabled() ? 1ULL : 0ULL);
     update(options.ordinary_krylov_parity_floor ? 1ULL : 0ULL);
     update(kOrdinaryAutoRoutingRetryPolicyVersion);
     update(options.ordinary_auto_routing_retry ? 1ULL : 0ULL);
     update(weights ? 1ULL : 0ULL);
     update(options.fit_intercept ? 1ULL : 0ULL);
     update(options.drop_singletons ? 1ULL : 0ULL);
+    update(static_cast<std::uint64_t>(options.dof_method));
+    update(options.dof_mobility_groups ? 1ULL : 0ULL);
+    update(options.dof_adjust_clusters ? 1ULL : 0ULL);
+    update(options.dof_adjust_continuous ? 1ULL : 0ULL);
     update(static_cast<std::uint64_t>(
         static_cast<std::uint32_t>(options.num_threads)));
     update(options.num_threads_explicit ? 1ULL : 0ULL);
@@ -2095,8 +2428,7 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(gpu_backend_env_requested() ? 1ULL : 0ULL);
     update(static_cast<std::uint64_t>(options.max_iter));
     update(static_cast<std::uint64_t>(static_cast<int>(options.tolerance_mode)));
-    hash_update_double(h1, options.tol);
-    hash_update_double(h2, options.tol);
+    update(hash_double_bits(options.tol));
 
     // Solver-selection knobs that change the absorption transform or its
     // convergence path. Including them guarantees a cache entry computed under
@@ -2109,12 +2441,9 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(options.use_sparse_solver ? 1ULL : 0ULL);
     update(options.use_krylov ? 1ULL : 0ULL);
     update(static_cast<std::uint64_t>(static_cast<std::uint32_t>(options.convergence_check_interval)));
-    hash_update_double(h1, options.krylov_lambda);
-    hash_update_double(h2, options.krylov_lambda);
-    hash_update_double(h1, options.jacobi_relaxation);
-    hash_update_double(h2, options.jacobi_relaxation);
-    hash_update_double(h1, options.sparse_threshold);
-    hash_update_double(h2, options.sparse_threshold);
+    update(hash_double_bits(options.krylov_lambda));
+    update(hash_double_bits(options.jacobi_relaxation));
+    update(hash_double_bits(options.sparse_threshold));
     update(static_cast<std::uint64_t>(options.sweep_order_override.size()));
     for (int so : options.sweep_order_override) {
         update(static_cast<std::uint64_t>(static_cast<std::int64_t>(so)));
@@ -2122,34 +2451,24 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
 
     for (const auto& fe : fes) {
         update(static_cast<std::uint64_t>(fe.size()));
-        for (int i = 0; i < fe.size(); ++i) {
-            const std::int64_t v = static_cast<std::int64_t>(fe(i));
-            update(static_cast<std::uint64_t>(v));
-        }
+        hash.data(fe.data(), static_cast<std::size_t>(fe.size()) * sizeof(int));
     }
 
-    for (Eigen::Index i = 0; i < y.size(); ++i) {
-        hash_update_double(h1, y(i));
-        hash_update_double(h2, y(i));
-    }
+    hash.data(y.data(), static_cast<std::size_t>(y.size()) * sizeof(double));
     for (Eigen::Index j = 0; j < X.cols(); ++j) {
-        for (Eigen::Index i = 0; i < X.rows(); ++i) {
-            const double v = X(i, j);
-            hash_update_double(h1, v);
-            hash_update_double(h2, v);
-        }
+        hash.data(X.col(j).data(), static_cast<std::size_t>(X.rows()) * sizeof(double));
     }
     if (weights) {
-        for (Eigen::Index i = 0; i < weights->size(); ++i) {
-            const double v = (*weights)(i);
-            hash_update_double(h1, v);
-            hash_update_double(h2, v);
-        }
+        hash.data(weights->data(), static_cast<std::size_t>(weights->size()) * sizeof(double));
     }
 
     AbsorptionCacheKey key;
-    key.sig1 = h1;
-    key.sig2 = h2;
+    key.hash_threads = std::max(1, options.num_threads);
+    key.hash_observer = options.parallel_observer;
+    const auto digest = hash.finish(key.hash_threads, key.hash_observer);
+    std::memcpy(&key.sig1, digest.data(), 8);
+    std::memcpy(&key.sig2, digest.data()+8, 8);
+    std::memcpy(key.tail.data(), digest.data()+16, 16);
     return key;
 }
 
@@ -2160,8 +2479,83 @@ std::string absorption_cache_path(const std::string& profile_path) {
     return profile_path + ".absorption_cache";
 }
 
-template <typename T>
-bool write_binary(std::ofstream& out, const T& value) {
+// Cache publication is a same-directory replacement. A failed or interrupted
+// writer leaves the previous entry available to concurrent readers.
+class AtomicAbsorptionCacheFile {
+    std::string target_, temporary_;
+    std::FILE* file_ = nullptr;
+    bool owned_ = false, good_ = true;
+public:
+    explicit AtomicAbsorptionCacheFile(const std::string& path) {
+        try {
+            std::error_code error;
+            target_ = std::filesystem::weakly_canonical(path, error).string();
+            if (error) return;
+            const auto parent = std::filesystem::path(target_).parent_path();
+            std::random_device random;
+            for (int attempt = 0; attempt < 16; ++attempt) {
+                temporary_ = (parent / (".xhdfe-cache-" + std::to_string(random()) +
+                                        "-" + std::to_string(random()) + ".tmp")).string();
+#ifdef _WIN32
+                const int fd = ::_open(temporary_.c_str(),
+                    _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
+                    _S_IREAD | _S_IWRITE);
+                if (fd < 0) continue;
+                owned_ = true;
+                file_ = ::_fdopen(fd, "wb");
+                if (!file_) ::_close(fd);
+#else
+                int flags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_CLOEXEC
+                flags |= O_CLOEXEC;
+#endif
+                const int fd = ::open(temporary_.c_str(), flags, 0666);
+                if (fd < 0) continue;
+                owned_ = true;
+                struct stat previous{};
+                if (::stat(target_.c_str(), &previous) == 0 &&
+                    ::fchmod(fd, previous.st_mode & 0777) != 0) {
+                    ::close(fd);
+                    return;
+                }
+                file_ = ::fdopen(fd, "wb");
+                if (!file_) ::close(fd);
+#endif
+                return;
+            }
+        } catch (const std::filesystem::filesystem_error&) {
+            good_ = false;
+        } catch (const std::system_error&) {
+            good_ = false;
+        }
+    }
+    AtomicAbsorptionCacheFile(const AtomicAbsorptionCacheFile&) = delete;
+    AtomicAbsorptionCacheFile& operator=(const AtomicAbsorptionCacheFile&) = delete;
+    ~AtomicAbsorptionCacheFile() {
+        if (file_) std::fclose(file_);
+        if (owned_) std::remove(temporary_.c_str());
+    }
+    explicit operator bool() const { return file_ && good_; }
+    void write(const char* bytes, std::streamsize size) {
+        if (!file_ || !good_ || size < 0) { good_ = false; return; }
+        const auto count = static_cast<std::size_t>(size);
+        if (std::fwrite(bytes, 1, count, file_) != count) good_ = false;
+    }
+    bool commit() {
+        if (!static_cast<bool>(*this)) return false;
+        const int closed = std::fclose(file_);
+        file_ = nullptr;
+        if (closed != 0) return false;
+        std::error_code error;
+        std::filesystem::rename(temporary_, target_, error);
+        if (error) return false;
+        owned_ = false;
+        return true;
+    }
+};
+
+template <typename T, typename Output>
+bool write_binary(Output& out, const T& value) {
     out.write(reinterpret_cast<const char*>(&value), sizeof(T));
     return static_cast<bool>(out);
 }
@@ -2172,7 +2566,8 @@ bool read_binary(std::ifstream& in, T& value) {
     return static_cast<bool>(in);
 }
 
-bool write_int_vector(std::ofstream& out, const std::vector<int>& values) {
+template <typename Output>
+bool write_int_vector(Output& out, const std::vector<int>& values) {
     const std::int32_t count = static_cast<std::int32_t>(values.size());
     if (!write_binary(out, count)) {
         return false;
@@ -2212,6 +2607,8 @@ bool read_int_vector(std::ifstream& in,
 struct AbsorptionCacheDigest {
     std::uint64_t first = 0;
     std::uint64_t second = 0;
+    std::uint64_t third = 0;
+    std::uint64_t fourth = 0;
 };
 
 AbsorptionCacheDigest absorption_cache_digest(
@@ -2240,15 +2637,15 @@ AbsorptionCacheDigest absorption_cache_digest(
     const std::vector<int>& sweep_order,
     const Eigen::VectorXd& y_tilde,
     const Eigen::MatrixXd& X_tilde) {
-    std::uint64_t h1 = kFnvOffset64;
-    std::uint64_t h2 = kFnvOffset64 ^ kAbsorptionCacheSalt;
+    detail::CacheDigestBuilder hash(UINT64_C(0x58484446454f5554));
     auto update = [&](std::uint64_t value) {
-        h1 = fnv1a_update(h1, value);
-        h2 = fnv1a_update(h2, value + kAbsorptionCacheSalt);
+        hash.word(value);
     };
     update(0x5848444645414253ULL);  // "XHDFEABS" domain separator.
     update(key.sig1);
     update(key.sig2);
+    update(key.tail[0]);
+    update(key.tail[1]);
     update(static_cast<std::uint64_t>(static_cast<std::int64_t>(nobs)));
     update(static_cast<std::uint64_t>(static_cast<std::int64_t>(cols)));
     update(static_cast<std::uint64_t>(static_cast<std::int64_t>(design_cols)));
@@ -2281,16 +2678,18 @@ AbsorptionCacheDigest absorption_cache_digest(
         update(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)));
     }
     update(static_cast<std::uint64_t>(y_tilde.size()));
-    for (Eigen::Index i = 0; i < y_tilde.size(); ++i) {
-        update(hash_double_bits(y_tilde(i)));
-    }
+    hash.data(y_tilde.data(), static_cast<std::size_t>(y_tilde.size()) * sizeof(double));
     update(static_cast<std::uint64_t>(X_tilde.rows()));
     update(static_cast<std::uint64_t>(X_tilde.cols()));
     update(static_cast<std::uint64_t>(X_tilde.size()));
-    for (Eigen::Index i = 0; i < X_tilde.size(); ++i) {
-        update(hash_double_bits(X_tilde.data()[i]));
-    }
-    return {h1, h2};
+    hash.data(X_tilde.data(), static_cast<std::size_t>(X_tilde.size()) * sizeof(double));
+    const auto bytes = hash.finish(key.hash_threads, key.hash_observer);
+    AbsorptionCacheDigest digest;
+    std::memcpy(&digest.first, bytes.data(), 8);
+    std::memcpy(&digest.second, bytes.data()+8, 8);
+    std::memcpy(&digest.third, bytes.data()+16, 8);
+    std::memcpy(&digest.fourth, bytes.data()+24, 8);
+    return digest;
 }
 
 bool write_absorption_cache(const std::string& path,
@@ -2311,7 +2710,7 @@ bool write_absorption_cache(const std::string& path,
     if (path.empty()) {
         return false;
     }
-    std::ofstream out(path, std::ios::binary);
+    AtomicAbsorptionCacheFile out(path);
     if (!out) {
         return false;
     }
@@ -2319,7 +2718,8 @@ bool write_absorption_cache(const std::string& path,
     char magic[kAbsorptionCacheMagicSize] = {};
     std::strncpy(magic, kAbsorptionCacheMagic, kAbsorptionCacheMagicSize - 1);
     out.write(magic, sizeof(magic));
-    if (!write_binary(out, key.sig1) || !write_binary(out, key.sig2)) {
+    if (!write_binary(out, key.sig1) || !write_binary(out, key.sig2) ||
+        !write_binary(out, key.tail[0]) || !write_binary(out, key.tail[1])) {
         return false;
     }
 
@@ -2387,7 +2787,8 @@ bool write_absorption_cache(const std::string& path,
         retry_diagnostics.auto_routing_retry_elapsed_seconds,
         fe_levels, sweep_order,
         y_tilde, X_tilde);
-    return write_binary(out, digest.first) && write_binary(out, digest.second);
+    return write_binary(out, digest.first) && write_binary(out, digest.second) &&
+           write_binary(out, digest.third) && write_binary(out, digest.fourth) && out.commit();
 }
 
 bool read_absorption_cache(const std::string& path,
@@ -2416,10 +2817,12 @@ bool read_absorption_cache(const std::string& path,
 
     std::uint64_t sig1 = 0;
     std::uint64_t sig2 = 0;
-    if (!read_binary(in, sig1) || !read_binary(in, sig2)) {
+    std::array<std::uint64_t,2> tail{};
+    if (!read_binary(in, sig1) || !read_binary(in, sig2) ||
+        !read_binary(in, tail[0]) || !read_binary(in, tail[1])) {
         return false;
     }
-    if (sig1 != key.sig1 || sig2 != key.sig2) {
+    if (sig1 != key.sig1 || sig2 != key.sig2 || tail != key.tail) {
         return false;
     }
 
@@ -2533,7 +2936,10 @@ bool read_absorption_cache(const std::string& path,
 
     std::uint64_t stored_first = 0;
     std::uint64_t stored_second = 0;
+    std::uint64_t stored_third = 0;
+    std::uint64_t stored_fourth = 0;
     if (!read_binary(in, stored_first) || !read_binary(in, stored_second) ||
+        !read_binary(in, stored_third) || !read_binary(in, stored_fourth) ||
         in.peek() != std::ifstream::traits_type::eof()) {
         return false;
     }
@@ -2554,7 +2960,8 @@ bool read_absorption_cache(const std::string& path,
         record.auto_routing_retry_elapsed_seconds, record.fe_levels,
         record.sweep_order, record.y_tilde, record.X_tilde);
     if (stored_first != expected_digest.first ||
-        stored_second != expected_digest.second) {
+        stored_second != expected_digest.second ||
+        stored_third != expected_digest.third || stored_fourth != expected_digest.fourth) {
         return false;
     }
 
@@ -2567,11 +2974,11 @@ bool read_absorption_cache(const std::string& path,
     return true;
 }
 
-constexpr const char* kFeStructureCacheMagic = "xhdfe_fe_structure_cache_v1";
+constexpr const char* kFeStructureCacheMagic = "xhdfe_fe_structure_cache_v2";
 constexpr std::size_t kFeStructureCacheMagicSize = 32;
 
 struct FeStructureCache {
-    std::uint64_t signature = 0;
+    FeStructureDigest signature{};
     int nobs_full = 0;
     int nobs = 0;
     bool drop_singletons = false;
@@ -2580,17 +2987,34 @@ struct FeStructureCache {
     std::vector<Eigen::VectorXi> fe_group_ids;
 };
 
+FeStructureDigest fe_structure_payload_digest(
+    const FeStructureDigest& signature, int nobs_full, bool drop_singletons,
+    const std::vector<int>& kept_idx, const std::vector<int>& num_groups,
+    const std::vector<Eigen::VectorXi>& fe_group_ids, int threads,
+    detail::ParallelWorkObserver* observer) {
+    detail::CacheDigestBuilder digest(UINT64_C(0x46455041594c4432));
+    digest.data(signature.data(), signature.size());
+    digest.word(nobs_full);
+    digest.word(drop_singletons);
+    digest.data(kept_idx.data(), kept_idx.size() * sizeof(int));
+    digest.data(num_groups.data(), num_groups.size() * sizeof(int));
+    digest.word(fe_group_ids.size());
+    for (const auto& ids : fe_group_ids) digest.data(ids.data(), ids.size() * sizeof(int));
+    return digest.finish(threads, observer);
+}
+
 bool write_fe_structure_cache(const std::string& path,
-                              std::uint64_t signature,
+                              const FeStructureDigest& signature,
                               int nobs_full,
                               bool drop_singletons,
                               const std::vector<int>& kept_idx,
                               const std::vector<int>& num_groups,
-                              const std::vector<Eigen::VectorXi>& fe_group_ids) {
+                              const std::vector<Eigen::VectorXi>& fe_group_ids,
+                              int threads, detail::ParallelWorkObserver* observer) {
     if (path.empty()) {
         return false;
     }
-    std::ofstream out(path, std::ios::binary);
+    AtomicAbsorptionCacheFile out(path);
     if (!out) {
         return false;
     }
@@ -2635,15 +3059,18 @@ bool write_fe_structure_cache(const std::string& path,
             return false;
         }
     }
-    return static_cast<bool>(out);
+    const auto digest = fe_structure_payload_digest(signature, nobs_full, drop_singletons,
+        kept_idx, num_groups, fe_group_ids, threads, observer);
+    return write_binary(out, digest) && out.commit();
 }
 
 bool read_fe_structure_cache(const std::string& path,
-                             std::uint64_t expected_signature,
+                             const FeStructureDigest& expected_signature,
                              int expected_nobs_full,
                              bool drop_singletons,
                              int expected_nfe,
-                             FeStructureCache& cache) {
+                             FeStructureCache& cache,
+                             int threads, detail::ParallelWorkObserver* observer) {
     if (path.empty()) {
         return false;
     }
@@ -2661,7 +3088,7 @@ bool read_fe_structure_cache(const std::string& path,
         return false;
     }
 
-    std::uint64_t signature = 0;
+    FeStructureDigest signature{};
     if (!read_binary(in, signature)) {
         return false;
     }
@@ -2677,18 +3104,18 @@ bool read_fe_structure_cache(const std::string& path,
         !read_binary(in, nfe) || !read_binary(in, drop_flag)) {
         return false;
     }
-    if (nobs_full < 0 || nobs < 0 || nfe < 0) {
+    if (nobs_full < 0 || nobs < 0 || nobs > nobs_full || nfe < 0) {
         return false;
     }
     if (nobs_full != expected_nobs_full || nfe != expected_nfe) {
         return false;
     }
-    if ((drop_flag != 0) != drop_singletons) {
+    if (drop_flag != static_cast<int>(drop_singletons)) {
         return false;
     }
 
     std::int32_t keep_count = 0;
-    if (!read_binary(in, keep_count) || keep_count < 0) {
+    if (!read_binary(in, keep_count) || keep_count < 0 || keep_count > nobs) {
         return false;
     }
     std::vector<int> kept_idx;
@@ -2698,6 +3125,8 @@ bool read_fe_structure_cache(const std::string& path,
         if (!read_binary(in, entry)) {
             return false;
         }
+        if (entry < 0 || entry >= nobs_full ||
+            (i > 0 && entry <= kept_idx[static_cast<std::size_t>(i-1)])) return false;
         kept_idx[static_cast<std::size_t>(i)] = static_cast<int>(entry);
     }
 
@@ -2718,7 +3147,7 @@ bool read_fe_structure_cache(const std::string& path,
         if (!read_binary(in, groups) || !read_binary(in, len)) {
             return false;
         }
-        if (groups < 0 || len != nobs) {
+        if (groups < 0 || groups > nobs || (nobs > 0 && groups == 0) || len != nobs) {
             return false;
         }
         num_groups[static_cast<std::size_t>(d)] = static_cast<int>(groups);
@@ -2728,7 +3157,16 @@ bool read_fe_structure_cache(const std::string& path,
         if (!in) {
             return false;
         }
+        for (int i = 0; i < len; ++i) {
+            const int gid = fe_group_ids[static_cast<std::size_t>(d)](i);
+            if (gid < 0 || gid >= groups) return false;
+        }
     }
+
+    FeStructureDigest stored_digest{};
+    if (!read_binary(in, stored_digest) || in.peek() != std::char_traits<char>::eof() ||
+        stored_digest != fe_structure_payload_digest(signature, nobs_full, drop_singletons,
+            kept_idx, num_groups, fe_group_ids, threads, observer)) return false;
 
     cache.signature = signature;
     cache.nobs_full = nobs_full;
@@ -4144,7 +4582,7 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
         throw std::runtime_error("groupvar() requires dofadjustments(all/firstpair/pairwise)");
     }
 
-    if (!groupvar && method != DofAdjustmentMethod::None && dims >= 2) {
+    if (method != DofAdjustmentMethod::None && dims >= 2) {
         std::vector<uint8_t> coarsened(static_cast<std::size_t>(dims), 0);
         bool any_coarsened = false;
         for (int d = 0; d < dims; ++d) {
@@ -4183,9 +4621,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
             }
 
             if (!effective_fes.empty() && static_cast<int>(effective_fes.size()) < dims) {
-                if (first_pair_stats != nullptr && dims >= 2) {
+                if ((groupvar != nullptr || first_pair_stats != nullptr) && dims >= 2) {
                     count_bipartite_components(
-                        fes[0], fes[1], lookups[0], lookups[1], nullptr,
+                        fes[0], fes[1], lookups[0], lookups[1], groupvar,
                         first_pair_stats, weights);
                 }
                 FeDofInfo effective =
@@ -4412,7 +4850,6 @@ FeDofInfo compute_fe_dof_for_intercept_dims(
 }
 
 std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::VectorXi>& fes,
-                                                       int max_iter,
                                                        int* dropped_out,
                                                        int num_threads_hint,
                                                        int runtime_capacity,
@@ -4601,11 +5038,8 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
 
     std::vector<uint8_t> keep(static_cast<std::size_t>(n), 1);
     int dropped_total = 0;
-    const int iters = std::max(1, max_iter);
-    for (int iter = 0; iter < iters; ++iter) {
-        if (current.empty()) {
-            break;
-        }
+    // Each nonempty wave removes rows permanently; finish at the fixed point.
+    while (!current.empty()) {
         to_drop.clear();
         to_drop.reserve(current.size());
         for (const int i : current) {
@@ -4662,7 +5096,6 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
 std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
     const std::vector<Eigen::VectorXi>& fes,
     const Eigen::Ref<const Eigen::VectorXd>& weights,
-    int max_iter,
     int* dropped_rows_out,
     double* dropped_weighted_out,
     int num_threads_hint,
@@ -4869,11 +5302,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
     to_drop.reserve(static_cast<std::size_t>(n / 32 + 1024));
     int dropped_rows_total = 0;
     double dropped_w_total = 0.0;
-    const int iters = std::max(1, max_iter);
-    for (int iter = 0; iter < iters; ++iter) {
-        if (current.empty()) {
-            break;
-        }
+    while (!current.empty()) {
         to_drop.clear();
         to_drop.reserve(current.size());
         for (const int i : current) {
@@ -4988,6 +5417,46 @@ std::vector<detail::HeterogeneousSlopeTerm> filter_slope_terms(
     return out;
 }
 
+std::vector<int> positive_weight_rows(const Eigen::VectorXd& weights, int zero_count) {
+    if (zero_count == weights.size())
+        throw std::runtime_error("No positive-weight observations remain");
+    std::vector<int> rows;
+    rows.reserve(static_cast<std::size_t>(weights.size() - zero_count));
+    for (int i = 0; i < weights.size(); ++i) {
+        const auto bits = detail::ieee_bits_detail::bits(weights[i]);
+        if ((bits & UINT64_C(0x7fffffffffffffff)) != 0) rows.push_back(i);
+    }
+    return rows;
+}
+
+struct PositiveWeightInput {
+    std::vector<int> rows;
+    Eigen::VectorXd y, weights;
+    Eigen::MatrixXd X;
+    std::vector<Eigen::VectorXi> fes;
+    std::optional<std::vector<Eigen::VectorXi>> clusters;
+    std::optional<Eigen::MatrixXd> instruments;
+    std::optional<std::vector<detail::HeterogeneousSlopeTerm>> slopes;
+
+    PositiveWeightInput(const Eigen::Ref<const Eigen::VectorXd>& raw_y,
+        const Eigen::Ref<const Eigen::MatrixXd>& raw_X,
+        const std::vector<Eigen::VectorXi>& raw_fes, const Eigen::VectorXd& raw_weights,
+        const std::vector<Eigen::VectorXi>* raw_clusters,
+        const Eigen::MatrixXd* raw_instruments,
+        const std::vector<detail::HeterogeneousSlopeTerm>* raw_slopes, int zero_count)
+        : rows(positive_weight_rows(raw_weights, zero_count)),
+          y(filter_vector(raw_y, rows)), weights(filter_vector(raw_weights, rows)),
+          X(filter_rows(raw_X, rows)) {
+        for (const auto& fe : raw_fes) fes.push_back(filter_vector(fe, rows));
+        if (raw_clusters) {
+            clusters.emplace();
+            for (const auto& c : *raw_clusters) clusters->push_back(filter_vector(c, rows));
+        }
+        if (raw_instruments) instruments = filter_rows(*raw_instruments, rows);
+        if (raw_slopes) slopes = filter_slope_terms(*raw_slopes, rows);
+    }
+};
+
 struct MixedSavefeRecoveryResult {
     std::vector<Eigen::VectorXd> contributions;
     std::vector<Eigen::VectorXd> save_effects;
@@ -5061,6 +5530,19 @@ MixedSavefeRecoveryResult recover_mixed_savefe_effects(
     }
     if (weights && weights->size() != n) {
         throw std::runtime_error("Weights must have the same length as the outcome");
+    }
+
+    const int scale_exponent = detail::fe_recovery_scale_exponent(partial);
+    if (scale_exponent < 0) {
+        Eigen::VectorXd normalized = partial;
+        detail::scale_fe_recovery_vector(normalized, -scale_exponent);
+        auto recovered = recover_mixed_savefe_effects(normalized, fes, slopes, weights, options);
+        for (auto& value : recovered.contributions)
+            detail::scale_fe_recovery_vector(value, scale_exponent);
+        for (auto& value : recovered.save_effects)
+            detail::scale_fe_recovery_vector(value, scale_exponent);
+        recovered.max_delta = std::ldexp(recovered.max_delta, scale_exponent);
+        return recovered;
     }
 
     std::vector<const detail::HeterogeneousSlopeTerm*> slope_by_dim(dims, nullptr);
@@ -5167,7 +5649,7 @@ MixedSavefeRecoveryResult recover_mixed_savefe_effects(
                 const double nr = wdim.rhs0[gs];
                 const double nz = wdim.rhs1[gs];
                 const double det = sw * swzz - swz * swz;
-                const double scale = std::max(1.0, std::abs(sw * swzz) + std::abs(swz * swz));
+                const double scale = std::abs(sw * swzz) + std::abs(swz * swz);
                 double delta_a = 0.0;
                 double delta_b = 0.0;
                 if (det > kSolveTol * scale) {
@@ -5194,8 +5676,7 @@ MixedSavefeRecoveryResult recover_mixed_savefe_effects(
         for (int g = 0; g < groups; ++g) {
             const std::size_t gs = static_cast<std::size_t>(g);
             const double denom = wdim.swzz[gs];
-            const double scale = std::max(1.0, std::abs(denom));
-            const double delta_b = denom > kSolveTol * scale ? wdim.rhs1[gs] / denom : 0.0;
+            const double delta_b = denom > 0.0 ? wdim.rhs1[gs] / denom : 0.0;
             wdim.rhs1[gs] = delta_b;
             wdim.beta(g) += delta_b;
             max_delta = std::max(max_delta, std::abs(delta_b));
@@ -5285,19 +5766,29 @@ MixedSavefeRecoveryResult recover_mixed_savefe_effects(
 void center_mixed_savefe_effects(std::vector<Eigen::VectorXd>& contributions,
                                  std::vector<Eigen::VectorXd>& save_effects,
                                  const std::vector<int>& save_alpha_slot_by_dim,
-                                 const Eigen::VectorXd* weights) {
+                                 const Eigen::VectorXd* weights,
+                                 bool fit_intercept) {
     const std::size_t dims = contributions.size();
     if (save_alpha_slot_by_dim.size() != dims) {
         return;
     }
+    int anchor_dim=-1;
+    double removed_mean=0.0;
     for (std::size_t dim = 0; dim < dims; ++dim) {
         const int slot = save_alpha_slot_by_dim[dim];
         if (slot < 0 || slot >= static_cast<int>(save_effects.size())) {
             continue;
         }
+        if (anchor_dim<0) anchor_dim=static_cast<int>(dim);
         const double mean = weighted_mean(contributions[dim], weights);
         contributions[dim].array() -= mean;
         save_effects[static_cast<std::size_t>(slot)].array() -= mean;
+        if (!fit_intercept) removed_mean+=mean;
+    }
+    if (!fit_intercept && anchor_dim>=0) {
+        // The intercept-bearing FE supplies the level when beta has no constant.
+        contributions[anchor_dim].array()+=removed_mean;
+        save_effects[save_alpha_slot_by_dim[anchor_dim]].array()+=removed_mean;
     }
 }
 
@@ -5331,12 +5822,11 @@ int heterogeneous_slope_rank(const Eigen::VectorXi& fe,
         if (slope.include_intercept) {
             if (wg > 0.0) {
                 const double det = wg * zzg - zg * zg;
-                const double scale = std::max(1.0, wg * zzg);
+                const double scale = wg * zzg;
                 rank += (det > kDetTol * scale) ? 2 : 1;
             }
         } else {
-            const double scale = std::max(1.0, zzg);
-            if (zzg > kDetTol * scale) {
+            if (zzg > 0.0) {
                 ++rank;
             }
         }
@@ -5447,6 +5937,221 @@ int find_identical_fe(const Eigen::VectorXi& needle,
         "rescale y and/or X (values near |X| >= 1e153 can overflow FP64 moments)");
 }
 
+bool exact_fe_span_for_omission(
+    const Eigen::Ref<const Eigen::VectorXd>& raw,
+    const std::vector<Eigen::VectorXi>& fes,
+    const std::vector<detail::HeterogeneousSlopeTerm>& slopes,
+    bool constant_available,const detail::GroupIndividualStructure* grouped,
+    bool mean) {
+    using Fraction=detail::RankFraction;
+    struct Block {
+        const Eigen::VectorXi* ids;
+        const Eigen::VectorXd* values;
+        std::unordered_map<int,int> columns;
+    };
+    try {
+        detail::ExactRankBudget budget;
+        std::vector<Block> blocks;
+        for(std::size_t d=0;d<fes.size();++d) {
+            bool level=true;
+            for(const auto& slope:slopes)
+                if(slope.fe_index==static_cast<int>(d) && !slope.include_intercept) level=false;
+            if(level) blocks.push_back({&fes[d],nullptr,{}});
+        }
+        for(const auto& slope:slopes)
+            blocks.push_back({&fes[slope.fe_index],&slope.values,{}});
+        int columns=constant_available ? 1 : 0;
+        for(auto& block:blocks) for(int row=0;row<raw.size();++row) {
+            budget.step();
+            if(!block.columns.count((*block.ids)[row])) {
+                if(columns>=2000000) return false;
+                block.columns.emplace((*block.ids)[row],columns++);
+            }
+        }
+        const int individual_start=columns;
+        if(grouped) {
+            if(grouped->num_individuals>2000000-columns) return false;
+            columns+=grouped->num_individuals;
+        }
+        // Binary64 values are dyadic rationals. Range limits decline the
+        // proof; they never turn a nonzero value into an exact zero.
+        auto fraction=[](double value) {
+            const auto bits=detail::ieee_bits_detail::bits(value);
+            const unsigned field=static_cast<unsigned>((bits>>52)&2047);
+            if(field==2047) throw std::runtime_error("nonfinite exact FE-span input");
+            std::uint64_t mantissa=(bits&0x000fffffffffffffULL)|(field ? 0x0010000000000000ULL : 0);
+            if(!mantissa) return Fraction();
+            int exponent=field ? static_cast<int>(field)-1075 : -1074;
+            while(!(mantissa&1)) {mantissa>>=1;++exponent;}
+            std::int64_t numerator=static_cast<std::int64_t>(mantissa),denominator=1;
+            if(exponent>=0) {
+                if(exponent>=63 || mantissa>(static_cast<std::uint64_t>(INT64_MAX)>>exponent))
+                    throw std::runtime_error("exact FE-span input range");
+                numerator=static_cast<std::int64_t>(mantissa<<exponent);
+            } else {
+                if(exponent< -62) throw std::runtime_error("exact FE-span input range");
+                denominator=static_cast<std::int64_t>(1ULL<<(-exponent));
+            }
+            return Fraction(bits>>63 ? -numerator : numerator,denominator);
+        };
+        detail::PackedRankAccumulator basis(columns+1,budget,2000000);
+        for(int row=0;row<raw.size();++row) {
+            detail::PackedRankAccumulator::Row equation;
+            if(constant_available) equation.emplace_back(0,Fraction(1));
+            for(const auto& block:blocks) {
+                budget.step();
+                const auto value=block.values ? fraction((*block.values)[row]) : Fraction(1);
+                if(!value.zero()) equation.emplace_back(block.columns.at((*block.ids)[row]),value);
+            }
+            if(grouped) {
+                const int first=grouped->group_ptr[row],last=grouped->group_ptr[row+1];
+                const Fraction value(1,mean ? last-first : 1);
+                for(int edge=first;edge<last;++edge) {
+                    budget.step();
+                    equation.emplace_back(individual_start+grouped->group_individual[edge],value);
+                }
+                std::sort(equation.begin(),equation.end(),[](const auto& a,const auto& b) {return a.first<b.first;});
+            }
+            const auto value=fraction(raw[row]);
+            if(!value.zero()) equation.emplace_back(columns,value);
+            basis.append(std::move(equation));
+            if(basis.is_pivot(columns)) return false;
+        }
+        return true;
+    } catch(const std::runtime_error&) {
+        return false;
+    }
+}
+
+bool require_safe_fe_omission(
+    const Eigen::Ref<const Eigen::VectorXd>& raw,double raw_ss,double within_ss,
+    const std::vector<Eigen::VectorXi>& fes,
+    const std::vector<detail::HeterogeneousSlopeTerm>& slopes,
+    bool constant_available,int column,bool exact_projection=false,
+    const detail::GroupIndividualStructure* grouped=nullptr,bool mean=false) {
+    auto bits=[](double value) {return detail::ieee_bits_detail::bits(value);};
+    auto equal=[&](double a,double b) {
+        const auto x=bits(a),y=bits(b);
+        return x==y || (((x|y)&0x7fffffffffffffffULL)==0);
+    };
+    bool zero=true,constant=true;
+    for(int row=0;row<raw.size();++row) {
+        zero=zero && ((bits(raw[row])&0x7fffffffffffffffULL)==0);
+        constant=constant && equal(raw[row],raw[0]);
+    }
+    if(zero || (constant_available && constant)) return true;
+    if(exact_projection && within_ss>0.0) return false;
+    std::vector<std::size_t> level_dimensions;
+    for(std::size_t d=0;d<fes.size();++d) {
+        bool level=true;
+        for(const auto& slope:slopes)
+            if(slope.fe_index==static_cast<int>(d) && !slope.include_intercept) level=false;
+        if(!level) continue;
+        level_dimensions.push_back(d);
+        std::unordered_map<int,double> values;bool constant=true;
+        for(int row=0;row<raw.size();++row) {
+            const auto entry=values.emplace(fes[d][row],raw[row]);
+            if(!entry.second && !equal(entry.first->second,raw[row])) {constant=false;break;}
+        }
+        if(constant) return true;
+    }
+    for(std::size_t a=0;a<level_dimensions.size();++a)
+        for(std::size_t b=a+1;b<level_dimensions.size();++b)
+            if(detail::exact_two_fe_span(raw,fes[level_dimensions[a]],fes[level_dimensions[b]])) return true;
+    for(const auto& slope:slopes) {
+        double multiplier=0;bool found=false;
+        for(int row=0;row<raw.size();++row) if(bits(slope.values[row])&0x7fffffffffffffffULL) {
+            multiplier=raw[row]/slope.values[row];found=true;break;
+        }
+        if(!found || !detail::ieee_finite(multiplier)) continue;
+        const auto mbits=bits(multiplier)&0x7fffffffffffffffULL;
+        if(mbits && !(mbits&0x7ff0000000000000ULL)) continue;
+        bool exact=true;
+        for(int row=0;row<raw.size();++row) {
+            const double value=slope.values[row];
+            const auto vbits=bits(value)&0x7fffffffffffffffULL;
+            if(vbits && !(vbits&0x7ff0000000000000ULL)) {exact=false;break;}
+            volatile double product=multiplier*value;
+            const auto pbits=bits(product)&0x7fffffffffffffffULL;
+            if(!detail::ieee_finite(product) || (!pbits && mbits && vbits) ||
+               (pbits && (pbits>>52)<123)) {exact=false;break;}
+            volatile double error=std::fma(multiplier,value,-product);
+            detail::GroupExactDyadicSum difference;
+            difference.add(raw[row]);difference.add(product,1,true);difference.add(error,1,true);
+            if(!difference.exactly_zero()) {exact=false;break;}
+        }
+        if(exact) return true;
+    }
+    if(exact_fe_span_for_omission(raw,fes,slopes,constant_available,grouped,mean)) return true;
+    if(!(raw_ss>0.0))
+        throw std::runtime_error("Regressor column "+std::to_string(column)+
+            " has nonzero values but its squared scale is not representable; no estimates returned");
+    std::ostringstream message;
+    message << "Regressor column " << column
+            << " would be omitted by the FE-collinearity rule, but exact redundancy could not be established"
+            << "; within/raw norm ratio=" << std::scientific << std::sqrt(within_ss/raw_ss)
+            << ". Numerical identification is ambiguous; omission and estimates were refused."
+            << " Inspect the absorbed component or reparameterize the regressor. No estimates returned.";
+    throw std::runtime_error(message.str());
+}
+
+// Sum of squares of a column about its unweighted mean, computed in two
+// passes after shifting by the first element so that a large common level
+// (X = 1e14 + a) cannot cancel the variation of interest.
+double centered_sum_of_squares(const Eigen::Ref<const Eigen::VectorXd>& x) {
+    const Eigen::Index n = x.size();
+    if (n <= 0) {
+        return 0.0;
+    }
+    const long double shift = static_cast<long double>(x[0]);
+    long double sum = 0.0L;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        sum += static_cast<long double>(x[i]) - shift;
+    }
+    const long double mean = sum / static_cast<long double>(n);
+    long double css = 0.0L;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        const long double d = static_cast<long double>(x[i]) - shift - mean;
+        css += d * d;
+    }
+    return static_cast<double>(css);
+}
+
+std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
+    const Eigen::Ref<const Eigen::MatrixXd>& gram,
+    const std::vector<int>& kept_slope_cols,
+    double rank_collinear_tol,
+    const std::vector<int>& collinear_priority,
+    bool* decisions_separated,
+    const Eigen::VectorXd* uncentered_diagonal);
+
+std::vector<uint8_t> precise_rank_mask_with_anchor(
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<int>& columns,
+    const Eigen::VectorXd* weights,
+    bool center,
+    double tolerance,
+    const std::vector<int>& priority,
+    int threads,
+    detail::ParallelWorkObserver* observer,
+    int anchor_col = -1) {
+    if (anchor_col < 0) {
+        return detail::precise_ols_rank_mask(
+            X, columns, weights, center, tolerance, priority, threads, observer);
+    }
+    // A pure-slope absorption transforms the intercept too. Keep that actual
+    // column first in the rank factorization instead of centering by raw ones.
+    std::vector<int> anchored_columns{anchor_col};
+    anchored_columns.insert(anchored_columns.end(), columns.begin(), columns.end());
+    std::vector<int> anchored_priority = priority;
+    anchored_priority.resize(static_cast<std::size_t>(X.cols()), 0);
+    anchored_priority[static_cast<std::size_t>(anchor_col)] =
+        std::numeric_limits<int>::max();
+    const auto mask = detail::precise_ols_rank_mask(
+        X, anchored_columns, weights, false, tolerance, anchored_priority, threads, observer);
+    return std::vector<uint8_t>(mask.begin() + 1, mask.end());
+}
+
 std::vector<uint8_t> compute_rank_collinearity_mask(
     const Eigen::Ref<const Eigen::MatrixXd>& transformed_X,
     const std::vector<int>& kept_slope_cols,
@@ -5456,45 +6161,25 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
     double rank_collinear_tol,
     int threads,
     const std::vector<int>& collinear_priority,
-    detail::ParallelWorkObserver* observer) {
-    std::vector<uint8_t> drop_mask(static_cast<std::size_t>(std::max(0, slope_cols)), 0);
-    if (kept_slope_cols.empty() || slope_cols <= 0) {
-        return drop_mask;
-    }
+    detail::ParallelWorkObserver* observer,
+    int anchor_col = -1) {
+    std::vector<uint8_t> result(static_cast<std::size_t>(std::max(0,slope_cols)),0);
+    if(kept_slope_cols.empty() || slope_cols<=0) return result;
 
-    std::vector<int> ordered_cols = kept_slope_cols;
-    if (!collinear_priority.empty()) {
-        std::stable_sort(ordered_cols.begin(), ordered_cols.end(),
-                         [&](int a, int b) {
-                             const int pa =
-                                 (a >= 0 && a < static_cast<int>(collinear_priority.size()))
-                                     ? collinear_priority[static_cast<std::size_t>(a)]
-                                     : 0;
-                             const int pb =
-                                 (b >= 0 && b < static_cast<int>(collinear_priority.size()))
-                                     ? collinear_priority[static_cast<std::size_t>(b)]
-                                     : 0;
-                             if (pa != pb) {
-                                 return pa > pb;
-                             }
-                             return a < b;
-                         });
-    }
-
-    const int p = static_cast<int>(ordered_cols.size());
-    Eigen::VectorXd sum_x = Eigen::VectorXd::Zero(p);
-    Eigen::MatrixXd sum_xx = Eigen::MatrixXd::Zero(p, p);
-    double sum_w = 0.0;
-
-    std::vector<const double*> col_ptrs(static_cast<std::size_t>(p));
+    // FP64 triage: the 2.26.2 Gram matrix over the kept columns decides the
+    // rank whenever every decision is separated from the threshold by the
+    // margin documented in compute_rank_collinearity_mask_from_gram. Only an
+    // ambiguous decision pays the double-double sequential rank over the rows.
+    const int p = static_cast<int>(kept_slope_cols.size());
     const Eigen::Index n = transformed_X.rows();
     const Eigen::Index stride = transformed_X.rows();
+    const bool anchored = has_intercept && anchor_col >= 0;
+    std::vector<const double*> col_ptrs(static_cast<std::size_t>(p));
     for (int j = 0; j < p; ++j) {
-        const int col = ordered_cols[static_cast<std::size_t>(j)];
         col_ptrs[static_cast<std::size_t>(j)] =
-            transformed_X.data() + static_cast<Eigen::Index>(col) * stride;
+            transformed_X.data() +
+            static_cast<Eigen::Index>(kept_slope_cols[static_cast<std::size_t>(j)]) * stride;
     }
-
     int use_threads = 1;
 #ifdef HDFE_USE_OPENMP
     use_threads = std::max(1, threads);
@@ -5519,18 +6204,17 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
         Eigen::MatrixXd& sum_xx_local = sum_xx_tls[static_cast<std::size_t>(chunk)];
         double sum_w_local = 0.0;
         std::vector<double> xvals(static_cast<std::size_t>(p), 0.0);
-        const Eigen::Index begin =
-            deterministic_moment_chunk_begin(n, chunk, chunks);
-        const Eigen::Index end =
-            deterministic_moment_chunk_end(n, chunk, chunks);
+        const Eigen::Index begin = deterministic_moment_chunk_begin(n, chunk, chunks);
+        const Eigen::Index end = deterministic_moment_chunk_end(n, chunk, chunks);
         for (Eigen::Index i = begin; i < end; ++i) {
             const double w = weights ? weights->data()[i] : 1.0;
-            if (weights) {
-                sum_w_local += w;
+            const double anchor = anchored ? transformed_X(i, anchor_col) : 1.0;
+            if (weights || anchored) {
+                sum_w_local += w * anchor * anchor;
             }
             for (int j = 0; j < p; ++j) {
                 xvals[j] = col_ptrs[static_cast<std::size_t>(j)][i];
-                sum_x_local(j) += w * xvals[j];
+                sum_x_local(j) += w * xvals[j] * anchor;
             }
             for (int j = 0; j < p; ++j) {
                 for (int k = 0; k <= j; ++k) {
@@ -5543,14 +6227,15 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
     if (observer) {
         observer->end_region();
     }
-
+    Eigen::VectorXd sum_x = Eigen::VectorXd::Zero(p);
+    Eigen::MatrixXd sum_xx = Eigen::MatrixXd::Zero(p, p);
+    double sum_w = 0.0;
     for (int chunk = 0; chunk < chunks; ++chunk) {
         sum_x.noalias() += sum_x_tls[static_cast<std::size_t>(chunk)];
         sum_xx.noalias() += sum_xx_tls[static_cast<std::size_t>(chunk)];
         sum_w += sum_w_tls[static_cast<std::size_t>(chunk)];
     }
-
-    if (!weights) {
+    if (!weights && !anchored) {
         sum_w = static_cast<double>(n);
     }
     if (!hdfe::detail::ieee_all_finite(sum_x) ||
@@ -5561,7 +6246,6 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
     if (has_intercept && weights && !(sum_w > 0.0)) {
         throw std::runtime_error("Weights must sum to a positive value");
     }
-
     Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(p, p);
     Eigen::VectorXd means;
     if (has_intercept) {
@@ -5585,65 +6269,19 @@ std::vector<uint8_t> compute_rank_collinearity_mask(
         throw_crossproduct_overflow();
     }
 
-    Eigen::MatrixXd gram_keep(0, 0);
-    Eigen::LDLT<Eigen::MatrixXd> ldlt;
-    std::vector<int> kept_positions;
-    kept_positions.reserve(static_cast<std::size_t>(p));
-
-    for (int pos = 0; pos < p; ++pos) {
-        const int col_idx = ordered_cols[static_cast<std::size_t>(pos)];
-        const double base_var = gram(pos, pos);
-        if (!hdfe::detail::ieee_finite(base_var)) {
-            throw_crossproduct_overflow();
-        }
-        if (base_var <= 0.0) {
-            drop_mask[static_cast<std::size_t>(col_idx)] = 1;
-            continue;
-        }
-
-        double resid_var = base_var;
-        if (!kept_positions.empty()) {
-            Eigen::VectorXd g(kept_positions.size());
-            for (std::size_t i = 0; i < kept_positions.size(); ++i) {
-                g(static_cast<Eigen::Index>(i)) = gram(kept_positions[i], pos);
-            }
-            const Eigen::VectorXd alpha = ldlt.solve(g);
-            resid_var = base_var - g.dot(alpha);
-        }
-        if (!hdfe::detail::ieee_finite(resid_var)) {
-            throw_crossproduct_overflow();
-        }
-        if (resid_var < 0.0) {
-            resid_var = 0.0;
-        }
-        const double base_norm = std::sqrt(base_var);
-        const double resid_norm = std::sqrt(resid_var);
-        if (!(base_norm > 0.0) || resid_norm <= rank_collinear_tol * base_norm) {
-            drop_mask[static_cast<std::size_t>(col_idx)] = 1;
-            continue;
-        }
-
-        const int old = gram_keep.rows();
-        gram_keep.conservativeResize(old + 1, old + 1);
-        for (int i = 0; i < old; ++i) {
-            const double v = gram(kept_positions[static_cast<std::size_t>(i)], pos);
-            gram_keep(i, old) = v;
-            gram_keep(old, i) = v;
-        }
-        gram_keep(old, old) = base_var;
-        kept_positions.push_back(pos);
-        ldlt.compute(gram_keep);
-        if (ldlt.info() != Eigen::Success) {
-            drop_mask[static_cast<std::size_t>(col_idx)] = 1;
-            kept_positions.pop_back();
-            gram_keep.conservativeResize(old, old);
-            if (old > 0) {
-                ldlt.compute(gram_keep);
-            }
-        }
+    bool separated = true;
+    const Eigen::VectorXd uncentered_diagonal = sum_xx.diagonal();
+    std::vector<uint8_t> selected = compute_rank_collinearity_mask_from_gram(
+        gram, kept_slope_cols, rank_collinear_tol, collinear_priority, &separated,
+        &uncentered_diagonal);
+    if (!separated) {
+        selected = precise_rank_mask_with_anchor(transformed_X, kept_slope_cols,
+            weights, has_intercept, rank_collinear_tol, collinear_priority, threads, observer,
+            anchored ? anchor_col : -1);
     }
-
-    return drop_mask;
+    for(std::size_t pos=0;pos<kept_slope_cols.size();++pos)
+        result[static_cast<std::size_t>(kept_slope_cols[pos])]=selected[pos];
+    return result;
 }
 
 struct CrossproductResult {
@@ -5779,19 +6417,47 @@ CrossproductResult compute_crossproducts_selected(
     return out;
 }
 
+// Sequential FP64 rank decision on the (centered) Gram matrix, as in 2.26.2.
+// `decisions_separated` reports whether every decision is safely away from
+// the omission threshold once FP64 Gram rounding is accounted for. With
+// U_jj the uncentered diagonal, the accumulation and centering error of the
+// Schur complement of column j is bounded by
+//   eta * (sqrt(U_jj) + sum_a |alpha_a| sqrt(U_aa))^2,   eta = 64 eps,
+// (alpha = regression of column j on the kept columns), which is what makes
+// large level offsets (X = 1000 + a) ambiguous in FP64. A kept column must
+// then satisfy resid - unc >= (margin*tol)^2 * base and an omitted column
+// resid + unc <= (tol/margin)^2 * base. A separated mask equals the
+// double-double decision; anything else is recomputed in wide arithmetic by
+// the caller (precise_ols_rank_mask), which is the only case that pays.
+constexpr double kRankDecisionMargin = 100.0;
+
 std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
     const Eigen::Ref<const Eigen::MatrixXd>& gram,
     const std::vector<int>& kept_slope_cols,
     double rank_collinear_tol,
-    const std::vector<int>& collinear_priority) {
+    const std::vector<int>& collinear_priority,
+    bool* decisions_separated,
+    const Eigen::VectorXd* uncentered_diagonal) {
     const int p = static_cast<int>(gram.rows());
     std::vector<uint8_t> drop_mask(static_cast<std::size_t>(std::max(0, p)), 0);
+    bool separated = true;
     if (p <= 0) {
+        if (decisions_separated) *decisions_separated = true;
         return drop_mask;
     }
     if (!hdfe::detail::ieee_all_finite(gram)) {
         throw_crossproduct_overflow();
     }
+    const double keep_margin_tol = rank_collinear_tol * kRankDecisionMargin;
+    const double drop_margin_tol = rank_collinear_tol / kRankDecisionMargin;
+    const double eta = 64.0 * std::numeric_limits<double>::epsilon();
+    auto uncentered_scale = [&](int position) {
+        if (!uncentered_diagonal || position < 0 ||
+            position >= uncentered_diagonal->size()) {
+            return std::sqrt(std::max(0.0, gram(position, position)));
+        }
+        return std::sqrt(std::max(0.0, (*uncentered_diagonal)[position]));
+    };
 
     std::vector<int> ordered_positions(static_cast<std::size_t>(p));
     std::iota(ordered_positions.begin(), ordered_positions.end(), 0);
@@ -5836,6 +6502,7 @@ std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
             continue;
         }
         double resid_var = base_var;
+        double uncertainty_scale = uncentered_scale(pos);
         if (!kept_positions.empty()) {
             Eigen::VectorXd g(kept_positions.size());
             for (std::size_t i = 0; i < kept_positions.size(); ++i) {
@@ -5843,6 +6510,10 @@ std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
             }
             const Eigen::VectorXd alpha = ldlt.solve(g);
             resid_var = base_var - g.dot(alpha);
+            for (std::size_t i = 0; i < kept_positions.size(); ++i) {
+                uncertainty_scale += std::abs(alpha(static_cast<Eigen::Index>(i))) *
+                                     uncentered_scale(kept_positions[i]);
+            }
         }
         if (!hdfe::detail::ieee_finite(resid_var)) {
             throw_crossproduct_overflow();
@@ -5850,11 +6521,26 @@ std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
         if (resid_var < 0.0) {
             resid_var = 0.0;
         }
+        const double uncertainty = eta * uncertainty_scale * uncertainty_scale;
+        const double base_uncertainty = eta * uncentered_scale(pos) * uncentered_scale(pos);
+        if (!hdfe::detail::ieee_finite(uncertainty)) {
+            separated = false;
+        }
         const double base_norm = std::sqrt(base_var);
         const double resid_norm = std::sqrt(resid_var);
         if (!(base_norm > 0.0) || resid_norm <= rank_collinear_tol * base_norm) {
             drop_mask[static_cast<std::size_t>(pos)] = 1;
+            if (base_norm > 0.0 &&
+                !(resid_var + uncertainty <=
+                  drop_margin_tol * drop_margin_tol *
+                      std::max(0.0, base_var - base_uncertainty))) {
+                separated = false;
+            }
             continue;
+        }
+        if (!(resid_var - uncertainty >=
+              keep_margin_tol * keep_margin_tol * (base_var + base_uncertainty))) {
+            separated = false;
         }
 
         const int old = gram_keep.rows();
@@ -5869,6 +6555,7 @@ std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
         ldlt.compute(gram_keep);
         if (ldlt.info() != Eigen::Success) {
             drop_mask[static_cast<std::size_t>(pos)] = 1;
+            separated = false;
             kept_positions.pop_back();
             gram_keep.conservativeResize(old, old);
             if (old > 0) {
@@ -5877,6 +6564,9 @@ std::vector<uint8_t> compute_rank_collinearity_mask_from_gram(
         }
     }
 
+    if (decisions_separated) {
+        *decisions_separated = separated;
+    }
     return drop_mask;
 }
 
@@ -5959,6 +6649,10 @@ AbsorptionCacheKey hash_grouped_mobility_signature(
         static_cast<std::uint32_t>(options.num_threads)));
     update(options.num_threads_explicit ? 1ULL : 0ULL);
     update(mobility_backend_tag());
+    update(static_cast<std::uint64_t>(options.dof_method));
+    update(options.dof_mobility_groups ? 1ULL : 0ULL);
+    update(options.dof_adjust_clusters ? 1ULL : 0ULL);
+    update(options.dof_adjust_continuous ? 1ULL : 0ULL);
     update(static_cast<std::uint64_t>(options.max_iter));
     update(static_cast<std::uint64_t>(static_cast<int>(options.tolerance_mode)));
     update(hash_double_bits(options.tol));
@@ -6035,6 +6729,10 @@ AbsorptionCacheKey hash_grouped_fit_signature(
     update(options.fit_intercept ? 1ULL : 0ULL);
     update(options.drop_singletons ? 1ULL : 0ULL);
 
+    update(static_cast<std::uint64_t>(options.dof_method));
+    update(options.dof_mobility_groups ? 1ULL : 0ULL);
+    update(options.dof_adjust_clusters ? 1ULL : 0ULL);
+    update(options.dof_adjust_continuous ? 1ULL : 0ULL);
     for (Eigen::Index i = 0; i < y.size(); ++i) {
         update_double(y[i]);
     }
@@ -6808,6 +7506,26 @@ GroupCollapsedData filter_group_collapsed(const GroupCollapsedData& data,
     return out;
 }
 
+void drop_zero_weight_groups(GroupCollapsedData& data, GroupAggregation aggregation,
+                             bool frequency_weights) {
+    if (!data.weights || frequency_weights) return;
+    int zero_count = 0;
+    for (int g = 0; g < data.weights->size(); ++g)
+        zero_count += (detail::ieee_bits_detail::bits((*data.weights)[g]) &
+                       UINT64_C(0x7fffffffffffffff)) == 0;
+    if (!zero_count) return;
+    const auto rows = positive_weight_rows(*data.weights, zero_count);
+    std::vector<uint8_t> keep(static_cast<std::size_t>(data.gi.num_groups), 0);
+    std::vector<int> degrees(static_cast<std::size_t>(data.gi.num_individuals), 0);
+    for (int g : rows) {
+        keep[static_cast<std::size_t>(g)] = 1;
+        for (int pos = data.gi.group_ptr[static_cast<std::size_t>(g)];
+             pos < data.gi.group_ptr[static_cast<std::size_t>(g+1)]; ++pos)
+            ++degrees[static_cast<std::size_t>(data.gi.group_individual[static_cast<std::size_t>(pos)])];
+    }
+    data = filter_group_collapsed(data, keep, degrees, aggregation);
+}
+
 struct FeIndexMap {
     Eigen::VectorXi level_index;  // length G: 0..L-1
     Eigen::VectorXi raw_values;   // length L: raw ids for each level
@@ -7503,8 +8221,19 @@ void enforce_estimation_output_postcondition(
             " output; results were rejected");
     };
 
-    if (!hdfe::detail::ieee_all_finite(results.coefficients)) {
-        fail("non-finite coefficient");
+    {
+        // The recovered constant of a model without a constant (group/
+        // individual sum aggregation whose membership columns do not span
+        // it) is reported missing: that trailing slot is the only permitted
+        // non-finite coefficient.
+        const int n_coef = static_cast<int>(results.coefficients.size());
+        const int checked =
+            (intercept_inference_unavailable && !results.model_has_constant && n_coef > 0)
+                ? n_coef - 1
+                : n_coef;
+        if (!hdfe::detail::ieee_all_finite(results.coefficients.head(checked))) {
+            fail("non-finite coefficient");
+        }
     }
 
     const int p = static_cast<int>(results.coefficients.size());
@@ -7578,6 +8307,188 @@ void recompute_inference(Eigen::VectorXd& coefficients,
         conf_int(j, 0) = coefficients(j) - half;
         conf_int(j, 1) = coefficients(j) + half;
     }
+}
+
+double n1_tolerance(const HdfeOptions& options) {
+    return options.tolerance_mode == ToleranceMode::ReghdfeComparable
+        ? std::min(options.tol, 1.0e-9) : options.tol;
+}
+
+// Necessary stationarity check for the original retained regressors. The
+// reduced OLS Gram check alone cannot detect an inaccurate FE projection.
+// Uses the established absorption limit and an arithmetic allowance from the
+// values and operations summed; it is not a forward-error certificate.
+void require_original_ols_moments(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const Eigen::Ref<const Eigen::VectorXd>& within_y,
+    const Eigen::Ref<const Eigen::MatrixXd>& within_X,
+    const std::vector<int>& kept,
+    const detail::OlsResult& ols, const HdfeOptions& options, bool refined) {
+    const auto started = std::chrono::steady_clock::now();
+    const int n = static_cast<int>(y.size()), p = static_cast<int>(kept.size());
+    if (p == 0) return;
+    constexpr int block = 4096;
+    const int chunks = n / block + (n % block != 0);
+    const int width = 4 * p + 1;
+    std::vector<long double> values(static_cast<std::size_t>(chunks) * width, 0.0L);
+    const int threads = std::max(1, options.num_threads);
+    if (options.parallel_observer) options.parallel_observer->begin_region(threads);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        if (options.parallel_observer) options.parallel_observer->observe_work();
+        long double* out = values.data() + static_cast<std::size_t>(chunk) * width;
+        const int first = chunk * block;
+        const int end = first + std::min(block, n - first);
+        for (int i = first; i < end; ++i) {
+            const long double u = ols.residuals[i];
+            long double formation = std::abs(static_cast<long double>(within_y[i]));
+            for (int j = 0; j < within_X.cols(); ++j)
+                formation += std::abs(static_cast<long double>(within_X(i,j)) * ols.coefficients[j]);
+            for (int j = 0; j < p; ++j) {
+                const long double x = X(i, kept[j]);
+                out[4*j] += x*u;
+                out[4*j+1] += x*x;
+                out[4*j+2] += std::abs(x*u);
+                out[4*j+3] += std::abs(x)*formation;
+            }
+            out[4*p] += static_cast<long double>(y[i])*y[i];
+        }
+    }
+    if (options.parallel_observer) options.parallel_observer->end_region();
+    std::vector<long double> total(width, 0.0L);
+    for (int k = 0; k < chunks; ++k)
+        for (int j = 0; j < width; ++j) total[j] += values[static_cast<std::size_t>(k)*width+j];
+    // FP64 roundoff also covers runtimes that reduce x87 precision.
+    const long double unit = std::numeric_limits<double>::epsilon()/2;
+    const long double mu = (block + chunks + 4)*unit;
+    const long double gamma = mu/(1-mu);
+    const long double formation_gamma = detail::N1NormalEvidence::gamma(2*within_X.cols()+2);
+    const long double target = std::max(8.0*std::max(0.0,n1_tolerance(options)),
+                                       64.0*std::numeric_limits<double>::epsilon());
+    int failed = -1;
+    long double failed_defect = 0, failed_scale = 0, failed_arithmetic = 0;
+    long double worst = 0, worst_allowance = 0;
+    for (int j = 0; j < p; ++j) {
+        const long double scale = std::sqrt(total[4*j+1])*std::sqrt(total[4*p]);
+        const long double arithmetic = gamma*(total[4*j+2]+target*scale) +
+                                       formation_gamma*total[4*j+3];
+        const long double defect = std::abs(total[4*j]);
+        if (scale > 0) {
+            worst = std::max(worst, defect/scale);
+            worst_allowance = std::max(worst_allowance, arithmetic/scale);
+        }
+        if (failed < 0 && defect > target*scale + arithmetic) {
+            failed = j;
+            failed_defect = defect;
+            failed_scale = scale;
+            failed_arithmetic = arithmetic;
+        }
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
+    if (read_env_bool("XHDFE_ORIGINAL_NORMAL_DIAG").value_or(false)) {
+        std::cerr << "xhdfe original_normal refined=" << refined << " relative=" << (double)worst
+                  << " target=" << (double)target << " arithmetic=" << (double)worst_allowance
+                  << " seconds=" << seconds << " pass=" << (failed<0) << '\n';
+    }
+    if (failed >= 0) {
+        std::ostringstream message;
+        message << "N1: original-design normal equation failed at regressor "
+                << kept[static_cast<std::size_t>(failed)] + 1
+                << " (defect=" << std::scientific << static_cast<double>(failed_defect)
+                << ", limit=" << static_cast<double>(target * failed_scale)
+                << ", arithmetic=" << static_cast<double>(failed_arithmetic)
+                << "); no estimates returned";
+        throw detail::N1Failure(message.str());
+    }
+}
+
+void require_n1_fit(const detail::AbsorptionResult& absorption,
+                    const detail::OlsResult& ols,
+                    const std::vector<int>& kept_columns,
+                    bool has_intercept, int design_columns,
+                    const HdfeOptions& options,
+                    const Eigen::MatrixXd* gram = nullptr,
+                    const Eigen::VectorXd* rhs = nullptr) {
+    // Default fit: the free necessary check. The normal-equation defect of the
+    // solved system is recomputed from the Gram matrix and right-hand side
+    // already formed for the OLS stage (O(p^2), no pass over the data). It
+    // detects a wrong or non-finite linear solve; the per-row evidence below
+    // is an audit instrument (XHDFE_CERTIFY=1) and never runs by default.
+    if (gram && rhs && gram->rows() > 0 && gram->rows() == gram->cols() &&
+        gram->rows() == ols.coefficients.size() && rhs->size() == ols.coefficients.size()) {
+        const Eigen::VectorXd defect = *rhs - (*gram) * ols.coefficients;
+        const double gram_scale = gram->norm() * ols.coefficients.norm();
+        const double scale = std::max(rhs->norm(), gram_scale);
+        const double arithmetic = 64.0 * std::numeric_limits<double>::epsilon() *
+            static_cast<double>(gram->rows()) * (rhs->norm() + gram_scale);
+        const double limit = n1_tolerance(options) * scale + arithmetic;
+        if (!hdfe::detail::ieee_all_finite(defect) || !(defect.norm() <= limit)) {
+            std::ostringstream message;
+            message << "N1: normal-equation defect " << std::scientific << defect.norm()
+                    << " exceeds its limit " << limit << "; no estimates returned";
+            throw detail::N1Failure(message.str());
+        }
+    }
+    if (!detail::n1_capture_active) return;
+    if (!ols.n1_normal)
+        throw detail::N1Failure("N1: missing residual evidence; no estimates returned");
+    ols.n1_normal->require(n1_tolerance(options));
+    if (!absorption.fe_levels.empty() && !absorption.n1_fe)
+        throw detail::N1Failure("N1: missing signed FE evidence; no estimates returned");
+    // The absorber already enforces the established per-column FE contract.
+    // A combined moment scaled by ||u|| would impose an extra work target.
+}
+
+// A failed necessary check permits one continuation at the caller's unchanged
+// tolerance and concrete method. Reconstruct alphas only when they already
+// existed; the group forward guard still evaluates the original data.
+detail::AbsorptionResult refine_n1_absorption(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes, const Eigen::VectorXd* weights,
+    const HdfeOptions& options, AbsorptionMethod method,
+    const std::vector<detail::HeterogeneousSlopeTerm>& slopes,
+    const detail::GroupIndividualStructure* gi,
+    const detail::AbsorptionResult& previous, int remaining) {
+    HdfeOptions continuation = options;
+    continuation.max_iter = remaining;
+    continuation.absorption_method = method;
+    continuation.from_auto = false;
+    if (!previous.sweep_order_used.empty())
+        continuation.sweep_order_override = previous.sweep_order_used;
+    detail::AbsorptionResult next = gi
+        ? detail::absorb_fixed_effects_group_individual(
+              previous.y_tilde, previous.X_tilde, fes, *gi, weights, continuation, method)
+        : detail::absorb_fixed_effects_v6(
+              previous.y_tilde, previous.X_tilde, fes, weights, continuation, method, slopes);
+    if (next.gpu_used != previous.gpu_used ||
+        next.schwarz_used != previous.schwarz_used ||
+        next.mlsmr_used != previous.mlsmr_used)
+        throw detail::N1Failure("N1: refinement changed method or backend; no estimates returned");
+    auto compose = [](auto& newer, const auto& older) {
+        if (older.empty()) { newer.clear(); return; }
+        if (newer.size() != older.size()) { newer.clear(); return; }
+        for (std::size_t d = 0; d < newer.size(); ++d) {
+            if (newer[d].rows() != older[d].rows() || newer[d].cols() != older[d].cols()) {
+                newer.clear(); return;
+            }
+            newer[d] += older[d];
+        }
+    };
+    compose(next.fe_alpha_y, previous.fe_alpha_y);
+    compose(next.fe_alpha_X, previous.fe_alpha_X);
+    compose(next.fe_slope_alpha_y, previous.fe_slope_alpha_y);
+    compose(next.fe_slope_alpha_X, previous.fe_slope_alpha_X);
+    next.iterations += previous.iterations;
+    next.gpu_absorption_iterations += previous.gpu_absorption_iterations;
+    if (gi)
+        detail::certify_group_individual_candidate(y, X, fes, *gi, weights, options, next);
+    else
+        detail::certify_absorption_result(y, X, fes, weights, options, slopes, next);
+    return next;
 }
 
 }  // namespace
@@ -8136,6 +9047,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                            const std::vector<int>& endogenous_idx,
                            const std::vector<detail::HeterogeneousSlopeTerm>* slopes) {
     AttemptTransaction attempt(*this);
+    if (options_.dof_method == DofAdjustmentMethod::Exact) {
+        throw std::runtime_error(
+            "dofadjustments(exact) currently requires group() and individual(); no estimates returned");
+    }
+    const bool cuda_execution_required = require_cuda_compatible_method(options_, fes.size());
     const auto fit_outer_t0 = std::chrono::steady_clock::now();
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
@@ -8161,6 +9077,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     if (weights && weights->size() != y.size()) {
         throw std::runtime_error("Weights must have the same length as y");
     }
+    int zero_weight_count = 0;
     if (weights && !options_.weights_are_frequencies) {
         // Analytic weights must be IEEE-finite and non-negative (re-audit
         // R-03): one negative or NaN value among many silently corrupts
@@ -8176,6 +9093,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 throw std::runtime_error(
                     "weights must be finite and non-negative");
             }
+            zero_weight_count += (detail::ieee_bits_detail::bits(w_chk[i]) &
+                                  UINT64_C(0x7fffffffffffffff)) == 0;
         }
     }
     gpu_used_ = false;
@@ -8229,11 +9148,19 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             "Instrument matrix supplied but no endogenous indices were provided");
     }
 
+    if (zero_weight_count) {
+        PositiveWeightInput sample(y, X, fes, *weights, clusters, instruments, slopes, zero_weight_count);
+        fit(sample.y, sample.X, sample.fes, &sample.weights,
+            sample.clusters ? &*sample.clusters : nullptr,
+            sample.instruments ? &*sample.instruments : nullptr, endogenous_idx,
+            sample.slopes ? &*sample.slopes : nullptr);
+        for (int i = 0; i < results_.sample_index.size(); ++i)
+            results_.sample_index[i] = sample.rows.at(static_cast<std::size_t>(results_.sample_index[i]));
+        attempt.commit(LifecycleState::StandardReady);
+        return;
+    }
+
     const bool has_fes = !fes.empty();
-    // A constant is in the span of any absorbed level FE.  Never pass that
-    // zero within-column to OLS/2SLS: recover the reported normalization
-    // ybar - xbar'b after estimating the identified slopes instead.
-    const bool drop_intercept = options_.fit_intercept && has_fes;
     const MobilityProfileConfig mobility_cfg = load_mobility_profile_config();
     const AbsorptionCacheConfig abs_cache_cfg = load_absorption_cache_config();
     const FeStructureCacheConfig fe_cache_cfg = load_fe_structure_cache_config();
@@ -8285,12 +9212,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     FeStructureCache fe_cache;
     bool fe_cache_hit = false;
-    std::uint64_t fe_cache_signature = 0;
+    FeStructureDigest fe_cache_signature{};
     bool fe_cache_signature_ready = false;
     auto ensure_fe_cache_signature = [&]() {
         if (!fe_cache_signature_ready) {
             fe_cache_signature = hash_fe_structure_cache_signature(
-                fes, weights, options_.drop_singletons, options_.weights_are_frequencies);
+                fes, weights, options_.drop_singletons, options_.weights_are_frequencies,
+                preprocessing_thread_resolution.effective, parallel_observer_.get());
             fe_cache_signature_ready = true;
         }
     };
@@ -8302,6 +9230,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                        const std::vector<Eigen::VectorXi>* c_ptr,
                        const Eigen::MatrixXd* inst_use,
                        const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) {
+        detail::additive_cell_projection::ScopedPublicAutoRequest additive_request(
+            options_.absorption_method==AbsorptionMethod::Auto);
+        detail::ScopedN1Capture n1_capture(detail::ordinary_audit_enabled());
         if (y_use.size() == 0) {
             throw std::runtime_error(
                 "no observations remain for estimation (empty input or every row "
@@ -8325,6 +9256,43 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
         const bool has_slopes_use = !slope_terms.empty();
+        std::vector<bool> absorbed_levels(fes_use.size(), true);
+        for (const auto& slope : slope_terms) {
+            absorbed_levels[static_cast<std::size_t>(slope.fe_index)] =
+                slope.include_intercept;
+        }
+        bool absorbed_constant = std::any_of(
+            absorbed_levels.begin(), absorbed_levels.end(),
+            [](bool level) { return level; });
+        // A nonzero slope constant within each retained group spans the same
+        // columns as level FEs. This is an exact structural test, not a near-
+        // collinearity threshold; genuinely varying slopes keep the constant.
+        if (!absorbed_constant) {
+            for (const auto& slope : slope_terms) {
+                const auto& ids = fes_use[static_cast<std::size_t>(slope.fe_index)];
+                std::unordered_map<int, double> first_value;
+                bool constant_in_groups = true;
+                for (Eigen::Index i = 0; i < ids.size(); ++i) {
+                    const double value = slope.values[i];
+                    if (value == 0.0) {
+                        constant_in_groups = false;
+                        break;
+                    }
+                    const auto entry = first_value.emplace(ids[i], value);
+                    if (!entry.second && entry.first->second != value) {
+                        constant_in_groups = false;
+                        break;
+                    }
+                }
+                if (constant_in_groups) {
+                    absorbed_constant = true;
+                    break;
+                }
+            }
+        }
+        // Never send a structurally zero within-constant to OLS/2SLS.
+        // Its reported normalization is recovered after the identified fit.
+        const bool drop_intercept = options_.fit_intercept && absorbed_constant;
         tuned.ordinary_krylov_parity_floor =
             options_.ordinary_krylov_parity_floor && !has_slopes_use;
         tuned.ordinary_auto_routing_retry =
@@ -8691,7 +9659,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             return (bounded_fast_contract || bounded_four_fe_cuda_precision) &&
                 candidate.abs_residual_rel > bounded_precision_limit;
         };
-        auto absorb_with_precision_repair = [&](
+        auto absorb_with_precision_repair_impl = [&](
             const Eigen::Ref<const Eigen::MatrixXd>& design,
             AbsorptionMethod requested_method) {
             std::optional<detail::ScopedCudaForwardProbeRequest>
@@ -8830,8 +9798,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         ConvergenceCriterion::Reghdfe;
                 }
             };
-            auto run_weighted_strict_cuda_repair = [&]() {
+            auto run_strict_cuda_repair = [&](int remaining = -1) {
                 HdfeOptions strict_options = tuned;
+                if (remaining >= 0) strict_options.max_iter = remaining;
                 strict_options.tolerance_mode = ToleranceMode::StrictResidual;
                 strict_options.convergence_criterion =
                     ConvergenceCriterion::Auto;
@@ -8866,14 +9835,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     strict_gpu.precision_certified) {
                     return finalize_backend_status(std::move(strict_gpu));
                 }
-                // Weighted CUDA can satisfy the native update criterion while
-                // still missing the independent residual certificate.  Retry
-                // with the strict device-side residual polish before failing
-                // closed; this remains a CUDA solve and is reached only after
-                // the cheaper native repair was insufficient.
-                if (w_ptr != nullptr && strict_gpu.gpu_used) {
+                // A native CG proxy can break down or miss the independent
+                // certificate. Retry the strict device path with the remaining
+                // actual iteration budget; the public tolerance stays fixed.
+                if ((strict_gpu.gpu_used || strict_gpu.gpu_status_code == 3) &&
+                    strict_gpu.iterations < tuned.max_iter) {
                     detail::AbsorptionResult strict_retry =
-                        run_weighted_strict_cuda_repair();
+                        run_strict_cuda_repair(
+                            tuned.max_iter - strict_gpu.iterations);
                     strict_retry.iterations += strict_gpu.iterations;
                     strict_retry.gpu_absorption_iterations =
                         strict_retry.iterations;
@@ -8912,12 +9881,32 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (bounded_four_fe_cuda_precision) {
                     primary_options.tol =
                         std::min(primary_options.tol, 1.0e-10);
+                    // The earlier sweep selector clears this internal flag.
+                    // Preserve the actual public Auto intent for CUDA routing.
+                    primary_options.from_auto =
+                        options_.absorption_method == AbsorptionMethod::Auto;
                 } else if (bounded_four_fe_cuda_fast) {
                     configure_native_cuda_repair(primary_options);
                 }
                 primary = detail::absorb_fixed_effects_v6(
                     y_use, design, fes_use, w_ptr, primary_options,
                     requested_method, slope_terms);
+                if (bounded_four_fe_cuda_precision && primary.gpu_attempted &&
+                    primary.gpu_status_code == 3 && !primary.converged &&
+                    primary.iterations < primary_options.max_iter) {
+                    const int cg_iterations = std::max(0, primary.iterations);
+                    HdfeOptions map_options = primary_options;
+                    // Ordinary Comparable Auto resolves to norm-change MAP.
+                    // Make that route explicit after a failed CG attempt.
+                    map_options.convergence_criterion = ConvergenceCriterion::NormChange;
+                    map_options.from_auto = tuned.from_auto;
+                    map_options.max_iter -= cg_iterations;
+                    primary = detail::absorb_fixed_effects_v6(
+                        y_use, design, fes_use, w_ptr, map_options,
+                        requested_method, slope_terms);
+                    primary.iterations += cg_iterations;
+                    primary.gpu_absorption_iterations = primary.iterations;
+                }
                 if ((bounded_four_fe_cuda_fast ||
                      bounded_four_fe_cuda_precision) && primary.gpu_used) {
                     certify_public_contract(primary);
@@ -8957,6 +9946,24 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (cuda_accuracy_retry_triggered) {
                 const int primary_iterations = primary.iterations;
                 int accumulated_iterations = primary_iterations;
+                // The primary already passed the public certificate. Every
+                // later stage is judged only against the tighter accuracy
+                // target; when none reaches it, the best certified candidate
+                // (smallest backward error) is returned as the device result.
+                // Refusing here would turn an accuracy improvement into a
+                // fail-closed loss of a fit the default route accepts
+                // (patents: primary 4.0e-9, cold retry 1.1e-10 > 1e-10).
+                detail::AbsorptionResult best_certified = primary;
+                auto consider_best = [&](const detail::AbsorptionResult& candidate) {
+                    if (candidate.gpu_used && candidate.gpu_attempted &&
+                        candidate.gpu_status_code == 1 &&
+                        candidate.gpu_absorption_converged && candidate.converged &&
+                        candidate.precision_certified &&
+                        hdfe::detail::ieee_finite(candidate.abs_residual_rel) &&
+                        candidate.abs_residual_rel < best_certified.abs_residual_rel) {
+                        best_certified = candidate;
+                    }
+                };
                 if (cuda_auto_comparable_accuracy_ladder) {
                     constexpr std::array<double, 3> kWarmStageTolerances = {
                         1.0e-9, 3.0e-10, 1.0e-10};
@@ -9011,6 +10018,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (!stage_valid) {
                             break;
                         }
+                        consider_best(staged);
                         stage_seed = std::move(staged);
                     }
                     if (cuda_auto_comparable_accuracy_retry_diag) {
@@ -9052,11 +10060,16 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         << " total_iterations=" << retried.iterations << '\n';
                 }
                 if (!retry_accepted) {
-                    retried.gpu_used = false;
-                    retried.gpu_status_code = 3;
-                    retried.gpu_absorption_converged = false;
-                    retried.converged = false;
-                    retried.precision_certified = false;
+                    consider_best(retried);
+                    if (cuda_auto_comparable_accuracy_retry_diag) {
+                        std::cerr
+                            << "xhdfe cuda_auto_comparable_accuracy_retry event=best_certified"
+                            << " abs_residual_rel=" << best_certified.abs_residual_rel
+                            << " iterations=" << best_certified.iterations << '\n';
+                    }
+                    best_certified.gpu_absorption_iterations = retried.iterations;
+                    best_certified.iterations = retried.iterations;
+                    return finalize_backend_status(std::move(best_certified));
                 }
                 return finalize_backend_status(std::move(retried));
             }
@@ -9316,7 +10329,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
                 if (w_ptr != nullptr && repaired.gpu_used) {
                     detail::AbsorptionResult strict_retry =
-                        run_weighted_strict_cuda_repair();
+                        run_strict_cuda_repair();
                     strict_retry.iterations +=
                         primary.iterations + repaired.iterations;
                     strict_retry.gpu_absorption_iterations =
@@ -9457,6 +10470,53 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             primary.converged = false;
             primary.precision_certified = false;
             return finalize_backend_status(std::move(primary));
+        };
+        // savefe: the alpha-capturing sweep cannot use the accelerated or
+        // Krylov routes, and its norm-change stop can leave the projection
+        // above the certificate (credit2: relative residual 5e-8 at 1e-8,
+        // returned uncertified by 2.26.2). Before refusing, make the one
+        // refinement the precision contract asks for: the projection is
+        // recomputed without alpha capture by the route of the mode (the
+        // accelerated sweep, the comparable retry to MLSMR), certified like any
+        // fit without savefe, and the fixed effects are then recovered from
+        // the partial y - Xb by the map recovery below, which needs no
+        // captured alphas. Only a stalled savefe primary pays for this.
+        auto absorb_with_precision_repair = [&](
+            const Eigen::Ref<const Eigen::MatrixXd>& design,
+            AbsorptionMethod requested_method) {
+            detail::AbsorptionResult primary_result =
+                absorb_with_precision_repair_impl(design, requested_method);
+            if (!tuned.retain_fixed_effects ||
+                (primary_result.converged && primary_result.precision_certified)) {
+                return primary_result;
+            }
+            const double primary_rel = primary_result.abs_residual_rel;
+            const int primary_iterations = primary_result.iterations;
+            tuned.retain_fixed_effects = false;
+            detail::AbsorptionResult projection;
+            try {
+                projection = absorb_with_precision_repair_impl(design, requested_method);
+            } catch (...) {
+                tuned.retain_fixed_effects = true;
+                throw;
+            }
+            tuned.retain_fixed_effects = true;
+            if (read_env_bool("XHDFE_AUTO_ROUTING_RETRY_DIAG").value_or(false)) {
+                std::cerr << "xhdfe savefe_projection_refinement primary_rel=" << primary_rel
+                          << " primary_iterations=" << primary_iterations
+                          << " certified=" << (projection.converged &&
+                                               projection.precision_certified ? 1 : 0)
+                          << " rel=" << projection.abs_residual_rel
+                          << " iterations=" << projection.iterations << std::endl;
+            }
+            if (projection.converged && projection.precision_certified) {
+                // No captured alphas: the recovery below takes its map path.
+                projection.fe_alpha_y.clear();
+                projection.fe_alpha_X.clear();
+                projection.iterations += primary_iterations;
+                return projection;
+            }
+            return primary_result;
         };
         // WP1 Gate-1 closure: everything between fit-inner entry and here —
         // input marshalling, weight validation, option resolution, workspace
@@ -9652,15 +10712,6 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (allow_cache_write && !cache_hit && absorption.converged &&
                 absorption.precision_certified && !cache_path.empty()) {
                 ensure_cache_key(X_use);
-                write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
-                                       absorption.X_tilde, absorption.fe_levels,
-                                       absorption.sweep_order_used, design_cols, method_used_,
-                                       absorption.iterations, absorption.converged,
-                                       absorption.krylov_internal_tolerance,
-                                       absorption.krylov_max_final_backward_error,
-                                       absorption.krylov_max_condition,
-                                       absorption.krylov_max_condition_times_backward_error,
-                                       absorption);
             }
         } else {
             if (drop_intercept && inst_use && inst_use->cols() > 0) {
@@ -9713,15 +10764,6 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (allow_cache_write && !cache_hit && absorption.converged &&
                     absorption.precision_certified && !cache_path.empty()) {
                     ensure_cache_key(combined);
-                    write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
-                                           absorption.X_tilde, absorption.fe_levels,
-                                           absorption.sweep_order_used, design_cols, method_used_,
-                                           absorption.iterations, absorption.converged,
-                                           absorption.krylov_internal_tolerance,
-                                           absorption.krylov_max_final_backward_error,
-                                           absorption.krylov_max_condition,
-                                           absorption.krylov_max_condition_times_backward_error,
-                                           absorption);
                 }
             } else {
                 Eigen::MatrixXd design =
@@ -9777,15 +10819,6 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (allow_cache_write && !cache_hit && absorption.converged &&
                         absorption.precision_certified && !cache_path.empty()) {
                         ensure_cache_key(design);
-                        write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
-                                               absorption.X_tilde, absorption.fe_levels,
-                                               absorption.sweep_order_used, design_cols, method_used_,
-                                               absorption.iterations, absorption.converged,
-                                               absorption.krylov_internal_tolerance,
-                                               absorption.krylov_max_final_backward_error,
-                                               absorption.krylov_max_condition,
-                                               absorption.krylov_max_condition_times_backward_error,
-                                               absorption);
                     }
                 } else {
                     const Eigen::MatrixXd combined = append_matrix(design, inst_use);
@@ -9837,70 +10870,27 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (allow_cache_write && !cache_hit && absorption.converged &&
                         absorption.precision_certified && !cache_path.empty()) {
                         ensure_cache_key(combined);
-                        write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
-                                               absorption.X_tilde, absorption.fe_levels,
-                                               absorption.sweep_order_used, design_cols, method_used_,
-                                               absorption.iterations, absorption.converged,
-                                               absorption.krylov_internal_tolerance,
-                                               absorption.krylov_max_final_backward_error,
-                                               absorption.krylov_max_condition,
-                                               absorption.krylov_max_condition_times_backward_error,
-                                               absorption);
                     }
                 }
             }
         }
 
         cpu_profile_log_elapsed("absorption", absorption_t0);
+        detail::N1RefinementBudget n1_budget{tuned.max_iter};
+        for (;;) {
         gpu_used_ = absorption.gpu_used;
         gpu_status_code_ = absorption.gpu_status_code;
         gpu_attempted_ = absorption.gpu_attempted;
         gpu_absorption_converged_ = absorption.gpu_absorption_converged;
         gpu_absorption_iterations_ = absorption.gpu_absorption_iterations;
-        if (!absorption.converged) {
-            if (absorption.gpu_status_code == 2) {
-                throw std::runtime_error("Requested GPU backend was unavailable during HDFE absorption");
-            }
-            if (absorption.gpu_status_code == 3) {
-                throw std::runtime_error("Requested GPU backend did not converge during HDFE absorption");
-            }
-            if (absorption.gpu_status_code == 4) {
-                throw std::runtime_error("Requested GPU backend failed during HDFE absorption");
-            }
-            if (absorption.gpu_status_code == 5) {
-                throw std::runtime_error("Requested GPU backend was bypassed by CPU cache/profile state");
-            }
-            // Pure CPU non-convergence (no explicit-GPU request): preserve the reference
-            // best-effort behaviour and surface the status through converged_/e(converged)
-            // rather than hard-failing the command. Explicit-GPU failures above still throw,
-            // since the contract forbids a silent CPU result under a requested GPU backend.
-        }
+        require_accepted_absorption(tuned, absorption, "HDFE absorption");
+        require_cuda_execution(cuda_execution_required, absorption);
         const auto stats_t0 = std::chrono::steady_clock::now();
         double sum_weights_for_stats = static_cast<double>(y_use.size());
-        // Stata/reghdfe convention: the total SS is centered only when the
-        // fitted model contains an intercept somewhere — either as an actual
-        // regressor column, or absorbed through at least one FE level
-        // dimension. Slope-only absorption (absorb(fe#c.z)) and noconstant
-        // fits have no intercept, so the uncentered TSS is used (this is what
-        // regress, noconstant and reghdfe report).
-        bool any_absorbed_level = false;
-        if (!fes_use.empty()) {
-            std::vector<char> slope_only_dim(fes_use.size(), 0);
-            for (const auto& s : slope_terms) {
-                if (!s.include_intercept && s.fe_index >= 0 &&
-                    s.fe_index < static_cast<int>(fes_use.size())) {
-                    slope_only_dim[static_cast<std::size_t>(s.fe_index)] = 1;
-                }
-            }
-            for (std::size_t d = 0; d < fes_use.size(); ++d) {
-                if (!slope_only_dim[d]) {
-                    any_absorbed_level = true;
-                    break;
-                }
-            }
-        }
+        // Center TSS when the model contains an explicit or absorbed constant.
+        // A pure slope can supply it when it is constant within every group.
         const bool model_has_intercept =
-            (options_.fit_intercept && !drop_intercept) || any_absorbed_level;
+            options_.fit_intercept || absorbed_constant;
         double total_tss = 0.0;
         if (model_has_intercept) {
             total_tss = compute_total_sum_of_squares(y_use, w_ptr, &sum_weights_for_stats);
@@ -9917,7 +10907,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             std::cerr << "xhdfe solver: use_krylov=" << (tuned.use_krylov ? 1 : 0)
                       << " use_sparse=" << (tuned.use_sparse_solver ? 1 : 0)
                       << " method=" << static_cast<int>(method_used_)
-                      << " iterations=" << absorption.iterations << "\n";
+                      << " iterations=" << absorption.iterations
+                      << " cache_hit=" << (cache_hit ? 1 : 0) << "\n";
         }
 
         auto transformed_X = absorption.X_tilde.leftCols(design_cols);
@@ -9926,6 +10917,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             (options_.fit_intercept && !drop_intercept && transformed_full_cols > 0);
         const int transformed_slope_cols =
             transformed_has_intercept ? (transformed_full_cols - 1) : transformed_full_cols;
+        const int rank_anchor_col = has_slopes_use && transformed_has_intercept
+                                        ? transformed_full_cols - 1 : -1;
 
         // Stata/reghdfe-style collinearity with absorbed fixed effects:
         // after partialling-out, regressors with near-zero variation are omitted.
@@ -9942,6 +10935,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         kept_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
         omitted_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
         const auto collinearity_t0 = std::chrono::steady_clock::now();
+        std::optional<bool> exact_single_level_projection;
         for (int j = 0; j < transformed_slope_cols; ++j) {
             const double raw_ss = X_use.col(j).squaredNorm();
             const double tilde_ss = transformed_X.col(j).squaredNorm();
@@ -9953,9 +10947,36 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                         : std::numeric_limits<double>::infinity());
             }
             const bool finite = hdfe::detail::ieee_finite(raw_ss) && hdfe::detail::ieee_finite(tilde_ss);
-            const bool collinear =
+            bool collinear =
                 finite && (raw_ss <= 0.0 ? (tilde_ss <= kFeCollinearTol)
                                          : (tilde_ss <= kFeCollinearTol * raw_ss));
+            if (collinear && detail::ordinary_audit_enabled()) {
+                // Audit mode: exact redundancy proof or an informative refusal.
+                bool verified=false;
+                if(fes_use.size()==1 && slope_terms.empty() && raw_ss>0 && tilde_ss>0) {
+                    if(!exact_single_level_projection) exact_single_level_projection=detail::exact_level_projection(
+                        y_use,X_use,fes_use[0],w_ptr,absorption.y_tilde,transformed_X.leftCols(X_use.cols()));
+                    verified=*exact_single_level_projection;
+                }
+                collinear=require_safe_fe_omission(X_use.col(j),raw_ss,tilde_ss,fes_use,
+                    slope_terms,model_has_intercept,j+1,verified);
+            } else if (collinear && model_has_intercept && raw_ss > 0.0 && tilde_ss > 0.0) {
+                // A level shift is absorbed by any constant in the model, so
+                // the relevant scale of the column is its variation about the
+                // mean: X = 1e14 + a must not be omitted when a varies within
+                // the FEs. The centered scale never exceeds the raw one, so
+                // this can only retain a column the raw ratio would omit.
+                const double centered_ss = centered_sum_of_squares(X_use.col(j));
+                // Projecting a column of magnitude |x| leaves FP64 rounding of
+                // about eps*|x| per row; within variation below that floor is
+                // not distinguishable from an exact redundancy.
+                const double rounding_floor =
+                    16.0 * std::numeric_limits<double>::epsilon() *
+                    std::numeric_limits<double>::epsilon() * raw_ss;
+                collinear = !(centered_ss > 0.0) ||
+                            tilde_ss <= kFeCollinearTol * centered_ss ||
+                            tilde_ss <= rounding_floor;
+            }
             if (collinear) {
                 omitted_fe_slope_cols.push_back(j);
                 omitted_slope_cols.push_back(j);
@@ -9980,17 +11001,32 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             std::vector<int> keep_positions;
             keep_positions.reserve(kept_slope_cols.size());
             if (k_initial > 0) {
+                // FP64 triage on the Gram already formed for OLS (2.26.2 rule);
+                // the double-double rank runs only for unseparated decisions.
                 Eigen::MatrixXd gram = cp.xtx.topLeftCorner(k_initial, k_initial);
                 if (options_.fit_intercept) {
-                    double denom = cp.sum_w;
+                    double denom = rank_anchor_col >= 0 ? cp.xtx(k_initial, k_initial) : cp.sum_w;
                     if (!(denom > 0.0)) {
                         denom = 1.0;
                     }
-                    gram.noalias() -= (cp.sum_x * cp.sum_x.transpose()) / denom;
+                    const Eigen::VectorXd cross = rank_anchor_col >= 0
+                        ? Eigen::VectorXd(cp.xtx.col(k_initial).head(k_initial)) : cp.sum_x;
+                    gram.noalias() -= (cross * cross.transpose()) / denom;
                 }
-                const std::vector<uint8_t> drop_mask =
+                bool rank_separated = true;
+                const Eigen::VectorXd uncentered_diagonal =
+                    cp.xtx.diagonal().head(k_initial);
+                std::vector<uint8_t> drop_mask =
                     compute_rank_collinearity_mask_from_gram(
-                        gram, kept_slope_cols, rank_collinear_tol, options_.collinear_priority);
+                        gram, kept_slope_cols, rank_collinear_tol,
+                        options_.collinear_priority, &rank_separated,
+                        &uncentered_diagonal);
+                if (!rank_separated) {
+                    drop_mask = precise_rank_mask_with_anchor(
+                        transformed_X, kept_slope_cols, w_ptr, options_.fit_intercept,
+                        rank_collinear_tol, options_.collinear_priority,
+                        tuned.num_threads, tuned.parallel_observer, rank_anchor_col);
+                }
 
                 std::vector<int> new_kept;
                 std::vector<int> new_omitted;
@@ -10033,7 +11069,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 transformed_X, kept_slope_cols, transformed_slope_cols,
                 transformed_has_intercept,
                 w_ptr, rank_collinear_tol, tuned.num_threads,
-                options_.collinear_priority, tuned.parallel_observer);
+                options_.collinear_priority, tuned.parallel_observer, rank_anchor_col);
 
             std::vector<int> new_kept;
             std::vector<int> new_omitted;
@@ -10099,6 +11135,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         // residuals and the normalization means use the actual regressors.
         // Keep X-hat alive through intercept-covariance postprocessing.
         Eigen::MatrixXd iv_score_X_storage;
+        Eigen::MatrixXd iv_score_low_storage;
+        Eigen::VectorXd iv_intercept_covariance;
         const auto ols_t0 = std::chrono::steady_clock::now();
         if (!wants_iv) {
             if (transformed_X_used.cols() == 0) {
@@ -10110,8 +11148,24 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 empty.tvalues.resize(0);
                 empty.pvalues.resize(0);
                 empty.conf_int.resize(0, 2);
-                empty.residuals = absorption.y_tilde;
+                empty.residuals.resize(absorption.y_tilde.size());
+                empty.n1_normal = std::make_shared<detail::N1NormalEvidence>(1, 0);
+                for (int i = 0; i < empty.residuals.size(); ++i) {
+                    const double value = absorption.y_tilde[i];
+                    empty.residuals[i] = value;
+                    empty.n1_normal->chunks[0].add(value, value, w_ptr ? (*w_ptr)[i] : 1.0,
+                        0, [](int) { return 0.0; }, [](int) { return 0.0; }, [](int) { return 0.0; });
+                }
                 empty.df_resid = nobs_effective;
+                if (tuned.se_type == StandardErrorType::Cluster) {
+                    if (!c_ptr || c_ptr->empty())
+                        throw std::runtime_error("Cluster-robust errors requested but no cluster variables were provided");
+                    const auto counts = compute_cluster_counts(*c_ptr);
+                    empty.num_clusters = *std::min_element(counts.begin(), counts.end());
+                    if (c_ptr->size() == 1 && empty.num_clusters > 1 && nobs_effective > 0.0)
+                        empty.cov_scale = static_cast<double>(empty.num_clusters) / (empty.num_clusters-1.0) *
+                            (nobs_effective-1.0) / nobs_effective;
+                }
                 empty.rss = weighted_sum_of_squares(empty.residuals, w_ptr);
                 empty.tss = total_tss;
                 empty.within_tss = within_tss;
@@ -10163,7 +11217,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (!inst_use || inst_use->cols() == 0) {
                 throw std::runtime_error("IV requested but no instruments were provided");
             }
-            Eigen::MatrixXd instrument_slice = absorption.X_tilde.rightCols(inst_use->cols());
+            const auto instrument_slice = absorption.X_tilde.rightCols(inst_use->cols());
             std::vector<int> cleaned =
                 sanitize_endogenous_idx(endogenous_idx, transformed_slope_cols);
             if (cleaned.empty()) {
@@ -10190,13 +11244,19 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     "All endogenous regressors are collinear after partialling-out");
             }
             Eigen::MatrixXd X_endog = select_columns(transformed_X_used, active_endog_cols);
-            Eigen::MatrixXd X_exog = drop_columns(transformed_X_used, active_endog_cols);
+            const int exogenous_cols = static_cast<int>(transformed_X_used.cols()) -
+                                       static_cast<int>(active_endog_cols.size());
             Eigen::MatrixXd instrument_matrix(instrument_slice.rows(),
-                                              X_exog.cols() + instrument_slice.cols());
+                                              exogenous_cols + instrument_slice.cols());
+            std::vector<bool> is_endogenous(static_cast<std::size_t>(transformed_X_used.cols()), false);
+            for (const int index : active_endog_cols) {
+                is_endogenous[static_cast<std::size_t>(index)] = true;
+            }
             int cursor = 0;
-            if (X_exog.cols() > 0) {
-                instrument_matrix.block(0, 0, X_exog.rows(), X_exog.cols()) = X_exog;
-                cursor = X_exog.cols();
+            for (int column = 0; column < transformed_X_used.cols(); ++column) {
+                if (!is_endogenous[static_cast<std::size_t>(column)]) {
+                    instrument_matrix.col(cursor++) = transformed_X_used.col(column);
+                }
             }
             if (instrument_slice.cols() > 0) {
                 instrument_matrix.block(0, cursor, instrument_slice.rows(),
@@ -10206,42 +11266,59 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 throw std::runtime_error(
                     "Instrument matrix is empty after combining exogenous regressors and user-supplied instruments");
             }
+            Eigen::MatrixXd projected_low;
             Eigen::MatrixXd projected =
                 detail::project_endogenous(instrument_matrix, X_endog,
-                                           static_cast<int>(X_exog.cols()), w_ptr);
+                                           exogenous_cols, w_ptr, tuned.parallel_observer, &projected_low);
             iv_score_X_storage = transformed_X_used;
             Eigen::MatrixXd& second_stage = iv_score_X_storage;
+            if (projected_low.size()) {
+                iv_score_low_storage = Eigen::MatrixXd::Zero(second_stage.rows(), second_stage.cols());
+            }
             for (int idx = 0; idx < static_cast<int>(active_endog_cols.size()); ++idx) {
                 second_stage.col(active_endog_cols[static_cast<std::size_t>(idx)]) = projected.col(idx);
+                if (projected_low.size()) {
+                    iv_score_low_storage.col(active_endog_cols[static_cast<std::size_t>(idx)]) = projected_low.col(idx);
+                }
             }
             // 2SLS inference must use residuals from the ACTUAL regressors
             // (u = y - X b), not the projected second-stage design; the solve
             // itself stays on the instrumented design.
-            const Eigen::MatrixXd iv_actual_X = transformed_X_used;
+            const Eigen::Ref<const Eigen::MatrixXd>& iv_actual_X = transformed_X_used;
+            const Eigen::MatrixXd* score_low = iv_score_low_storage.size() ? &iv_score_low_storage : nullptr;
+            Eigen::VectorXd normalization_means;
+            if(score_low && drop_intercept && options_.fit_intercept) {
+                normalization_means.resize(static_cast<int>(kept_slope_cols.size()));
+                for(int pos=0;pos<normalization_means.size();++pos)
+                    normalization_means[pos]=fixed_chunk_weighted_mean(
+                        X_use.col(kept_slope_cols[static_cast<std::size_t>(pos)]),w_ptr);
+            }
+            const Eigen::VectorXd* means_ptr=normalization_means.size() ? &normalization_means : nullptr;
+            Eigen::VectorXd* intercept_ptr=means_ptr ? &iv_intercept_covariance : nullptr;
             if (tuned.se_type == StandardErrorType::Cluster) {
                 if (!c_ptr || c_ptr->empty()) {
                     throw std::runtime_error(
                         "Cluster-robust errors requested but no cluster variables were provided");
                 }
                 if (c_ptr->size() == 1) {
-                    ols_result = detail::run_ols(absorption.y_tilde, second_stage, w_ptr, &(*c_ptr)[0],
+                    ols_result = detail::run_ols_with_score_low(absorption.y_tilde, second_stage, w_ptr, &(*c_ptr)[0],
                                                  tuned.se_type, total_tss, within_tss, nobs_effective,
                                                  false, &iv_actual_X,
                                                  tuned.num_threads_explicit,
-                                                 tuned.parallel_observer);
+                                                 tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
                 } else {
-                    ols_result = detail::run_ols_multiway(absorption.y_tilde, second_stage, w_ptr, c_ptr,
+                    ols_result = detail::run_ols_multiway_with_score_low(absorption.y_tilde, second_stage, w_ptr, c_ptr,
                                                          tuned.se_type, total_tss, within_tss,
                                                          tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective,
                                                          &iv_actual_X, tuned.num_threads_explicit,
-                                                         tuned.parallel_observer);
+                                                         tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
                 }
             } else {
-                ols_result = detail::run_ols(absorption.y_tilde, second_stage, w_ptr, nullptr, tuned.se_type,
+                ols_result = detail::run_ols_with_score_low(absorption.y_tilde, second_stage, w_ptr, nullptr, tuned.se_type,
                                              total_tss, within_tss, nobs_effective,
                                              tuned.weights_are_frequencies, &iv_actual_X,
                                              tuned.num_threads_explicit,
-                                             tuned.parallel_observer);
+                                             tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
             }
         }
         cpu_profile_log_elapsed("ols", ols_t0);
@@ -10253,6 +11330,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const auto post_t0 = std::chrono::steady_clock::now();
         auto post_phase_t0 = std::chrono::steady_clock::now();
         apply_common_postprocessing(y_use, X_use, w_ptr, absorption.fe_levels, ols_result);
+        // Explicit intercept, or one spanned by absorbed levels (also under
+        // noconstant); false only for noconstant fits without absorbed levels.
+        results_.model_has_constant = model_has_intercept;
         cpu_profile_log_elapsed("post_common", post_phase_t0);
         results_.nobs_effective = nobs_effective;
         results_.nobs_full_effective = nobs_full_effective;
@@ -10431,6 +11511,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         const char* fe_recovery_method = "map";
         bool used_mixed_savefe = false;
+        const double n1_reference_intercept = options_.fit_intercept && results_.coefficients.size()
+            ? results_.coefficients[results_.coefficients.size() - 1] : 0.0;
+        Eigen::VectorXd n1_partial;
+        detail::N1ReconstructionEvidence n1_reconstruction;
+        const bool capture_fe_reconstruction = detail::n1_capture_active;
         if (options_.retain_fixed_effects && has_fes) {
             const bool profile_savefe = savefe_profile_enabled();
             const int slope_cols =
@@ -10445,6 +11530,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
             if (!slope_terms.empty()) {
+                if (options_.fit_intercept && !drop_intercept) {
+                    // A separately estimated constant is not part of the
+                    // pure-slope FE projection being recovered here.
+                    partial.array() -= results_.coefficients(slope_cols);
+                }
                 HdfeOptions fe_opts = tuned;
                 if (!absorption.sweep_order_used.empty()) {
                     fe_opts.sweep_order_override = absorption.sweep_order_used;
@@ -10456,7 +11546,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                              w_ptr, fe_opts);
                 }
                 center_mixed_savefe_effects(recovered.contributions, recovered.save_effects,
-                                            recovered.save_alpha_slot_by_dim, w_ptr);
+                                            recovered.save_alpha_slot_by_dim, w_ptr,
+                                            options_.fit_intercept);
                 results_.fe_effects = std::move(recovered.contributions);
                 results_.fe_save_effects = std::move(recovered.save_effects);
                 results_.fe_recovery_iterations = recovered.iterations;
@@ -10473,6 +11564,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 absorption.fe_group_ids.size() == fes_use.size();
             bool used_cached = false;
             bool have_cached = false;
+            int partial_fe_scale_exponent = 0;
             Eigen::VectorXd cached_residual;
             const bool can_try_hybrid =
                 options_.fe_recovery_method == FeRecoveryMethod::Hybrid &&
@@ -10535,8 +11627,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             results_.fe_effects[dim] = std::move(fe_vec);
                         }
                     }
+                    partial_fe_scale_exponent = detail::fe_recovery_scale_exponent(partial);
                     const double fe_tol =
-                        options_.fe_tolerance > 0.0 ? options_.fe_tolerance : options_.tol;
+                        std::ldexp(options_.fe_tolerance > 0.0 ? options_.fe_tolerance : options_.tol,
+                                   partial_fe_scale_exponent);
                     Eigen::VectorXd residual = partial;
                     for (const auto& fe_vec : results_.fe_effects) {
                         residual.noalias() -= fe_vec;
@@ -10639,6 +11733,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     fe_opts.sweep_order_override = absorption.sweep_order_used;
                 }
                 const Eigen::VectorXd& fe_partial = have_cached ? cached_residual : partial;
+                const double solver_fe_tolerance =
+                    fe_opts.fe_tolerance > 0.0 ? fe_opts.fe_tolerance : fe_opts.tol;
+                if (have_cached) {
+                    // Reuse the original problem's coordinates. The physical
+                    // max-update target remains solver_fe_tolerance * 2^scale.
+                    fe_opts.fe_tolerance = solver_fe_tolerance;
+                }
                 detail::FeRecoveryResult recovered;
                 {
                     SavefeTimer timer("savefe_recover_map");
@@ -10648,8 +11749,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                               fe_opts,
                               absorption.fe_weight_sums.empty()
                                   ? nullptr
-                                  : &absorption.fe_weight_sums)
-                        : detail::recover_fixed_effects(fe_partial, fes_use, w_ptr, fe_opts);
+                                  : &absorption.fe_weight_sums,
+                              solver_fe_tolerance,
+                              have_cached ? partial_fe_scale_exponent
+                                          : std::numeric_limits<int>::max())
+                        : detail::recover_fixed_effects(fe_partial, fes_use, w_ptr, fe_opts,
+                                                        solver_fe_tolerance);
                 }
                 if (have_cached &&
                     recovered.contributions.size() == results_.fe_effects.size()) {
@@ -10668,20 +11773,33 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
             }
+            if (capture_fe_reconstruction) n1_partial = std::move(partial);
         }
 
+        if (options_.retain_fixed_effects && !results_.fe_recovery_converged) {
+            std::ostringstream message;
+            message << "Fixed-effect recovery did not converge; iterations="
+                    << results_.fe_recovery_iterations << "/" << options_.max_iter
+                    << "; final max change=" << std::scientific << results_.fe_recovery_max_delta
+                    << "; requested FE tolerance=" << options_.fe_tolerance
+                    << ". No estimates or fixed effects returned. Check scaling and the iteration limit.";
+            throw std::runtime_error(message.str());
+        }
         if (!used_mixed_savefe && !results_.fe_effects.empty()) {
             const std::size_t dims = results_.fe_effects.size();
             const FeNormalizeStyle normalize_style =
                 resolve_fe_normalize_style(options_.stats_style);
             if (dims == 1) {
-                const double mean = weighted_mean(results_.fe_effects[0], w_ptr);
-                results_.fe_effects[0].array() -= mean;
+                if (options_.fit_intercept) {
+                    const double mean = weighted_mean(results_.fe_effects[0], w_ptr);
+                    results_.fe_effects[0].array() -= mean;
+                }
             } else if (dims >= 2) {
                 if (normalize_style == FeNormalizeStyle::Reghdfe) {
-                    for (std::size_t d = 0; d < dims; ++d) {
+                    for (std::size_t d = options_.fit_intercept ? 0 : 1; d < dims; ++d) {
                         const double mean = weighted_mean(results_.fe_effects[d], w_ptr);
                         results_.fe_effects[d].array() -= mean;
+                        if (!options_.fit_intercept) results_.fe_effects[0].array() += mean;
                     }
                 } else {
                     // Component normalization: center FE2 within each mobility component.
@@ -10723,11 +11841,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             results_.fe_effects[0](i) += shift;
                         }
                     }
-                    const double mean0 = weighted_mean(results_.fe_effects[0], w_ptr);
-                    results_.fe_effects[0].array() -= mean0;
+                    if (options_.fit_intercept) {
+                        const double mean0 = weighted_mean(results_.fe_effects[0], w_ptr);
+                        results_.fe_effects[0].array() -= mean0;
+                    }
                     for (std::size_t d = 2; d < dims; ++d) {
                         const double mean = weighted_mean(results_.fe_effects[d], w_ptr);
                         results_.fe_effects[d].array() -= mean;
+                        if (!options_.fit_intercept) results_.fe_effects[0].array() += mean;
                     }
                 }
             }
@@ -10750,11 +11871,32 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 linear_predictor.noalias() += fe_total;
                 const double intercept = weighted_mean(y_use - linear_predictor, w_ptr);
                 results_.coefficients(intercept_idx) = intercept;
-                results_.residuals = y_use - (linear_predictor.array() + intercept).matrix();
+                results_.residuals.resize(y_use.size());
+                for (int i = 0; i < y_use.size(); ++i) {
+                    results_.residuals[i] = y_use[i] - (linear_predictor[i] + intercept);
+                    if (capture_fe_reconstruction) {
+                        const double canonical_partial = n1_partial[i] -
+                            (used_mixed_savefe && !drop_intercept ? 0.0 : n1_reference_intercept);
+                        const double canonical_fe = fe_total[i] + (intercept - n1_reference_intercept);
+                        n1_reconstruction.add(canonical_partial, canonical_fe, results_.residuals[i],
+                            ols_result.residuals[i], w_ptr ? (*w_ptr)[i] : 1.0,
+                            2 * static_cast<int>(results_.coefficients.size()) +
+                            static_cast<int>(results_.fe_effects.size()) + 8);
+                    }
+                }
             } else {
                 Eigen::VectorXd fitted_full = X_use * results_.coefficients;
                 fitted_full.noalias() += fe_total;
-                results_.residuals = y_use - fitted_full;
+                results_.residuals.resize(y_use.size());
+                for (int i = 0; i < y_use.size(); ++i) {
+                    results_.residuals[i] = y_use[i] - fitted_full[i];
+                    if (capture_fe_reconstruction) {
+                        n1_reconstruction.add(n1_partial[i], fe_total[i], results_.residuals[i],
+                            ols_result.residuals[i], w_ptr ? (*w_ptr)[i] : 1.0,
+                            2 * static_cast<int>(results_.coefficients.size()) +
+                            static_cast<int>(results_.fe_effects.size()) + 8);
+                    }
+                }
             }
         }
 
@@ -10828,11 +11970,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         results_.df_m = static_cast<double>(df_m);
         const int df_intercept = (options_.fit_intercept && !drop_intercept) ? 1 : 0;
         const bool use_reghdfe_stats = (options_.stats_style == StatsStyle::Reghdfe);
-        // Reghdfe books the ordinary constant as one absorbed degree of
-        // freedom when there are no explicit fixed effects.  Keep the same
-        // total model DoF, but expose the decomposition used by its CRV1
-        // denominator and e(df_a) metadata.
-        const int df_intercept_dof = use_reghdfe_stats ? 0 : df_intercept;
+        // Reghdfe books the ordinary constant as one absorbed degree of freedom
+        // only when there are no explicit fixed effects. Pure-slope FEs need not
+        // span a constant, so their explicitly estimated intercept still costs
+        // one model degree of freedom.
+        const int df_intercept_dof =
+            (use_reghdfe_stats && !has_fes) ? 0 : df_intercept;
 
         int df_a_levels = (use_reghdfe_stats && !has_fes) ? df_intercept : 0;
         int df_a_exact = df_a_levels;
@@ -11161,7 +12304,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 results_.covariance *= robust_scale;
             }
             results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : df_r_model;
-        } else if (tuned.se_type == StandardErrorType::Cluster && df_m > 0 && c_ptr && !c_ptr->empty()) {
+        } else if (tuned.se_type == StandardErrorType::Cluster && c_ptr && !c_ptr->empty()) {
             const int G = ols_result.num_clusters;
             if (use_reghdfe_stats) {
                 const double df_r_unclust = df_r_model;
@@ -11230,11 +12373,34 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         bool intercept_cov_updated = false;
         if (drop_intercept && options_.fit_intercept && !saturated_model) {
             post_phase_t0 = std::chrono::steady_clock::now();
-            intercept_cov_updated = update_intercept_covariance(
-                results_, X_use, score_X_tilde_used, ols_result.residuals, w_ptr,
-                kept_slope_cols, ols_result, tuned.se_type, c_ptr, tuned.ssc_g_df,
-                tuned.ssc_g_adj, results_.sigma2, robust_scale, cluster_ratio,
-                tuned.weights_are_frequencies);
+            const bool have_wide_intercept = iv_intercept_covariance.size()==
+                static_cast<int>(kept_slope_cols.size())+1;
+            if(have_wide_intercept) {
+                double scale=tuned.se_type==StandardErrorType::Robust ? robust_scale :
+                    (tuned.se_type==StandardErrorType::Cluster ? cluster_ratio :
+                     (ols_result.sigma2>0 ? results_.sigma2/ols_result.sigma2 : 1.0));
+                const int intercept=static_cast<int>(results_.coefficients.size())-1;
+                results_.covariance.row(intercept).setZero();
+                results_.covariance.col(intercept).setZero();
+                for(int pos=0;pos<static_cast<int>(kept_slope_cols.size());++pos) {
+                    const int column=kept_slope_cols[static_cast<std::size_t>(pos)];
+                    const double value=scale*iv_intercept_covariance[pos];
+                    results_.covariance(intercept,column)=value;
+                    results_.covariance(column,intercept)=value;
+                }
+                double variance=scale*iv_intercept_covariance[iv_intercept_covariance.size()-1];
+                if(!(tuned.se_type==StandardErrorType::Cluster && c_ptr && c_ptr->size()>1))
+                    variance=std::max(0.0,variance);
+                results_.covariance(intercept,intercept)=variance;
+                results_.std_errors[intercept]=std::sqrt(std::max(0.0,variance));
+                intercept_cov_updated=true;
+            } else {
+                intercept_cov_updated = update_intercept_covariance(
+                    results_, X_use, score_X_tilde_used, ols_result.residuals, w_ptr,
+                    kept_slope_cols, ols_result, tuned.se_type, c_ptr, tuned.ssc_g_df,
+                    tuned.ssc_g_adj, results_.sigma2, robust_scale, cluster_ratio,
+                    tuned.weights_are_frequencies);
+            }
             cpu_profile_log_elapsed("post_intercept_cov", post_phase_t0);
 
             // Multiway clustering: rebuild the whole covariance the way
@@ -11243,7 +12409,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             // regressors. The recovered-intercept formula above matches one-
             // way clustering but not the inclusion-exclusion CGM sum, and the
             // PSD fix below is extremely sensitive to the _cons row/col input.
-            if (tuned.se_type == StandardErrorType::Cluster && c_ptr &&
+            if (!have_wide_intercept && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
                 c_ptr->size() > 1) {
                 const int cov_cols = static_cast<int>(results_.covariance.cols());
                 const int slope_cols_aug = cov_cols - 1;
@@ -11258,34 +12424,29 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             X_use.col(kept_slope_cols[static_cast<std::size_t>(j)]),
                             w_ptr);
                     }
-                    // reghdfe scores: demeaned X with the original means added
-                    // back, plus the constant column.
+                    // Form the sandwich before restoring means; the equivalent
+                    // uncentered bread/scores lose slope precision at large offsets.
                     Eigen::MatrixXd scores(n_rows, cov_cols);
-                    scores.leftCols(slope_cols_aug) =
-                        score_X_tilde_used.rowwise() + means_x;
+                    scores.leftCols(slope_cols_aug) = score_X_tilde_used;
                     scores.col(slope_cols_aug).setOnes();
                     // Extended bread (partitioned inverse; reghdfe_extend_b_and_xx).
                     const double n_bread =
                         w_ptr ? w_ptr->sum() : static_cast<double>(n_rows);
-                    Eigen::MatrixXd bread(cov_cols, cov_cols);
+                    Eigen::MatrixXd bread = Eigen::MatrixXd::Zero(cov_cols, cov_cols);
                     bread.topLeftCorner(slope_cols_aug, slope_cols_aug) =
                         ols_result.xtx_inv;
-                    Eigen::RowVectorXd side = -means_x * ols_result.xtx_inv;
-                    bread.block(slope_cols_aug, 0, 1, slope_cols_aug) = side;
-                    bread.block(0, slope_cols_aug, slope_cols_aug, 1) =
-                        side.transpose();
-                    bread(slope_cols_aug, slope_cols_aug) =
-                        1.0 / n_bread +
-                        (means_x * ols_result.xtx_inv * means_x.transpose())(0, 0);
+                    bread(slope_cols_aug, slope_cols_aug) = 1.0 / n_bread;
                     Eigen::MatrixXd cov_aug = detail::multiway_cluster_sandwich(
-                        bread, scores, ols_result.residuals, w_ptr, *c_ptr);
-                    double num = 0.0;
-                    double den = 0.0;
-                    for (int j = 0; j < slope_cols_aug; ++j) {
-                        num += results_.covariance(j, j);
-                        den += cov_aug(j, j);
-                    }
-                    const double rescale = (den > 0.0) ? (num / den) : 0.0;
+                        bread, scores, ols_result.residuals, w_ptr, *c_ptr,
+                        tuned.ssc_g_df, tuned.ssc_g_adj);
+                    Eigen::MatrixXd transport = Eigen::MatrixXd::Identity(cov_cols, cov_cols);
+                    transport.block(slope_cols_aug, 0, 1, slope_cols_aug) = -means_x;
+                    cov_aug = (transport * cov_aug * transport.transpose()).eval();
+                    double rescale = cluster_ratio;
+                    if (ols_result.df_resid > 0.0)
+                        rescale *= (nobs - 1.0) / ols_result.df_resid;
+                    if (tuned.ssc_g_df == ClusterDofMethod::Min && tuned.ssc_g_adj && ols_result.num_clusters > 1)
+                        rescale *= static_cast<double>(ols_result.num_clusters) / (ols_result.num_clusters - 1.0);
                     if (rescale > 0.0 && hdfe::detail::ieee_finite(rescale) && hdfe::detail::ieee_all_finite(cov_aug)) {
                         results_.covariance = cov_aug * rescale;
                         results_.std_errors =
@@ -11336,11 +12497,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 Eigen::MatrixXd cov_full = results_.covariance;
                 Eigen::MatrixXd cov_block =
                     cov_full.topLeftCorner(slope_cols, slope_cols);
-                if (fix_psd_scaled(cov_full, psd_scale)) {
-                    if (slope_cols > 0) {
-                        (void)fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
-                        cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
-                    }
+                const bool full_fixed = fix_psd_scaled(cov_full, psd_scale);
+                const bool slopes_fixed = slope_cols > 0 &&
+                    fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
+                if (full_fixed || slopes_fixed) {
+                    cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
                     results_.covariance = cov_full;
                     results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
                     results_.vcv_psd_fixed = true;
@@ -11374,10 +12535,60 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
         enforce_estimation_output_postcondition(
             results_, drop_intercept, inference_unavailable);
+        try {
+            require_n1_fit(absorption, ols_result, kept_slope_cols,
+                           transformed_has_intercept, transformed_full_cols, tuned,
+                           have_precomputed ? &xtx_used : nullptr,
+                           have_precomputed ? &xty_used : nullptr);
+            if (absorption.gpu_used && !wants_iv && !has_slopes_use && w_ptr == nullptr &&
+                !tuned.retain_fixed_effects && tuned.tolerance_mode == ToleranceMode::ReghdfeComparable)
+                require_original_ols_moments(y_use, X_use, absorption.y_tilde, transformed_X_used,
+                                             kept_slope_cols, ols_result, tuned, n1_budget.used);
+            if (detail::n1_capture_active && !results_.fe_effects.empty())
+                n1_reconstruction.require(tuned.fe_tolerance > 0.0 ? tuned.fe_tolerance : tuned.tol);
+        } catch (const detail::N1Failure& failure) {
+            const int remaining = n1_budget.remaining(absorption.iterations, failure);
+            Eigen::MatrixXd original_design = drop_intercept ? Eigen::MatrixXd(X_use)
+                : maybe_add_intercept(X_use, options_.fit_intercept);
+            if (inst_use && inst_use->cols()) original_design = append_matrix(original_design, inst_use);
+            absorption = refine_n1_absorption(y_use, original_design, fes_use, w_ptr,
+                tuned, method_used_, slope_terms, nullptr, absorption, remaining);
+            continue;
+        }
+        if (detail::ordinary_audit_enabled()) {
+            detail::OrdinaryAuditReceipt audit("fit",tuned,absorption,cache_hit,n1_budget.used ? 1 : 0);
+            if (has_slopes_use) {
+                audit.unsupported("heterogeneous_slopes");
+            } else {
+                Eigen::MatrixXd audit_design=drop_intercept ? Eigen::MatrixXd(X_use)
+                    : maybe_add_intercept(X_use,options_.fit_intercept);
+                if (inst_use && inst_use->cols()) audit_design=append_matrix(audit_design,inst_use);
+                double rss_scale=1.0;
+                if (w_ptr && !tuned.weights_are_frequencies && sum_weights_for_stats>0.0 &&
+                    std::abs(sum_weights_for_stats-results_.nobs)>1e-12*std::max(1.0,double(results_.nobs)))
+                    rss_scale=results_.nobs/sum_weights_for_stats;
+                detail::run_ordinary_post_ols_audit(audit,y_use,audit_design,fes_use,w_ptr,c_ptr,tuned,
+                    absorption,transformed_X_used,kept_slope_cols,ols_result,results_,
+                    drop_intercept,transformed_has_intercept,sigma2_df,robust_scale,cluster_ratio,
+                    rss_scale,inference_unavailable,wants_iv,false);
+            }
+            audit.emit();
+        }
+        if (allow_cache_write && !cache_hit && absorption.converged &&
+            absorption.precision_certified && !cache_path.empty()) {
+            write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
+                absorption.X_tilde, absorption.fe_levels, absorption.sweep_order_used,
+                design_cols, method_used_, absorption.iterations, absorption.converged,
+                absorption.krylov_internal_tolerance, absorption.krylov_max_final_backward_error,
+                absorption.krylov_max_condition, absorption.krylov_max_condition_times_backward_error,
+                absorption);
+        }
         cpu_profile_log_elapsed("post_inference", post_phase_t0);
         cpu_profile_log_elapsed("postprocess", post_t0);
         cpu_profile_log_elapsed("fit_inner_total", fit_t0);
         end_parallel_observation();
+        break;
+        }
     };
 
     if (!has_slopes && fe_cache_cfg.mode != "off" && has_fes) {
@@ -11389,7 +12600,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             fe_cache_hit =
                 read_fe_structure_cache(fe_cache_cfg.path, fe_cache_signature, nobs_full,
                                         options_.drop_singletons,
-                                        static_cast<int>(fes.size()), fe_cache);
+                                        static_cast<int>(fes.size()), fe_cache,
+                                        preprocessing_thread_resolution.effective, parallel_observer_.get());
         }
         cpu_profile_log_elapsed("fe_cache_read", fe_cache_read_t0);
     }
@@ -11454,7 +12666,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         std::vector<uint8_t> keep;
         if (options_.weights_are_frequencies && weights) {
             keep = compute_keep_mask_drop_singletons_fweights(
-                fes, *weights, kMaxSingletonIterations, &singletons_dropped_rows,
+                fes, *weights, &singletons_dropped_rows,
                 &singletons_dropped_effective,
                 preprocessing_thread_resolution.effective,
                 preprocessing_thread_resolution.capacity,
@@ -11462,7 +12674,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 &integer_frequency_weights,
                 &preprocessing_observer);
         } else {
-            keep = compute_keep_mask_drop_singletons(fes, kMaxSingletonIterations,
+            keep = compute_keep_mask_drop_singletons(fes,
                                                      &singletons_dropped_rows,
                                                      preprocessing_thread_resolution.effective,
                                                      preprocessing_thread_resolution.capacity,
@@ -11564,7 +12776,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             write_fe_structure_cache(fe_cache_cfg.path, fe_cache_signature, nobs_full,
                                      options_.drop_singletons, kept_idx, num_groups,
-                                     fe_group_ids);
+                                     fe_group_ids, preprocessing_thread_resolution.effective,
+                                     parallel_observer_.get());
         }
     }
 
@@ -11587,6 +12800,86 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     attempt.commit(LifecycleState::StandardReady);
 }
 
+void HdfeRegressorV11::apply_importance_weights(
+    const Eigen::Ref<const Eigen::VectorXd>& weights) {
+    try {
+        if (!has_estimation_result() || !results_.converged ||
+            !results_.precision_certified || options_.weights_are_frequencies ||
+            results_.sample_index.size() != results_.nobs || results_.nobs <= 0) {
+            throw std::runtime_error(
+                "iweights require a successful non-frequency-weight fit with a complete sample map; no estimates returned");
+        }
+        // regress treats iweights as analytic weights with robust/cluster VCE.
+        // Only classical inference uses unnormalized sums and weighted N/df.
+        if (options_.se_type != StandardErrorType::Homoskedastic) return;
+        long double full_sum = 0.0L, kept_sum = 0.0L;
+        for (int row = 0; row < weights.size(); ++row) {
+            if (!hdfe::detail::ieee_finite(weights(row)) || weights(row) <= 0.0) {
+                throw std::runtime_error("iweights must be finite and positive; no estimates returned");
+            }
+            full_sum += static_cast<long double>(weights(row));
+        }
+        for (int row : results_.sample_index) {
+            if (row < 0 || row >= weights.size()) {
+                throw std::runtime_error("iweight sample index is outside the supplied weights; no estimates returned");
+            }
+            kept_sum += static_cast<long double>(weights(row));
+        }
+        const double full_weight = static_cast<double>(full_sum);
+        const double kept_weight = static_cast<double>(kept_sum);
+        if (!hdfe::detail::ieee_finite(full_weight) || !hdfe::detail::ieee_finite(kept_weight)) {
+            throw std::runtime_error("iweight totals exceed the finite result range; no estimates returned");
+        }
+        // regress truncates classical iweight counts, but keeps the actual
+        // unnormalized weights in RSS/TSS and in the normal equations.
+        const double full_n = std::floor(full_weight);
+        const double kept_n = std::floor(kept_weight);
+        const double old_df = results_.df_resid_unadj;
+        const double new_df = old_df + kept_weight - results_.nobs;
+        const double reported_df = old_df + kept_n - results_.nobs;
+        if (options_.se_type == StandardErrorType::Homoskedastic && old_df > 0.0 && new_df > 0.0) {
+            const double variance_scale = old_df / new_df;
+            if (!hdfe::detail::ieee_finite(variance_scale)) {
+                throw std::runtime_error("iweight covariance scaling overflowed; no estimates returned");
+            }
+            for (int j = 0; j < results_.covariance.size(); ++j) {
+                const double value = results_.covariance.data()[j];
+                if (hdfe::detail::ieee_finite(value) &&
+                    !hdfe::detail::ieee_finite(value * variance_scale)) {
+                    throw std::runtime_error("iweight covariance overflowed; no estimates returned");
+                }
+            }
+            results_.covariance *= variance_scale;
+            for (int j = 0; j < results_.std_errors.size(); ++j) {
+                const double variance = results_.covariance(j,j);
+                results_.std_errors(j) = variance >= 0.0 ? std::sqrt(variance)
+                    : std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+        const double scale = kept_weight / results_.nobs;
+        results_.rss *= scale;
+        results_.tss *= scale;
+        results_.tss_within *= scale;
+        results_.sigma2 = new_df > 0.0 ? results_.rss / new_df
+            : std::numeric_limits<double>::quiet_NaN();
+        results_.df_resid_unadj = new_df;
+        if (options_.se_type != StandardErrorType::Cluster) results_.df_resid = reported_df;
+        results_.nobs_effective = kept_n;
+        results_.nobs_full_effective = full_n;
+        recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
+                            results_.pvalues, results_.conf_int, options_.level, results_.df_resid);
+        if (!(new_df > 0.0)) mark_inference_unavailable(results_);
+        if (!hdfe::detail::ieee_finite(results_.rss) ||
+            !hdfe::detail::ieee_finite(results_.tss) ||
+            !hdfe::detail::ieee_finite(results_.tss_within)) {
+            throw std::runtime_error("iweight fit statistics overflowed; no estimates returned");
+        }
+    } catch (...) {
+        fail_attempt();
+        throw;
+    }
+}
+
 detail::AbsorptionResult HdfeRegressorV11::partial_out(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -11595,6 +12888,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     const std::vector<Eigen::VectorXi>* clusters,
     const std::vector<detail::HeterogeneousSlopeTerm>* slopes) {
     AttemptTransaction attempt(*this);
+    const bool cuda_execution_required = require_cuda_compatible_method(options_, fes.size());
     if (y.size() == 0) {
         throw std::runtime_error("Outcome vector must be non-empty");
     }
@@ -11617,6 +12911,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     if (weights && weights->size() != y.size()) {
         throw std::runtime_error("Weights must have the same length as y");
     }
+    int zero_weight_count = 0;
     if (weights && !options_.weights_are_frequencies) {
         // Analytic weights must be IEEE-finite and non-negative (re-audit
         // R-03): one negative or NaN value among many silently corrupts
@@ -11632,6 +12927,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 throw std::runtime_error(
                     "weights must be finite and non-negative");
             }
+            zero_weight_count += (detail::ieee_bits_detail::bits(w_chk[i]) &
+                                  UINT64_C(0x7fffffffffffffff)) == 0;
         }
     }
     gpu_used_ = false;
@@ -11665,6 +12962,17 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             require_finite_vector(
                 slope.values, "heterogeneous slope values", validation_threads);
         }
+    }
+
+    if (zero_weight_count) {
+        PositiveWeightInput sample(y, X, fes, *weights, clusters, nullptr, slopes, zero_weight_count);
+        auto result = partial_out(sample.y, sample.X, sample.fes, &sample.weights,
+            sample.clusters ? &*sample.clusters : nullptr,
+            sample.slopes ? &*sample.slopes : nullptr);
+        for (int i = 0; i < results_.sample_index.size(); ++i)
+            results_.sample_index[i] = sample.rows.at(static_cast<std::size_t>(results_.sample_index[i]));
+        attempt.commit(LifecycleState::PartialReady);
+        return result;
     }
 
     const bool has_fes = !fes.empty();
@@ -11726,12 +13034,13 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
 
     FeStructureCache fe_cache;
     bool fe_cache_hit = false;
-    std::uint64_t fe_cache_signature = 0;
+    FeStructureDigest fe_cache_signature{};
     bool fe_cache_signature_ready = false;
     auto ensure_fe_cache_signature = [&]() {
         if (!fe_cache_signature_ready) {
             fe_cache_signature = hash_fe_structure_cache_signature(
-                fes, weights, options_.drop_singletons, options_.weights_are_frequencies);
+                fes, weights, options_.drop_singletons, options_.weights_are_frequencies,
+                preprocessing_thread_resolution.effective, parallel_observer_.get());
             fe_cache_signature_ready = true;
         }
     };
@@ -11763,6 +13072,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                            const Eigen::VectorXd* w_ptr,
                            const std::vector<Eigen::VectorXi>* c_ptr,
                            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) -> detail::AbsorptionResult {
+        detail::additive_cell_projection::ScopedPublicAutoRequest additive_request(
+            options_.absorption_method==AbsorptionMethod::Auto);
         const ThreadResolution thread_resolution =
             resolve_threads(static_cast<int>(y_use.size()),
                             static_cast<int>(fes_use.size()));
@@ -11792,6 +13103,29 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 detail::absorb_fixed_effects_v6(
                     y_use, X_use, fes_use, w_ptr, tuned,
                     AbsorptionMethod::Auto, slope_terms);
+            const double effective_tolerance =
+                tuned.tolerance_mode == ToleranceMode::ReghdfeComparable
+                    ? std::min(tuned.tol, 1e-9) : tuned.tol;
+            const double necessary_limit = std::max(
+                8.0 * std::max(0.0, effective_tolerance),
+                64.0 * std::numeric_limits<double>::epsilon());
+            if (solved.converged && !solved.precision_certified &&
+                hdfe::detail::ieee_finite(solved.abs_residual_rel) &&
+                solved.abs_residual_rel > necessary_limit && w_ptr == nullptr &&
+                slope_terms.empty() && solved.iterations < tuned.max_iter) {
+                // One continuation at the caller's unchanged method/target.
+                // Only an actual necessary-check failure enters this branch.
+                HdfeOptions continuation = tuned;
+                continuation.max_iter -= solved.iterations;
+                detail::AbsorptionResult refined = detail::absorb_fixed_effects_v6(
+                    solved.y_tilde, solved.X_tilde, fes_use, nullptr, continuation,
+                    AbsorptionMethod::Auto, slope_terms);
+                refined.iterations += solved.iterations;
+                refined.gpu_absorption_iterations += solved.gpu_absorption_iterations;
+                detail::certify_absorption_result(
+                    y_use, X_use, fes_use, nullptr, tuned, slope_terms, refined);
+                solved = std::move(refined);
+            }
             method_used_ = choose_method_used(fes_use.size(), threads, tuned);
             if (has_slopes_use && method_used_ == AbsorptionMethod::Jacobi) {
                 method_used_ = fes_use.size() > 1
@@ -11802,6 +13136,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         };
 
         detail::AbsorptionResult absorption;
+        bool cache_hit = false;
         if (!cache_profile_enabled) {
             // Preserve the cache-off hot path exactly: no signature, profile,
             // cache allocation, read, or write is attempted.
@@ -11910,7 +13245,6 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
 
             AbsorptionCacheKey cache_key;
             bool cache_key_ready = false;
-            bool cache_hit = false;
             const HdfeOptions cache_key_options = tuned;
             auto ensure_cache_key = [&]() {
                 if (!cache_key_ready) {
@@ -12042,6 +13376,9 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
 
         // Populate a minimal results_ object for Stata/Python consumers that expect e(df_a),
         // singleton counts, and convergence diagnostics.
+        if (read_env_bool("XHDFE_DEBUG_SOLVER").value_or(false)) {
+            std::cerr << "xhdfe partial_out: cache_hit=" << (cache_hit ? 1 : 0) << "\n";
+        }
         results_.coefficients.resize(0);
         results_.std_errors.resize(0);
         results_.tvalues.resize(0);
@@ -12328,6 +13665,15 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.df_a = static_cast<double>(df_a_report);
         results_.df_a_nested = static_cast<double>(nested_report);
 
+        if (detail::ordinary_audit_enabled()) {
+            detail::OrdinaryAuditReceipt audit("partial_out",tuned,absorption,cache_hit);
+            if (has_slopes_use) audit.unsupported("heterogeneous_slopes");
+            else {
+                audit.families[0]=detail::run_ordinary_n2_audit(y_use,X_use,fes_use,w_ptr,tuned,absorption,c_ptr,false);
+                for(int j=1;j<4;++j) audit.families[j]={detail::OrdinaryAuditFinding::Unsupported,"partial_out_no_ols"};
+            }
+            audit.emit();
+        }
         end_parallel_observation();
         return absorption;
     };
@@ -12340,7 +13686,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             fe_cache_hit =
                 read_fe_structure_cache(fe_cache_cfg.path, fe_cache_signature, nobs_full,
                                         options_.drop_singletons,
-                                        static_cast<int>(fes.size()), fe_cache);
+                                        static_cast<int>(fes.size()), fe_cache,
+                                        preprocessing_thread_resolution.effective, parallel_observer_.get());
         }
     }
 
@@ -12395,7 +13742,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         std::vector<uint8_t> keep;
         if (options_.weights_are_frequencies && weights) {
             keep = compute_keep_mask_drop_singletons_fweights(
-                fes, *weights, kMaxSingletonIterations, &singletons_dropped_rows,
+                fes, *weights, &singletons_dropped_rows,
                 &singletons_dropped_effective,
                 preprocessing_thread_resolution.effective,
                 preprocessing_thread_resolution.capacity,
@@ -12403,7 +13750,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 &integer_frequency_weights,
                 &preprocessing_observer);
         } else {
-            keep = compute_keep_mask_drop_singletons(fes, kMaxSingletonIterations,
+            keep = compute_keep_mask_drop_singletons(fes,
                                                      &singletons_dropped_rows,
                                                      preprocessing_thread_resolution.effective,
                                                      preprocessing_thread_resolution.capacity,
@@ -12459,6 +13806,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     } else {
         absorption = run_partial(y, X, fes, weights, clusters, slopes_in);
     }
+    require_accepted_absorption(options_, absorption, "HDFE partial-out");
+    require_cuda_execution(cuda_execution_required, absorption);
     if (preprocessing_parallel_observed) {
         if (preprocessing_thread_resolution.effective > threads_effective_) {
             threads_effective_ = preprocessing_thread_resolution.effective;
@@ -12496,7 +13845,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             }
             write_fe_structure_cache(fe_cache_cfg.path, fe_cache_signature, nobs_full,
                                      options_.drop_singletons, kept_idx, num_groups,
-                                     fe_group_ids);
+                                     fe_group_ids, preprocessing_thread_resolution.effective,
+                                     parallel_observer_.get());
         }
     }
 
@@ -12534,6 +13884,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                   const Eigen::VectorXd* weights,
                                   const std::vector<Eigen::VectorXi>* clusters) {
     AttemptTransaction attempt(*this);
+    detail::ScopedN1Capture n1_capture(detail::ordinary_audit_enabled());
+    const bool exact_group_dof = options_.dof_method == DofAdjustmentMethod::Exact;
+    const bool adjust_group_clusters = options_.dof_adjust_clusters && !exact_group_dof;
+    const bool cuda_execution_required = require_cuda_compatible_method(options_, fes.size());
     if (!individual_ids) {
         GroupCollapsedData collapsed =
             collapse_group_long_format(
@@ -12548,7 +13902,19 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 suppress_auto_routing_retry_, true);
             fit(collapsed.y, collapsed.X, collapsed.standard_fes, w_ptr, c_ptr, nullptr, {});
         }
-        results_.sample_index.resize(0);
+        if (results_.sample_index.size() != results_.nobs) {
+            throw std::runtime_error(
+                "group(): estimation sample mapping is incomplete; no estimates returned");
+        }
+        // Compose the post-singleton group selection with original input rows.
+        for (int i = 0; i < results_.sample_index.size(); ++i) {
+            const int group_row = results_.sample_index(i);
+            if (group_row < 0 || group_row >= static_cast<int>(collapsed.rep_row.size())) {
+                throw std::runtime_error(
+                    "group(): estimation sample index is outside the group map; no estimates returned");
+            }
+            results_.sample_index(i) = collapsed.rep_row[static_cast<std::size_t>(group_row)];
+        }
         attempt.commit(LifecycleState::StandardReady);
         return;
     }
@@ -12570,6 +13936,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     GroupCollapsedData collapsed = collapse_group_long_format(
         y, X, fes, group_ids, individual_ids, individual_fe_index, aggregation,
         weights, options_.weights_are_frequencies, clusters);
+    drop_zero_weight_groups(collapsed, aggregation, options_.weights_are_frequencies);
     const int collapsed_full = static_cast<int>(collapsed.y.size());
     const std::int64_t nobs_full_frequency =
         (options_.weights_are_frequencies && collapsed.weights)
@@ -12613,6 +13980,32 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     Eigen::MatrixXd design =
         drop_intercept ? X_work : maybe_add_intercept(X_work, options_.fit_intercept);
     const int design_cols = static_cast<int>(design.cols());
+
+    // The grouped design never carries an explicit intercept column: an
+    // ordinary FE level or mean-aggregated membership columns (rows summing to
+    // one) span the constant. Sum aggregation spans it only through a
+    // combination of individual columns that is constant across groups:
+    // guaranteed for a uniform team size and scale, otherwise a property of
+    // the incidence pattern, decided after the absorption by projecting the
+    // ones vector as one separate right-hand side (only in that case). A fit
+    // whose absorbed effects do not span the constant has no intercept and is
+    // reported as such: no recovered constant, uncentered total sum of squares.
+    bool constant_in_span =
+        !standard_fes_work.empty() || aggregation == GroupAggregation::Mean ||
+        gi_work.num_groups <= 0;
+    if (!constant_in_span) {
+        const int first_size = gi_work.group_ptr[1] - gi_work.group_ptr[0];
+        bool uniform_team = true;
+        for (int group = 1; group < gi_work.num_groups && uniform_team; ++group) {
+            uniform_team =
+                gi_work.group_ptr[group + 1] - gi_work.group_ptr[group] == first_size &&
+                (gi_work.group_scale.empty() ||
+                 gi_work.group_scale[static_cast<std::size_t>(group)] ==
+                     gi_work.group_scale[0]);
+        }
+        constant_in_span = uniform_team;
+    }
+    const bool probe_constant = !constant_in_span;
 
     const ThreadResolution thread_resolution =
         resolve_threads(static_cast<int>(y_work.size()),
@@ -12758,32 +14151,43 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                   : AbsorptionMethod::GaussSeidel);
         tuned.absorption_method = method_used_;
     }
+    detail::N1RefinementBudget n1_budget{tuned.max_iter};
+    for (;;) {
     gpu_used_ = absorption.gpu_used;
     gpu_status_code_ = absorption.gpu_status_code;
     gpu_attempted_ = absorption.gpu_attempted;
     gpu_absorption_converged_ = absorption.gpu_absorption_converged;
     gpu_absorption_iterations_ = absorption.gpu_absorption_iterations;
-    if (!absorption.converged) {
-        if (absorption.gpu_status_code == 2) {
-            throw std::runtime_error("Requested GPU backend was unavailable during group/individual HDFE absorption");
-        }
-        if (absorption.gpu_status_code == 3) {
-            throw std::runtime_error("Requested GPU backend did not converge during group/individual HDFE absorption");
-        }
-        if (absorption.gpu_status_code == 4) {
-            throw std::runtime_error("Requested GPU backend failed during group/individual HDFE absorption");
-        }
-        throw std::runtime_error(
-            "Group/individual HDFE absorption did not converge; no estimates were produced");
+    require_accepted_absorption(tuned, absorption, "group/individual HDFE absorption",
+        absorption.converged && absorption.precision_certified ? std::string{} :
+        group_failure_criteria(y_work, design, standard_fes_work, gi_work, w_ptr, tuned, absorption));
+    require_cuda_execution(cuda_execution_required, absorption);
+
+    if (probe_constant) {
+        // Ones vector projected on the absorbed effects by one separate
+        // right-hand side (exact direct route when eligible, otherwise the
+        // LSMR of the backend that did the absorption), outside the
+        // certificate, refinement and retry machinery: appended to the design
+        // it made the primary certificate fail on its consistent system and
+        // triggered a wasted tighter pass. A residual at the FE-collinearity
+        // scale (kFeCollinearTol below) means the constant lies in the span.
+        const double residual_rel = detail::group_constant_projection_residual_rel(
+            standard_fes_work, gi_work, w_ptr, tuned, absorption.gpu_used);
+        constant_in_span = residual_rel <= 1e-9;
     }
-    if (!absorption.precision_certified) {
-        throw std::runtime_error(
-            "Group/individual HDFE absorption failed the independent precision certificate; no estimates were produced");
-    }
+    results_.model_has_constant = constant_in_span;
 
     double sum_weights_for_stats = static_cast<double>(y_work.size());
-    const double total_tss =
-        compute_total_sum_of_squares(y_work, w_ptr, &sum_weights_for_stats);
+    double total_tss = 0.0;
+    if (constant_in_span) {
+        total_tss = compute_total_sum_of_squares(y_work, w_ptr, &sum_weights_for_stats);
+    } else {
+        // No constant anywhere in the model: uncentered total sum of squares,
+        // as the ordinary path reports noconstant fits without absorbed levels.
+        total_tss = weighted_sum_of_squares(y_work, w_ptr);
+        sum_weights_for_stats =
+            w_ptr ? w_ptr->sum() : static_cast<double>(y_work.size());
+    }
     const double within_tss = weighted_sum_of_squares(absorption.y_tilde, w_ptr);
 
     Eigen::MatrixXd transformed_X = absorption.X_tilde.leftCols(design_cols);
@@ -12806,6 +14210,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     kept_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
     omitted_slope_cols.reserve(static_cast<std::size_t>(std::max(0, transformed_slope_cols)));
+    std::optional<bool> exact_constant_membership_projection;
     for (int j = 0; j < transformed_slope_cols; ++j) {
         const double raw_ss = X_work.col(j).squaredNorm();
         const double tilde_ss = transformed_X.col(j).squaredNorm();
@@ -12817,9 +14222,40 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                     : std::numeric_limits<double>::infinity());
         }
         const bool finite = hdfe::detail::ieee_finite(raw_ss) && hdfe::detail::ieee_finite(tilde_ss);
-        const bool collinear =
+        bool collinear =
             finite && (raw_ss <= 0.0 ? (tilde_ss <= kFeCollinearTol)
                                      : (tilde_ss <= kFeCollinearTol * raw_ss));
+        const bool grouped_constant_available =
+            constant_in_span;
+        if (collinear && detail::ordinary_audit_enabled()) {
+            // Audit mode: exact redundancy proof or an informative refusal.
+            bool verified=false;
+            if(standard_fes_work.size()<=1 && raw_ss>0 && tilde_ss>0) {
+                if(!exact_constant_membership_projection) {
+                    bool same=gi_work.num_individuals>0;
+                    for(int g=0;g<gi_work.num_groups && same;++g)
+                        same=gi_work.group_ptr[g+1]-gi_work.group_ptr[g]==gi_work.num_individuals &&
+                             gi_work.group_scale[g]==gi_work.group_scale[0];
+                    Eigen::VectorXi level=standard_fes_work.empty() ? Eigen::VectorXi::Zero(y_work.size()) : standard_fes_work[0];
+                    exact_constant_membership_projection=same && detail::exact_level_projection(
+                        y_work,X_work,level,w_ptr,absorption.y_tilde,transformed_X.leftCols(X_work.cols()));
+                }
+                verified=*exact_constant_membership_projection;
+            }
+            collinear=require_safe_fe_omission(X_work.col(j),raw_ss,tilde_ss,standard_fes_work,
+                {},grouped_constant_available,j+1,verified,
+                &gi_work,aggregation==GroupAggregation::Mean);
+        } else if (collinear && grouped_constant_available && raw_ss > 0.0 && tilde_ss > 0.0) {
+            // Centered scale, as in the ordinary path: a level shift is absorbed
+            // by the ordinary FE or by mean-aggregated membership columns.
+            const double centered_ss = centered_sum_of_squares(X_work.col(j));
+            const double rounding_floor =
+                16.0 * std::numeric_limits<double>::epsilon() *
+                std::numeric_limits<double>::epsilon() * raw_ss;
+            collinear = !(centered_ss > 0.0) ||
+                        tilde_ss <= kFeCollinearTol * centered_ss ||
+                        tilde_ss <= rounding_floor;
+        }
         if (collinear) {
             omitted_fe_slope_cols.push_back(j);
             omitted_slope_cols.push_back(j);
@@ -12843,6 +14279,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         std::vector<int> keep_positions;
         keep_positions.reserve(kept_slope_cols.size());
         if (k_initial > 0) {
+            // FP64 triage on the Gram already formed for OLS (2.26.2 rule);
+            // the double-double rank runs only for unseparated decisions.
             Eigen::MatrixXd gram = cp.xtx.topLeftCorner(k_initial, k_initial);
             if (transformed_has_intercept) {
                 double denom = cp.sum_w;
@@ -12851,9 +14289,20 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
                 gram.noalias() -= (cp.sum_x * cp.sum_x.transpose()) / denom;
             }
-            const std::vector<uint8_t> drop_mask =
+            bool rank_separated = true;
+            const Eigen::VectorXd uncentered_diagonal =
+                cp.xtx.diagonal().head(k_initial);
+            std::vector<uint8_t> drop_mask =
                 compute_rank_collinearity_mask_from_gram(
-                    gram, kept_slope_cols, rank_collinear_tol, options_.collinear_priority);
+                    gram, kept_slope_cols, rank_collinear_tol,
+                    options_.collinear_priority, &rank_separated,
+                    &uncentered_diagonal);
+            if (!rank_separated) {
+                drop_mask = detail::precise_ols_rank_mask(
+                    transformed_X, kept_slope_cols, w_ptr, transformed_has_intercept,
+                    rank_collinear_tol, options_.collinear_priority,
+                    tuned.num_threads, tuned.parallel_observer);
+            }
 
             std::vector<int> new_kept;
             std::vector<int> new_omitted;
@@ -12938,8 +14387,24 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         empty.tvalues.resize(0);
         empty.pvalues.resize(0);
         empty.conf_int.resize(0, 2);
-        empty.residuals = absorption.y_tilde;
+        empty.residuals.resize(absorption.y_tilde.size());
+        empty.n1_normal = std::make_shared<detail::N1NormalEvidence>(1, 0);
+        for (int i = 0; i < empty.residuals.size(); ++i) {
+            const double value = absorption.y_tilde[i];
+            empty.residuals[i] = value;
+            empty.n1_normal->chunks[0].add(value, value, w_ptr ? (*w_ptr)[i] : 1.0,
+                0, [](int) { return 0.0; }, [](int) { return 0.0; }, [](int) { return 0.0; });
+        }
         empty.df_resid = nobs_effective;
+        if (tuned.se_type == StandardErrorType::Cluster) {
+            if (!c_ptr || c_ptr->empty())
+                throw std::runtime_error("Cluster-robust errors requested but no cluster variables were provided");
+            const auto counts = compute_cluster_counts(*c_ptr);
+            empty.num_clusters = *std::min_element(counts.begin(), counts.end());
+            if (c_ptr->size() == 1 && empty.num_clusters > 1 && nobs_effective > 0.0)
+                empty.cov_scale = static_cast<double>(empty.num_clusters) / (empty.num_clusters-1.0) *
+                    (nobs_effective-1.0) / nobs_effective;
+        }
         empty.rss = weighted_sum_of_squares(empty.residuals, w_ptr);
         empty.tss = total_tss;
         empty.within_tss = within_tss;
@@ -13151,7 +14616,12 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                               tuned.parallel_observer);
             }
         }
-        const double intercept = y_mean - x_means.dot(results_.coefficients);
+        // Without a constant in the span of the absorbed effects the recovered
+        // level is not an intercept (the residuals need not sum to zero): the
+        // slot is reported missing and the Stata ado drops the _cons column.
+        const double intercept =
+            constant_in_span ? y_mean - x_means.dot(results_.coefficients)
+                             : std::numeric_limits<double>::quiet_NaN();
 
         const int out_cols = slope_cols + 1;
         results_.coefficients.conservativeResize(out_cols);
@@ -13221,7 +14691,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 standard_fes_work, standard_levels, mobility_method,
                 groupvar_ptr, tuned.num_threads, first_pair_stats_ptr, w_ptr);
         std::vector<uint8_t> nested_flags(dof.levels.size(), 0);
-        if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
+        if (adjust_group_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
             !c_ptr->empty()) {
             for (const auto& cl : *c_ptr) {
                 for (std::size_t d = 0; d < standard_fes_work.size(); ++d) {
@@ -13342,7 +14812,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (groupvar_ptr) {
             results_.groupvar = std::move(groupvar);
         }
-        if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
+        if (adjust_group_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
             !c_ptr->empty()) {
             for (std::size_t d = 0; d < nested_flags.size(); ++d) {
                 if (nested_flags[d]) {
@@ -13378,11 +14848,22 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     // Append the individual FE row so the Stata ado can display it in the
     // "Absorbed degrees of freedom" footnote, matching reghdfe's layout.
     // The individual FE is placed last in absorb_ordered on the ado side.
-    const int individual_redundant =
-        (options_.dof_method == DofAdjustmentMethod::None &&
-         !standard_fes_work.empty())
-            ? 1
-            : 0;
+    int individual_redundant = 0;
+    if (!standard_fes_work.empty() && nested_dof_levels == 0) {
+        bool constant_team_size = true;
+        const int first_size = gi_work.group_ptr[1] - gi_work.group_ptr[0];
+        for (int group = 1; group < gi_work.num_groups; ++group) {
+            if (gi_work.group_ptr[group + 1] - gi_work.group_ptr[group] != first_size) {
+                constant_team_size = false;
+                break;
+            }
+        }
+        // Mean membership columns sum to one. Uniform-size sum membership has
+        // the same span. An ordinary FE already supplies that intercept.
+        if (aggregation == GroupAggregation::Mean || constant_team_size) {
+            individual_redundant = 1;
+        }
+    }
     if (individual_redundant > 0) {
         df_a_exact -= individual_redundant;
     }
@@ -13397,6 +14878,19 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     results_.fe_inexact.push_back(1);
     results_.fe_nested.push_back(0);
 
+    if (exact_group_dof) {
+        const FeDofInfo exact = compute_grouped_dof_exact(standard_fes_work, gi_work, aggregation, w_ptr);
+        df_a_levels = exact.df_a_levels;
+        df_a_exact = exact.df_a_exact;
+        results_.fe_num_levels = exact.levels;
+        results_.fe_base_levels = exact.levels;
+        results_.fe_redundant = exact.redundant;
+        results_.fe_base_redundant = exact.redundant;
+        results_.fe_num_coefs = exact.num_coefs;
+        results_.fe_inexact = exact.inexact;
+        results_.fe_nested.assign(exact.levels.size(), 0);
+    }
+
     results_.df_a_levels = static_cast<double>(df_a_levels);
     results_.df_a_exact = static_cast<double>(df_a_exact);
 
@@ -13404,6 +14898,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     const int nested_report = nested_dof_levels;
     results_.df_a = static_cast<double>(df_a_report);
     results_.df_a_nested = static_cast<double>(nested_report);
+    results_.model_has_constant = constant_in_span;
 
     const bool use_reghdfe_stats = (options_.stats_style == StatsStyle::Reghdfe);
     int df_a_used = df_a_report;
@@ -13412,7 +14907,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     if (!use_reghdfe_stats) {
         df_a_used = 0;
         nested_dof_used = 0;
-        const int df_a_base = tuned.ssc_k_exact ? df_a_exact : df_a_levels;
+        const int df_a_base = (tuned.ssc_k_exact || exact_group_dof) ? df_a_exact : df_a_levels;
         const int nested_base = tuned.ssc_k_exact ? nested_dof_coefs : nested_dof_levels;
         nested_adj = (nested_base > 0) ? 1 : 0;
         if (tuned.ssc_k_fixef == FixefDofMethod::None) {
@@ -13490,7 +14985,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             results_.covariance *= robust_scale;
         }
         results_.df_resid = tuned.ssc_t_df > 0.0 ? tuned.ssc_t_df : df_r_model;
-    } else if (tuned.se_type == StandardErrorType::Cluster && df_m > 0 && c_ptr && !c_ptr->empty()) {
+    } else if (tuned.se_type == StandardErrorType::Cluster && c_ptr && !c_ptr->empty()) {
         const int Gc = ols_result.num_clusters;
         if (use_reghdfe_stats) {
             const double df_r_unclust = df_r_model;
@@ -13586,30 +15081,25 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                         w_ptr);
                 }
                 Eigen::MatrixXd scores(n_rows, cov_cols);
-                scores.leftCols(slope_cols_aug) =
-                    transformed_X_used.rowwise() + means_x;
+                scores.leftCols(slope_cols_aug) = transformed_X_used;
                 scores.col(slope_cols_aug).setOnes();
                 const double n_bread =
                     w_ptr ? w_ptr->sum() : static_cast<double>(n_rows);
-                Eigen::MatrixXd bread(cov_cols, cov_cols);
+                Eigen::MatrixXd bread = Eigen::MatrixXd::Zero(cov_cols, cov_cols);
                 bread.topLeftCorner(slope_cols_aug, slope_cols_aug) =
                     ols_result.xtx_inv;
-                Eigen::RowVectorXd side = -means_x * ols_result.xtx_inv;
-                bread.block(slope_cols_aug, 0, 1, slope_cols_aug) = side;
-                bread.block(0, slope_cols_aug, slope_cols_aug, 1) =
-                    side.transpose();
-                bread(slope_cols_aug, slope_cols_aug) =
-                    1.0 / n_bread +
-                    (means_x * ols_result.xtx_inv * means_x.transpose())(0, 0);
+                bread(slope_cols_aug, slope_cols_aug) = 1.0 / n_bread;
                 Eigen::MatrixXd cov_aug = detail::multiway_cluster_sandwich(
-                    bread, scores, ols_result.residuals, w_ptr, *c_ptr);
-                double num = 0.0;
-                double den = 0.0;
-                for (int j = 0; j < slope_cols_aug; ++j) {
-                    num += results_.covariance(j, j);
-                    den += cov_aug(j, j);
-                }
-                const double rescale = (den > 0.0) ? (num / den) : 0.0;
+                    bread, scores, ols_result.residuals, w_ptr, *c_ptr,
+                    tuned.ssc_g_df, tuned.ssc_g_adj);
+                Eigen::MatrixXd transport = Eigen::MatrixXd::Identity(cov_cols, cov_cols);
+                transport.block(slope_cols_aug, 0, 1, slope_cols_aug) = -means_x;
+                cov_aug = (transport * cov_aug * transport.transpose()).eval();
+                double rescale = cluster_ratio;
+                if (ols_result.df_resid > 0.0)
+                    rescale *= (nobs - 1.0) / ols_result.df_resid;
+                if (tuned.ssc_g_df == ClusterDofMethod::Min && tuned.ssc_g_adj && ols_result.num_clusters > 1)
+                    rescale *= static_cast<double>(ols_result.num_clusters) / (ols_result.num_clusters - 1.0);
                 if (rescale > 0.0 && hdfe::detail::ieee_finite(rescale) && hdfe::detail::ieee_all_finite(cov_aug)) {
                     results_.covariance = cov_aug * rescale;
                     results_.std_errors =
@@ -13655,11 +15145,11 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             Eigen::MatrixXd cov_full = results_.covariance;
             Eigen::MatrixXd cov_block =
                 cov_full.topLeftCorner(slope_cols, slope_cols);
-            if (fix_psd_scaled(cov_full, psd_scale)) {
-                if (slope_cols > 0) {
-                    (void)fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
-                    cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
-                }
+            const bool full_fixed = fix_psd_scaled(cov_full, psd_scale);
+            const bool slopes_fixed = slope_cols > 0 &&
+                fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
+            if (full_fixed || slopes_fixed) {
+                cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
                 results_.covariance = cov_full;
                 results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
                 results_.vcv_psd_fixed = true;
@@ -13693,7 +15183,26 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     enforce_estimation_output_postcondition(
         results_, drop_intercept, inference_unavailable);
 
+    try {
+        require_n1_fit(absorption, ols_result, kept_slope_cols,
+                       transformed_has_intercept, transformed_full_cols, tuned,
+                       have_precomputed ? &xtx_used : nullptr,
+                       have_precomputed ? &xty_used : nullptr);
+    } catch (const detail::N1Failure& failure) {
+        const int remaining = n1_budget.remaining(absorption.iterations, failure);
+        absorption = refine_n1_absorption(y_work, design, standard_fes_work, w_ptr,
+            tuned, method_used_, {}, &gi_work, absorption, remaining);
+        continue;
+    }
+
+    if (detail::ordinary_audit_enabled()) {
+        detail::OrdinaryAuditReceipt audit("group_fit",tuned,absorption,false,n1_budget.used ? 1 : 0);
+        audit.unsupported("group_individual");
+        audit.emit();
+    }
     end_parallel_observation();
+    break;
+    }
     const AbsorptionCacheKey grouped_signature = hash_grouped_fit_signature(
         y, X, fes, group_ids, *individual_ids, aggregation, weights, options_);
     grouped_signature_1_ = grouped_signature.sig1;
@@ -13711,6 +15220,9 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     GroupAggregation aggregation,
     const Eigen::VectorXd* weights,
     const GroupIndividualFeOptions& options) const {
+    if (options.max_iter_main <= 0 || options.max_iter_solver <= 0) {
+        throw std::runtime_error("Group/individual FE recovery iteration limits must be positive");
+    }
     if (lifecycle_state_ != LifecycleState::GroupedReady ||
         !results_.converged ||
         !results_.precision_certified) {
@@ -13767,6 +15279,7 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
         collapse_group_long_format(y, X, fes, group_ids, &individual_ids, individual_fe_index,
                                    aggregation, weights,
                                    options_.weights_are_frequencies, nullptr);
+    drop_zero_weight_groups(collapsed, aggregation, options_.weights_are_frequencies);
 
     if (options_.drop_singletons) {
         if (options_.weights_are_frequencies && collapsed.weights) {
@@ -13840,7 +15353,10 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
             "Group/individual FE extraction absorption did not converge "
             "and pass the independent precision certificate");
     }
-    const Eigen::VectorXd d = y_minus_xb - absorbed.y_tilde;
+    Eigen::VectorXd d = y_minus_xb - absorbed.y_tilde;
+    const int recovery_scale_exponent = detail::fe_recovery_scale_exponent(d);
+    if (recovery_scale_exponent < 0)
+        detail::scale_fe_recovery_vector(d, -recovery_scale_exponent);
 
     const int G = collapsed.gi.num_groups;
     const int I = collapsed.gi.num_individuals;
@@ -13949,14 +15465,29 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
         if (options.verbose > 0) {
             std::cout << "iter: " << iter << " mse=" << mse << "\n";
         }
-        if (iter > options.max_iter_main) {
+        if (iter >= options.max_iter_main) {
             break;
         }
     }
     converged = (mse <= options.tol_main);
+    if (!converged || !hdfe::detail::ieee_finite(mse)) {
+        std::ostringstream message;
+        message << "Group/individual fixed-effect recovery did not converge; iterations="
+                << iter << "/" << options.max_iter_main
+                << "; mse=" << std::scientific << mse
+                << "; requested tolerance=" << options.tol_main
+                << ". No fixed-effect estimates returned. Check scaling and the iteration limits.";
+        throw std::runtime_error(message.str());
+    }
 
     GroupIndividualFeEstimates out;
     out.individual_ids = collapsed.individual_values;
+    if (recovery_scale_exponent < 0) {
+        detail::scale_fe_recovery_vector(a, recovery_scale_exponent);
+        for (auto& values : fe_level_values)
+            detail::scale_fe_recovery_vector(values, recovery_scale_exponent);
+        mse = std::ldexp(mse, 2 * recovery_scale_exponent);
+    }
     out.individual_effects = std::move(a);
     out.fe_level_ids.reserve(static_cast<std::size_t>(K));
     out.fe_level_effects.reserve(static_cast<std::size_t>(K));

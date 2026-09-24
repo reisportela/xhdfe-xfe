@@ -1,4 +1,25 @@
-# xhdfe worked examples — AKM / KSS and Gelbach
+# xhdfe examples
+
+Two sets of examples live here.
+
+**[`dofiles/`](dofiles/) + [`data/`](data/)** — a Stata tour of the whole
+`xhdfe` feature surface, 21 do-files running against small test datasets that
+ship in `data/`. Nothing there touches the network: `reghdfe`'s own example
+datasets (`auto`, `nlswork`, `toy-patents-long`) are stored locally, alongside
+a scaled-down version of Marta's AKM case and her nine-row
+`group()`/`individual()` case. See [`dofiles/README.md`](dofiles/README.md) for
+the file-by-file map and [`data/README.md`](data/README.md) for dataset
+provenance.
+
+```stata
+cd examples/dofiles
+do run_all.do        // everything, logging to ../output
+```
+
+**The scripts below** — deeper worked examples of the AKM/KSS and Gelbach
+layers, in all three front-ends, each generating its own synthetic data.
+
+## Worked examples — AKM / KSS and Gelbach
 
 Self-contained, reproducible example scripts for the worker-firm (AKM) and
 Gelbach post-estimation layer, in all three front-ends. Each script generates

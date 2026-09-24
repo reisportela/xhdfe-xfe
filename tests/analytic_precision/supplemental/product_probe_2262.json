@@ -1,0 +1,319 @@
+{
+  "scope": "real HdfeRegressor fits; no transformed arrays or estimates forged",
+  "label": "2.26.2.20260903",
+  "module": "/home/mangelo/Documents/GitHub/xhdfe/build/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so",
+  "design": {
+    "k": 52,
+    "S": 256,
+    "n": 64,
+    "y_exponents": [
+      -60,
+      0,
+      -20
+    ]
+  },
+  "fit_count": 3,
+  "rows": [
+    {
+      "t_exp": -60,
+      "success": true,
+      "seconds": 0.0014648211654275656,
+      "lifecycle": "standard_ready",
+      "converged": true,
+      "precision_certified": true,
+      "threads_used": 2,
+      "gpu_used": false,
+      "nobs_rows": 64,
+      "singletons_rows": 0,
+      "df_m": 1.0,
+      "df_a": 4.0,
+      "df_resid": 59.0,
+      "df_resid_unadj": 59.0,
+      "coefficient_count": 3,
+      "coef": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "intercept": 0.0,
+      "omitted": [
+        false,
+        true,
+        false
+      ],
+      "rss": 4.81482486096809e-35,
+      "expected_rss": 4.81482486096809e-35,
+      "rss_relative_error": 0.0,
+      "residual_relative_error": 0.0,
+      "covariance_scale_rss_over_df": 8.160720103335745e-37,
+      "expected_covariance_scale": 8.160720103335745e-37,
+      "slope_covariance": [
+        [
+          1.945667291482865e-43,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_covariance": [
+        [
+          5.742596252571529e-23,
+          -5.742596252571529e-23
+        ],
+        [
+          -5.742596252571529e-23,
+          5.742596252571529e-23
+        ]
+      ],
+      "covariance_relative_error": 1.0,
+      "observed_bread_V_over_cov_scale": [
+        [
+          2.3841857910156255e-07,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_bread": [
+        [
+          70368744177664.02,
+          -70368744177664.02
+        ],
+        [
+          -70368744177664.02,
+          70368744177664.02
+        ]
+      ],
+      "bread_relative_error": 1.0,
+      "input_exact": true,
+      "raw_weighted_fe_moments_zero": true,
+      "weak_information": 7.105427357601002e-15,
+      "observed_weak_information": 7.105427357601002e-15,
+      "checks": {
+        "lifecycle_standard_ready": true,
+        "converged": true,
+        "precision_certified": true,
+        "cpu_backend": true,
+        "threads_used_at_most_2": true,
+        "sample_preserved": true,
+        "rank_two": false,
+        "input_exact": true,
+        "raw_weighted_fe_moments_zero": true,
+        "weak_information_exact": true,
+        "beta_zero": true,
+        "intercept_zero": true,
+        "residuals_match_y": true,
+        "rss_matches_oracle": true,
+        "df_matches_structure": false,
+        "bread_matches_oracle": false,
+        "covariance_matches_oracle": false
+      },
+      "pass": false
+    },
+    {
+      "t_exp": 0,
+      "success": true,
+      "seconds": 0.00048107304610311985,
+      "lifecycle": "standard_ready",
+      "converged": true,
+      "precision_certified": true,
+      "threads_used": 2,
+      "gpu_used": false,
+      "nobs_rows": 64,
+      "singletons_rows": 0,
+      "df_m": 1.0,
+      "df_a": 4.0,
+      "df_resid": 59.0,
+      "df_resid_unadj": 59.0,
+      "coefficient_count": 3,
+      "coef": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "intercept": 0.0,
+      "omitted": [
+        false,
+        true,
+        false
+      ],
+      "rss": 64.0,
+      "expected_rss": 64.0,
+      "rss_relative_error": 0.0,
+      "residual_relative_error": 0.0,
+      "covariance_scale_rss_over_df": 1.0847457627118644,
+      "expected_covariance_scale": 1.0847457627118644,
+      "slope_covariance": [
+        [
+          2.5862354343220344e-07,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_covariance": [
+        [
+          76332197074076.22,
+          -76332197074076.22
+        ],
+        [
+          -76332197074076.22,
+          76332197074076.22
+        ]
+      ],
+      "covariance_relative_error": 1.0,
+      "observed_bread_V_over_cov_scale": [
+        [
+          2.3841857910156255e-07,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_bread": [
+        [
+          70368744177664.02,
+          -70368744177664.02
+        ],
+        [
+          -70368744177664.02,
+          70368744177664.02
+        ]
+      ],
+      "bread_relative_error": 1.0,
+      "input_exact": true,
+      "raw_weighted_fe_moments_zero": true,
+      "weak_information": 7.105427357601002e-15,
+      "observed_weak_information": 7.105427357601002e-15,
+      "checks": {
+        "lifecycle_standard_ready": true,
+        "converged": true,
+        "precision_certified": true,
+        "cpu_backend": true,
+        "threads_used_at_most_2": true,
+        "sample_preserved": true,
+        "rank_two": false,
+        "input_exact": true,
+        "raw_weighted_fe_moments_zero": true,
+        "weak_information_exact": true,
+        "beta_zero": true,
+        "intercept_zero": true,
+        "residuals_match_y": true,
+        "rss_matches_oracle": true,
+        "df_matches_structure": false,
+        "bread_matches_oracle": false,
+        "covariance_matches_oracle": false
+      },
+      "pass": false
+    },
+    {
+      "t_exp": -20,
+      "success": true,
+      "seconds": 0.0004507622215896845,
+      "lifecycle": "standard_ready",
+      "converged": true,
+      "precision_certified": true,
+      "threads_used": 2,
+      "gpu_used": false,
+      "nobs_rows": 64,
+      "singletons_rows": 0,
+      "df_m": 1.0,
+      "df_a": 4.0,
+      "df_resid": 59.0,
+      "df_resid_unadj": 59.0,
+      "coefficient_count": 3,
+      "coef": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "intercept": 0.0,
+      "omitted": [
+        false,
+        true,
+        false
+      ],
+      "rss": 5.820766091346741e-11,
+      "expected_rss": 5.820766091346741e-11,
+      "rss_relative_error": 0.0,
+      "residual_relative_error": 0.0,
+      "covariance_scale_rss_over_df": 9.865705239570747e-13,
+      "expected_covariance_scale": 9.865705239570747e-13,
+      "slope_covariance": [
+        [
+          2.352167425053298e-19,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_covariance": [
+        [
+          69.42372881355934,
+          -69.42372881355934
+        ],
+        [
+          -69.42372881355934,
+          69.42372881355934
+        ]
+      ],
+      "covariance_relative_error": 1.0,
+      "observed_bread_V_over_cov_scale": [
+        [
+          2.3841857910156255e-07,
+          0.0
+        ],
+        [
+          0.0,
+          0.0
+        ]
+      ],
+      "oracle_bread": [
+        [
+          70368744177664.02,
+          -70368744177664.02
+        ],
+        [
+          -70368744177664.02,
+          70368744177664.02
+        ]
+      ],
+      "bread_relative_error": 1.0,
+      "input_exact": true,
+      "raw_weighted_fe_moments_zero": true,
+      "weak_information": 7.105427357601002e-15,
+      "observed_weak_information": 7.105427357601002e-15,
+      "checks": {
+        "lifecycle_standard_ready": true,
+        "converged": true,
+        "precision_certified": true,
+        "cpu_backend": true,
+        "threads_used_at_most_2": true,
+        "sample_preserved": true,
+        "rank_two": false,
+        "input_exact": true,
+        "raw_weighted_fe_moments_zero": true,
+        "weak_information_exact": true,
+        "beta_zero": true,
+        "intercept_zero": true,
+        "residuals_match_y": true,
+        "rss_matches_oracle": true,
+        "df_matches_structure": false,
+        "bread_matches_oracle": false,
+        "covariance_matches_oracle": false
+      },
+      "pass": false
+    }
+  ],
+  "all_pass": false
+}

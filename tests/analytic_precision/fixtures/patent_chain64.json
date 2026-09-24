@@ -1,0 +1,8 @@
+{
+  "kind": "synthetic regression fixture",
+  "rows": 3328,
+  "groups": 512,
+  "generator": "tests/stata/fixtures/toy-patents-chain.do",
+  "csv_sha256": "b148b8a1d5313c0cf162c1af40d4384ecc764477912bccfb1bf5b2dcb5d44f7e",
+  "source_dta_sha256": "f77cd2401c45613eae977b6fec49ca80901e60cceb891be25f89f59b1f16e772"
+}

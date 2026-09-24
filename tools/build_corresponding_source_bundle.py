@@ -23,6 +23,9 @@ import sys
 import tempfile
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from windows_stata_linkage import validate as validate_static_stata
+
 
 SCHEMA_VERSION = 1
 REQUIRED_COMPONENTS = {
@@ -292,6 +295,7 @@ def validate_release_inputs(
     runtime_providers: dict[str, str],
     provider_binaries: dict[str, str],
     metadata: dict[str, dict[str, str]],
+    static_stata: dict | None = None,
 ) -> None:
     overlap = set(components) & set(providers)
     if overlap:
@@ -301,7 +305,13 @@ def validate_release_inputs(
         )
     missing_components = REQUIRED_COMPONENTS - set(components)
     missing_providers = REQUIRED_PROVIDERS - set(providers)
-    missing_runtimes = set(RUNTIME_PROVIDERS) - set(runtimes)
+    required_runtimes = {key: value for key, value in RUNTIME_PROVIDERS.items()
+                         if static_stata is None or not key.startswith("windows-stata-")}
+    if static_stata is not None:
+        validate_static_stata(static_stata)
+        if any(key.startswith("windows-stata-") for key in runtimes):
+            raise ValueError("static Stata runtimes cannot also be declared as shipped DLLs")
+    missing_runtimes = set(required_runtimes) - set(runtimes)
     if missing_components:
         raise ValueError(
             "missing source components: " + ", ".join(sorted(missing_components))
@@ -319,7 +329,7 @@ def validate_release_inputs(
     if set(provider_binaries) != set(runtimes):
         raise ValueError("every --runtime-binary needs exactly one --provider-binary")
 
-    for runtime_id, expected_provider in RUNTIME_PROVIDERS.items():
+    for runtime_id, expected_provider in required_runtimes.items():
         actual_provider = runtime_providers.get(runtime_id)
         if actual_provider != expected_provider:
             raise ValueError(
@@ -370,6 +380,8 @@ def build_archive(args: argparse.Namespace) -> None:
         args.provider_binary, "--provider-binary"
     )
     metadata = parse_metadata(args.metadata)
+    static_path = getattr(args, "windows_stata_static_ledger", None)
+    static_stata = json.loads(Path(static_path).read_text()) if static_path else None
     validate_release_inputs(
         components,
         providers,
@@ -377,6 +389,7 @@ def build_archive(args: argparse.Namespace) -> None:
         runtime_providers,
         provider_binaries,
         metadata,
+        static_stata,
     )
     for provider_id in sorted(DEBIAN_SOURCE_PROVIDERS):
         validate_debian_source_directory(
@@ -438,7 +451,7 @@ def build_archive(args: argparse.Namespace) -> None:
                 )
 
         provenance = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": 2 if static_stata is not None else SCHEMA_VERSION,
             "package": "xhdfe",
             "version": args.version,
             "components": component_entries,
@@ -466,6 +479,8 @@ def build_archive(args: argparse.Namespace) -> None:
                 ),
             },
         }
+        if static_stata is not None:
+            provenance["windows_stata_static_link"] = static_stata
         write_text(
             stage_root / "PROVENANCE.json",
             json.dumps(provenance, indent=2, sort_keys=True) + "\n",
@@ -478,6 +493,8 @@ This release asset contains the exact source payloads and provider source
 packages supplied to the release job for redistributed GNU/MinGW runtime
 binaries. `PROVENANCE.json` maps each released runtime hash to its provider
 binary and source payload. `MANIFEST.sha256` authenticates every file here.
+For self-contained Windows Stata plugins, `windows_stata_static_link` records
+the link-input archives and final plugin hashes; these are not shipped DLLs.
 
 The builder performs no downloads: every source and evidence file is an
 explicit local input. Host paths in the ledger identify the CI provider binary
@@ -586,6 +603,7 @@ and a provider ID present in the supplied component/provider source closure.
         metavar="OBJECT.FIELD=VALUE",
         help="pinned version, URL, package identity, or release path",
     )
+    parser.add_argument("--windows-stata-static-ledger", type=Path)
     parser.add_argument("--contains-cuda", action="store_true")
     parser.add_argument(
         "--license-dir",

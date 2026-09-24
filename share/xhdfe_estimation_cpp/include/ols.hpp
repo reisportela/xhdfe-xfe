@@ -3,12 +3,15 @@
 
 #include <Eigen/Dense>
 
+#include <memory>
 #include <vector>
 
 #include "hdfe/hdfe_regressor.hpp"
 
 namespace hdfe {
 namespace detail {
+
+struct N1NormalEvidence;
 
 struct OlsResult {
     Eigen::VectorXd coefficients;
@@ -31,6 +34,7 @@ struct OlsResult {
     double sigma2 = 0.0;
     int nobs = 0;
     int num_clusters = 0;
+    std::shared_ptr<N1NormalEvidence> n1_normal;
 };
 
 // X_for_residuals: when set (2SLS), the coefficients are solved on X (the
@@ -64,7 +68,7 @@ OlsResult run_ols_fast_from_xtx(const Eigen::VectorXd& y,
                                 ParallelWorkObserver* parallel_observer = nullptr);
 
 // Raw multiway-cluster sandwich bread * [inclusion-exclusion meat] * bread
-// with NO df scaling of any kind (the caller maps its composite small-sample
+// with optional per-component cluster corrections (the caller maps any common
 // scale from an already-scaled slope block). `scores` is the unweighted score
 // design (reghdfe restores the original means and appends the constant
 // column); weights fold in as sqrt(w) on both scores and residuals.
@@ -73,7 +77,9 @@ Eigen::MatrixXd multiway_cluster_sandwich(
     const Eigen::Ref<const Eigen::MatrixXd>& scores,
     const Eigen::VectorXd& residuals,
     const Eigen::VectorXd* weights,
-    const std::vector<Eigen::VectorXi>& clusters);
+    const std::vector<Eigen::VectorXi>& clusters,
+    ClusterDofMethod g_df = ClusterDofMethod::Min,
+    bool g_adj = false);
 
 OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -88,6 +94,26 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            const Eigen::MatrixXd* X_for_residuals = nullptr,
                            bool num_threads_explicit = false,
                            ParallelWorkObserver* parallel_observer = nullptr);
+
+OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X, const Eigen::VectorXd* weights,
+    const Eigen::VectorXi* clusters, StandardErrorType se_type,
+    double total_sum_squares, double within_sum_squares, double n_effective,
+    bool weights_are_frequencies, const Eigen::Ref<const Eigen::MatrixXd>* X_for_residuals,
+    bool num_threads_explicit, ParallelWorkObserver* parallel_observer,
+    const Eigen::MatrixXd* score_low,
+    const Eigen::VectorXd* normalization_means = nullptr,
+    Eigen::VectorXd* intercept_covariance = nullptr);
+
+OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X, const Eigen::VectorXd* weights,
+    const std::vector<Eigen::VectorXi>* clusters, StandardErrorType se_type,
+    double total_sum_squares, double within_sum_squares, ClusterDofMethod g_df,
+    bool g_adj, double n_effective, const Eigen::Ref<const Eigen::MatrixXd>* X_for_residuals,
+    bool num_threads_explicit, ParallelWorkObserver* parallel_observer,
+    const Eigen::MatrixXd* score_low,
+    const Eigen::VectorXd* normalization_means = nullptr,
+    Eigen::VectorXd* intercept_covariance = nullptr);
 
 }  // namespace detail
 }  // namespace hdfe

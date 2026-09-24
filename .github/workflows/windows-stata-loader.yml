@@ -1,0 +1,119 @@
+name: Windows Stata installed-layout loader
+
+on:
+  push:
+    branches: ['codex/release-2.28.0-20260924']
+  workflow_call:
+    inputs:
+      artifact_name:
+        type: string
+        required: true
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-probe-inputs:
+    if: inputs.artifact_name == ''
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+      - name: Build exact Windows inputs
+        env:
+          XHDFE_RELEASE_BUILD: '1'
+        run: |
+          set -euo pipefail
+          mkdir artifacts
+          bash stata/tools/build-plugin.sh --windows --openmp
+          bash stata/tools/build-xfepout-plugin.sh --windows --openmp
+          cp stata/xhdfe.plugin artifacts/xhdfe.plugin.windows
+          cp stata/xfepout.plugin artifacts/xfepout.plugin.windows
+          cp stata/xhdfe.plugin.map artifacts/xhdfe.plugin.windows.map
+          cp stata/xfepout.plugin.map artifacts/xfepout.plugin.windows.map
+          python3 tools/windows_stata_linkage.py record --artifact-dir artifacts --ledger artifacts/windows-stata-provider-ledger.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-stata-issue11
+          path: artifacts/
+          if-no-files-found: error
+
+  native-loader:
+    needs: build-probe-inputs
+    if: always() && (needs.build-probe-inputs.result == 'success' || needs.build-probe-inputs.result == 'skipped')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name || 'windows-stata-issue11' }}
+          path: artifacts/input
+      - name: Prepare Stata letter directories and separate executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:RUNNER_ARCH -ne 'X64') { throw 'Native Windows X64 required' }
+          $compiler = 'C:\Strawberry\c\bin\g++.exe'
+          $objdump = 'C:\Strawberry\c\bin\objdump.exe'
+          if ((& $compiler -dumpmachine).Trim() -ne 'x86_64-w64-mingw32') { throw 'Wrong probe target' }
+          New-Item -ItemType Directory -Force artifacts/host, artifacts/plus/x, artifacts/plus/l, artifacts/empty | Out-Null
+          & $compiler -std=gnu++17 -O2 -DNDEBUG -D_WIN32_WINNT=0x0602 -DSYSTEM=STWIN32 `
+            -static -static-libgcc -static-libstdc++ -municode -Istata/tools/_deps `
+            tools/plugin_openmp_probe.cpp -o artifacts/host/plugin_openmp_probe.exe
+          # A dynamic negative control must fail when G WIN64 installs DLLs in plus/l.
+          '#include <omp.h>' | Set-Content artifacts/negative.cpp
+          'extern "C" __declspec(dllexport) int probe() { return omp_get_max_threads(); }' | Add-Content artifacts/negative.cpp
+          & $compiler -shared -fopenmp artifacts/negative.cpp -o artifacts/plus/x/negative.plugin
+          python tools/validate_python_release_artifacts.py --pe-binary artifacts/plus/x/negative.plugin `
+            --runtime-search-dir C:\Strawberry\c\bin --runtime-dir artifacts/plus/l `
+            --write-runtime-ledger artifacts/negative-closure.json --mingw-objdump $objdump
+          python tools/windows_stata_linkage.py verify --artifact-dir artifacts/input `
+            --ledger artifacts/input/windows-stata-provider-ledger.json
+          foreach ($kind in @('xhdfe', 'xfepout')) {
+            Copy-Item "artifacts/input/$kind.plugin.windows" "artifacts/plus/x/$kind.plugin"
+          }
+          python tools/validate_python_release_artifacts.py --system-only `
+            --pe-binary artifacts/plus/x/xhdfe.plugin --pe-binary artifacts/plus/x/xfepout.plugin `
+            --runtime-dir artifacts/empty --write-runtime-ledger artifacts/installed-closure.json `
+            --mingw-objdump $objdump
+          python tools/validate_python_release_artifacts.py --system-only `
+            --pe-binary artifacts/host/plugin_openmp_probe.exe --runtime-dir artifacts/empty `
+            --write-runtime-ledger artifacts/host-closure.json --mingw-objdump $objdump
+
+      - name: Plain LoadLibrary and real estimator workers with clean PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $python = (Get-Command python).Source
+          $env:PATH = @((Split-Path $python), "$env:SystemRoot\System32", $env:SystemRoot) -join ';'
+          $env:XHDFE_NEGATIVE = (Resolve-Path artifacts/plus/x/negative.plugin).Path
+          $env:XHDFE_NEGATIVE_DLLS = (Resolve-Path artifacts/plus/l).Path
+          & $python -c 'import ctypes, os; p=os.environ["XHDFE_NEGATIVE"]; k=ctypes.WinDLL("kernel32",use_last_error=True); k.LoadLibraryW.argtypes=[ctypes.c_wchar_p]; k.LoadLibraryW.restype=ctypes.c_void_p; assert not k.LoadLibraryW(p) and ctypes.get_last_error()==126; print("ISSUE11_LETTER_LAYOUT_REPRODUCED")'
+          & $python -c 'import ctypes,os; os.environ["PATH"]=os.environ["XHDFE_NEGATIVE_DLLS"]+os.pathsep+os.environ["PATH"]; k=ctypes.WinDLL("kernel32",use_last_error=True); k.LoadLibraryW.argtypes=[ctypes.c_wchar_p]; k.LoadLibraryW.restype=ctypes.c_void_p; assert k.LoadLibraryW(os.environ["XHDFE_NEGATIVE"]); print("NEGATIVE_CONTROL_VALID_DLL")'
+          foreach ($kind in @('xhdfe', 'xfepout')) {
+            $plugin = (Resolve-Path "artifacts/plus/x/$kind.plugin").Path
+            & $python tools/run_plugin_openmp_probe.py --probe artifacts/host/plugin_openmp_probe.exe `
+              --plugin $plugin --runtime-path $plugin --kind $kind --arch x86_64 --stage final `
+              --out "artifacts/windows-native-receipts/$kind"
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-stata-native-receipts
+          path: |
+            artifacts/windows-native-receipts
+            artifacts/installed-closure.json
+            artifacts/host-closure.json
+            artifacts/negative-closure.json
+          if-no-files-found: error

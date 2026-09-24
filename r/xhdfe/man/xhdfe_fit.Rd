@@ -5,7 +5,7 @@
 \title{Matrix interface to the xhdfe estimator}
 \usage{
 xhdfe_fit(y, X, fes = NULL,
-          weights = NULL, weights_type = c("analytic", "frequency"),
+          weights = NULL, weights_type = c("analytic", "frequency", "importance", "probability"),
           cluster = NULL, vcov = NULL,
           instruments = NULL, endogenous = NULL,
           slopes = NULL,

@@ -410,6 +410,7 @@ def _validate_pe_runtime_ledger(
     objdump: Path,
     python_host_dll_names: frozenset[str],
     label: str,
+    system_only: bool = False,
 ) -> None:
     _require(objdump.is_file(), f"MinGW objdump not found: {objdump}")
     all_names = list(roots) + list(runtimes)
@@ -463,7 +464,10 @@ def _validate_pe_runtime_ledger(
         f"{label}: ledger DLLs differ from packaged DLLs",
     )
     _require(actual_roots, f"{label}: no PE roots were supplied")
-    _require(actual_runtimes, f"{label}: no runtime DLLs were supplied")
+    if system_only:
+        _require(not actual_runtimes, f"{label}: system-only plugins must not ship runtime DLLs")
+    else:
+        _require(actual_runtimes, f"{label}: no runtime DLLs were supplied")
 
     with tempfile.TemporaryDirectory() as tmp:
         inspection_root = Path(tmp)
@@ -544,10 +548,11 @@ def _validate_pe_runtime_ledger(
             for key in root_records
             for dependency in actual_dependencies[key]
         ]
-        _require(
-            any(name.casefold() == "libgomp-1.dll" for name in root_dependencies),
-            f"{label}: no root is linked to libgomp-1.dll; OpenMP is missing",
-        )
+        if not system_only:
+            _require(
+                any(name.casefold() == "libgomp-1.dll" for name in root_dependencies),
+                f"{label}: no root is linked to libgomp-1.dll; OpenMP is missing",
+            )
         pending = sorted(
             (
                 dependency
@@ -556,7 +561,10 @@ def _validate_pe_runtime_ledger(
             ),
             key=str.casefold,
         )
-        _require(pending, f"{label}: roots have no detected non-system dependency")
+        if system_only:
+            _require(not pending, f"{label}: unexpected non-system dependency")
+        else:
+            _require(pending, f"{label}: roots have no detected non-system dependency")
         visited: set[str] = set()
         while pending:
             name = pending.pop(0)
@@ -651,7 +659,8 @@ def _runtime_dll_paths(runtime_dir: Path) -> list[Path]:
 
 
 def validate_pe_runtime_directory(
-    binaries: list[Path], runtime_dir: Path, ledger: Path, objdump: Path
+    binaries: list[Path], runtime_dir: Path, ledger: Path, objdump: Path,
+    system_only: bool = False,
 ) -> None:
     _require(runtime_dir.is_dir(), f"runtime directory not found: {runtime_dir}")
     _require(ledger.is_file(), f"runtime ledger not found: {ledger}")
@@ -676,6 +685,7 @@ def validate_pe_runtime_directory(
         objdump=objdump,
         python_host_dll_names=frozenset(),
         label="PE runtime directory",
+        system_only=system_only,
     )
 
 
@@ -733,6 +743,7 @@ def build_pe_runtime_ledger(
     ledger: Path,
     objdump: Path,
     runtime_search_dirs: Optional[list[Path]] = None,
+    system_only: bool = False,
 ) -> None:
     search_dirs = [path.resolve() for path in (runtime_search_dirs or [])]
     explicit_sources = [path.resolve() for path in runtime_sources]
@@ -741,7 +752,7 @@ def build_pe_runtime_ledger(
     _require(ledger.parent.is_dir(), f"ledger parent directory not found: {ledger.parent}")
     _require(binaries, "supply at least one PE root binary")
     _require(
-        explicit_sources or search_dirs,
+        system_only or explicit_sources or search_dirs,
         "supply a runtime source DLL or runtime search directory",
     )
     _require(all(path.is_file() for path in binaries), "a PE root binary is missing")
@@ -796,6 +807,9 @@ def build_pe_runtime_ledger(
         "PE roots do not share one x86-64 architecture",
     )
     root_architecture = next(iter(root_architectures))
+    if system_only:
+        _require(not pending, "system-only PE roots import non-system DLLs: " + ", ".join(pending))
+        _require(not explicit_sources and not search_dirs, "system-only mode cannot supply runtime sources")
 
     resolved: dict[str, dict[str, object]] = {}
     while pending:
@@ -837,7 +851,7 @@ def build_pe_runtime_ledger(
         "explicit runtime sources include unreferenced DLLs: "
         + ", ".join(sorted(explicit_keys - set(resolved))),
     )
-    _require(resolved, "PE roots have no detected non-system dependency")
+    _require(system_only or resolved, "PE roots have no detected non-system dependency")
 
     existing_paths = _runtime_dll_paths(runtime_dir)
     existing_by_key = {path.name.casefold(): path for path in existing_paths}
@@ -908,6 +922,7 @@ def build_pe_runtime_ledger(
         objdump=objdump,
         python_host_dll_names=frozenset(),
         label="generated PE runtime directory",
+        system_only=system_only,
     )
     ledger.write_bytes(ledger_bytes)
 
@@ -1008,6 +1023,8 @@ def main() -> int:
     parser.add_argument("--runtime-dir", type=Path)
     parser.add_argument("--runtime-ledger", type=Path)
     parser.add_argument("--write-runtime-ledger", type=Path)
+    parser.add_argument("--system-only", action="store_true",
+                        help="require PE roots to import only Windows system DLLs")
     args = parser.parse_args()
     write_mode = bool(
         args.runtime_source
@@ -1041,11 +1058,12 @@ def main() -> int:
             args.runtime_dir,
             args.runtime_ledger,
             args.mingw_objdump,
+            system_only=args.system_only,
         )
     if write_mode:
         _require(
             args.pe_binary
-            and (args.runtime_source or args.runtime_search_dir)
+            and (args.system_only or args.runtime_source or args.runtime_search_dir)
             and args.runtime_dir is not None
             and args.write_runtime_ledger is not None
             and args.mingw_objdump is not None
@@ -1061,6 +1079,7 @@ def main() -> int:
             args.write_runtime_ledger,
             args.mingw_objdump,
             args.runtime_search_dir,
+            system_only=args.system_only,
         )
     print("Python release artifact closure OK")
     return 0

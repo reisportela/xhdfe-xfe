@@ -48,6 +48,7 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
     fe_recovery_method = fe_recovery_method,
     stats_style = stats_style,
     weights_are_frequencies = identical(weights_type, "frequency"),
+    weights_are_importance = identical(weights_type, "importance"),
     groupvar = isTRUE(groupvar)
   )
   if (!is.null(keep_singletons)) opts$keepsingletons <- isTRUE(keep_singletons)
@@ -125,8 +126,32 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
                            backend, se_type, cluster_names, fe_labels,
                            tolerance_mode, stats_style, model_has_cons = NULL,
                            weights_sum = NULL,
-                           X_used = NULL, y_used = NULL) {
+                           X_used = NULL, y_used = NULL, grouped_fit = FALSE) {
+  if (!isTRUE(res$converged) || !isTRUE(res$precision_certified) ||
+      identical(res$fe_recovery_converged, FALSE)) {
+    stop("xhdfe: convergence or precision certification failed; iterations=",
+         res$num_iterations, "; relative residual=", res$abs_residual_rel,
+         ". No estimates returned.", call. = FALSE)
+  }
   k <- length(coef_names)
+  # A recovered constant is reported only when the model contains one (an
+  # explicit intercept, or one spanned by the absorbed effects). Otherwise the
+  # trailing slot the core returns is dropped, as the Stata ado does, and the
+  # fit statistics are those of a model without a constant.
+  if (identical(res$model_has_constant, FALSE) &&
+      length(res$coefficients) == k + 1L) {
+    keep <- seq_len(k)
+    res$coefficients <- res$coefficients[keep]
+    res$se <- res$se[keep]
+    res$tvalues <- res$tvalues[keep]
+    res$pvalues <- res$pvalues[keep]
+    res$conf_int <- res$conf_int[keep, , drop = FALSE]
+    res$covariance <- res$covariance[keep, keep, drop = FALSE]
+    if (length(res$omitted_reason) == k + 1L) {
+      res$omitted_reason <- res$omitted_reason[keep]
+    }
+    model_has_cons <- FALSE
+  }
   ncoef <- length(res$coefficients)
   has_cons <- FALSE
   if (ncoef == k + 1L) {
@@ -157,20 +182,18 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     omitted <- stats::setNames(integer(length(coef_names)), coef_names)
   }
 
-  # Rows of the original data that survived NA filtering AND singleton
-  # dropping (0-based core indices refer to the post-NA input arrays). In
-  # group()/individual() mode the core estimates on collapsed group-level
-  # rows and does not report a sample index; residuals then stay at the
-  # group level.
-  grouped_fit <- length(res$sample_index0) == 0L && res$nobs > 0L
-  if (grouped_fit) {
-    sample_rows <- integer(0)
-    residuals_full <- res$residuals
-  } else {
-    sample_rows <- rows_used[res$sample_index0 + 1L]
-    residuals_full <- rep(NA_real_, n_input)
-    residuals_full[sample_rows] <- res$residuals
+  # Compose the core selection with NA/subset filtering. Grouped indices
+  # identify representative input rows, including after singleton pruning.
+  if (length(res$sample_index0) != res$nobs ||
+      length(res$residuals) != res$nobs || anyNA(res$sample_index0) ||
+      any(res$sample_index0 < 0L | res$sample_index0 >= length(rows_used)) ||
+      anyDuplicated(res$sample_index0)) {
+    stop("xhdfe: estimation sample mapping is incomplete or invalid; no estimates returned",
+         call. = FALSE)
   }
+  sample_rows <- rows_used[res$sample_index0 + 1L]
+  residuals_full <- rep(NA_real_, n_input)
+  residuals_full[sample_rows] <- res$residuals
 
   # Observation counts follow the effective (weight-total) count, as Stata's
   # e(N) does. The effective count equals the row count unless frequency
@@ -388,6 +411,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     tolerance_mode = tolerance_mode,
     stats_style = stats_style,
     has_intercept = has_cons,
+    model_has_constant = isTRUE(model_has_cons),
     sumweights = if (is.null(weights_sum)) nobs else weights_sum,
     n_input = n_input,
     call = call,
@@ -397,7 +421,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
   out$grouped_fit <- grouped_fit
 
   # Prediction caches (n-vectors; the full design is not retained).
-  if (!is.null(X_used) && !is.null(y_used) && !grouped_fit) {
+  if (!is.null(X_used) && !is.null(y_used)) {
     kept <- res$sample_index0 + 1L
     Xs <- X_used[kept, , drop = FALSE]
     b_slopes <- coefficients[seq_len(ncol(Xs))]
@@ -418,15 +442,6 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
   }
   class(out) <- "xhdfe"
 
-  if (!isTRUE(res$converged)) {
-    warning("absorption did not converge within maxiter iterations; ",
-            "estimates are reported but should not be trusted", call. = FALSE)
-  }
-  if (!isTRUE(res$precision_certified)) {
-    message("xhdfe fit did not pass the independent precision ",
-            "certificate; inspect abs_residual_rel and consider ",
-            "tolerance_mode = \"strict-residual\"")
-  }
   if (isTRUE(res$vcv_psd_fixed)) {
     warning("the multiway-cluster VCV required the Cameron-Gelbach-Miller ",
             "positive-semi-definite adjustment (as in reghdfe)", call. = FALSE)

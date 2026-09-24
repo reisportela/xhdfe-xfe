@@ -5,6 +5,34 @@ site="${1:?usage: validate_stata_package_site.sh SITE_DIR}"
 [[ -d "$site" ]] || { echo "missing site directory: $site" >&2; exit 1; }
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+macos_xhdfe=""
+macos_xfe=""
+if [[ -f "$site/xhdfe.macos-universal.plugin" || -f "$site/xfepout.macos-universal.plugin" ]]; then
+  macos_xhdfe="$site/xhdfe.macos-universal.plugin"
+  macos_xfe="$site/xfepout.macos-universal.plugin"
+else
+  if [[ -f "$site/xhdfe.plugin" ]] && file "$site/xhdfe.plugin" | grep -q 'Mach-O'; then
+    macos_xhdfe="$site/xhdfe.plugin"
+  fi
+  if [[ -f "$site/xfepout.plugin" ]] && file "$site/xfepout.plugin" | grep -q 'Mach-O'; then
+    macos_xfe="$site/xfepout.plugin"
+  fi
+fi
+if [[ -n "$macos_xhdfe" || -n "$macos_xfe" ]]; then
+  [[ -f "$macos_xhdfe" && -f "$macos_xfe" ]] || {
+    echo "incomplete macOS plugin pair" >&2
+    exit 1
+  }
+  for name in xhdfe_libomp.dylib LLVM-OpenMP-LICENSE.txt macos-openmp-manifest.json; do
+    [[ -f "$site/$name" && ! -L "$site/$name" ]] || {
+      echo "missing macOS OpenMP runtime input: $name" >&2
+      exit 1
+    }
+  done
+  python3 "$repo_root/tools/validate_macos_openmp.py" verify \
+    --xhdfe "$macos_xhdfe" --xfepout "$macos_xfe" --runtime-dir "$site"
+fi
+
 for retired in xfe.ado xfe.sthlp xfe.pkg xfe.plugin; do
   [[ ! -e "$site/$retired" ]] || {
     echo "retired Stata frontend file is still published: $retired" >&2
@@ -83,7 +111,7 @@ if [[ -f "$windows_runtime_provider_ledger" || -f "$windows_runtime_closure_ledg
     exit 1
   }
   runtime_names_output="$(python3 - "$site" "$windows_runtime_provider_ledger" \
-    "$windows_runtime_closure_ledger" <<'PY'
+    "$windows_runtime_closure_ledger" "$repo_root/tools" <<'PY'
 import hashlib
 import json
 from pathlib import Path, PurePath
@@ -121,7 +149,15 @@ if (
 ):
     raise SystemExit("Windows runtime ledger compiler identity mismatch")
 entries = ledger["entries"]
-if not isinstance(entries, list) or not entries:
+if ledger.get("linkage") == "static":
+    sys.path.insert(0, sys.argv[4])
+    from windows_stata_linkage import validate, validate_closure
+    plugins = {f"{kind}.plugin.windows": (site / f"{kind}.win64.plugin"
+               if (site / f"{kind}.win64.plugin").is_file() else site / f"{kind}.plugin")
+               for kind in ("xhdfe", "xfepout")}
+    validate(ledger, plugin_paths=plugins)
+    validate_closure(ledger, json.loads(closure_path.read_bytes(), object_pairs_hook=no_duplicates))
+elif not isinstance(entries, list) or not entries:
     raise SystemExit("Windows runtime ledger has no entries")
 
 required_entry = {
@@ -219,10 +255,6 @@ PY
   while IFS= read -r runtime_name; do
     [[ -z "$runtime_name" ]] || windows_runtime_names+=("$runtime_name")
   done <<< "$runtime_names_output"
-  [[ "${#windows_runtime_names[@]}" -gt 0 && -n "${windows_runtime_names[0]}" ]] || {
-    echo "Windows runtime ledger produced an empty closure." >&2
-    exit 1
-  }
 else
   while IFS= read -r dll; do
     [[ -z "$dll" ]] || {
@@ -325,6 +357,25 @@ for pkg in "$site"/*.pkg; do
   elif awk '($1 == "g" || $1 == "G") && $2 == "WIN64" { found=1 } END { exit !found }' "$pkg"; then
     echo "$(basename "$pkg"): WIN64 mappings exist without a runtime ledger" >&2
     exit 1
+  fi
+  if [[ -n "$macos_xhdfe" ]]; then
+    for platform in MACARM64 OSX.ARM64 MACINTEL64 OSX.X8664; do
+      mapping_count="$(awk -v platform="$platform" '
+        $1 == "G" && $2 == platform && $3 == "xhdfe_libomp.dylib" &&
+          $4 == "xhdfe_libomp.dylib" { n++ }
+        END { print n+0 }
+      ' "$pkg")"
+      [[ "$mapping_count" -eq 1 ]] || {
+        echo "$(basename "$pkg"): expected one exact $platform xhdfe_libomp.dylib mapping" >&2
+        exit 1
+      }
+    done
+    for name in LLVM-OpenMP-LICENSE.txt macos-openmp-manifest.json; do
+      grep -Fxq "f $name" "$pkg" || {
+        echo "$(basename "$pkg"): missing installable macOS OpenMP ancillary $name" >&2
+        exit 1
+      }
+    done
   fi
 done
 

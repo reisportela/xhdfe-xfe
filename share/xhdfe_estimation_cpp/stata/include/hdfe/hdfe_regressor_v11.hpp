@@ -133,6 +133,10 @@ public:
     // every fit call, so a previous fweight fit cannot leak into a later call.
     void set_weights_are_frequencies(bool value) noexcept;
 
+    // Language adapters call this with the exact weights of the completed fit
+    // to apply Stata's importance-weight reporting and inference convention.
+    void apply_importance_weights(const Eigen::Ref<const Eigen::VectorXd>& weights);
+
     const HdfeResults& results() const noexcept { return results_; }
     const char* lifecycle_state_name() const noexcept;
     std::uint64_t generation() const noexcept { return generation_; }

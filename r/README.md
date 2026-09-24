@@ -116,12 +116,12 @@ is unavailable or absorption does not complete on it, the call errors instead
 of silently returning CPU results — mirroring the Stata command's error 498
 contract. CPU remains the reference backend.
 
-For version 2.26.2, a successful GPU-use status proves execution rather than
-universal numerical equivalence. The exact H100 comparable-mode campaign
-accepted 13/24 core24-quick surfaces; difficult ordinary FE graphs remain
-uncertified as complete results, and some also failed coefficient or
-standard-error gates. Use CPU for any fully certified result on those graphs
-and see the root GPU guide and release notes for the exact scope.
+GPU-use status proves execution, not universal numerical equivalence. The
+2.28.0 core matrix covers C++/Python and Stata; R additionally has its own
+frontend and native validation. Four difficult CUDA Comparable matrix cells
+still refuse estimation, and some group/individual CUDA cases remain outside
+the successful coverage. Use CPU for these specifications and see the
+[validation record](../docs/releases/VALIDATION_2.28.0.20260924.md).
 
 ## Quick start
 

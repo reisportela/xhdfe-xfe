@@ -33,8 +33,8 @@
 #' @param ... unused.
 #' @return A numeric vector. With \code{newdata}, of length
 #'   \code{nrow(newdata)}; otherwise of length \code{object$n_input} with
-#'   \code{NA} outside the estimation sample. In group()/individual() fits
-#'   the in-sample statistics are at the collapsed group level.
+#'   \code{NA} outside the estimation sample. In grouped fits, the sample
+#'   consists of the retained representative rows of the original input.
 #' @seealso \code{\link{xhdfe}}, \code{\link{fixef.xhdfe}}
 #' @examples
 #' d <- data.frame(f1 = rep(1:25, 20), f2 = rep(1:20, each = 25))
@@ -70,7 +70,7 @@ predict.xhdfe <- function(object, newdata = NULL,
       mfe <- stats::model.frame(tfe, data = newdata,
                                 na.action = stats::na.pass,
                                 xlev = object$xlevels)
-      Xe <- stats::model.matrix(tfe, mfe)
+      Xe <- stats::model.matrix(tfe, mfe, contrasts.arg = object$contrasts_endo)
       ic <- match("(Intercept)", colnames(Xe))
       if (!is.na(ic)) Xe <- Xe[, -ic, drop = FALSE]
       X <- cbind(X, Xe)
@@ -86,6 +86,8 @@ predict.xhdfe <- function(object, newdata = NULL,
     bs[!is.finite(bs)] <- 0
     xb <- drop(X[, slope_names, drop = FALSE] %*% bs)
     if (object$has_intercept) xb <- xb + b[["(Intercept)"]]
+    offset <- stats::model.offset(mf)
+    if (!is.null(offset)) xb <- xb + offset
     return(xb)
   }
 

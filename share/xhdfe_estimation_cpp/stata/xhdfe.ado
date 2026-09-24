@@ -1,10 +1,10 @@
-*! version 2.26.2 03sep2026
+*! version 2.28.0 24sep2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.26.2 03sep2026"
+        local version "2.28.0 24sep2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -22,6 +22,17 @@ program define xhdfe, eclass sortpreserve
     // A new estimation attempt owns a fresh e() lifecycle. Replay and
     // version queries above intentionally preserve their historical behavior.
     ereturn clear
+    local output = cond(c(noisily), "noisily", "quietly")
+    capture `output' _xhdfe_estimate `0'
+    local rc = _rc
+    if (`rc') {
+        ereturn clear
+        exit `rc'
+    }
+end
+
+program define _xhdfe_estimate, eclass
+    version 16.0
 
     local __xhdfe_profile_env : environment XHDFE_PROFILE_CPU
     local __xhdfe_profile 0
@@ -34,8 +45,8 @@ program define xhdfe, eclass sortpreserve
     }
 
     local cmdline : copy local 0
-    // Normalize short option aliases for reghdfe-style usage.
-    local optline : copy local 0
+    // Normalize aliases only after the first unbound comma.
+    _parse comma cmdprefix optline : 0
     local optline : subinstr local optline ",g(" ", group(", all
     local optline : subinstr local optline ", g(" ", group(", all
     local optline : subinstr local optline " g(" " group(", all
@@ -133,7 +144,7 @@ program define xhdfe, eclass sortpreserve
     local optline : subinstr local optline ",targetrowsperthread(" ", targetrpt(", all
     local optline : subinstr local optline ", targetrowsperthread(" ", targetrpt(", all
     local optline : subinstr local optline " targetrowsperthread(" " targetrpt(", all
-    local 0 `"`optline'"'
+    local 0 `"`cmdprefix' `optline'"'
 
     syntax varlist(min=1 fv numeric) [if] [in] [aw fw pw iw], ///
         [ ///
@@ -185,14 +196,14 @@ program define xhdfe, eclass sortpreserve
         NOWARN ///
         PARAllel(string asis) ///
         GPUBACKEND(string) ///
-        MOBilityProfile ///
+        MOBilityprofile ///
         MOBfile(string) ///
         ABSORPTIONCache(string) ///
         ABSCACHEMode(string) ///
-        FESTructureCache ///
+        FESTructurecache ///
         FESCache(string) ///
         FECACHEMODE(string) ///
-        SYMmetricSweep ///
+        SYMmetricsweep ///
         ABSORPTIONMethod(string) ///
         JACOBIRelaxation(real 0) ///
         LEVEL(real 95) ///
@@ -211,6 +222,11 @@ program define xhdfe, eclass sortpreserve
         GROUPVAR(name) ///
         SAVEFEs(string) ///
         ]
+
+    // Validate formats before estimating or displaying any fit statistics.
+    foreach fmt in cformat pformat sformat {
+        if ("``fmt''" != "") confirm numeric format ``fmt''
+    }
 
     local unsupported_het_slopes_msg ///
         "continuous interactions are supported as absorbed heterogeneous slopes only; use absorb(fe#c.x) or absorb(fe##c.x)"
@@ -853,12 +869,19 @@ program define xhdfe, eclass sortpreserve
     }
     // Keep string absorb()/cluster()/group()/individual() variables in sample marking.
     markout `touse' `markvars', strok
+    if ("`weight'" == "iweight") {
+        quietly count if `touse' & `wvar' < 0
+        if (r(N) > 0) {
+            di as err "negative importance weights are not supported"
+            exit 198
+        }
+    }
     if (`has_weight') {
         quietly replace `touse' = 0 if `wvar' <= 0 | missing(`wvar')
     }
     tempname iw_sum_full
     scalar `iw_sum_full' = .
-    if ("`weight'" == "iweight") {
+    if ("`weight'" == "iweight" & "`se_type'" == "unadjusted") {
         quietly summarize `wvar' if `touse', meanonly
         scalar `iw_sum_full' = r(sum)
     }
@@ -1341,6 +1364,7 @@ program define xhdfe, eclass sortpreserve
             else if ("`sint'" == "1") local any_level 1
         }
     }
+    if (`nkinds' > 0 & !`any_level') local fit_intercept 0
     local model_has_cons = cond(`nkinds' > 0, `any_level', `fit_intercept')
 
     // absorption method default
@@ -1588,6 +1612,7 @@ program define xhdfe, eclass sortpreserve
     local omit_priority_list
     local fv_stub "__xhdfe_"
     local fv_created 0
+    local fv_created_vars
     local fv_terms
     if ("`indepvars'" != "") {
         local has_fv = (strpos("`indepvars'", ".") > 0) | (strpos("`indepvars'", "#") > 0)
@@ -1595,8 +1620,11 @@ program define xhdfe, eclass sortpreserve
         if (`has_fv') {
             quietly fvexpand `indepvars' if `touse'
             local fv_terms "`r(varlist)'"
+            unab fv_before : _all
             quietly fvrevar `indepvars' if `touse', stub(`fv_stub')
             local raw_x "`r(varlist)'"
+            unab fv_after : _all
+            local fv_created_vars : list fv_after - fv_before
             local fv_created 1
         }
 
@@ -1722,6 +1750,7 @@ program define xhdfe, eclass sortpreserve
         local cluster_diag_mat "`cluster_diag'"
     }
 
+    tempname sHasCons
     tempname sN sNfull sNsng sDFr sDFRUnadj sDFm sDFa sDFaLevels sDFaExact sDFaNested ///
         sR2 sR2w sSig2 sRss sTss sTssw sSat sIter sConv sAbsRes sAbsResRel sPrecCert ///
         sKryTol sKryBack sKryCond sKryCondBack ///
@@ -1783,6 +1812,7 @@ program define xhdfe, eclass sortpreserve
     local cfg "`cfg's_N=`sN';s_N_full=`sNfull';s_num_singletons=`sNsng';s_df_r=`sDFr';"
     local cfg "`cfg's_df_r_unadj=`sDFRUnadj';s_df_m=`sDFm';s_df_a=`sDFa';"
     local cfg "`cfg's_df_a_levels=`sDFaLevels';s_df_a_exact=`sDFaExact';s_df_a_nested=`sDFaNested';"
+    local cfg "`cfg's_model_has_constant=`sHasCons';"
     local cfg "`cfg's_r2=`sR2';s_r2_within=`sR2w';s_sigma2=`sSig2';s_rss=`sRss';"
     local cfg "`cfg's_tss=`sTss';s_tss_within=`sTssw';s_saturated=`sSat';"
     local cfg "`cfg's_iterations=`sIter';s_converged=`sConv';"
@@ -1940,7 +1970,7 @@ program define xhdfe, eclass sortpreserve
             }
         }
         if (`fv_created') {
-            capture drop `fv_stub'*
+            capture drop `fv_created_vars'
         }
         exit `rc'
     }
@@ -1965,7 +1995,7 @@ program define xhdfe, eclass sortpreserve
     local reject_cpu_gpu = ("`gpu_backend'" != "" & "`gpu_backend'" != "cpu" & scalar(`sGpuUsed') < 0.5)
     if (`reject_cpu_gpu') {
         if (`fv_created') {
-            capture drop `fv_stub'*
+            capture drop `fv_created_vars'
         }
         local gpu_backend_disp = upper("`gpu_backend'")
         if ("`gpu_status'" == "backend_unavailable") {
@@ -2004,15 +2034,17 @@ program define xhdfe, eclass sortpreserve
         exit 498
     }
 
-    if (scalar(`sConv') == 0) {
+    if (scalar(`sConv') != 1 | scalar(`sPrecCert') != 1) {
         if (`fv_created') {
-            capture drop `fv_stub'*
+            capture drop `fv_created_vars'
         }
-        di as err "xhdfe: HDFE absorption did not converge"
+        di as err "xhdfe: HDFE absorption did not pass convergence and precision checks"
         if (scalar(`sIter') < .) {
             di as err "xhdfe: absorption reached " %9.0g scalar(`sIter') " iterations without convergence"
         }
-        di as err "xhdfe: refusing to post estimates from a non-converged absorption"
+        di as err "xhdfe: requested tolerance = " %12.4e `tolerance'
+        di as err "xhdfe: relative residual = " %12.4e scalar(`sAbsResRel')
+        di as err "xhdfe: no estimates returned; check scaling, identification and the iteration limit"
         exit 498
     }
 
@@ -2023,7 +2055,7 @@ program define xhdfe, eclass sortpreserve
     // failed command leaves no imprecise output behind.
     if (`store_fes' & scalar(`sFeRecConv') == 0) {
         if (`fv_created') {
-            capture drop `fv_stub'*
+            capture drop `fv_created_vars'
         }
         foreach v of local fe_out_vars {
             capture drop `v'
@@ -2035,7 +2067,7 @@ program define xhdfe, eclass sortpreserve
         if (scalar(`sFeRecMaxDelta') < .) {
             di as err "xhdfe: final FE recovery max change = " %12.4e scalar(`sFeRecMaxDelta')
         }
-        di as err "xhdfe: refusing to save fixed effects from a non-converged recovery (raise maxiter() or fetolerance())"
+        di as err "xhdfe: no estimates or fixed effects returned; check scaling and the iteration limit"
         exit 498
     }
 
@@ -2196,27 +2228,11 @@ program define xhdfe, eclass sortpreserve
         scalar `sumweights' = scalar(`sN')
     }
 
-    // Stata's iweight convention posts sum(w) as N and uses it for the
-    // homoskedastic residual denominator.  Robust/cluster sandwiches already
-    // match regress under the row-based HC/score convention, so only the
-    // posted counts (and the classical VCE) change.
-    tempname iw_N iw_df_old iw_df_new iw_vscale iw_stat_scale
+    // The shared C++ core applies the iweight statistics convention.
+    tempname iw_N
     scalar `iw_N' = .
-    if ("`weight'" == "iweight") {
-        scalar `iw_N' = scalar(`sumweights')
-        scalar `iw_df_old' = scalar(`sDFRUnadj')
-        scalar `iw_df_new' = scalar(`iw_df_old') + scalar(`iw_N') - scalar(`sN')
-        if ("`se_type'" == "unadjusted" & scalar(`iw_df_old') > 0 & scalar(`iw_df_new') > 0) {
-            scalar `iw_vscale' = scalar(`iw_df_old') / scalar(`iw_df_new')
-            matrix `V' = `V' * scalar(`iw_vscale')
-        }
-        scalar `iw_stat_scale' = scalar(`iw_N') / scalar(`sN')
-        scalar `sRss' = scalar(`sRss') * scalar(`iw_stat_scale')
-        scalar `sTss' = scalar(`sTss') * scalar(`iw_stat_scale')
-        scalar `sTssw' = scalar(`sTssw') * scalar(`iw_stat_scale')
-        scalar `sSig2' = scalar(`sRss') / scalar(`iw_df_new')
-        scalar `sDFRUnadj' = scalar(`iw_df_new')
-        if ("`se_type'" != "cluster") scalar `sDFr' = scalar(`iw_df_new')
+    if ("`weight'" == "iweight" & "`se_type'" == "unadjusted") {
+        scalar `iw_N' = scalar(`sN')
     }
 
     // Force-omit regressors that are main effects of absorbed FE variables (reghdfe-style).
@@ -2254,6 +2270,7 @@ program define xhdfe, eclass sortpreserve
     if ((`forced_omit' | `nendog' > 0) & `fit_intercept') {
         local wgt ""
         if (`has_weight') local wgt " [`weight'=`wvar']"
+        if ("`weight'" == "pweight") local wgt " [aweight=`wvar']"
         tempname xbarb
         scalar `xbarb' = 0
         local idx = 0
@@ -2268,6 +2285,14 @@ program define xhdfe, eclass sortpreserve
         quietly summarize `depvar' `wgt' if `esample', meanonly
         matrix `b'[1,`k'] = r(mean) - scalar(`xbarb')
     }
+
+    // The plugin reports whether the fitted model contains a constant, explicit
+    // or spanned by the absorbed effects. group()/individual() with
+    // aggregation(sum) and no ordinary FE level spans it only when the ones
+    // vector lies in the span of the membership columns (uniform team size, or
+    // a data-dependent combination); otherwise the fit has no intercept and is
+    // reported as one: no _cons, uncentered e(tss), noconstant-style e(r2_a).
+    if (scalar(`sHasCons') == 0) local model_has_cons 0
 
     // reghdfe parity: a slope-only absorb() fit has no intercept anywhere, and
     // reghdfe reports no _cons row for it. Drop the recovered constant column
@@ -2292,7 +2317,7 @@ program define xhdfe, eclass sortpreserve
     }
 
     if (`fv_created') {
-        capture drop `fv_stub'*
+        capture drop `fv_created_vars'
     }
 
     local absorb_ordered = strtrim("`absorb_ordered'")
@@ -2385,7 +2410,7 @@ program define xhdfe, eclass sortpreserve
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.26.2 03sep2026"
+    ereturn local version "2.28.0 24sep2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2423,9 +2448,9 @@ program define xhdfe, eclass sortpreserve
         ereturn local vce "ols"
     }
     ereturn scalar N_full = scalar(`sNfull')
-    if ("`weight'" == "iweight") {
+    if ("`weight'" == "iweight" & "`se_type'" == "unadjusted") {
         ereturn scalar N = scalar(`iw_N')
-        ereturn scalar N_full = scalar(`iw_sum_full')
+        ereturn scalar N_full = floor(scalar(`iw_sum_full'))
     }
     ereturn scalar num_singletons = scalar(`sNsng')
     ereturn scalar sumweights = scalar(`sumweights')
@@ -2973,6 +2998,10 @@ program define xhdfe_footnote
 
     .`mytab'.sep, bottom
     if (`explain_exact') di as text "? = number of redundant parameters may be higher"
+    if (`explain_exact' & "`e(individual)'" != "") {
+        di as text "Group/individual DoF are approximate; standard errors may be conservative."
+        di as text "Use dofadjustments(exact) for a bounded calculation of the design rank."
+    }
     if (`explain_nested') di as text `"* = FE nested within cluster; treated as redundant for DoF computation"'
 end
 
