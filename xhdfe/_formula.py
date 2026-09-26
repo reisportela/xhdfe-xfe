@@ -349,6 +349,12 @@ def _numeric_vector(value: Any, n_rows: int, label: str, pd: Any) -> np.ndarray:
         raise ValueError(f"{label} must be numeric") from exc
 
 
+# ``infer_dtype`` results for object arrays that cannot hold a numeric scalar.
+# Such label columns (strings from pandas, Polars, or plain object arrays) skip
+# the per-element ID validation loop in ``_encode_ids``, which runs in Python.
+_LABEL_ONLY_INFERRED_TYPES = frozenset({"string", "bytes", "empty"})
+
+
 def _encode_ids(value: Any, n_rows: int, label: str, pd: Any):
     array = _as_vector(value, n_rows, label)
     _require_no_missing(array, label, pd)
@@ -376,7 +382,10 @@ def _encode_ids(value: Any, n_rows: int, label: str, pd: Any):
             )
     elif array.dtype.kind == "c":
         raise ValueError(f"{label} must contain real-valued category IDs")
-    elif array.dtype.kind == "O":
+    elif array.dtype.kind == "O" and (
+        pd.api.types.infer_dtype(array, skipna=True)
+        not in _LABEL_ONLY_INFERRED_TYPES
+    ):
         for position, raw in enumerate(array):
             if isinstance(raw, Integral) and not isinstance(raw, (bool, np.bool_)):
                 if int(raw) < 0:

@@ -39,6 +39,7 @@ test = [
   "pandas>=1.3",
   "setuptools>=69",
   "maketables>=0.1.7",
+  "polars>=1.0",
 ]
 
 [project.urls]
