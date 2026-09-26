@@ -154,8 +154,11 @@ print(reg.coef_names_)
 print(reg.tidy())
 ```
 
-`data` may be a dataframe or a mapping of column names to equal-length vectors.
-Custom transforms must be supplied explicitly through a `context` mapping;
+`data` may be a pandas or Polars DataFrame, or a mapping of column names to
+equal-length vectors. A Polars frame is read directly, with no conversion to
+pandas: numeric lookups take its columns as NumPy arrays, and Formulaic
+evaluates categorical terms and transforms on it through Narwhals. Polars
+nulls count as missing values. Custom transforms must be supplied explicitly through a `context` mapping;
 Formulaic never captures arbitrary caller-local names implicitly.
 
 The supported operators use standard R/Formulaic semantics. The closest common
@@ -242,7 +245,9 @@ negative value such as pandas' `-1` missing-category sentinel is rejected, as
 are non-finite numeric identifiers. String, categorical, datetime, and
 other label columns are factorized without conversion through floating point.
 Nonnegative `int64` identifiers, including values above `2**53`, also retain
-their exact integer identity.
+their exact integer identity. Integer identifiers are passed to the absorber
+as they are, while label columns must be factorized first; on large data,
+storing a FE or cluster identifier as an integer column is the faster input.
 
 `weights` and `clusters` accept either arrays or dataframe column names. A
 two-dimensional cluster array has shape `(n, q)`; a list/tuple of arrays is
