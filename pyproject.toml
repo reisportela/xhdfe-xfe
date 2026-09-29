@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xhdfe"
-version = "2.28.0.20260924"
+version = "2.28.1.20260929"
 description = "High-dimensional fixed effects regression backed by the xhdfe C++ core"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -39,6 +39,7 @@ test = [
   "pandas>=1.3",
   "setuptools>=69",
   "maketables>=0.1.7",
+  "polars[pyarrow]>=1.0",
 ]
 
 [project.urls]

@@ -13,7 +13,7 @@ when a version is ready to publish.
    private local CUDA binaries and public CI binaries have different roles.
 3. Push `preflight-v<full-version>` (or `-rN` for a new attempt). It runs all
    platform gates and assembles the release without publishing. For example,
-   the full version here is `2.28.0.20260924`, including the date.
+   the full version here is `2.28.1.20260929`, including the date.
 4. Push `v<full-version>` at the reviewed commit. This builds and stages a
    **draft** release. Download and authenticate the artifacts from that exact
    version-tag run. Preflight or local binaries cannot substitute for them.

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.28.0 24sep2026}{...}
+{* *! version 2.28.1 29sep2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -261,8 +261,8 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.28.0 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
-The 24-specification matrix across eight language/backend/mode combinations has 188 converged cells out of 192;
+{bf:Version 2.28.1 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+The inherited 2.28.0 matrix has 188 converged cells out of 192 across 24 specifications and eight language/backend/mode combinations;
 every CPU and Fast cell converged. Four difficult CUDA Comparable cells still refuse estimation.
 Separate extreme-offset and {cmd:group()}/{cmd:individual()} CUDA cases also retain documented refusals.
 Use {cmd:gpubackend(cpu)} for those specifications. The release validation record documents the independent
@@ -922,7 +922,7 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {p2colreset}{...}
 
 {marker known_limitations}{...}
-{title:Known limitations (2.28.0)}
+{title:Known limitations (2.28.1)}
 
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
@@ -1287,7 +1287,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.28.0.
+regression via a C++ backend." Version 2.28.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

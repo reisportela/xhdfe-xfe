@@ -2,7 +2,7 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.28.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.28.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 ---
 
@@ -38,12 +38,12 @@ and clusters standard errors at the worker level:
 
 The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 `reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
-These historical timings are not a benchmark of every 2.28.0 workflow.
-The current validation covers 24 specifications across eight language,
+These historical timings are not a benchmark of every 2.28.1 workflow.
+The inherited 2.28.0 core validation covers 24 specifications across eight language,
 backend and tolerance-mode combinations: 188 of 192 cells converged, including
 every CPU and Fast cell. Four difficult CUDA Comparable cells still refuse
 estimation; use CPU for those specifications. See the
-[2.28.0 validation record](docs/releases/VALIDATION_2.28.0.20260924.md) for
+[2.28.1 validation record](docs/releases/VALIDATION_2.28.1.20260929.md) for
 numerical checks, recovery coverage, measured performance costs and remaining
 CUDA limitations. GPU execution alone does not certify every output.
 
@@ -478,7 +478,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.28.0.
+> effects regression via a C++ backend.* Version 2.28.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

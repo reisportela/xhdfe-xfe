@@ -256,30 +256,18 @@ jobs:
             /tmp/xhdfe-wheel-smoke/bin/python -c \
               'import sys; import numpy as np; import xhdfe; from xhdfe import feols, gelbach; assert "formulaic" not in sys.modules; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); assert callable(feols); assert "formulaic" not in sys.modules; print("PYTHON_WHEEL_BASE_SMOKE_PASS")'
           )
-          /tmp/xhdfe-wheel-smoke/bin/python -m pip install "${WHEELS[0]}[formula]"
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install "${WHEELS[0]}[test]"
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'formulaic==1.2.1'
           /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'maketables==0.1.8'
           /tmp/xhdfe-wheel-smoke/bin/python -m pip check
-          cp tests/test_formula_frontend.py /tmp/test_formula_frontend.py
-          cp tests/test_maketables_integration.py /tmp/test_maketables_integration.py
+          mkdir -p /tmp/xhdfe-formula-tests/tools /tmp/xhdfe-formula-tests/tests/analytic_precision
+          cp tools/validate_formula_frontend.py /tmp/xhdfe-formula-tests/tools/
+          cp tests/test_formula_frontend.py tests/test_maketables_integration.py /tmp/xhdfe-formula-tests/tests/
+          cp tests/analytic_precision/polars_formula_contract.py /tmp/xhdfe-formula-tests/tests/analytic_precision/
           (
-            cd /tmp
-            /tmp/xhdfe-wheel-smoke/bin/python - <<'PY'
-          import formulaic
-          import pandas
-          import unittest
-
-          suite = unittest.TestSuite()
-          for name in ("test_formula_frontend", "test_maketables_integration"):
-              suite.addTests(unittest.defaultTestLoader.loadTestsFromName(name))
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          if not result.wasSuccessful() or result.skipped or result.testsRun != 83:
-              raise SystemExit(
-                  f"formula/maketables wheel gate expected 83 passing tests without skips; "
-                  f"ran={result.testsRun}, skipped={result.skipped}"
-              )
-          print("PYTHON_WHEEL_FORMULA_MAKETABLES_SUITES_PASS")
-          PY
+            cd /tmp/xhdfe-formula-tests
+            /tmp/xhdfe-wheel-smoke/bin/python -B tools/validate_formula_frontend.py \
+              --expected-prefix /tmp/xhdfe-wheel-smoke --forbid-prefix "$GITHUB_WORKSPACE"
           )
           python3 -m venv --system-site-packages /tmp/xhdfe-sdist-smoke
           env -u XHDFE_CUDA_ARCHS XHDFE_ENABLE_CUDA=OFF \

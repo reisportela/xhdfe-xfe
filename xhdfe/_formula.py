@@ -349,6 +349,12 @@ def _numeric_vector(value: Any, n_rows: int, label: str, pd: Any) -> np.ndarray:
         raise ValueError(f"{label} must be numeric") from exc
 
 
+# ``infer_dtype`` results for object arrays that cannot hold a numeric scalar.
+# Such label columns (strings from pandas, Polars, or plain object arrays) skip
+# the per-element ID validation loop in ``_encode_ids``, which runs in Python.
+_LABEL_ONLY_INFERRED_TYPES = frozenset({"string", "bytes", "empty"})
+
+
 def _encode_ids(value: Any, n_rows: int, label: str, pd: Any):
     array = _as_vector(value, n_rows, label)
     _require_no_missing(array, label, pd)
@@ -376,7 +382,10 @@ def _encode_ids(value: Any, n_rows: int, label: str, pd: Any):
             )
     elif array.dtype.kind == "c":
         raise ValueError(f"{label} must contain real-valued category IDs")
-    elif array.dtype.kind == "O":
+    elif array.dtype.kind == "O" and (
+        pd.api.types.infer_dtype(array, skipna=True)
+        not in _LABEL_ONLY_INFERRED_TYPES
+    ):
         for position, raw in enumerate(array):
             if isinstance(raw, Integral) and not isinstance(raw, (bool, np.bool_)):
                 if int(raw) < 0:
@@ -761,8 +770,13 @@ def _formulaic_input_data(sides: Sequence[Any], data: Any, n_rows: int, pd: Any)
     else:
         formula_data = data
 
-    if not isinstance(formula_data, pd.DataFrame):
-        return formula_data
+    pandas_input = isinstance(formula_data, pd.DataFrame)
+    if not pandas_input:
+        # Formulaic already uses Narwhals for optional native dataframe inputs.
+        import narwhals.stable.v1 as nw
+
+        if not nw.dependencies.is_into_dataframe(formula_data):
+            return formula_data
 
     available_columns = {str(name) for name in formula_data.columns}
     numeric_candidates: set[str] = set()
@@ -813,10 +827,27 @@ def _formulaic_input_data(sides: Sequence[Any], data: Any, n_rows: int, pd: Any)
     if not numeric_lookups:
         return formula_data
 
-    promoted = formula_data.copy(deep=False)
-    for name, values in numeric_lookups.items():
-        promoted[name] = values
-    return promoted
+    if pandas_input:
+        promoted = formula_data.copy(deep=False)
+        for name, values in numeric_lookups.items():
+            promoted[name] = values
+        return promoted
+
+    # Replace only numeric formula columns, retaining category metadata and IDs.
+    promoted = nw.from_native(formula_data, eager_only=True)
+    schema = promoted.schema
+    numeric_lookups = {
+        name: values for name, values in numeric_lookups.items()
+        if schema[name] != nw.Float64
+    }
+    if not numeric_lookups:
+        return formula_data
+    replacements = nw.from_dict(
+        numeric_lookups, native_namespace=nw.get_native_namespace(promoted)
+    )
+    return promoted.with_columns(
+        *[replacements[name] for name in numeric_lookups]
+    ).to_native()
 
 
 def _drop_intercept_columns(matrix: Any, label: str):

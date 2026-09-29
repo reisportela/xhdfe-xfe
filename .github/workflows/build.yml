@@ -40,8 +40,20 @@ jobs:
           XHDFE_ENABLE_MARCH_NATIVE: "OFF"
         run: |
           python -m pip install --upgrade pip numpy
-          python -m pip install .
+          python -m pip install '.[test]'
           python -c "import xhdfe; print('python import OK', xhdfe.__version__)"
+
+      - name: Validate the installed Python formula interface
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          formula_smoke="$RUNNER_TEMP/xhdfe-formula-tests"
+          mkdir -p "$formula_smoke/tools" "$formula_smoke/tests/analytic_precision"
+          cp tools/validate_formula_frontend.py "$formula_smoke/tools/"
+          cp tests/test_formula_frontend.py tests/test_maketables_integration.py "$formula_smoke/tests/"
+          cp tests/analytic_precision/polars_formula_contract.py "$formula_smoke/tests/analytic_precision/"
+          cd "$formula_smoke"
+          python tools/validate_formula_frontend.py --forbid-prefix "$GITHUB_WORKSPACE"
 
       - name: Run fast Python contract validation
         run: |

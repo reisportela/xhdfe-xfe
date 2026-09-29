@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.28.0  24sep2026}{...}
+{* *! version 2.28.1  29sep2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
@@ -82,7 +82,7 @@ new CUDA plugin is loaded, then verify a GPU run:
 
 {pstd}
 CPU behavior is the numerical reference. A successful CUDA status proves GPU
-execution, not universal numerical equivalence. Version 2.28.0 retains refusals
+execution, not universal numerical equivalence. Version 2.28.1 retains refusals
 on some difficult Comparable and group/individual specifications. See
 {helpb xhdfe##opt_gpu:help xhdfe, GPU option} and the release validation record;
 use CPU for those specifications. If a {cmd:gpubackend(cuda)} run reports that

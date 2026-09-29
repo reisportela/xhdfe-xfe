@@ -26,6 +26,11 @@ try:
 except ImportError:
     pd = None
 
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
 
 HAS_FORMULA_DEPENDENCIES = pd is not None
 REGRESSOR_OPTIONS = {
@@ -598,6 +603,38 @@ class FormulaFrontendTest(unittest.TestCase):
                         **REGRESSOR_OPTIONS,
                     )
 
+    def test_object_ids_mixing_labels_and_invalid_numbers_fail_closed(self):
+        # Label-only object columns skip the per-element scan; one numeric
+        # scalar among the labels must still route the column through it.
+        cases = (
+            (-1, "negative integer ID"),
+            (np.int64(-3), "negative integer ID"),
+            (-1.0, "negative numeric ID"),
+            (np.inf, "non-finite ID"),
+            (1j, "real-valued category IDs"),
+        )
+        for bad_value, message in cases:
+            ids = np.asarray(self.data["firm_text"], dtype=object).copy()
+            ids[7] = bad_value
+            with self.subTest(surface="fixed effect", bad_value=bad_value):
+                d = self.data.copy()
+                d["bad_id"] = ids
+                with self.assertRaisesRegex(ValueError, message):
+                    xhdfe.feols(
+                        "y ~ x | bad_id + year",
+                        d,
+                        **REGRESSOR_OPTIONS,
+                    )
+            with self.subTest(surface="cluster", bad_value=bad_value):
+                with self.assertRaisesRegex(ValueError, message):
+                    xhdfe.feols(
+                        "y ~ x | firm + year",
+                        self.data,
+                        clusters=ids,
+                        se_type="cluster",
+                        **REGRESSOR_OPTIONS,
+                    )
+
     def test_cluster_input_shapes_have_unambiguous_orientation(self):
         from xhdfe import _formula
 
@@ -909,6 +946,141 @@ class FormulaFrontendTest(unittest.TestCase):
             **REGRESSOR_OPTIONS,
         )
         pd.testing.assert_frame_equal(self.data, original, check_exact=True)
+
+
+@unittest.skipUnless(
+    HAS_FORMULA_DEPENDENCIES and pl is not None,
+    "formulaic extra or polars is not installed",
+)
+class PolarsInputTest(unittest.TestCase):
+    """A Polars DataFrame is read directly, with no conversion to pandas."""
+
+    @classmethod
+    def setUpClass(cls):
+        FormulaFrontendTest.setUpClass()
+        # Polars frames carry no index, so compare against a positional one.
+        cls.pandas_data = FormulaFrontendTest.data.reset_index(drop=True)
+        cls.polars_data = pl.DataFrame(
+            {name: cls.pandas_data[name].to_numpy() for name in cls.pandas_data.columns}
+        )
+
+    def _assert_same_fit(self, formula, **options):
+        options = dict(REGRESSOR_OPTIONS, **options)
+        expected = xhdfe.feols(formula, self.pandas_data, **options)
+        actual = xhdfe.feols(formula, self.polars_data, **options)
+        _assert_native_parity(self, actual, expected, rtol=0, atol=0)
+        self.assertEqual(actual.coef_names_, expected.coef_names_)
+        self.assertEqual(actual.used_fast_path_, expected.used_fast_path_)
+        self.assertEqual(actual.fe_levels_.keys(), expected.fe_levels_.keys())
+        for name in expected.fe_levels_:
+            np.testing.assert_array_equal(actual.fe_levels_[name], expected.fe_levels_[name])
+        return actual
+
+    def test_numeric_fast_path_matches_pandas(self):
+        self.assertTrue(self._assert_same_fit("y ~ x + z + x:z | firm + year").used_fast_path_)
+
+    def test_formulaic_path_matches_pandas(self):
+        self.assertFalse(self._assert_same_fit("y ~ x + C(g) + I(z**2) | firm + year").used_fast_path_)
+
+    def test_string_fixed_effects_match_pandas(self):
+        self._assert_same_fit("y ~ x | firm_text + year_text")
+
+    def test_named_weights_and_string_clusters_match_pandas(self):
+        actual = self._assert_same_fit(
+            "y ~ x | firm + year",
+            weights="weight",
+            clusters="cluster_text",
+            se_type="cluster",
+        )
+        self.assertIn("cluster_text", actual.cluster_levels_)
+
+    def test_polars_nulls_fail_closed(self):
+        for column in ("x", "firm", "firm_text"):
+            with self.subTest(column=column):
+                d = self.polars_data.with_columns(
+                    pl.when(pl.int_range(pl.len()) == 7)
+                    .then(None)
+                    .otherwise(pl.col(column))
+                    .alias(column)
+                )
+                with self.assertRaisesRegex(ValueError, "missing values"):
+                    xhdfe.feols(
+                        "y ~ x | firm_text + firm",
+                        d,
+                        **REGRESSOR_OPTIONS,
+                    )
+
+    def test_formulaic_integer_arithmetic_matches_float64_reference(self):
+        for dtype, start in ((np.int16, 300), (np.int32, 50_000), (np.int64, 4_000_000_000)):
+            z = (np.arange(8) + start).astype(dtype)
+            data = {"y": np.arange(8.0), "x": z[::-1].copy(), "z": z, "g": np.arange(8) % 2}
+            original = pl.DataFrame(data)
+            for formula in (
+                "y ~ 0 + I(z**2)",
+                'y ~ 0 + I(Q("z")**2)',
+                "I(z**2) ~ 0 + y",
+                'I(Q("z")**2) ~ 0 + y',
+                "y ~ C(g) + x:z",
+            ):
+                with self.subTest(dtype=dtype, formula=formula):
+                    expected = xhdfe.prepare_formula(formula, pd.DataFrame(data))
+                    actual = xhdfe.prepare_formula(formula, original)
+                    self.assertEqual(actual.coef_names, expected.coef_names)
+                    np.testing.assert_array_equal(actual.y, expected.y)
+                    np.testing.assert_array_equal(actual.X, expected.X)
+            direct = xhdfe.prepare_formula("y ~ 0 + I(z**2)", original)
+            np.testing.assert_array_equal(direct.X[:, 0], z.astype(np.float64) ** 2)
+            np.testing.assert_array_equal(original["z"].to_numpy(), z)
+            self.assertEqual(original["z"].dtype, pl.from_numpy(z).dtypes[0])
+
+    def test_promotion_preserves_large_ids_and_input_frame(self):
+        from polars.testing import assert_frame_equal
+
+        offset = 2**53 + 101
+        data = self.polars_data.with_columns(
+            (pl.col("firm") + offset).alias("firm_big"),
+            (pl.col("g") + offset).alias("category_big"),
+        )
+        original = data.clone()
+        prepared = xhdfe.prepare_formula(
+            "y ~ x + C(category_big) + I(z**2) | firm_big + year", data
+        )
+        np.testing.assert_array_equal(prepared.fes[0], data["firm_big"].to_numpy())
+        self.assertTrue(any(str(offset + 1) in name for name in prepared.coef_names))
+        assert_frame_equal(data, original)
+
+    def test_shared_numeric_and_categorical_column_uses_the_same_guard(self):
+        data = pl.DataFrame({"y": np.arange(8.0), "g": np.arange(8, dtype=np.int64) + 2**53})
+        with self.assertRaisesRegex(ValueError, "both categorically"):
+            xhdfe.prepare_formula("y ~ C(g) + I(g**2)", data)
+
+    def test_implicit_string_category_matches_pandas(self):
+        self._assert_same_fit("y ~ x + cluster_text | year")
+
+    def test_enum_levels_survive_numeric_promotion(self):
+        levels = ["second", "first", "third"]
+        values = np.resize(np.asarray(levels), 12)
+        data = {"y": np.arange(12.0), "z": np.arange(12, dtype=np.int32) + 50_000, "g": values}
+        polars_data = pl.DataFrame(data).with_columns(pl.col("g").cast(pl.Enum(levels)))
+        pandas_data = pd.DataFrame(data)
+        pandas_data["g"] = pd.Categorical(values, categories=levels)
+        for formula, context in (
+            ("y ~ g + I(z**2)", None),
+            ("y ~ C(g, levels=level_order) + I(z**2)", {"level_order": levels}),
+        ):
+            with self.subTest(formula=formula):
+                expected = xhdfe.prepare_formula(formula, pandas_data, context=context)
+                actual = xhdfe.prepare_formula(formula, polars_data, context=context)
+                self.assertEqual(actual.coef_names, expected.coef_names)
+                np.testing.assert_array_equal(actual.X, expected.X)
+        self.assertEqual(polars_data["g"].dtype, pl.Enum(levels))
+
+    def test_endogenous_and_instrument_integer_transforms_are_promoted(self):
+        values = np.arange(12, dtype=np.int32) + 50_000
+        data = pl.DataFrame({"y": np.arange(12.0), "d": values, "z": values[::-1], "g": np.arange(12) % 3})
+        prepared = xhdfe.prepare_formula("y ~ C(g) | I(d**2) ~ I(z**2)", data)
+        np.testing.assert_array_equal(prepared.X[:, -1], values.astype(np.float64) ** 2)
+        np.testing.assert_array_equal(prepared.instruments[:, 0], values[::-1].astype(np.float64) ** 2)
 
 
 @unittest.skipUnless(HAS_FORMULA_DEPENDENCIES, "formulaic extra is not installed")

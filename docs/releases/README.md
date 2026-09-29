@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.28.1 | 29 September 2026 | [Safe Polars formulas, faster label IDs and enforced Python frontend gates](RELEASE_NOTES_2.28.1.20260929.md) |
 | 2.28.0 | 24 September 2026 | [Audited integration, correctness fixes and declared performance trade-offs](RELEASE_NOTES_2.28.0.20260924.md) |
 | 2.26.2 | 3 September 2026 | [Certified 2.26 line: Windows Student-t, SMCL Viewer safety, and CUDA gate alignment](RELEASE_NOTES_2.26.2.20260903.md) |
 | 2.26.1 | 2 September 2026 | [Unissued candidate, superseded by 2.26.2: Windows Student-t and SMCL Viewer fixes](RELEASE_NOTES_2.26.1.20260902.md) |

@@ -58,8 +58,8 @@ MinGW runtime and compatibility libraries (binary artifacts when required)
     https://www.gnu.org/licenses/gcc-exception-3.1.html
 
   Candidate builds use their bundled sources and the validation ledger.
-  The following stable-release source URL is reserved and is not yet published:
-    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.28.0.20260924/xhdfe-2.28.0.20260924-corresponding-source.zip
+  The corresponding-source asset is available when this release is published:
+    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.28.1.20260929/xhdfe-2.28.1.20260929-corresponding-source.zip
   That asset includes a machine-readable provenance manifest and SHA-256
   manifest over the source archives actually supplied to the release job.
 

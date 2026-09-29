@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.28.0.20260924. Use `python -m xhdfe --version`
+Package documentation version: 2.28.1.20260929. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -154,7 +154,21 @@ print(reg.coef_names_)
 print(reg.tidy())
 ```
 
-`data` may be a dataframe or a mapping of column names to equal-length vectors.
+`data` may be a pandas or Polars DataFrame, or a mapping of column names to
+equal-length vectors. Pass prepared data; materialize a Polars LazyFrame before
+calling the estimator. The numeric path reads columns as NumPy arrays.
+Formulaic evaluates other formulas through pandas or Narwhals; categorical
+Polars columns can be converted internally to pandas and require PyArrow.
+Polars is optional: install `polars[pyarrow]>=1.0` when using that input format.
+Polars nulls count as missing values.
+
+Numeric formula columns are promoted to float64 before evaluating products,
+powers, and other transforms, so integer arithmetic cannot overflow before the
+model matrix is built. Category and identifier columns retain their original
+types, and the input DataFrame is not modified. A non-float64 column used both
+numerically and through `C(...)` requires a separate float64 column for its
+numeric role, preserving the original category IDs.
+
 Custom transforms must be supplied explicitly through a `context` mapping;
 Formulaic never captures arbitrary caller-local names implicitly.
 
@@ -242,7 +256,9 @@ negative value such as pandas' `-1` missing-category sentinel is rejected, as
 are non-finite numeric identifiers. String, categorical, datetime, and
 other label columns are factorized without conversion through floating point.
 Nonnegative `int64` identifiers, including values above `2**53`, also retain
-their exact integer identity.
+their exact integer identity. Integer identifiers are passed to the absorber
+as they are, while label columns must be factorized first; on large data,
+storing a FE or cluster identifier as an integer column is the faster input.
 
 `weights` and `clusters` accept either arrays or dataframe column names. A
 two-dimensional cluster array has shape `(n, q)`; a list/tuple of arrays is
@@ -500,7 +516,7 @@ the joint LSMR implementation is CPU-only. Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
-## Known limitations (2.28.0)
+## Known limitations (2.28.1)
 
 - A fit that converges by the solver's stopping rule but does not pass the
   precision certificate raises an error and returns no estimates, in Python,
@@ -683,8 +699,8 @@ XHDFE_GPU_BACKEND=metal
 CPU is the package default. CUDA requires a CUDA-enabled build and a CUDA device.
 Metal is currently reserved.
 
-In 2.28.0, `gpu_used_ == 1` proves GPU execution, not universal numerical
-certification. The current core matrix has 188 converged cells out of 192;
+In 2.28.1, `gpu_used_ == 1` proves GPU execution, not universal numerical
+certification. The inherited 2.28.0 core matrix has 188 converged cells out of 192;
 every CPU and Fast cell converged. Four difficult CUDA Comparable cells still
 refuse estimation. Separate extreme-offset and group/individual CUDA cases
 also retain documented refusals; use CPU for those specifications. Consult
