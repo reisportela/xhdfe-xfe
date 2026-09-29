@@ -1453,22 +1453,38 @@ program define xhdfe_hetero, eclass sortpreserve
     local omit_priority_list
     local fv_stub "__xhdfe_"
     local fv_created 0
+    local fv_terms
     if ("`indepvars'" != "") {
         local has_fv = (strpos("`indepvars'", ".") > 0) | (strpos("`indepvars'", "#") > 0)
         local raw_x "`indepvars'"
         if (`has_fv') {
+            quietly fvexpand `indepvars' if `touse'
+            local fv_terms "`r(varlist)'"
             quietly fvrevar `indepvars' if `touse', stub(`fv_stub')
             local raw_x "`r(varlist)'"
             local fv_created 1
         }
 
+        local fv_i 0
         foreach v of local raw_x {
+            local ++fv_i
             local term : char `v'[fvrevar]
+            if (`has_fv') {
+                local canonical : word `fv_i' of `fv_terms'
+                if ("`canonical'" != "") local term "`canonical'"
+            }
             if ("`term'" == "") local term "`v'"
 
-            // Drop explicitly omitted terms and base categories.
-            if (substr("`term'", 1, 2) == "o.") continue
-            if (regexm("`term'", "([0-9]+b\.)")) continue
+            if (regexm("`term'", "(^|#)[^#.]*o\.")) continue
+            if (strpos("`term'", "#") == 0 & regexm("`term'", "^[0-9]+b\.")) continue
+            if (strpos("`term'", "#") > 0) {
+                local fv_parts : subinstr local term "#" " ", all
+                local all_base 1
+                foreach part of local fv_parts {
+                    if (!regexm("`part'", "^[0-9]+b\.")) local all_base 0
+                }
+                if (`all_base') continue
+            }
 
             // Match Stata naming conventions for continuous main effects.
             if (substr("`term'", 1, 2) == "c." & strpos("`term'", "#") == 0) {
@@ -1946,11 +1962,6 @@ program define xhdfe_hetero, eclass sortpreserve
         if ("`name'" == "_cons") continue
         // Prefer explicit omission tracking from C++/forced omission pass.
         if (`omit_reason'[`j',1] > 0) continue
-        // Guard against base/omitted FV terms that may still appear in colnames.
-        if (regexm("`name'", "([0-9]+b\.)")) continue
-        if (regexm("`name'", "([0-9]+bn\.)")) continue
-        if (regexm("`name'", "^o\.")) continue
-        if (regexm("`name'", "([0-9]+o\.)")) continue
         local ++df_m_eff
     }
 
@@ -2186,10 +2197,6 @@ program define xhdfe_hetero, eclass sortpreserve
             local ++idx
             if ("`name'" == "_cons") continue
             if (e(omit_reason)[`idx',1] > 0) continue
-            if (regexm("`name'", "([0-9]+b\.)")) continue
-            if (regexm("`name'", "([0-9]+bn\.)")) continue
-            if (regexm("`name'", "^o\.")) continue
-            if (regexm("`name'", "([0-9]+o\.)")) continue
             local keep_cols "`keep_cols' `idx'"
         }
 
