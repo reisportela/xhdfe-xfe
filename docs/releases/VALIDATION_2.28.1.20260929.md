@@ -58,3 +58,48 @@ The release's offline bundle carries native receipts and provider ledgers;
 the published checksums identify the distribution files. Local source tests
 and earlier release artifacts do not substitute for these version-tag gates.
 See the [release procedure](../release-workflow.md).
+
+## Executed release gates
+
+The [preflight](https://github.com/reisportela/xhdfe-xfe/actions/runs/36553876660)
+and the independent
+[version-tag build](https://github.com/reisportela/xhdfe-xfe/actions/runs/36558408298)
+passed on public commit `9d221ae21206686b2b30857c1cb883087ad4c143`.
+All 13 final draft assets matched both GitHub's SHA-256 digests and the
+downloaded `SHA256SUMS.txt` before runtime testing.
+
+| Gate | Observed result |
+| --- | --- |
+| Linux CPU/CUDA-host, Windows, macOS arm64/x86_64 plugins | Ten native plugin cases matched final artifact hashes and demonstrated one/two useful OpenMP workers with analytic numerical agreement. |
+| macOS serial controls | Both plugins on both architectures rejected the separate serial builds. |
+| Installed Linux/Windows Python wheels and R package | Actual one/two-worker gates and analytic b/full covariance/RSS checks passed. |
+| Downloaded Linux wheel, isolated local installation | The complete 97-test frontend gate passed again without skips or source shadowing. |
+| Exact Linux CUDA ZIP on H100 with licensed Stata | Fast/Comparable analytic b/full V, xfepout, savefe/reconstruction and CPU/CUDA cache cases passed with actual GPU use. |
+| Exact Linux CPU ZIP with licensed Stata | The analytic fixture, documented auto-data example, cache cases and large CPU smoke passed. |
+| Platform ZIPs, net-install snapshot, corresponding sources | Package layout, runtime/source closure and provenance validators passed. |
+
+The freshly built Linux CPU and CUDA plugin pairs are byte-identical to their
+2.28.0 counterparts. In fresh Stata processes on the large CPU sample,
+the previous public package and the final 2.28.1 package returned identical
+coefficients, full covariance, RSS, sample signature and degrees of freedom:
+46,156,187 estimation observations, 23 iterations and 16 actual workers.
+Fit times were 80.854 s and 80.182 s. This single pair is an artifact smoke,
+not a new performance campaign or a general speedup claim.
+
+Both canonical local checkouts were separately rebuilt and exercised on CPU
+and H100. Their native modules, active Python imports and Stata entry points
+were identified by path and hash. Local sm_90 builds remain distinct from
+the portable CI distribution artifacts.
+
+## R check qualifications
+
+The version-tag `R CMD check` completed its examples and tests, with two
+warnings and four notes. The same pattern was present in the exact 2.28.0
+tag build: nonstandard source filenames, a GCC `-Wstringop-overread` warning,
+unavailable suggested packages (`fixest`, `nanoparquet`, `gt`), installed size,
+GNU make and compiled stdout/stderr symbols. The separate R OpenMP/numerical
+gate passed with zero recorded analytic and one/two-worker differences.
+
+These qualifications are retained; the result is not a warning-free CRAN
+check and does not establish that the compiler diagnostic is false. The
+native sources were not changed to suppress these diagnostics.
