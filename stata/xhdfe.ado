@@ -1,10 +1,10 @@
-*! version 2.28.0 24sep2026
+*! version 2.28.1 29sep2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.28.0 24sep2026"
+        local version "2.28.1 29sep2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -2410,7 +2410,7 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.28.0 24sep2026"
+    ereturn local version "2.28.1 29sep2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
