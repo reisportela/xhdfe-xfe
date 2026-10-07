@@ -877,8 +877,9 @@ else {
             what("with the small option the two engines agree")
 
         * -----------------------------------------------------------------
-        * D.10 OPEN: xhdfe posts no first-stage or weak-identification
-        * statistics, so none can be compared. ivreghdfe posts e(widstat),
+        * D.10 OPEN: xhdfe posts no weak-identification/overidentification
+        * statistics. First-stage F tests have a separate contract in
+        * iv_firststage_contract.do. ivreghdfe posts e(widstat),
         * e(j), e(rkf); xhdfe posts none of them. Recorded, not failed.
         * -----------------------------------------------------------------
         quietly ivreghdfe y x1 x2 (d1 d2 = z1 z2 z3), absorb(firm year) small
@@ -895,7 +896,7 @@ else {
         di as text "             weak-id statistics posted: ivreghdfe `iv_stats'" ///
             " of 3, xhdfe `xh_stats' of 3"
         xpf_open, id("D10") got(`= 3 - `xh_stats'') pinned(3) ///
-            what("xhdfe posts no first-stage / weak-identification statistics")
+            what("xhdfe posts no weak-identification / overidentification statistics")
 
         * -----------------------------------------------------------------
         * D.11 (IV-1): IV with no absorbed dimension and clustering must

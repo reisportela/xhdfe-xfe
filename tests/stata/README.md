@@ -54,6 +54,8 @@ not part of the CPU/default runner.
 - saved fixed-effect reconstruction
 - named/aliased saved-FE mapping vs `reghdfe` (regression guard for mixed unnamed+named `absorb()` terms)
 - IV/2SLS parity against `ivreghdfe`
+- IV first-stage diagnostics against `ivreghdfe` and direct `reghdfe` first
+  stages, including the documented nested-cluster degrees-of-freedom factor
 - probability-weight and importance-weight behavior
 - `group()` / `individual()` behavior and aliases
 - missing-data, sample-restriction, and expected-error behavior
@@ -72,6 +74,34 @@ not part of the CPU/default runner.
   first-draw and basic-CI oracles, analytic weights, added/common FEs,
   fail-closed validation, multi-format escaped tables and
   identity-preserving waterfall filtering
+
+## First-stage diagnostics
+
+The standalone `iv_firststage_contract.do` uses 6,000 synthetic observations.
+Run it in a scratch/output directory with the candidate package on the adopath:
+
+```bash
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/iv_firststage_contract.do cpu
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/iv_firststage_contract.do cuda
+```
+
+Require the explicit `IV_FIRSTSTAGE_CONTRACT_PASS` marker. Each run writes a CSV
+comparison with `reghdfe` and `ivreghdfe`, and the CUDA run requires actual GPU
+use in the IV regression and both auxiliary regressions. The tests cover
+multiple endogenous variables, robust/clustered errors, weights, missing values,
+singleton removal, redundant instruments, weak instruments, replay, `nosample`,
+and restoration of the IV estimates after successful and failed postestimation.
+The few-cluster two-way case pins ivreghdfe's unavailable system statistic and
+checks the per-equation F tests against reghdfe. No timing or general
+release-certification claim follows from these small tests.
+
+The CPU run covers 21 specifications (27 first-stage equations); CUDA covers
+18 specifications (24 equations). No-absorb regressions are CPU-only. CUDA
+covers zero instrument columns, but proportional duplicates and instruments
+that repeat included controls expose an existing native IV limitation and are
+not certified by this test. Repeated-fit comparisons allow FP64 roundoff;
+postestimation restoration and cached-result checks require exact equality.
+See the [candidate validation report](../../docs/certification/iv-firststage-20261007.md).
 
 ## Upstream notice
 

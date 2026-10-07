@@ -105,3 +105,15 @@ fi
 
 echo "Stata certification log: ${LOG_FILE}"
 echo "Stata Gelbach bootstrap log: ${BOOTSTRAP_LOG}"
+
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/iv_firststage_contract.do" cpu
+)
+FIRSTSTAGE_LOG="${OUT_DIR}/iv_firststage_contract.log"
+if ! grep -Fxq "IV_FIRSTSTAGE_CONTRACT_PASS cpu" "${FIRSTSTAGE_LOG}"; then
+  echo "Stata IV first-stage diagnostics failed. Last log lines:" >&2
+  tail -n 80 "${FIRSTSTAGE_LOG}" >&2
+  exit 1
+fi
+echo "Stata IV first-stage log: ${FIRSTSTAGE_LOG}"

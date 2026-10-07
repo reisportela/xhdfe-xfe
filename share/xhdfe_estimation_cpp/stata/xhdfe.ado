@@ -1,10 +1,10 @@
-*! version 2.28.1 29sep2026
+*! version 2.29.0 07oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.28.1 29sep2026"
+        local version "2.29.0 07oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -217,6 +217,7 @@ program define _xhdfe_estimate, eclass
         AGGregation(string) ///
         ENDOGenous(varlist numeric) ///
         INSTRuments(varlist numeric) ///
+        FIRST FFIRST ///
         RESiduals(name) ///
         RESiduals2 ///
         GROUPVAR(name) ///
@@ -646,6 +647,10 @@ program define _xhdfe_estimate, eclass
     // IV / instruments.
     local ninst : word count `instruments'
     local nendog : word count `endogenous'
+    if ("`first'`ffirst'" != "" & `nendog' == 0) {
+        di as err "first and ffirst require endogenous() and instruments()"
+        exit 198
+    }
     if (`ninst' > 0 | `nendog' > 0) {
         local has_fv = (strpos("`indepvars_raw'", ".") > 0) | (strpos("`indepvars_raw'", "#") > 0)
         if (`has_fv') {
@@ -2410,7 +2415,7 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.28.1 29sep2026"
+    ereturn local version "2.29.0 07oct2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2718,6 +2723,46 @@ program define _xhdfe_estimate, eclass
     // ereturn display in supported Stata versions accepts fvwrap() but not
     // fvwrapon(); parse fvwrapon() for compatibility and leave display stable.
 
+    if (`nendog' > 0) {
+        // Retain original variable names and estimation settings for on-demand
+        // first stages. Do not carry generated FE IDs, savefe/residual targets,
+        // or disk-cache paths into the auxiliary regressions.
+        local exogenous : list indepvars_raw - endogenous
+        local excluded : list instruments - exogenous
+        local excluded : list uniq excluded
+        ereturn local endogenous "`endogenous'"
+        ereturn local exogenous "`exogenous'"
+        ereturn local instruments "`excluded'"
+        local fsopts "tolerance(`tolerance') tolerancemode(`tolerance_mode') maxiter(`maxiter')"
+        local fsopts "`fsopts' absorptionmethod(`absorptionmethod') convergence(`convergence')"
+        local fsopts "`fsopts' numthreads(`numthreads') defaultthreads(`defaultthreads') maxthreads(`maxthreads')"
+        local fsopts "`fsopts' minparallelrows(`minparrows') targetrowsperthread(`targetrpt')"
+        local fsopts "`fsopts' statstyle(`statstyle') jacobirelaxation(`jacobirelaxation')"
+        local fsopts "`fsopts' `keepsingletons' `noconstant' `symmetricsweep' `nowarn'"
+        if ("`absorb_ordered'" != "") local fsopts "`fsopts' absorb(`absorb_ordered')"
+        if ("`se_type'" == "cluster") local fsopts "`fsopts' vce(cluster `cluster_ordered')"
+        else local fsopts "`fsopts' vce(`se_type')"
+        if (`"`ssc'"' != "") local fsopts `"`fsopts' ssc(`ssc')"'
+        if (`"`dofadjustments'"' != "") local fsopts `"`fsopts' dofadjustments(`dofadjustments')"'
+        local fsbackend "`gpu_backend'"
+        if ("`fsbackend'" == "") local fsbackend : environment XHDFE_GPU_BACKEND
+        if ("`fsbackend'" == "") local fsbackend "cpu"
+        local fsopts "`fsopts' gpubackend(`fsbackend')"
+        ereturn local firststage_options `"`fsopts'"'
+        if ("`first'`ffirst'" != "") {
+            // ereturn post consumes esample when it installs e(sample).
+            // With nosample the final plugin sample is still a local variable.
+            local fs_sampleopt
+            if ("`nosample'" != "") local fs_sampleopt "sample(`esample')"
+            xhdfe_estat firststage, `fs_sampleopt' `first' level(`level')
+            tempname fsresult fsgpu
+            matrix `fsresult' = r(first)
+            matrix `fsgpu' = r(first_gpu_used)
+            ereturn matrix first = `fsresult'
+            ereturn matrix first_gpu_used = `fsgpu'
+        }
+    }
+
     xhdfe_display, level(`level') `display_opts'
     if (`__xhdfe_profile') {
         timer off 99
@@ -2749,7 +2794,11 @@ program define xhdfe_display
     syntax [, Level(cilevel) NOHeader NOTABle NOFOOTnote NOOMITTED NOEMPty ///
         NOCI NOPVALUES BASElevels ALLBASElevels CFORMAT(string asis) ///
         PFORMAT(string asis) SFORMAT(string asis) FVWrap(integer 0) ///
-        FVWON(string asis) VSQUISH NOLSTRetch NOFVLABEL]
+        FVWON(string asis) VSQUISH NOLSTRetch NOFVLABEL FIRST FFIRST]
+
+    if ("`first'`ffirst'" != "") {
+        xhdfe_estat firststage, `first' level(`level')
+    }
 
     local printed_preamble 0
     if (!missing(e(drop_singletons)) & e(drop_singletons) == 1 & !missing(e(num_singletons)) & e(num_singletons) > 0) {

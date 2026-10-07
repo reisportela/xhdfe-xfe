@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.28.1 29sep2026}{...}
+{* *! version 2.29.0 07oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -114,6 +114,8 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 {syntab:IV/2SLS {help xhdfe##opt_iv:[+]}}
 {synopt : {opth endog:enous(varlist)}}endogenous regressors (subset of slopes){p_end}
 {synopt : {opth instr:uments(varlist)}}instruments for IV/2SLS{p_end}
+{synopt : {opt first}}display first-stage regressions and excluded-instrument tests{p_end}
+{synopt : {opt ffirst}}display only the first-stage diagnostic summary{p_end}
 
 {syntab:Degrees-of-Freedom Adjustments {help xhdfe##opt_dof:[+]}}
 {synopt :{opt dof:adjustments(list)}}select absorbed-DoF adjustment rules; default is {cmd:all}{p_end}
@@ -526,6 +528,36 @@ Factor-variable operators are not supported with IV, and IV is not supported in 
 {pmore}
 Redundant instrument columns are accepted when their retained span identifies the declared endogenous regressors.
 An effective zero instrument span or an underidentified model returns an error.
+On CUDA, use linearly independent excluded instruments and do not repeat included
+controls in {cmd:instruments()}: the current native IV solver can reject proportional
+duplicates or produce unstable estimates with repeated controls. CPU handles these
+redundancies. This existing limitation also applies when requesting first-stage diagnostics.
+
+{phang}
+{opt first} displays the regression of each endogenous variable on the included
+exogenous regressors, excluded instruments, and absorbed fixed effects, followed
+by the first-stage diagnostic summary. {opt ffirst} displays just the summary.
+Both store {cmd:e(first)}, with one column per endogenous regressor and rows
+{cmd:pr2}, {cmd:F}, {cmd:df}, {cmd:df_r}, and {cmd:pvalue}. The F-test jointly tests
+the excluded-instrument coefficients; redundant restrictions are omitted.
+Partial R-squared is {it:1 - RSS_unrestricted/RSS_restricted}, where the restricted
+first stage includes the exogenous controls and fixed effects only.
+
+{pmore}
+The auxiliary regressions use the final IV estimation sample, weights, fixed
+effects, covariance estimator, DoF/SSC settings, and selected CPU/CUDA backend.
+They run only when requested, and preserve the structural coefficients,
+covariance matrix, estimation sample, and other {cmd:e()} results. These options
+perform additional xhdfe regressions and therefore add computation time.
+
+{pmore}
+F-statistics follow the same small-sample conventions as a direct xhdfe or
+reghdfe first-stage regression followed by {cmd:test}. When fixed effects are
+nested within clusters, reghdfe charges an additional intercept degree of
+freedom relative to ivreghdfe; the resulting F-statistics can differ by that
+known finite-sample factor. With multiple endogenous regressors, these are
+per-equation relevance tests, not Sanderson-Windmeijer conditional tests or
+Kleibergen-Paap weak-identification statistics. They do not test instrument validity.
 
 {pmore}
 With absorbed fixed effects, the reported {cmd:_cons} is the finite
@@ -879,7 +911,17 @@ residuals for compatibility.
 
 {pstd}
 Implemented {cmd:estat} subcommands are {cmd:estat summarize}, {cmd:estat vce}, and
-{cmd:estat ic}.
+{cmd:estat ic}, plus {cmd:estat firststage} after IV estimation.
+
+{pstd}
+{cmd:estat firststage} reports the first-stage summary and returns its matrix in
+{cmd:r(first)} without replacing the IV estimates. It reuses {cmd:e(first)} when
+available, or estimates the auxiliary regressions on {cmd:e(sample)} otherwise.
+{cmd:r(first_gpu_used)} reports GPU use in the unrestricted and restricted first stages.
+{cmd:estat firststage, first} also displays the full first-stage regressions.
+With {cmd:nosample}, request {cmd:first} or {cmd:ffirst} during estimation to retain
+the summary for later use; re-estimating full first stages requires the sample.
+Replay with {cmd:xhdfe, ffirst} or {cmd:xhdfe, first} is also supported.
 
 {pstd}
 The syntax of {it:predict} is:
@@ -1006,6 +1048,9 @@ other redundancies are not detected by default and the footnote marks the count 
 
 {pstd}Two-stage least squares after absorbing FEs{p_end}
 {phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south)}{p_end}
+{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south) vce(cluster idcode) ffirst}{p_end}
+{phang2}{cmd:. matrix list e(first)}{p_end}
+{phang2}{cmd:. estat firststage}{p_end}
 
 {pstd}Side-by-side comparison with reghdfe (user example){p_end}
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
@@ -1181,6 +1226,9 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(title2)}}secondary title reporting the number of absorbed FE groups{p_end}
 {synopt:{cmd:e(depvar)}}name of dependent variable{p_end}
 {synopt:{cmd:e(indepvars)}}names of independent variables{p_end}
+{synopt:{cmd:e(endogenous)}}endogenous regressor list after IV estimation{p_end}
+{synopt:{cmd:e(exogenous)}}included exogenous regressor list after IV estimation{p_end}
+{synopt:{cmd:e(instruments)}}excluded instrument list after IV estimation{p_end}
 {synopt:{cmd:e(absorb)}}absorbed FE list{p_end}
 {synopt:{cmd:e(absvars)}}alias for absorbed FE list (reghdfe compatibility){p_end}
 {synopt:{cmd:e(extended_absvars)}}extended absorbed FE list (reghdfe compatibility){p_end}
@@ -1212,6 +1260,8 @@ or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end
 
 {synoptset 24 tabbed}{...}
 {syntab:Matrices}
+{synopt:{cmd:e(first)}}first-stage partial R-squared, excluded-instrument F, numerator/denominator df, and p-value; with {cmd:first} or {cmd:ffirst}{p_end}
+{synopt:{cmd:e(first_gpu_used)}}GPU use for unrestricted and restricted first stages, one column per endogenous regressor{p_end}
 {synopt:{cmd:e(b)}}coefficient vector{p_end}
 {synopt:{cmd:e(V)}}variance-covariance matrix of the estimators{p_end}
 {synopt:{cmd:e(dof_table)}}absorbed DoF table by FE dimension (if any){p_end}
@@ -1287,7 +1337,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.28.1.
+regression via a C++ backend." Version 2.29.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
