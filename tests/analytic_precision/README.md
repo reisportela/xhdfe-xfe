@@ -100,6 +100,60 @@ the analytic campaign above; proportional duplicates and general numerical-rank
 decisions remain outside its coverage. The special self-instrumentation case
 uses explicit-dummy OLS and reghdfe because ivreghdfe rejects that syntax.
 
+The proportional-instrument repair has separate permanent guards:
+
+- `iv_exact_proportional_contract.cpp` reads represented binary64 inputs and
+  checks the production filter. Compile it with the candidate's flags and
+  `-Iinclude -Isrc -I/path/to/Eigen`; use `-fopenmp -DHDFE_USE_OPENMP` for
+  explicit-team coverage. Run `iv_exact_proportional_contract.py --probe BIN
+  --out NEW.json --threads 1,2,8,16,24,48`. Its independent `Fraction` oracle
+  covers 4,396 cases per team, including subnormals, extreme exponents, signed
+  zeros and one-bit differences. A 6,000-row check verifies that a distinction
+  in a late row survives and every requested worker actually performs work.
+- `iv_proportional_instrument_contract.py --module MODULE --backend cpu|cuda
+  --out NEW.json` runs 28 cases per backend against the conditioning contract's
+  independent Walsh scores. It combines exactly proportional columns with tiny
+  genuine directions, two endogenous regressors, weights, robust/clustered
+  covariance, both tolerance modes, positive-weight sample selection, and
+  underidentification. The multiple-endogenous weighted fixture explicitly
+  checks the score-space and FE orthogonality assumptions before evaluating a fit.
+- `iv_proportional_instrument_contract.do cpu|cuda`, with
+  `XHDFE_STATA_ADOPATH`, checks 210 CPU / 180 CUDA fits against the clean
+  specification, independent explicit-dummy 2SLS/OLS and ivreghdfe/reghdfe.
+  Require `IV_PROPORTIONAL_INSTRUMENT_CONTRACT_PASS`. The original first-stage
+  contract now also runs the proportional case on CUDA.
+- `n1_iv_cache_contract.py` crosses its independent IV score and saved-FE
+  recovery fixtures with and without proportional columns. Its existing OLS
+  persistent-cache checks are unchanged.
+
+These tests do not certify arbitrary multicolumn dependencies, FE-induced
+redundancy, cross-platform packages, or runtime performance.
+
+The multiway IV covariance repair has two complementary independent guards:
+
+- The unchanged `iv_intercept_covariance_contract.py --module MODULE --out
+  NEW.json --mode xhdfe-fast|reghdfe-comparable` covers 46 full covariance cases
+  per mode. `iv_intercept_covariance_cuda_contract.py` runs the same references
+  and requires real CUDA use. It includes equivalent cluster partitions, raw
+  regressor means, analytic/frequency weights, SSC choices and perfect fits.
+- `iv_covariance_psd_contract.py --module MODULE --backend cpu|cuda --mode
+  xhdfe-fast|reghdfe-comparable --out NEW.json` adds 44 cases per backend/mode.
+  Fixed partitions (seeds 2/102 and 11/111) require actual eigenvalue correction;
+  equivalent partitions must preserve the positive sandwich. The MP90 and
+  MP120 references independently construct the cluster scores and sandwich,
+  then apply the documented standardized full-matrix and separate slope-block
+  rule. At least 12 controls must detect an implementation that skips the
+  projection. Every coefficient/covariance limit remains 1e-9/1e-8.
+- For Stata, first run `iv_covariance_psd_stata_fixtures.py NEW_DIRECTORY`, then
+  `do iv_covariance_psd_contract.do cpu|cuda NEW_DIRECTORY` from a scratch
+  directory with the candidate selected by `XHDFE_STATA_ADOPATH`. This tests
+  88 fits per backend, including `e(vcv_psd_fixed)` and real CUDA diagnostics,
+  against the same independent MP120 oracle. Require the
+  `IV_COVARIANCE_PSD_CONTRACT_PASS` marker. A wrapper do-file avoids ambiguity
+  in the log filename chosen by Stata batch mode for multiple arguments.
+
+These covariance tests do not substitute for full release performance gates.
+
 The scope, source hashes, fixtures and complete per-row results must accompany
 any certification claim. Preserve failed evidence, investigate oracle or
 interface-contract mistakes separately from product failures, and prepare a

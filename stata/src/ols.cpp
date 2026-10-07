@@ -1,5 +1,6 @@
 #include "ols.hpp"
 #include "wide_float.hpp"
+#include "wide_covariance.hpp"
 #include "ols_precision.hpp"
 #include "n1_checks.hpp"
 #include "group_forward_certificate.hpp"
@@ -337,7 +338,8 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     ClusterDofMethod g_df=ClusterDofMethod::Min,bool g_adj=true,
     const Eigen::MatrixXd* score_low=nullptr,
     const Eigen::VectorXd* normalization_means=nullptr,
-    Eigen::VectorXd* intercept_covariance=nullptr);
+    Eigen::VectorXd* intercept_covariance=nullptr,
+    OlsWideCovariance* covariance_wide=nullptr);
 
 struct OlsOriginShift {
     int constant = -1;
@@ -1649,7 +1651,8 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     const Eigen::Ref<const Eigen::MatrixXd>* residual_design,ParallelWorkObserver* observer,
     ClusterDofMethod g_df,bool g_adj,const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means,
-    Eigen::VectorXd* intercept_covariance) {
+    Eigen::VectorXd* intercept_covariance,
+    OlsWideCovariance* covariance_wide) {
     using Number=OlsWide;
     using Matrix=std::vector<Number>;
     const int n=static_cast<int>(y.size()),p=static_cast<int>(X.cols());
@@ -1660,6 +1663,10 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     if(residual_design && !ieee_all_finite(*residual_design)) fail("actual-regressor design is not finite");
     if(score_low && (score_low->rows()!=n || score_low->cols()!=p || !ieee_all_finite(*score_low))) fail("invalid score low part");
     const bool capture_intercept = normalization_means && intercept_covariance;
+    const bool retain_covariance = covariance_wide && capture_intercept;
+    const bool retain_cluster_covariance = retain_covariance && multiway &&
+                                            se_type == StandardErrorType::Cluster;
+    if (retain_covariance) covariance_wide->values.setZero(p+1, p+1);
     if(capture_intercept && (normalization_means->size()!=p || !ieee_all_finite(*normalization_means))) fail("invalid intercept normalization means");
     auto score_coordinate=[&](int row,int column) {
         return score_low ? Number::pair(X(row,column),(*score_low)(row,column)) : Number(X(row,column));
@@ -1901,6 +1908,8 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     const double df=std::max(0.0,effective-p);
     Matrix intercept_component_cross(capture_intercept ? p : 0);
     Number intercept_component_total;
+    OlsWideCovariance::Matrix covariance_component;
+    if (retain_cluster_covariance) covariance_component.resize(p+1,p+1);
     auto cluster_meat=[&](const Eigen::VectorXi& ids,bool auxiliary) {
         if(ids.size()!=n) fail("cluster labels do not align with observations");
         std::unordered_map<int,int> mapping;
@@ -1918,6 +1927,7 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                 checked_inference_product(checked_inference_product(wu,coordinate(row,j,false)),inverse_scales[j]));
         }
         Matrix value(square),cross(p);Number total_u2;
+        if (retain_cluster_covariance) covariance_component.setZero();
         for(std::size_t g=0;g<scores.size();++g) {
             for(int j=0;j<p;++j) {
                 if (inference_nonzero(scores[g][j]) &&
@@ -1927,6 +1937,28 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                 if(auxiliary || capture_intercept) cross[j]=checked_inference_add(cross[j],checked_inference_product(totals[g],scores[g][j]));
             }
             if(auxiliary || capture_intercept) total_u2=checked_inference_add(total_u2,checked_inference_product(totals[g],totals[g]));
+            if (retain_cluster_covariance) {
+                // Evaluate the same sandwich as outer products of cluster
+                // influences. Multiplying bread * meat * bread first can
+                // lose the small eigenvalues even in wide arithmetic when
+                // the projected regressors are nearly collinear.
+                const Matrix influence=solve(scores[g]);
+                Matrix original(p+1);
+                for (int i=0;i<p;++i) {
+                    if (constant>=0) {
+                        for (int j=0;j<p;++j)
+                            original[i]+=transform[static_cast<std::size_t>(i)*p+j]*influence[j];
+                    } else original[i]=inverse_scales[i]*influence[i];
+                }
+                original[p]=totals[g]/intercept_weight_sum;
+                for (int i=0;i<p;++i)
+                    original[p]-=Number((*normalization_means)[i])*original[i];
+                for (auto& value:original)
+                    value=checked_inference_product(value,Number(y_scale));
+                for (int i=0;i<=p;++i) for (int j=0;j<=i;++j)
+                    covariance_component(i,j)=checked_inference_add(covariance_component(i,j),
+                        checked_inference_product(original[i],original[j]));
+            }
         }
         for (int j=0;j<p;++j) {
             const auto& entry=value[static_cast<std::size_t>(j)*p+j];
@@ -1970,6 +2002,10 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                     intercept_total+=multiplier*intercept_component_total;
                     for(int j=0;j<p;++j) intercept_cross[j]+=multiplier*intercept_component_cross[j];
                 }
+                if (retain_cluster_covariance)
+                    for (int i=0;i<=p;++i) for (int j=0;j<=i;++j)
+                        covariance_wide->values(i,j)=checked_inference_add(covariance_wide->values(i,j),
+                            checked_inference_product(multiplier,covariance_component(i,j)));
             }
             result.num_clusters=minimum;
             if(df>0) adjustment=Number(effective-1)/Number(df);
@@ -2032,11 +2068,19 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
         for(int i=0;i<p;++i) {
             Number value;
             for(int j=0;j<p;++j) value+=basis(i,j)*(cross[j]-covariance_means[j]);
-            (*intercept_covariance)[i]=checked_inference_product(
-                checked_inference_product(value,Number(y_scale)),Number(y_scale)).value();
+            const Number original_value=checked_inference_product(
+                checked_inference_product(value,Number(y_scale)),Number(y_scale));
+            (*intercept_covariance)[i]=original_value.value();
+            if (retain_covariance && !retain_cluster_covariance) {
+                covariance_wide->values(i,p)=original_value;
+                covariance_wide->values(p,i)=original_value;
+            }
         }
-        (*intercept_covariance)[p]=checked_inference_product(
-            checked_inference_product(variance,Number(y_scale)),Number(y_scale)).value();
+        const Number original_variance=checked_inference_product(
+            checked_inference_product(variance,Number(y_scale)),Number(y_scale));
+        (*intercept_covariance)[p]=original_variance.value();
+        if (retain_covariance && !retain_cluster_covariance)
+            covariance_wide->values(p,p)=original_variance;
         if(!ieee_all_finite(*intercept_covariance)) fail("intercept inference exceeded its numerical range");
     }
     result.xtx_inv.resize(p,p);result.covariance.resize(p,p);
@@ -2060,15 +2104,32 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
             for(int j=0;j<p;++j) {
                 result.xtx_inv(i,j)=original_bread[static_cast<std::size_t>(i)*p+j].value();
                 result.covariance(i,j)=original_covariance[static_cast<std::size_t>(i)*p+j].value();
+                if (retain_covariance && !retain_cluster_covariance)
+                    covariance_wide->values(i,j)=original_covariance[static_cast<std::size_t>(i)*p+j];
             }
         }
     } else for(int i=0;i<p;++i) {
         for(int j=0;j<p;++j) {
             const auto at=static_cast<std::size_t>(i)*p+j;
             result.xtx_inv(i,j)=checked_inference_product(checked_inference_product(bread[at],inverse_scales[i]),inverse_scales[j]).value();
-            result.covariance(i,j)=checked_inference_product(checked_inference_product(checked_inference_product(
-                checked_inference_product(covariance[at],Number(y_scale)),inverse_scales[i]),Number(y_scale)),inverse_scales[j]).value();
+            const Number original_covariance=checked_inference_product(checked_inference_product(checked_inference_product(
+                checked_inference_product(covariance[at],Number(y_scale)),inverse_scales[i]),Number(y_scale)),inverse_scales[j]);
+            result.covariance(i,j)=original_covariance.value();
+            if (retain_covariance && !retain_cluster_covariance)
+                covariance_wide->values(i,j)=original_covariance;
         }
+    }
+    if (retain_cluster_covariance) {
+        for (int i=0;i<=p;++i) for (int j=0;j<=i;++j) {
+            const Number value=checked_inference_product(covariance_wide->values(i,j),adjustment);
+            covariance_wide->values(i,j)=value;
+            covariance_wide->values(j,i)=value;
+        }
+        result.covariance=covariance_wide->values.topLeftCorner(p,p).cast<double>();
+        for (int i=0;i<=p;++i)
+            (*intercept_covariance)[i]=covariance_wide->values(i,p).value();
+        if (!ieee_all_finite(*intercept_covariance))
+            fail("intercept inference exceeded its numerical range");
     }
     if(!ieee_all_finite(result.coefficients) || !ieee_all_finite(result.xtx_inv) || !ieee_all_finite(result.covariance) ||
        !ieee_all_finite(result.cluster_ux) || !ieee_finite(result.cluster_u2)) fail("inference output exceeded its numerical range");
@@ -2856,8 +2917,10 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
                            ParallelWorkObserver* parallel_observer,
                            const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means,
-    Eigen::VectorXd* intercept_covariance) {
+    Eigen::VectorXd* intercept_covariance,
+    OlsWideCovariance* covariance_wide) {
     if (intercept_covariance) intercept_covariance->resize(0);
+    if (covariance_wide) covariance_wide->values.resize(0,0);
     if (se_type != StandardErrorType::Cluster) {
         throw std::runtime_error("run_ols_multiway is only valid for clustered inference");
     }
@@ -2987,7 +3050,7 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     }
     if(normal_equations_need_wide(xtx))
         return run_ols_wide(y,X,weights,nullptr,clusters,se_type,total_sum_squares,
-            within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance);
+            within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance,covariance_wide);
     Eigen::LDLT<Eigen::MatrixXd> solver;
     solver.compute(xtx);
     if (solver.info() != Eigen::Success) {
@@ -3102,7 +3165,7 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     } catch (const OlsInferenceRangeError&) {
         n1_normal.reset();
         return run_ols_wide(y,X,weights,nullptr,clusters,se_type,total_sum_squares,
-            within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance);
+            within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance,covariance_wide);
     }
 
     Eigen::VectorXd std_errors = covariance.diagonal().array().cwiseMax(0.0).sqrt();

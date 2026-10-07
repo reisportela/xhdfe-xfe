@@ -59,7 +59,7 @@ MinGW runtime and compatibility libraries (binary artifacts when required)
 
   Candidate builds use their bundled sources and the validation ledger.
   The corresponding-source asset is available when this release is published:
-    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.29.1.20261007/xhdfe-2.29.1.20261007-corresponding-source.zip
+    https://github.com/reisportela/xhdfe-xfe/releases/download/v2.29.3.20261007/xhdfe-2.29.3.20261007-corresponding-source.zip
   That asset includes a machine-readable provenance manifest and SHA-256
   manifest over the source archives actually supplied to the release job.
 

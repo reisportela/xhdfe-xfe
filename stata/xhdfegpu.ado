@@ -1,4 +1,4 @@
-*! version 2.29.1  07oct2026
+*! version 2.29.3  07oct2026
 *! xhdfegpu: build and install a CUDA (GPU) xhdfe/xfepout plugin for this machine.
 *!
 *! net install ships CPU-only plugins. On a machine with an NVIDIA GPU, run

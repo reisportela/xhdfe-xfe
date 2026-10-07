@@ -129,3 +129,15 @@ if ! grep -Fxq "IV_REPEATED_CONTROL_CONTRACT_PASS cpu" "${IV_OVERLAP_LOG}"; then
   exit 1
 fi
 echo "Stata IV repeated-control log: ${IV_OVERLAP_LOG}"
+
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/../analytic_precision/iv_proportional_instrument_contract.do" cpu
+)
+IV_PROPORTIONAL_LOG="${OUT_DIR}/iv_proportional_instrument_contract.log"
+if ! grep -Fxq "IV_PROPORTIONAL_INSTRUMENT_CONTRACT_PASS cpu" "${IV_PROPORTIONAL_LOG}"; then
+  echo "Stata IV proportional-instrument contract failed. Last log lines:" >&2
+  tail -n 80 "${IV_PROPORTIONAL_LOG}" >&2
+  exit 1
+fi
+echo "Stata IV proportional-instrument log: ${IV_PROPORTIONAL_LOG}"

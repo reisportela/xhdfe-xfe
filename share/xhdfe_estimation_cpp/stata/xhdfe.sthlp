@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.1 07oct2026}{...}
+{* *! version 2.29.3 07oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -531,9 +531,10 @@ An effective zero instrument span or an underidentified model returns an error.
 Included exogenous regressors enter the instrument set automatically. If their
 variable names also appear in {cmd:instruments()}, the extra entries are removed
 before absorption on both CPU and CUDA; they do not count as excluded instruments.
-On CUDA, use linearly independent excluded instruments: the current native IV
-solver can reject proportional duplicates under different variable names. CPU
-handles those redundancies. This limitation also applies to first-stage diagnostics.
+Exactly proportional nonzero instruments are removed before absorption on both
+CPU and CUDA, including columns with different variable names. Distinct, nearly
+proportional instruments are retained. More general linear dependencies, or
+those created only by absorption, can still trigger rank-deficiency errors on CUDA.
 
 {phang}
 {opt first} displays the regression of each endogenous variable on the included
@@ -1339,7 +1340,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.1.
+regression via a C++ backend." Version 2.29.3.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

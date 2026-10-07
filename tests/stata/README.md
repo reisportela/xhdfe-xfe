@@ -96,10 +96,11 @@ checks the per-equation F tests against reghdfe. No timing or general
 release-certification claim follows from these small tests.
 
 The CPU run covers 23 specifications (29 first-stage equations); CUDA covers
-20 specifications (26 equations). No-absorb regressions are CPU-only. Both
-backends cover zero instrument columns and repeated included controls.
-Proportional duplicates under different names still expose an existing CUDA
-native IV limitation and are not certified on CUDA. Repeated-fit comparisons allow FP64 roundoff;
+21 specifications (27 equations). No-absorb regressions are CPU-only. Both
+backends cover zero instrument columns, repeated included controls, and exactly
+proportional instruments under different variable names.
+The proportional-instrument repair is covered on both backends. Repeated-fit
+comparisons allow FP64 roundoff;
 postestimation restoration and cached-result checks require exact equality.
 See the [initial candidate validation](../../docs/certification/iv-firststage-20261007.md)
 and [repeated-control follow-up](../../docs/certification/iv-repeated-controls-20261007.md).
@@ -120,6 +121,13 @@ FE-dummy `ivregress 2sls` and `ivreghdfe` coefficient comparisons; the special
 self-instrumentation case uses its explicit-dummy OLS equivalent. Require
 the `IV_REPEATED_CONTROL_CONTRACT_PASS` marker. Its CPU mode also runs in
 `run_stata_tests.sh`.
+
+The standalone `../analytic_precision/iv_covariance_psd_contract.do` compares
+88 fits per backend with MP120 full-covariance references, checks the PSD-fix
+flag, and exercises both tolerance modes and genuine negative-eigenvalue cases.
+Generate its input directory with `iv_covariance_psd_stata_fixtures.py`; pass
+`cpu` or `cuda` and that directory to the do-file. See the analytic battery's
+README for the commands and accuracy limits.
 
 ## Upstream notice
 

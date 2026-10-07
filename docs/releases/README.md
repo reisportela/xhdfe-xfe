@@ -5,6 +5,8 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.29.3 candidate | 7 October 2026 (unissued) | [IV multiway covariance precision](RELEASE_NOTES_2.29.3.20261007.md) |
+| 2.29.2 candidate | 7 October 2026 (unissued) | [Exactly proportional IV instruments on CPU and CUDA](RELEASE_NOTES_2.29.2.20261007.md) |
 | 2.29.1 candidate | 7 October 2026 (unissued) | [Repeated included controls in Stata IV](RELEASE_NOTES_2.29.1.20261007.md) |
 | 2.29.0 candidate | 7 October 2026 (unissued) | [First-stage excluded-instrument diagnostics](RELEASE_NOTES_2.29.0.20261007.md) |
 | 2.28.1 | 29 September 2026 | [Safe Polars formulas, faster label IDs and enforced Python frontend gates](RELEASE_NOTES_2.28.1.20260929.md) |

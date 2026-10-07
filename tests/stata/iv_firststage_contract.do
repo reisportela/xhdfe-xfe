@@ -193,15 +193,8 @@ fs_case, id(repeated_control) backend(`backend') handle(`handle') endogenous(d1)
     instruments(z1 z2 x1) controls(x1 x2) absorb(firm year)
 fs_case, id(zero_repeated_control) backend(`backend') handle(`handle') endogenous(d1) ///
     instruments(x2 z1 z2 zzero x1) controls(x1 x2) absorb(firm year) noivref
-if ("`backend'" == "cpu") {
-    fs_case, id(redundant_duplicate) backend(`backend') handle(`handle') endogenous(d1) ///
-        instruments(z1 z2 zdup zzero x1) controls(x1 x2) absorb(firm year) noivref
-}
-else {
-    * The unchanged 2.28.1 CUDA IV solver rejects this proportional duplicate
-    * before diagnostics run. Do not count that existing limitation as a pass.
-    di "NOT_TESTED redundant_duplicate cuda: existing IV rank-deficiency refusal"
-}
+fs_case, id(redundant_duplicate) backend(`backend') handle(`handle') endogenous(d1) ///
+    instruments(z1 z2 zdup zzero x1) controls(x1 x2) absorb(firm year) noivref
 fs_case, id(weak) backend(`backend') handle(`handle') endogenous(weak) ///
     instruments(z1 z2) controls(x1 x2) absorb(firm year) vce(robust)
 preserve

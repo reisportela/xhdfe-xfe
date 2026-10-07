@@ -12,6 +12,7 @@ namespace hdfe {
 namespace detail {
 
 struct N1NormalEvidence;
+struct OlsWideCovariance;
 
 struct OlsResult {
     Eigen::VectorXd coefficients;
@@ -113,7 +114,8 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     bool num_threads_explicit, ParallelWorkObserver* parallel_observer,
     const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means = nullptr,
-    Eigen::VectorXd* intercept_covariance = nullptr);
+    Eigen::VectorXd* intercept_covariance = nullptr,
+    OlsWideCovariance* covariance_wide = nullptr);
 
 }  // namespace detail
 }  // namespace hdfe
