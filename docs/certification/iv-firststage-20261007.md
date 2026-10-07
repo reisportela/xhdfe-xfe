@@ -106,6 +106,53 @@ Both unrestricted and restricted first-stage fits must also report actual GPU
 use through `r(first_gpu_used)`. CUDA requires at least one fixed-effect
 dimension, so the two ordinary IV specifications are CPU-only.
 
+## Follow-up: tighter tolerances and an explicit-dummy reference
+
+The probability-weighted specification produced the largest F difference in
+the original comparison. The targeted
+[precision probe](../../tests/stata/iv_firststage_precision_probe.do) reruns
+that same synthetic fixture at tolerances 1e-8, 1e-12, and 1e-14, using CPU and
+actual CUDA. It also fits Stata `regress` with explicit firm/year dummies and
+the same probability weights and state-clustered VCE. The explicit-dummy
+reference avoids iterative fixed-effect absorption.
+
+| Tolerance | Absolute F difference: CPU vs reghdfe | Absolute F difference: CUDA vs reghdfe | Maximum CPU/CUDA F difference from explicit dummies |
+| --- | ---: | ---: | ---: |
+| 1e-8 | 5.99289e-9 | 5.99334e-9 | 4.77485e-12 |
+| 1e-12 | 5.99266e-9 | 5.99175e-9 | 5.91172e-12 |
+| 1e-14 | 5.99266e-9 | 5.99221e-9 | 5.45697e-12 |
+
+The reference F is 1580.845842736720 with explicit dummies, versus
+1580.845842742718 from reghdfe. Tightening tolerance leaves the small discrepancy
+essentially unchanged. Reghdfe takes four iterations at all three settings;
+xhdfe takes four, five, and six. All fits use the same 6,000 observations,
+29 clusters, and F degrees of freedom `(2, 28)`; the absorbed fits agree on
+129 absorbed degrees of freedom.
+
+For the four common slopes `x1 x2 z1 z2`, the maximum absolute coefficient
+difference between xhdfe and reghdfe is 9.99201e-16; the maximum absolute
+covariance-entry difference is 1.63052e-15. Against the explicit-dummy fit,
+xhdfe agrees within 4.44089e-16 in coefficients and 2.98156e-19 in covariance
+entries. The coefficient/covariance comparison excludes the intercept because
+the explicit-dummy parametrization uses a different intercept normalization.
+The reported first-stage diagnostic F and a separate xhdfe first-stage `test`
+agree within 1.36425e-12 across all six CPU/CUDA fits.
+
+This evidence points to a tiny difference in clustered covariance evaluation.
+The independent dummy-variable calculation agrees substantially more closely
+with xhdfe in this fixture. The check supports retaining the implementation and
+default tolerance; it does not justify changing the estimator to reproduce the
+last digits of the other command. The exact arithmetic operation responsible
+inside the reference implementation was not investigated further.
+
+All assertions passed with the marker `IV_FIRSTSTAGE_PRECISION_PASS`.
+The probe uses the same ado/plugin hashes recorded below. Executed scripts,
+CSV summaries, full-precision result matrices in `.dta`, and a log with its
+license banner removed are retained in the coordination workspace under
+`pipeline/results/iv_firststage_precision_20261007/`; the remote run is
+`/srv/projetos/P008/04_to_test_xhdfe/runs/iv_firststage_precision_20261007`.
+No estimator code or default setting changed during this follow-up.
+
 ## Existing CUDA IV redundancy limitation
 
 Two extra probes reproduced problems **without any first-stage diagnostics**

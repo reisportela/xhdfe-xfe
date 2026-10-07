@@ -103,6 +103,13 @@ not certified by this test. Repeated-fit comparisons allow FP64 roundoff;
 postestimation restoration and cached-result checks require exact equality.
 See the [candidate validation report](../../docs/certification/iv-firststage-20261007.md).
 
+`iv_firststage_precision_probe.do` is a separate, opt-in CPU/CUDA investigation
+of the probability-weighted case. It compares tolerances 1e-8, 1e-12, and 1e-14
+with reghdfe/ivreghdfe and an explicit-dummy `regress` reference, recording
+first-stage coefficients, covariance entries, F-statistics, and sample/DoF
+checks. It requires CUDA and the `IV_FIRSTSTAGE_PRECISION_PASS` marker.
+Run it from a scratch directory with `XHDFE_STATA_ADOPATH` set as above.
+
 ## Upstream notice
 
 Several test scenarios and the certification-test layout are adapted from the
