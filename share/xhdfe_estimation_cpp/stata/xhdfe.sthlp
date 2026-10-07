@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.0 07oct2026}{...}
+{* *! version 2.29.1 07oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -528,10 +528,12 @@ Factor-variable operators are not supported with IV, and IV is not supported in 
 {pmore}
 Redundant instrument columns are accepted when their retained span identifies the declared endogenous regressors.
 An effective zero instrument span or an underidentified model returns an error.
-On CUDA, use linearly independent excluded instruments and do not repeat included
-controls in {cmd:instruments()}: the current native IV solver can reject proportional
-duplicates or produce unstable estimates with repeated controls. CPU handles these
-redundancies. This existing limitation also applies when requesting first-stage diagnostics.
+Included exogenous regressors enter the instrument set automatically. If their
+variable names also appear in {cmd:instruments()}, the extra entries are removed
+before absorption on both CPU and CUDA; they do not count as excluded instruments.
+On CUDA, use linearly independent excluded instruments: the current native IV
+solver can reject proportional duplicates under different variable names. CPU
+handles those redundancies. This limitation also applies to first-stage diagnostics.
 
 {phang}
 {opt first} displays the regression of each endogenous variable on the included
@@ -1337,7 +1339,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.0.
+regression via a C++ backend." Version 2.29.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

@@ -117,3 +117,15 @@ if ! grep -Fxq "IV_FIRSTSTAGE_CONTRACT_PASS cpu" "${FIRSTSTAGE_LOG}"; then
   exit 1
 fi
 echo "Stata IV first-stage log: ${FIRSTSTAGE_LOG}"
+
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/../analytic_precision/iv_repeated_control_contract.do" cpu
+)
+IV_OVERLAP_LOG="${OUT_DIR}/iv_repeated_control_contract.log"
+if ! grep -Fxq "IV_REPEATED_CONTROL_CONTRACT_PASS cpu" "${IV_OVERLAP_LOG}"; then
+  echo "Stata IV repeated-control contract failed. Last log lines:" >&2
+  tail -n 80 "${IV_OVERLAP_LOG}" >&2
+  exit 1
+fi
+echo "Stata IV repeated-control log: ${IV_OVERLAP_LOG}"

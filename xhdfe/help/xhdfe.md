@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.29.0.20261007. Use `python -m xhdfe --version`
+Package documentation version: 2.29.1.20261007. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It

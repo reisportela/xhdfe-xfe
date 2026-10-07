@@ -95,13 +95,14 @@ The few-cluster two-way case pins ivreghdfe's unavailable system statistic and
 checks the per-equation F tests against reghdfe. No timing or general
 release-certification claim follows from these small tests.
 
-The CPU run covers 21 specifications (27 first-stage equations); CUDA covers
-18 specifications (24 equations). No-absorb regressions are CPU-only. CUDA
-covers zero instrument columns, but proportional duplicates and instruments
-that repeat included controls expose an existing native IV limitation and are
-not certified by this test. Repeated-fit comparisons allow FP64 roundoff;
+The CPU run covers 23 specifications (29 first-stage equations); CUDA covers
+20 specifications (26 equations). No-absorb regressions are CPU-only. Both
+backends cover zero instrument columns and repeated included controls.
+Proportional duplicates under different names still expose an existing CUDA
+native IV limitation and are not certified on CUDA. Repeated-fit comparisons allow FP64 roundoff;
 postestimation restoration and cached-result checks require exact equality.
-See the [candidate validation report](../../docs/certification/iv-firststage-20261007.md).
+See the [initial candidate validation](../../docs/certification/iv-firststage-20261007.md)
+and [repeated-control follow-up](../../docs/certification/iv-repeated-controls-20261007.md).
 
 `iv_firststage_precision_probe.do` is a separate, opt-in CPU/CUDA investigation
 of the probability-weighted case. It compares tolerances 1e-8, 1e-12, and 1e-14
@@ -109,6 +110,16 @@ with reghdfe/ivreghdfe and an explicit-dummy `regress` reference, recording
 first-stage coefficients, covariance entries, F-statistics, and sample/DoF
 checks. It requires CUDA and the `IV_FIRSTSTAGE_PRECISION_PASS` marker.
 Run it from a scratch directory with `XHDFE_STATA_ADOPATH` set as above.
+
+The standalone `../analytic_precision/iv_repeated_control_contract.do` accepts
+the same `cpu`/`cuda` argument and adopath environment variable. It checks that
+adding included controls to `instruments()` preserves coefficients, covariance,
+sample, RSS, degrees of freedom and IV metadata across repeated runs, while
+underidentified models still fail with empty estimates. It includes explicit
+FE-dummy `ivregress 2sls` and `ivreghdfe` coefficient comparisons; the special
+self-instrumentation case uses its explicit-dummy OLS equivalent. Require
+the `IV_REPEATED_CONTROL_CONTRACT_PASS` marker. Its CPU mode also runs in
+`run_stata_tests.sh`.
 
 ## Upstream notice
 

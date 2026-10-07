@@ -189,6 +189,10 @@ fs_case, id(nocontrols) backend(`backend') handle(`handle') endogenous(d1) ///
     instruments(z1) absorb(firm year) vce(cluster state)
 fs_case, id(redundant_zero) backend(`backend') handle(`handle') endogenous(d1) ///
     instruments(z1 z2 zzero) controls(x1 x2) absorb(firm year) noivref
+fs_case, id(repeated_control) backend(`backend') handle(`handle') endogenous(d1) ///
+    instruments(z1 z2 x1) controls(x1 x2) absorb(firm year)
+fs_case, id(zero_repeated_control) backend(`backend') handle(`handle') endogenous(d1) ///
+    instruments(x2 z1 z2 zzero x1) controls(x1 x2) absorb(firm year) noivref
 if ("`backend'" == "cpu") {
     fs_case, id(redundant_duplicate) backend(`backend') handle(`handle') endogenous(d1) ///
         instruments(z1 z2 zdup zzero x1) controls(x1 x2) absorb(firm year) noivref

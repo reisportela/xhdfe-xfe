@@ -1,10 +1,10 @@
-*! version 2.29.0 07oct2026
+*! version 2.29.1 07oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.0 07oct2026"
+        local version "2.29.1 07oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -675,6 +675,17 @@ program define _xhdfe_estimate, eclass
             local idx0 = `pos' - 1
             if ("`endogenous_idx'" == "") local endogenous_idx "`idx0'"
             else local endogenous_idx "`endogenous_idx',`idx0'"
+        }
+
+        // Included exogenous regressors already enter the native instrument
+        // matrix. Do not absorb them a second time as excluded instruments:
+        // independently rounded CUDA columns can create a spurious direction.
+        local exogenous : list indepvars_raw - endogenous
+        local instruments : list instruments - exogenous
+        local ninst : word count `instruments'
+        if (`ninst' == 0) {
+            di as err "IV model requires at least one excluded instrument"
+            exit 198
         }
     }
 
@@ -2415,7 +2426,7 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.29.0 07oct2026"
+    ereturn local version "2.29.1 07oct2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }

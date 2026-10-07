@@ -88,6 +88,18 @@ macOS/Windows execution, and full-data performance. This battery supplements
 the existing inference, feature, release and benchmark suites; it does not
 replace them or certify every possible dataset/platform configuration.
 
+A separate Stata IV guard, `iv_repeated_control_contract.do`, covers exact
+variable-name overlap between included controls and `instruments()`. From a
+scratch directory run `stata-mp -b do /path/to/iv_repeated_control_contract.do cpu`
+(or `cuda`) with `XHDFE_STATA_ADOPATH` selecting the candidate. It compares
+the clean and repeated-control specifications, coefficients against independent
+explicit-dummy `ivregress 2sls` and `ivreghdfe`, repeated estimates and covariance,
+sample/DoF/RSS, backend use, and failed-fit state. Require the
+`IV_REPEATED_CONTROL_CONTRACT_PASS` marker. This focused IV test is separate from
+the analytic campaign above; proportional duplicates and general numerical-rank
+decisions remain outside its coverage. The special self-instrumentation case
+uses explicit-dummy OLS and reghdfe because ivreghdfe rejects that syntax.
+
 The scope, source hashes, fixtures and complete per-row results must accompany
 any certification claim. Preserve failed evidence, investigate oracle or
 interface-contract mistakes separately from product failures, and prepare a
