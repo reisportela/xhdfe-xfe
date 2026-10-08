@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.29.4 candidate | 8 October 2026 (unissued) | [Wide cluster covariance optimization](RELEASE_NOTES_2.29.4.20261008.md) |
 | 2.29.3 candidate | 7 October 2026 (unissued) | [IV multiway covariance precision](RELEASE_NOTES_2.29.3.20261007.md) |
 | 2.29.2 candidate | 7 October 2026 (unissued) | [Exactly proportional IV instruments on CPU and CUDA](RELEASE_NOTES_2.29.2.20261007.md) |
 | 2.29.1 candidate | 7 October 2026 (unissued) | [Repeated included controls in Stata IV](RELEASE_NOTES_2.29.1.20261007.md) |

@@ -273,3 +273,28 @@ separately and do not overturn a correct default fit; audit harness/coverage
 gaps and wrong returned estimates remain failures. The aggregate always leaves
 `full_G1_claim=false` while IV/X-hat normal-defect coverage, formal covariance
 interval gaps, core24 x 8 and the group/individual 3M gate remain outstanding.
+
+
+## Wide cluster covariance storage reuse (2026-10-08)
+
+`wide_cluster_covariance_reuse.cpp` exercises the retained wide multiway
+covariance path directly, including 2/3/5 regressors, explicit constants in
+first/last position, no explicit constant, weights, response scales 2^-80,
+1 and 2^80, and minimum/conventional cluster adjustments. All 84 cases require
+this path to have been entered and expose both the retained and returned full
+covariance. This covers buffer sizing/reset and the original-units transform.
+
+Compile the driver against each frozen baseline/candidate `libxhdfe.a`, using
+that build's Eigen headers and OpenMP/CUDA link dependencies. Run the two
+executables into separate JSONL files, then grade outside the estimator:
+
+```bash
+python tests/analytic_precision/wide_cluster_covariance_reuse_contract.py \
+  --baseline baseline.jsonl --candidate candidate.jsonl --out reuse_validation.json
+```
+
+The grader constructs an independent MP90/MP120 augmented sandwich reference,
+checks the unchanged 1e-8 scaled covariance and 1e-9 coefficient/RSS limits,
+and requires exact baseline/candidate output equality for these fixtures.
+Existing IV intercept/PSD contracts cover the full Python/Stata estimation
+and PSD postprocessing; this test supplies additional native-path coverage.

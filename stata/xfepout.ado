@@ -1,4 +1,4 @@
-*! version 1.13.2 07oct2026
+*! version 1.13.2 08oct2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,7 @@ program define xfepout, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.13.2 07oct2026"
+        local version "1.13.2 08oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1075,7 +1075,7 @@ program define xfepout, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.13.2 07oct2026"
+    ereturn local version "1.13.2 08oct2026"
     ereturn local cmd "xfepout"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {
