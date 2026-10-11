@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.4 08oct2026}{...}
+{* *! version 2.29.5 09oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -704,8 +704,13 @@ previous versions. It can cut runtime by an order of magnitude on such designs (
 {cmd:tolerancemode()}). {cmd:auto} (default) follows {cmd:tolerancemode()}: under
 {it:reghdfe-comparable} the slope absorber stops on the reghdfe-style update criterion at the nominal
 {cmd:tolerance()}, and under {it:xhdfe-fast} it uses the historical norm-change trigger. For Auto
-requests this trigger produces a candidate only: the independent per-block certificate governs
-acceptance and may add visible same-method continuation sweeps.
+requests in {it:reghdfe-comparable}, this trigger produces a candidate only: the independent
+per-block certificate governs acceptance and may add visible same-method continuation sweeps.
+In {it:xhdfe-fast}, the historical aggregate residual certificate governs acceptance; block checks
+and block-driven continuation are skipped, including with an explicit {cmd:convergence()} rule.
+An aggregate failure can still trigger same-method refinement or refusal.
+The estimator, public tolerance and numerical failure guards are retained. Fast mode can therefore
+return less accurate absorption than comparable mode on difficult slope designs.
 {cmd:tolerancemode(strict-residual)} is not supported with heterogeneous slopes and exits with an
 error before estimation; use {cmd:tolerancemode(reghdfe-comparable)} or {cmd:tolerancemode(xhdfe-fast)}
 for those designs. Within supported tolerance modes, explicit values override the auto mapping:
@@ -972,7 +977,7 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
 precision certificate returns no estimates (r(498)) in Stata, Python and R alike.
-Ill-conditioned specifications can still require a refusal. Heterogeneous slopes under
+Ill-conditioned specifications can still require a refusal. In {it:reghdfe-comparable}, heterogeneous slopes under
 an explicit {cmd:convergence(reghdfe)} used to: the reghdfe stopping rule leaves the slope block
 above the certificate; the explicit rule is now continued once at tighter internal tolerances
 and the first certified stage is returned ({cmd:e(slope_accuracy_retry_stages)} counts them),
@@ -1155,7 +1160,8 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(auto_retry_iterations)}}cold MLSMR retry iterations{p_end}
 {synopt:{cmd:e(auto_retry_abs_res_rel)}}retry canonical certificate metric{p_end}
 {synopt:{cmd:e(auto_retry_elapsed_seconds)}}retry wall time in seconds{p_end}
-{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate{p_end}
+{synopt:{cmd:e(slope_block_checked)}}1 if the heterogeneous-slope block check ran; 0 in fast mode or without slopes{p_end}
+{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate; only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise contain zero placeholders){p_end}
 {synopt:{cmd:e(slope_block_frobenius_rel)}}heterogeneous slopes: maximum Frobenius-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_rms_rel)}}heterogeneous slopes: maximum RMS diagonal-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_max_rel)}}heterogeneous slopes: maximum worst-group block moment{p_end}
@@ -1165,7 +1171,7 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(slope_accuracy_retry_stages)}}number of adaptive same-method slope continuation stages{p_end}
 {synopt:{cmd:e(slope_accuracy_retry_iterations)}}slope continuation iterations beyond the primary candidate{p_end}
 {synopt:{cmd:e(slope_internal_tolerance)}}last internal slope continuation tolerance; public {cmd:tolerance()} is unchanged{p_end}
-{synopt:{cmd:e(precision_certified)}}1 if the explicit residual check meets its numerical limit{p_end}
+{synopt:{cmd:e(precision_certified)}}1 if the selected mode's residual check meets its limit; fast slope fits use the aggregate check{p_end}
 {synopt:{cmd:e(fe_recovery_converged)}}(only with {cmd:savefe}/{cmd:savefes}) 1 if fixed-effect recovery converged, 0 otherwise{p_end}
 {synopt:{cmd:e(fe_recovery_iterations)}}(only with {cmd:savefe}/{cmd:savefes}) iterations used to recover the fixed effects{p_end}
 {synopt:{cmd:e(fe_recovery_max_delta)}}(only with {cmd:savefe}/{cmd:savefes}) maximum change in the final FE recovery sweep{p_end}
@@ -1340,7 +1346,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.4.
+regression via a C++ backend." Version 2.29.5.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

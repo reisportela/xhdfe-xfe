@@ -367,6 +367,7 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
       res$auto_routing_retry_abs_residual_rel,
     auto_routing_retry_elapsed_seconds =
       res$auto_routing_retry_elapsed_seconds,
+    slope_block_checked = res$slope_block_checked,
     slope_block_residual_rel = res$slope_block_residual_rel,
     slope_block_frobenius_rel = res$slope_block_frobenius_rel,
     slope_block_rms_rel = res$slope_block_rms_rel,

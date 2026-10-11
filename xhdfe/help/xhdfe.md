@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.29.4.20261008. Use `python -m xhdfe --version`
+Package documentation version: 2.29.5.20261009. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -381,6 +381,11 @@ Main options:
   `strict-residual`. Ordinary no-slope LSMR/MLSMR uses
   `min(effective tolerance, 1e-11)` in comparable/strict modes; fast mode and
   requested tolerances at or below `1e-11` are unchanged.
+  For heterogeneous slopes, fast mode uses the historical aggregate residual
+  check and omits the stronger block checks and block-driven refinement.
+  Aggregate failures can still trigger refinement or refusal. The default
+  comparable mode retains its block checks. `slope_block_checked_` reports
+  whether they ran; block metrics are zero placeholders when it is false.
 - `dofadjustments`: `all`, `none`, `firstpair`, `pairwise`, `clusters`, and
   `continuous`, as a string or sequence.
 - `ssc_*`: fixest-style small-sample correction controls.

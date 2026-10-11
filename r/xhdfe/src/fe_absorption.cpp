@@ -8897,12 +8897,18 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         const double slope_continuation_target = std::max(
             effective_absorption_tolerance(options),
             64.0 * std::numeric_limits<double>::epsilon());
+        // Fast mode requires only the historical aggregate certificate. It
+        // may repair an aggregate failure, but never retries or polishes a
+        // successful aggregate result to satisfy the comparable block target.
+        auto slope_target_met = [&](const AbsorptionResult& candidate) {
+            return options.tolerance_mode == ToleranceMode::XhdfeFast ||
+                   candidate.slope_block_residual_rel <= slope_continuation_target;
+        };
         const bool adaptive_eligible =
             options.from_auto &&
             options.convergence_criterion == ConvergenceCriterion::Auto &&
             primary.converged &&
-            (!primary.precision_certified ||
-             primary.slope_block_residual_rel > slope_continuation_target) &&
+            (!primary.precision_certified || !slope_target_met(primary)) &&
             options.tol > 0.0 && options.max_iter > primary.iterations;
         // An explicit criterion (convergence(reghdfe), norm_change, both) is
         // honoured as the stopping rule, but a result that fails the public
@@ -8917,8 +8923,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             options.convergence_criterion != ConvergenceCriterion::Auto &&
             primary.converged && !primary.precision_certified &&
             options.tol > 0.0 && options.max_iter > primary.iterations;
-        if ((primary.precision_certified &&
-             primary.slope_block_residual_rel <= slope_continuation_target) ||
+        if ((primary.precision_certified && slope_target_met(primary)) ||
             (!adaptive_eligible && !explicit_refinement)) {
             return primary;
         }
@@ -8977,8 +8982,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 stage.gpu_absorption_iterations = cumulative_iterations;
             }
             if (stage.converged && stage.precision_certified &&
-                (explicit_refinement ||
-                 stage.slope_block_residual_rel <= slope_continuation_target)) {
+                (explicit_refinement || slope_target_met(stage))) {
                 return stage;
             }
             last = std::move(stage);
@@ -17254,6 +17258,7 @@ void certify_absorption_result(
     const GroupIndividualStructure* group_individual) {
     result.abs_residual = 0.0;
     result.abs_residual_rel = 0.0;
+    result.slope_block_checked = false;
     result.slope_block_residual_rel = 0.0;
     result.slope_block_frobenius_rel = 0.0;
     result.slope_block_rms_rel = 0.0;
@@ -17320,7 +17325,9 @@ void certify_absorption_result(
     const double* weight_ptr = unit_weights ? nullptr : weights->data();
     const int rhs_count = static_cast<int>(X.cols()) + 1;
     const bool slope_block_scope =
-        !slopes.empty() && group_individual == nullptr;
+        !slopes.empty() && group_individual == nullptr &&
+        options.tolerance_mode != ToleranceMode::XhdfeFast;
+    result.slope_block_checked = slope_block_scope;
     std::vector<long double> original_norm_sq(
         static_cast<std::size_t>(rhs_count), 0.0L);
     std::vector<long double> residual_norm_sq(static_cast<std::size_t>(rhs_count), 0.0L);

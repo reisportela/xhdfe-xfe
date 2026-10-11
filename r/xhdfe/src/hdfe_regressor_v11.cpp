@@ -1943,11 +1943,17 @@ void require_accepted_absorption(const HdfeOptions& options,
             options.tolerance_mode == ToleranceMode::ReghdfeComparable
                 ? std::min(options.tol, 1.0e-9) : options.tol;
         const double arithmetic_floor = 64.0 * std::numeric_limits<double>::epsilon();
-        message << "; slope block residual=" << result.slope_block_residual_rel
-                << "; block certificate limit="
-                << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
-                << "; continuation target=" << std::max(effective_tol, arithmetic_floor)
-                << "; continuation stages=" << result.slope_accuracy_retry_stages
+        if (options.tolerance_mode == ToleranceMode::XhdfeFast) {
+            message << "; aggregate certificate limit="
+                    << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
+                    << "; slope block check=not performed";
+        } else {
+            message << "; slope block residual=" << result.slope_block_residual_rel
+                    << "; block certificate limit="
+                    << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
+                    << "; continuation target=" << std::max(effective_tol, arithmetic_floor);
+        }
+        message << "; continuation stages=" << result.slope_accuracy_retry_stages
                 << "; last internal tolerance=" << result.slope_internal_tolerance;
     }
     message << ". No estimates returned.";
@@ -11416,6 +11422,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             absorption.auto_routing_retry_abs_residual_rel;
         results_.auto_routing_retry_elapsed_seconds =
             absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_checked = absorption.slope_block_checked;
         results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
         results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
         results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
@@ -13522,6 +13529,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             absorption.auto_routing_retry_abs_residual_rel;
         results_.auto_routing_retry_elapsed_seconds =
             absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_checked = absorption.slope_block_checked;
         results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
         results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
         results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
@@ -14560,6 +14568,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         absorption.auto_routing_retry_abs_residual_rel;
     results_.auto_routing_retry_elapsed_seconds =
         absorption.auto_routing_retry_elapsed_seconds;
+    results_.slope_block_checked = absorption.slope_block_checked;
     results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
     results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
     results_.slope_block_rms_rel = absorption.slope_block_rms_rel;

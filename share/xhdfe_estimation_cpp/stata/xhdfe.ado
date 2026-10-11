@@ -1,10 +1,10 @@
-*! version 2.29.4 08oct2026
+*! version 2.29.5 09oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.4 08oct2026"
+        local version "2.29.5 09oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -1773,7 +1773,7 @@ program define _xhdfe_estimate, eclass
         sAutoRetryPolicy sAutoRetryEligible sAutoRetryFired sAutoRetryStatus ///
         sAutoRetryPrimaryMethod sAutoRetryPrimaryIter sAutoRetryPrimaryRel ///
         sAutoRetryIter sAutoRetryRel sAutoRetrySeconds ///
-        sSlopeBlockRel sSlopeBlockFrob sSlopeBlockRms sSlopeBlockMax sSlopeBlockSkipped ///
+        sSlopeBlockChecked sSlopeBlockRel sSlopeBlockFrob sSlopeBlockRms sSlopeBlockMax sSlopeBlockSkipped ///
         sSlopeWorstFe sSlopeWorstMoment sSlopeRetryStages sSlopeRetryIter sSlopeInternalTol ///
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
         sGpuUsed sGpuStatus ///
@@ -1840,6 +1840,7 @@ program define _xhdfe_estimate, eclass
     local cfg "`cfg's_auto_routing_retry_primary_method=`sAutoRetryPrimaryMethod';s_auto_routing_retry_primary_iterations=`sAutoRetryPrimaryIter';"
     local cfg "`cfg's_auto_routing_retry_primary_abs_residual_rel=`sAutoRetryPrimaryRel';s_auto_routing_retry_iterations=`sAutoRetryIter';"
     local cfg "`cfg's_auto_routing_retry_abs_residual_rel=`sAutoRetryRel';s_auto_routing_retry_elapsed_seconds=`sAutoRetrySeconds';"
+    local cfg "`cfg's_slope_block_checked=`sSlopeBlockChecked';"
     local cfg "`cfg's_slope_block_residual_rel=`sSlopeBlockRel';s_slope_block_frobenius_rel=`sSlopeBlockFrob';"
     local cfg "`cfg's_slope_block_rms_rel=`sSlopeBlockRms';s_slope_block_max_rel=`sSlopeBlockMax';"
     local cfg "`cfg's_slope_block_skipped_max_rel=`sSlopeBlockSkipped';s_slope_certificate_worst_fe=`sSlopeWorstFe';"
@@ -2426,7 +2427,7 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.29.4 08oct2026"
+    ereturn local version "2.29.5 09oct2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2527,6 +2528,7 @@ program define _xhdfe_estimate, eclass
     else if (scalar(`sAutoRetryStatus') == 2) local auto_retry_status "used"
     else if (scalar(`sAutoRetryStatus') == 3) local auto_retry_status "failed"
     ereturn local auto_retry_status "`auto_retry_status'"
+    ereturn scalar slope_block_checked = scalar(`sSlopeBlockChecked')
     ereturn scalar slope_block_residual_rel = scalar(`sSlopeBlockRel')
     ereturn scalar slope_block_frobenius_rel = scalar(`sSlopeBlockFrob')
     ereturn scalar slope_block_rms_rel = scalar(`sSlopeBlockRms')

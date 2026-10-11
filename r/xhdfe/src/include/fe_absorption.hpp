@@ -55,6 +55,7 @@ struct AbsorptionResult {
     bool converged = true;
     double abs_residual = 0.0;      // verified ||D' W v_tilde||_2, max over RHS columns
     double abs_residual_rel = 0.0;  // max ||D' W v_tilde||_2 / (||D' W||_F ||v||_2)
+    bool slope_block_checked = false;  // false in fast mode; block metrics then not applicable
     double slope_block_residual_rel = 0.0;  // max scale-invariant per-block/RHS certificate
     double slope_block_frobenius_rel = 0.0;  // max ||m||/(sqrt(sum d)||u_tilde||_W)
     double slope_block_rms_rel = 0.0;  // max RMS diagonal-scaled group moment

@@ -243,7 +243,11 @@ reghdfe-style vector update criterion, i.e. the maximum weighted mean
 relative difference between successive transformed y/X columns), or
 \code{"both"} (requires both criteria). Note that
 \code{tolerance_mode = "strict-residual"} is not supported with
-heterogeneous slopes.}
+heterogeneous slopes. In fast mode, slope absorption uses the historical
+aggregate residual check; block checks and block-driven refinement are skipped.
+Aggregate failures can still trigger refinement or refusal. Comparable mode
+keeps its block checks. The result field \code{slope_block_checked} is false
+when block diagnostics were not computed (their values are placeholders).}
 
 \item{check_interval}{number of absorber iterations between convergence
 checks; default \code{1} (check every iteration).}

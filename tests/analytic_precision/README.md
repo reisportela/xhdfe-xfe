@@ -298,3 +298,22 @@ checks the unchanged 1e-8 scaled covariance and 1e-9 coefficient/RSS limits,
 and requires exact baseline/candidate output equality for these fixtures.
 Existing IV intercept/PSD contracts cover the full Python/Stata estimation
 and PSD postprocessing; this test supplies additional native-path coverage.
+
+## Fast heterogeneous-slope acceptance policy
+
+`fast_slope_policy_contract.cpp` calls the real certificate on an approximate
+projection whose historical aggregate residual passes while the comparable
+block residual fails. It also checks the exact projection, weighted cases,
+slope-unit changes, recertification scope, non-convergence, non-finite values,
+and an aggregate residual that must still be rejected in fast mode. Link it
+against the matching native archive with that build's include/compile/link flags.
+
+`fast_slope_fit_contract.py --module MODULE --backend cpu|cuda --out OUTPUT`
+records real weighted/unweighted fits with and without retained effects, both
+modes, explicit-dummy OLS coefficient references, full covariance and residuals.
+Run baseline and candidate separately and compare comparable outputs. The
+acceptance-wrapper contract additionally verifies fast mode never performs a
+block-driven retry, and comparable mode retains its continuation/refusal rules.
+The new `slope_block_checked_` diagnostic (Stata: `e(slope_block_checked)`, R:
+`slope_block_checked`) distinguishes skipped checks from zero residuals. The
+five existing block metrics are zero placeholders when it is false.

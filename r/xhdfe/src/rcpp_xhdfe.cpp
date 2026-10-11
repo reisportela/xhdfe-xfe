@@ -525,6 +525,7 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
         res.auto_routing_retry_abs_residual_rel;
     out["auto_routing_retry_elapsed_seconds"] =
         res.auto_routing_retry_elapsed_seconds;
+    out["slope_block_checked"] = res.slope_block_checked;
     out["slope_block_residual_rel"] = res.slope_block_residual_rel;
     out["slope_block_frobenius_rel"] = res.slope_block_frobenius_rel;
     out["slope_block_rms_rel"] = res.slope_block_rms_rel;
@@ -785,6 +786,7 @@ Rcpp::List xhdfe_cpp_partial_out(Rcpp::NumericVector y,
         partial.auto_routing_retry_abs_residual_rel;
     out["auto_routing_retry_elapsed_seconds"] =
         partial.auto_routing_retry_elapsed_seconds;
+    out["slope_block_checked"] = partial.slope_block_checked;
     out["slope_block_residual_rel"] = partial.slope_block_residual_rel;
     out["slope_block_frobenius_rel"] = partial.slope_block_frobenius_rel;
     out["slope_block_rms_rel"] = partial.slope_block_rms_rel;

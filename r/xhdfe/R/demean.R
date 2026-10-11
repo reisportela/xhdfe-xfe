@@ -172,6 +172,7 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                  krylov_max_condition = res$krylov_max_condition,
                  krylov_max_condition_times_backward_error =
                    res$krylov_max_condition_times_backward_error,
+                 slope_block_checked = res$slope_block_checked,
                  slope_block_residual_rel = res$slope_block_residual_rel,
                  slope_block_frobenius_rel = res$slope_block_frobenius_rel,
                  slope_block_rms_rel = res$slope_block_rms_rel,

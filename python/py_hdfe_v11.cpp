@@ -1567,6 +1567,9 @@ All weight-type flags require ``weights`` and are mutually exclusive.
         .def_property_readonly("auto_routing_retry_elapsed_seconds_", [](const HdfeRegressorV11& self) {
             return self.results().auto_routing_retry_elapsed_seconds;
         })
+        .def_property_readonly("slope_block_checked_", [](const HdfeRegressorV11& self) {
+            return self.results().slope_block_checked;
+        })
         .def_property_readonly("slope_block_residual_rel_", [](const HdfeRegressorV11& self) {
             return self.results().slope_block_residual_rel;
         })
