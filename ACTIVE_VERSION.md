@@ -1,16 +1,22 @@
 # Pastas locais ativas do xhdfe
 
-## Correcções locais 2.29.1.20261014 — não publicadas
+## Release activa 2.29.1.20261014 — publicada
 
-Os dois checkouts contêm as correcções da auditoria de 14out2026 e a ajuda
-correspondente, com builds CPU/CUDA e plugins Stata recompilados e validados
-localmente. O âmbito está em `docs/releases/VALIDATION_2.29.1.20261014.md`;
-a evidência e as cópias dos originais estão em
-`Verifications/remediacao_main_2291_20261014/`. A release publicada e o manifesto selado abaixo continuam a ser
-2.29.0.20261014. Uma divergência do verificador durante este desenvolvimento
-não deve ser ocultada actualizando os hashes da release anterior.
+Publicada a 14out2026, às 18:17:43 UTC, em
+https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.29.1.20261014.
+Os dois checkouts contêm as correcções e a ajuda actual, com builds CPU/CUDA
+sm_90 e plugins Stata OpenMP/nativos recompilados e verificados em processos
+novos. O corte público é `8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef`.
 
-## Release 2.29.0.20261014 (corte de 14out2026)
+Os 13 anexos foram autenticados e os binários exactos testados na H100. Uma
+instalação Stata nova confirmou os 49 ficheiros do site e os 37 ficheiros
+instalados/descarregados. O âmbito e os limites estão em
+`docs/releases/VALIDATION_2.29.1.20261014.md`. A evidência e a recuperação estão
+em `Verifications/release_2_29_1_20261014/` e no checkpoint anterior
+`Verifications/remediacao_main_2291_20261014/`. O manifesto local é selado
+depois dos commits finais; não deve ser actualizado apenas para ocultar desvios.
+
+## Histórico: release 2.29.0.20261014 (substituída pela 2.29.1)
 
 Ramo `integrate/pr13-tiago-2.29-20261012` (worktree
 `build-worktrees/pr13-integration-20261012`): candidata 2.29.0.20261006 + PR #13
@@ -29,7 +35,7 @@ O checkout de testes não atualiza as pastas canónicas descritas abaixo.
 
 ## Estado canónico publicado em 14out2026
 
-Versão local validada: 2.29.0.20261014. As pastas principais xhdfe e xhdfe-xfe são os pontos de entrada locais.
+Versão local validada: 2.29.1.20261014. As pastas principais xhdfe e xhdfe-xfe são os pontos de entrada locais.
 
 - Stata: usar stata/ da respetiva pasta principal. O comando de partial-out atual é xfepout.
 - Python: importar xhdfe a partir da respetiva pasta principal.

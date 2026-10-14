@@ -1,14 +1,34 @@
 # OpenMP release checklist — 2.29.1.20261014
 
-The 2.29.1 release repeats every gate below with fresh version-tag artifacts.
-Completion is pending the current preflight, version-tag build, exact H100
-validation and public installation readback. The historical completion record
-below belongs to 2.28.1 and does not substitute for these executions.
+The 2.29.1 release repeated every gate below with fresh version-tag artifacts
+and was published on 14 October 2026 after exact H100 validation and public
+installation readback. The historical 2.28.1 record remains below.
 
 The native xhdfe probe now also checks the IV Driscoll–Kraay counterexample
 against an independent MP90/MP120 reference, in both tolerance modes and with
 one/two threads. Locally, the corrected plugin passes all four cases and the
 frozen 2.29.0 plugin is rejected for its incorrect full covariance.
+
+## 2.29.1 completed gates
+
+- [x] [Final preflight 38598859387](https://github.com/reisportela/xhdfe-xfe/actions/runs/38598859387): all 11 required build, platform and assembly jobs passed.
+- [x] [Version-tag run 38604829130](https://github.com/reisportela/xhdfe-xfe/actions/runs/38604829130): all 12 required jobs passed, including fresh draft assembly.
+- [x] All 13 exact assets match their GitHub digests; the 12 payloads also
+  match `SHA256SUMS.txt`.
+- [x] Final native receipts match ten plugin/platform cases, two installed
+  Python wheels and four macOS serial negative controls. Every production
+  plugin has one/two-worker numerical evidence; both final macOS slices ran natively.
+- [x] [Exact arithmetic 38597574837](https://github.com/reisportela/xhdfe-xfe/actions/runs/38597574837): 37,632 rational-reference cases passed in each of five native compiler/platform configurations.
+- [x] Exact Linux CUDA assets passed licensed Stata/H100 analytic, covariance,
+  recovery, cache and first-stage checks with real GPU use. The installed
+  Linux wheel passed all 97 frontend tests without skips.
+- [x] Five interleaved CPU pairs on 48 million synthetic rows have identical
+  b/V, sample and convergence. This is an artifact smoke, not a new core24 claim.
+- [x] [Publication 38613871888](https://github.com/reisportela/xhdfe-xfe/actions/runs/38613871888) published the existing draft and site; all 49 site files and 37 installed/ancillary files matched the authenticated snapshot.
+
+The CI R package check has two warnings and four notes, with its tests and
+actual-worker gate passed. The complete scope is in
+`docs/releases/VALIDATION_2.29.1.20261014.md`.
 
 ## Historical gate definitions and 2.28.1 completion
 

@@ -4,7 +4,7 @@
 
 `Version 2.29.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-Version 2.29.1.20261014 corrects IV Driscoll–Kraay covariance and named fixed
+[Version 2.29.1.20261014](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.29.1.20261014) corrects IV Driscoll–Kraay covariance and named fixed
 effects in first-stage regressions. See the
 [release notes and validation](docs/releases/RELEASE_NOTES_2.29.1.20261014.md).
 
@@ -16,8 +16,8 @@ effects in first-stage regressions. See the
 effects (HDFE) — the worker–firm, patent–inventor, and multi-way panel designs
 common in applied economics. It follows the defaults and reporting conventions
 of [`reghdfe`](https://github.com/sergiocorreia/reghdfe) (Correia 2016). Under
-the default `reghdfe-comparable` tolerance mode, the certification suite checks
-coefficients and inference against `reghdfe` at the same nominal tolerance. A
+the default `reghdfe-comparable` tolerance mode, numerical validation uses
+independent finite-sample oracles, with `reghdfe` assessed separately as a comparator. A
 Stata command, a Python package, and an R package all call the **same compiled
 C++ core**. CPU is the reference backend; an optional CUDA GPU absorber is
 available for large problems.

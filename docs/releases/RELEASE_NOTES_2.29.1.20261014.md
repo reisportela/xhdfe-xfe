@@ -21,7 +21,10 @@ This corrective release addresses the 14 October adversarial audit.
   restore the intended coefficient and covariance accuracy without changing
   solver targets or tolerance-mode semantics.
 
-See [validation and release coverage](VALIDATION_2.29.1.20261014.md).
+Published on 14 October 2026 for Linux, Windows and macOS (Intel/Apple Silicon),
+with a separate Linux CUDA bundle. See
+[validation and release coverage](VALIDATION_2.29.1.20261014.md) and the
+[native arithmetic receipt](NATIVE_ARITHMETIC_2.29.1.20261014.json).
 Earlier
 performance and platform receipts belong to their recorded source/binary hashes;
 they are not a new performance campaign for this correction.

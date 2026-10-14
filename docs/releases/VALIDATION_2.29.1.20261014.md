@@ -1,11 +1,16 @@
 # Validation — xhdfe 2.29.1.20261014
 
-14 October 2026. The initial local correction checkpoint was validated before
+**Published 14 October 2026 at 18:17:43 UTC:**
+[v2.29.1.20261014](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.29.1.20261014),
+at public source commit `8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef`.
+All 13 exact assets and a fresh public Stata installation were verified.
+
+The initial local correction checkpoint was validated before
 publication, from private/public base commits
 `a332096e67db877b612bfa16a2b6146e2a6fda4f` and
 `78b1d2966cfec7b956cd3460e86aaea69d107018`. The tables below identify that local
-checkpoint; the additional platform work is recorded at the end. Release
-publication is gated on fresh native builds and exact-asset validation.
+checkpoint; the additional platform work and completed release gates are
+recorded below.
 
 Evidence is retained in the private repository under
 `Verifications/remediacao_main_2291_20261014/`. The earlier adversarial audit and
@@ -133,8 +138,8 @@ operation. The Clang correction scopes precise arithmetic to the wide-number
 definitions. Neither adds a fit-time verifier, changes tolerances or increases
 the solver's iteration target. The GCC Linux/CUDA route retains its existing
 arithmetic. The Windows native gate passed the correction; the corrected local
-Clang plugin passed all four DK IV mode/thread cases. Final macOS/version-tag
-gates remain required before publication.
+Clang plugin passed all four DK IV mode/thread cases. The final native macOS
+and version-tag gates subsequently passed, as recorded below.
 
 Permanent exact-rational tests cover 37,632 product/range cases and the complete
 wide-pair value. GCC, Clang and Clang UBSan pass; an uncorrected Clang negative
@@ -154,9 +159,46 @@ fresh-install gates remain mandatory. Fresh synthetic artifact smokes do not
 establish a new core24 performance claim. The Windows R build-configuration
 stamp remains a separately scoped follow-up.
 
-The existing active-checkout manifest was already locally modified before this
-task and still seals the published 2.29.0 state. It was preserved; expected
-candidate/source/version mismatches must not be hidden by refreshing its hashes.
-The new candidate's provenance lives in the separate remediation and release
-receipts. The final seal is made only after exact-asset validation and public
-installation readback.
+The prior active-checkout manifest was already locally modified and sealed
+2.29.0. Its exact bytes were preserved for recovery. The final 2.29.1 seal
+follows publication, public readback and final documentation commits, and
+includes the ignored active native modules as well as the source/help files.
+
+## Exact release-artifact closure
+
+| Gate | Result |
+|---|---|
+| [Preflight 38598859387](https://github.com/reisportela/xhdfe-xfe/actions/runs/38598859387) | All 11 required build/platform/assembly jobs passed |
+| [Version-tag build 38604829130](https://github.com/reisportela/xhdfe-xfe/actions/runs/38604829130) | All 12 required jobs passed; fresh draft artifacts |
+| Asset authentication | All 13 GitHub digests agree; the 12 payloads also match `SHA256SUMS.txt` |
+| Native final-byte checks | Ten plugin/platform cases, two Python wheels and four macOS serial negative controls; observed useful workers and analytic agreement |
+| [Native arithmetic 38597574837](https://github.com/reisportela/xhdfe-xfe/actions/runs/38597574837) | 37,632 exact-rational cases on GCC 13, Clang 18, MinGW 13, and Apple Clang 17 Intel/ARM; [receipt](NATIVE_ARITHMETIC_2.29.1.20261014.json) |
+| Exact Linux Stata packages | Analytic b/full-V, partial-out, recovery and cache gates passed; real H100 use |
+| Exact DK IV extended guard | 72 CPU PASS; 66 CUDA PASS and six documented no-FE CUDA refusals; maximum scaled full-V error about `3.24e-9`, below the fixed `1e-8` limit |
+| Exact first-stage alias guard | Eight scenarios per CPU/CUDA backend passed |
+| Installed Linux Python wheel | 97 frontend tests passed, no skips; actual one/two-worker gate passed |
+| Tagged R source package | CI build/check/tests and one/two-worker gate passed; two warnings and four notes remain explicit qualifications |
+| [Publication 38613871888](https://github.com/reisportela/xhdfe-xfe/actions/runs/38613871888) | Existing draft and existing net-install snapshot published without rebuilding |
+| Fresh public readback | 49 site files, 22 installed runtime files and 15 ancillary files match the authenticated snapshot |
+
+The final canonical CPU/CUDA builds passed 11/11 CTests in each of the four
+build directories. Fresh imports and Stata processes passed CPU/CUDA analytic
+checks in both checkouts, including native requests of 1, 2, 8, 16, 24 and 48
+workers. All ten canonical GNU artifacts remained byte-identical to the local
+remediation artifacts; the earlier full analytic campaign therefore still
+identifies their exact bytes. The current shared source/help surface is aligned.
+Three unchanged historical release-note differences are retained for separate
+review; they are outside the current command/help comparison.
+
+The exact portable CPU release artifacts were additionally compared in five
+interleaved pairs, each using 48 million synthetic observations and a fresh
+Stata process. All ten fits returned identical b/V, sample and 18 iterations
+with 16 actual workers. The paired time ratio's median was `0.986`; individual
+ratios ranged from `0.880` to `1.155`, with variable timings in both arms. No
+build or other local campaign overlapped those timings. These are operational
+artifact checks, not a speedup or new core24 performance certification.
+
+The native Windows/macOS gates exercise the SPI and estimator, including the
+new IV/DK counterexample; they do not replace a licensed Stata GUI/ado suite on
+each OS. Linux Stata/H100, the installed Python wheel and the R package have
+their separately recorded checks. No universal numerical certification is claimed.

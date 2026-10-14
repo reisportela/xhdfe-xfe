@@ -1,0 +1,151 @@
+{
+  "status": "PASS",
+  "run": 38597574837,
+  "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+  "rows": [
+    {
+      "platform": "wide-arithmetic-linux-gcc",
+      "system": "Linux",
+      "architecture": "x86_64",
+      "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+      "cases": 37632,
+      "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+      "source_custody": [
+        {
+          "path": "src/wide_float.hpp",
+          "git_lf_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/wide_product_probe.cpp",
+          "git_lf_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/analytic_precision/wide_product_contract.py",
+          "git_lf_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_line_endings": "LF"
+        }
+      ]
+    },
+    {
+      "platform": "wide-arithmetic-windows-mingw",
+      "system": "Windows",
+      "architecture": "AMD64",
+      "compiler": "g++.exe (MinGW-W64 x86_64-ucrt-posix-seh, built by Brecht Sanders, r8) 13.2.0",
+      "cases": 37632,
+      "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+      "source_custody": [
+        {
+          "path": "src/wide_float.hpp",
+          "git_lf_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_sha256": "79a48749df45b1c8c332d54ccc8973e46b2836c1aefaea247817ce7d026a5e08",
+          "runner_line_endings": "CRLF"
+        },
+        {
+          "path": "tests/wide_product_probe.cpp",
+          "git_lf_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_sha256": "2c70db55c9cfd3277054694506ea4da9af1432f92d748793c148079d70223a6b",
+          "runner_line_endings": "CRLF"
+        },
+        {
+          "path": "tests/analytic_precision/wide_product_contract.py",
+          "git_lf_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_sha256": "b7a771c1a74eb409f3cad2f9fd61948da5560e380638437cca70d20bec21b723",
+          "runner_line_endings": "CRLF"
+        }
+      ]
+    },
+    {
+      "platform": "wide-arithmetic-macos-arm",
+      "system": "Darwin",
+      "architecture": "arm64",
+      "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+      "cases": 37632,
+      "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+      "source_custody": [
+        {
+          "path": "src/wide_float.hpp",
+          "git_lf_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/wide_product_probe.cpp",
+          "git_lf_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/analytic_precision/wide_product_contract.py",
+          "git_lf_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_line_endings": "LF"
+        }
+      ]
+    },
+    {
+      "platform": "wide-arithmetic-macos-intel",
+      "system": "Darwin",
+      "architecture": "x86_64",
+      "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)",
+      "cases": 37632,
+      "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+      "source_custody": [
+        {
+          "path": "src/wide_float.hpp",
+          "git_lf_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/wide_product_probe.cpp",
+          "git_lf_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/analytic_precision/wide_product_contract.py",
+          "git_lf_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_line_endings": "LF"
+        }
+      ]
+    },
+    {
+      "platform": "wide-arithmetic-linux-clang",
+      "system": "Linux",
+      "architecture": "x86_64",
+      "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+      "cases": 37632,
+      "source_commit": "8ce9b96cd2b1deca6ff052cead8bfbffbc7a67ef",
+      "source_custody": [
+        {
+          "path": "src/wide_float.hpp",
+          "git_lf_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_sha256": "022edde67014999c1f43ec326f9aa9fd2d502a86b035f78eb0cd4d15e5d59b6c",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/wide_product_probe.cpp",
+          "git_lf_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_sha256": "ff782428a90d14e75cf686b595294699f4b7dd549d39dbce497995947146f7ad",
+          "runner_line_endings": "LF"
+        },
+        {
+          "path": "tests/analytic_precision/wide_product_contract.py",
+          "git_lf_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_sha256": "42203cb9e5cd4c73410509c156d33f2f5b481ac11ace5109d0ef83c520bca199",
+          "runner_line_endings": "LF"
+        }
+      ]
+    }
+  ],
+  "schema": "xhdfe-native-wide-arithmetic-v1",
+  "version": "2.29.1.20261014",
+  "run_url": "https://github.com/reisportela/xhdfe-xfe/actions/runs/38597574837",
+  "scope": "Exact rational product/range and represented wide-pair checks on five native configurations; not a full estimator or performance certification"
+}
