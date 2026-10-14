@@ -146,6 +146,76 @@ version-tag gates. See the [release procedure](../release-workflow.md).
 
 ## Executed release gates
 
-To be appended from the `preflight-v2.29.0.20261014` and `v2.29.0.20261014`
-runs and the H100 checks of the exact draft assets before
-`publish-v2.29.0.20261014` is pushed.
+Three preflight tags were needed. `preflight-v2.29.0.20261014` (run 38531061273)
+failed on the Windows wheel and plugin probe because three top-level test
+sources the CMake build references had not been propagated; `-r2`
+(run 38531758954) failed on macOS arm64 because the new fused multiply-add
+liveness probe expanded an empty bash array under `set -u` on bash 3.2;
+`-r3` (run [38532492153](https://github.com/reisportela/xhdfe-xfe/actions/runs/38532492153))
+passed all 11 build/validation/assembly jobs on public commit
+`10a8adfa9a0ce7e686dddf333653c10c39241318` with the frontend contract at
+97 tests, no skips, and the R OpenMP probe passing. Both fixes are in the
+private and public sources (`docs/LICOES_INTEGRACAO_PR13_20261012.md` §12).
+
+The version tag `v2.29.0.20261014` at the same commit ran
+[38540846493](https://github.com/reisportela/xhdfe-xfe/actions/runs/38540846493): 12 jobs
+succeeded and the publish job was skipped as designed; it staged draft release
+412566854 with 13 assets. Every asset matched GitHub's SHA-256 digest, its
+recorded size and `SHA256SUMS.txt` (`FINAL_ASSETS_AUTHENTICATED.json`):
+
+| Asset | Bytes |
+| --- | ---: |
+| `SHA256SUMS.txt` | 1,257 |
+| `xhdfe-2.29.0.20261014-corresponding-source.zip` | 273,122,751 |
+| `xhdfe-2.29.0.20261014-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl` | 4,639,669 |
+| `xhdfe-2.29.0.20261014-cp312-cp312-win_amd64.whl` | 5,431,614 |
+| `xhdfe-2.29.0.20261014.tar.gz` | 4,791,832 |
+| `xhdfe-src.zip` | 15,472,510 |
+| `xhdfe_2.29.0.20261014.tar.gz` | 1,842,858 |
+| `xhdfe_xfe-offline-source-and-platform-binaries.zip` | 349,424,354 |
+| `xhdfe_xfe-stata-linux-cpu.zip` | 7,779,944 |
+| `xhdfe_xfe-stata-linux-cuda.zip` | 11,008,779 |
+| `xhdfe_xfe-stata-macos-universal.zip` | 8,220,536 |
+| `xhdfe_xfe-stata-netinstall-site.zip` | 39,112,230 |
+| `xhdfe_xfe-stata-windows-cpu.zip` | 8,041,533 |
+
+Archive layout (`FINAL_ARCHIVE_LAYOUT.json`): the 20 Stata ado/help files
+are byte-identical across the four platform ZIPs, the net-install snapshot and
+the release sources; the offline bundle carries the same prebuilt plugins and
+package files as the platform ZIPs and the Python/R assets; `xhdfe-src.zip`
+carries the release `VERSION`, the frontend sources and the certified
+`Rcpp_1.1.2.tar.gz`. Native receipts (`FINAL_NATIVE_PLATFORM_RECEIPTS.json`):
+10 plugin receipts (Linux CPU, Linux CUDA host, Windows, macOS x86_64 and
+arm64 × `xhdfe`/`xfepout`) tied to the final plugin bytes with one and two
+useful OpenMP workers and numerical parity, 2 wheel receipts (Linux,
+Windows) tied to the final module bytes, and 4 macOS serial negative controls
+rejected as expected.
+
+Runtime gates on the authenticated assets (`FINAL_RUNTIME_GATES.json`,
+25 checks, all passed; no foreign GPU process and 0 % utilisation at start):
+
+| Gate | Observed result |
+| --- | --- |
+| Corresponding-source bundle, four platform package sites, net-install site, Linux binary floor, `ldd` of the four Linux plugins | validators passed; every plugin links `libgomp`, none links `nvomp` |
+| Downloaded manylinux wheel and sdist, isolated local installation | archive closure passed; the complete 97-test frontend gate passed without skips or source shadowing; the installed OpenMP probe passed |
+| Exact Linux CPU ZIP, fresh licensed Stata: analytic b/full V in Fast and Comparable, `xfepout` within, documented auto-data example | PASS, package bytes unchanged (XHDFE_RELEASE_ANALYTIC_SMOKE_PASS, ISSUE11_AUTO_EXAMPLE_PASS) |
+| Exact Linux CUDA ZIP on the H100 (`gpu_used==1`): the same analytic cases on CPU and CUDA | PASS, package bytes unchanged (XHDFE_RELEASE_ANALYTIC_SMOKE_PASS, ISSUE11_AUTO_EXAMPLE_PASS) |
+| Exact Linux CUDA ZIP: `savefe` and reconstruction on CUDA | PASS, package bytes unchanged (XHDFE_SAVEFE_CUDA_CURRENT_BYTES_PASS) |
+| Exact Linux CUDA ZIP: `xfepout` CUDA/CPU hint guard | PASS, package bytes unchanged (XFEPOUT_CUDA_CPU_HINT_GUARD_PASS) |
+| Exact Linux CPU ZIP: `xfepout` cache hit receipt, signature-miss rewrite, cache profile | PASS, package bytes unchanged (XFEPOUT_CACHE_HIT_RECEIPT_PASS, XFEPOUT_CACHE_SIGNATURE_MISS_REWRITE_PASS, XFEPOUT_CACHE_PROFILE_PASS) |
+| Exact Linux CUDA ZIP on CPU: the same `xfepout` cache cases | PASS, package bytes unchanged (XFEPOUT_CACHE_HIT_RECEIPT_PASS, XFEPOUT_CACHE_SIGNATURE_MISS_REWRITE_PASS, XFEPOUT_CACHE_PROFILE_PASS) |
+| Large CPU smoke, exact 2.28.1 public CPU package vs exact 2.29.0 CPU package, fresh Stata processes, 16 workers | 46,156,187 observations, identical sample signature and degrees of freedom, 23 iterations in both; scaled coefficient error 5.1e-15, full-covariance scaled error 1.7e-12; fit times 72.38 s (2.28.1) and 49.24 s (2.29.0), ratio 0.68. One pair: an artifact smoke, not a performance campaign (the campaigns above are). |
+
+The version-tag `R CMD check` reports `2 WARNINGs, 4 NOTEs`, the pattern already
+recorded for 2.28.0 and 2.28.1 (compiled code (NOTE); for gnu extensions in makefiles (NOTE); if this is a source package (WARNING); installed package size (NOTE); package dependencies (NOTE); whether package ‘xhdfe’ can be installed (WARNING));
+the native sources were not changed to suppress these diagnostics.
+
+Both canonical local checkouts were brought to the release state: private `main`
+fast-forwarded to the integration branch, `build/` and `build_cuda/` rebuilt
+(Release, native tuning, required OpenMP, CUDA sm_90) and exercised with the
+analytic Polars/FE check in Fast and Comparable on CPU and on the H100 with
+actual GPU use (`canonical_cpu_native.json`, `canonical_cuda_native.json`); the
+canonical CPU module is byte-identical to the module the promotion campaigns
+measured (`74855148…`). The tracked Stata plugins are the native-recipe builds the
+campaigns measured (`cd63b7aa…`, `7d379ec4…`); their sources did not change
+after that build.

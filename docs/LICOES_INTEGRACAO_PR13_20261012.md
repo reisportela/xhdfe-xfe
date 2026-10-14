@@ -172,3 +172,33 @@ certification failed» e usava uma fixture agrupada subdeterminada;
 (expectativas fail-closed, recusa esperada, fixture sobredeterminada, NOTA em
 vez de erro); `docs/gpu.md` deixou de prometer o fallback; ctest 10/10.
 
+## 12. Lições do corte e da publicação da 2.29.0.20261014 (14out2026)
+
+- **Propagação curada ao público a partir de `git ls-files`, não de uma lista
+  redigida à mão.** A lista do plano (§4) cobria árvores e três ficheiros de
+  teste de topo; o `CMakeLists.txt` propagado referenciava `tests/fma_liveness.cpp`
+  e dois contratos novos que ficaram para trás, e o primeiro preflight falhou nos
+  jobs Windows (`build-probe-inputs` e wheel). Regra: depois de copiar, correr um
+  `cmake` de configuração no checkout público (build dir fora do repositório) e
+  só depois etiquetar; a lista fica derivada dos ficheiros versionados.
+- **Arrays vazios em bash 3.2.** O sonda de liveness FMA acrescentado na linha
+  2.29 ligava com `"${fma_link_flags[@]}"`; com `set -u` no bash 3.2 do macOS um
+  array vazio é variável indefinida e o job macOS arm64 falhou. O próprio
+  script já usava o idioma seguro `${arr[@]+"${arr[@]}"}` para os outros arrays
+  opcionais; corrigido nos dois scripts de build (`524b20c3`). A CI do macOS é a
+  única execução do script em bash 3.2: nunca assumir que «corre em Linux» cobre
+  o macOS.
+- **Referência do contrato = release pública corrente.** A campanha mínima
+  arrancou com a 2.26.2 como quarto braço porque o `CLAUDE.md` o exigia; o
+  mantenedor fixou a referência na 2.28.1 a meio da campanha e o registo passou a
+  tratar a 2.26.2 como anexo de precisão. Quando a release pública mudar, o
+  baseline e os tempos de referência do ready mudam nos dois ficheiros de regras.
+- **O checkout principal não é área de trabalho.** Tinha oito ficheiros
+  modificados e nunca commitados (`AGENTS.md` de 03out, `.gitignore` de 11out,
+  entre outros) que impediam o fast-forward do `main`; ficaram num stash
+  etiquetado e num patch em `Verifications/`. Trabalho vive em worktrees; o
+  checkout principal só recebe fast-forwards e rebuilds canónicos.
+- **Um protocolo de medição por parágrafo de referência.** Os tempos Stata do
+  harness das campanhas (`residuals()`) são 1,6–2× os do comando simples; os
+  tempos de referência do ready no `CLAUDE.md` declaram agora os dois protocolos
+  e proíbem misturá-los.
