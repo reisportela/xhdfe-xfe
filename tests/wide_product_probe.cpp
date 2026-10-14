@@ -4,11 +4,19 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#if defined(__SSE__) || defined(_M_X64)
+#include <xmmintrin.h>
+#endif
 
 int main() {
     // Exercise subnormals under IEEE arithmetic, including when the test
     // executable was linked with fast-math's startup environment.
     if (std::fesetenv(FE_DFL_ENV)) return 2;
+#if defined(__SSE__) || defined(_M_X64)
+    // MinGW fesetenv does not clear fast-math's SSE flush modes.
+    _mm_setcsr(_mm_getcsr() & ~0x8040U);
+    if (_mm_getcsr() & 0x8040U) return 3;
+#endif
     std::uint64_t ab, bb;
     while (std::cin >> std::hex >> ab >> bb) {
         double a, b;
