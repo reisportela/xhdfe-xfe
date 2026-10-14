@@ -82,6 +82,32 @@ jobs:
               stdout=run.stdout,stderr=run.stderr,returncode=run.returncode)
           (out/'RESULT.json').write_text(json.dumps(receipt,indent=2)+'\n')
           print(run.stdout+run.stderr)
+          if run.returncode and platform.system()=='Linux' and 'clang' in compiler:
+              # Isolated diagnostic copies, not changes to the product sources.
+              original = (root/'src/wide_float.hpp').read_text()
+              needle = 'volatile double product_error=std::fma(hi,b.hi,-p);'
+              assert original.count(needle)==1
+              variants = {
+                  'builtin': original.replace(needle,'volatile double product_error=__builtin_fma(hi,b.hi,-p);'),
+                  'library': original.replace(needle,'static double (*volatile library_fma)(double,double,double)=std::fma; volatile double product_error=library_fma(hi,b.hi,-p);'),
+                  'integer': original.replace('#if defined(__MINGW32__) && defined(__SIZEOF_INT128__)','#if defined(__SIZEOF_INT128__)'),
+                  'strict_control': original,
+              }
+              checks = []
+              for name, text in variants.items():
+                  directory = out/name
+                  directory.mkdir()
+                  (directory/'wide_float.hpp').write_text(text)
+                  binary = directory/'probe'
+                  options = [v for v in flags if v!='-ffast-math'] if name=='strict_control' else flags
+                  subprocess.run([compiler,*options,'-I'+str(directory),'-Ithird_party/eigen-3.4.0',
+                      '-Iinclude','tests/wide_product_probe.cpp','-o',str(binary)],check=True)
+                  trial = subprocess.run(['python','-B','tests/analytic_precision/wide_product_contract.py',
+                      '--probe',str(binary)],text=True,capture_output=True)
+                  (directory/'run.log').write_text(trial.stdout+trial.stderr)
+                  checks.append(dict(variant=name,returncode=trial.returncode,stdout=trial.stdout,stderr=trial.stderr))
+              (out/'VARIANTS.json').write_text(json.dumps(checks,indent=2)+'\n')
+              print(json.dumps(checks))
           run.check_returncode()
           assert run.stdout.strip()=='WIDE_PRODUCT_RATIONAL_CONTRACT_PASS 37632'
       - uses: actions/upload-artifact@v4
