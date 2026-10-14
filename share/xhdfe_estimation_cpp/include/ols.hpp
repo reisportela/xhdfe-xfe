@@ -14,6 +14,13 @@ namespace detail {
 struct N1NormalEvidence;
 struct OlsWideCovariance;
 
+// Unscaled time-cluster influences from the existing wide IV factorisation.
+// The recovered constant is formed before conversion to binary64.
+struct DkraayInfluences {
+    Eigen::VectorXi time_ids;
+    Eigen::MatrixXd values;
+};
+
 struct OlsResult {
     Eigen::VectorXd coefficients;
     Eigen::VectorXd std_errors;
@@ -107,7 +114,8 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     bool num_threads_explicit, ParallelWorkObserver* parallel_observer,
     const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means = nullptr,
-    Eigen::VectorXd* intercept_covariance = nullptr);
+    Eigen::VectorXd* intercept_covariance = nullptr,
+    DkraayInfluences* dkraay_influences = nullptr);
 
 OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X, const Eigen::VectorXd* weights,

@@ -54,8 +54,9 @@ local certified = .
 local gpu = 0
 local threads = .
 local singletons = 0
-local intercept = 0
-capture local intercept = _b[_cons]
+tempname intercept
+scalar `intercept' = 0
+capture scalar `intercept' = _b[_cons]
 if ("`engine'" == "ols") quietly predict double fit_residual if e(sample), residuals
 if ("`engine'" == "reghdfe") {
     local iterations = e(ic)
@@ -74,6 +75,20 @@ if ("`engine'" == "xhdfe") {
 
 tempname values V
 matrix `V' = e(V)
+// Keep the complete reported block separately from explicit-dummy OLS,
+// whose extra coefficients have a different parameterisation.
+if ("`engine'" != "ols") {
+    tempname fullb fullV
+    matrix `fullb' = e(b)
+    matrix `fullV' = e(V)
+    mata: st_matrix("`fullb'", st_matrix("`fullb'")')
+    preserve
+    clear
+    svmat double `fullb', names(parameter)
+    svmat double `fullV', names(covariance)
+    save "`output'/parameters.dta"
+    restore
+}
 local covariance
 forvalues i = 1/3 {
     forvalues j = 1/3 {

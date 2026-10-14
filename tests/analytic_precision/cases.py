@@ -130,7 +130,61 @@ class Case:
         arithmetic_model['scale_source'] = 'absolute products in frozen oracle graph'
         within_gram = Xr_w.T@Xr_w
         within_outcome_norm = float(np.linalg.norm(yr_w))
+        # Independently transport the complete identified parameter vector.
+        # The reported constant is mean(y)-mean(X)*beta under the package's
+        # zero-mean FE normalisation, including grouped observations.
+        full_beta = BETA.copy()
+        full_contrast = C.copy()
+        full_covariance = V_contract.copy()
+        if self.intercept:
+            means = np.average(X, axis=0, weights=w)
+            constant = float(np.average(y-X@BETA, weights=w))
+            full_beta = np.r_[BETA, constant]
+            full_contrast = np.zeros((C.shape[0]+1, 4))
+            full_contrast[:-1, :3] = C
+            full_contrast[-1, -1] = 1.
+            bread = np.zeros((4, 4))
+            bread[:3, :3] = Hinv
+            bread[3, 3] = 1./w.sum()
+            transport = np.eye(4)
+            transport[3, :3] = -means
+            influence = np.c_[Xr, np.ones(len(y))]@(transport@bread).T
+            if self.vce == 'unadjusted':
+                full_covariance = (transport@bread@transport.T)*raw_rss/(n_effective-k_contract)
+            elif self.vce == 'robust':
+                factor = (w if self.weight == 'fw' else w*w)*e*e
+                full_covariance = influence.T@(factor[:, None]*influence)*n_effective/(n_effective-k_contract)
+            else:
+                full_covariance = np.zeros((4, 4))
+                for q in range(1, len(labels)+1):
+                    for subset in combinations(labels, q):
+                        _, ids = np.unique(np.column_stack(subset), axis=0, return_inverse=True)
+                        sums = np.zeros((ids.max()+1, 4))
+                        np.add.at(sums, ids, (w*e)[:, None]*influence)
+                        full_covariance += (-1)**(q+1)*(sums.T@sums)
+                full_covariance *= minimum_clusters/(minimum_clusters-1)*(n_effective-1)/(n_effective-k_contract)
+                if len(labels) > 1:
+                    # Independent implementation of the documented D-C policy:
+                    # full-matrix clipping, retained slope block, then the
+                    # constant's range and Schur condition. No candidate inputs.
+                    scales = np.r_[np.maximum(X.std(axis=0, ddof=1), .001), 1.]
+                    standardized = full_covariance*np.outer(scales, scales)
+                    eigenvalues, vectors = np.linalg.eigh((standardized+standardized.T)/2)
+                    if np.any(eigenvalues < 0):
+                        full_covariance = ((vectors*np.maximum(eigenvalues, 0))@vectors.T)/np.outer(scales, scales)
+                        block = V_contract*np.outer(scales[:3], scales[:3])
+                        values, directions = np.linalg.eigh((block+block.T)/2)
+                        assert values.min() > 0, self.name
+                        cross = full_covariance[:3,3]*scales[:3]
+                        coordinates = directions.T@cross
+                        required = float(np.sum(coordinates**2/values))
+                        full_covariance[3,3] = max(full_covariance[3,3], required)
+            # Preserve the existing slope oracle's arithmetic, while extending
+            # its independent sandwich to the constant and cross-covariances.
+            full_covariance[:3, :3] = V_contract
         return dict(beta=BETA.tolist(), beta_svd=fit.tolist(), contrast=C.tolist(),
+                    parameters=full_beta.tolist(), parameter_contrast=full_contrast.tolist(),
+                    covariance_full=full_covariance.tolist(),
                     V_exact=V_exact.tolist(), V_contract=V_contract.tolist(),
                     V_ols=V_ols.tolist(), cluster_ssc='common_min_G',
                     rank_D=rank_d, rank_X=int(rank_x), k_exact=k_exact,

@@ -53,6 +53,7 @@ try:
     beta = np.asarray(model.coef_)
     result.update(rc=0, beta=beta[:3].tolist(), cons=float(beta[3]) if len(beta)>3 else 0.,
                   V=np.asarray(model.covariance_)[:3,:3].tolist(),
+                  parameters=beta.tolist(), covariance_full=np.asarray(model.covariance_).tolist(),
                   N=model.nobs_, rss=model.rss_, df_r=model.df_resid_, df_a=model.df_a_,
                   singletons=model.num_singletons_, iterations=model.num_iterations_,
                   converged=int(model.converged_), method_used=int(model.absorption_method_used),

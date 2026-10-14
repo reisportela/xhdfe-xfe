@@ -361,7 +361,8 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     const Eigen::MatrixXd* score_low=nullptr,
     const Eigen::VectorXd* normalization_means=nullptr,
     Eigen::VectorXd* intercept_covariance=nullptr,
-    OlsWideCovariance* covariance_wide=nullptr);
+    OlsWideCovariance* covariance_wide=nullptr,
+    DkraayInfluences* dkraay_influences=nullptr);
 
 struct OlsOriginShift {
     int constant = -1;
@@ -1803,7 +1804,8 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     ClusterDofMethod g_df,bool g_adj,const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means,
     Eigen::VectorXd* intercept_covariance,
-    OlsWideCovariance* covariance_wide) {
+    OlsWideCovariance* covariance_wide,
+    DkraayInfluences* dkraay_influences) {
     using Number=OlsWide;
     using Matrix=std::vector<Number>;
     const int n=static_cast<int>(y.size()),p=static_cast<int>(X.cols());
@@ -1817,6 +1819,9 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     const bool retain_covariance = covariance_wide && capture_intercept;
     const bool retain_cluster_covariance = retain_covariance && multiway &&
                                             se_type == StandardErrorType::Cluster;
+    const bool retain_dkraay = dkraay_influences && cluster && !multiway &&
+                              se_type == StandardErrorType::Cluster;
+    if (dkraay_influences && !retain_dkraay) fail("DK requires one time-cluster vector");
     if (retain_covariance) covariance_wide->values.setZero(p+1, p+1);
     if(capture_intercept && (normalization_means->size()!=p || !ieee_all_finite(*normalization_means))) fail("invalid intercept normalization means");
     auto score_coordinate=[&](int row,int column) {
@@ -2064,8 +2069,10 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
     Number intercept_component_total;
     OlsWideCovariance::Matrix covariance_component;
     if (retain_cluster_covariance) covariance_component.resize(p+1,p+1);
-    Matrix influence(retain_cluster_covariance ? p : 0);
-    Matrix original_influence(retain_cluster_covariance ? p+1 : 0);
+    const bool retain_influences = retain_cluster_covariance || retain_dkraay;
+    const int influence_columns = p + (capture_intercept ? 1 : 0);
+    Matrix influence(retain_influences ? p : 0);
+    Matrix original_influence(retain_influences ? influence_columns : 0);
     auto cluster_meat=[&](const Eigen::VectorXi& ids,bool auxiliary) {
         if(ids.size()!=n) fail("cluster labels do not align with observations");
         std::unordered_map<int,int> mapping;
@@ -2095,6 +2102,12 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
         const bool need_cross=auxiliary || capture_intercept;
         Matrix value(square),cross(p);Number total_u2;
         if (retain_cluster_covariance) covariance_component.setZero();
+        if (retain_dkraay) {
+            dkraay_influences->time_ids.resize(totals.size());
+            dkraay_influences->values.resize(totals.size(), influence_columns);
+            for (const auto& entry : mapping)
+                dkraay_influences->time_ids[entry.second] = entry.first;
+        }
         for(std::size_t g=0;g<totals.size();++g) {
             const auto* score=group_score(g);
             for(int j=0;j<p;++j) {
@@ -2106,7 +2119,7 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                 if(need_cross) cross[j]=checked_inference_add(cross[j],checked_inference_product(totals[g],score[j]));
             }
             if(need_cross) total_u2=checked_inference_add(total_u2,checked_inference_product(totals[g],totals[g]));
-            if (retain_cluster_covariance) {
+            if (retain_influences) {
                 // Evaluate the same sandwich as outer products of cluster
                 // influences. Multiplying bread * meat * bread first can
                 // lose the small eigenvalues even in wide arithmetic when
@@ -2120,14 +2133,20 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                             original_influence[i]+=transform[static_cast<std::size_t>(i)*p+j]*influence[j];
                     } else original_influence[i]=inverse_scales[i]*influence[i];
                 }
-                original_influence[p]=totals[g]/intercept_weight_sum;
-                for (int i=0;i<p;++i)
-                    original_influence[p]-=Number((*normalization_means)[i])*original_influence[i];
+                if (capture_intercept) {
+                    original_influence[p]=totals[g]/intercept_weight_sum;
+                    for (int i=0;i<p;++i)
+                        original_influence[p]-=Number((*normalization_means)[i])*original_influence[i];
+                }
                 for (auto& value:original_influence)
                     value=checked_inference_product(value,Number(y_scale));
-                for (int i=0;i<=p;++i) for (int j=0;j<=i;++j)
-                    covariance_component(i,j)=checked_inference_add(covariance_component(i,j),
-                        checked_inference_product(original_influence[i],original_influence[j]));
+                if (retain_cluster_covariance)
+                    for (int i=0;i<=p;++i) for (int j=0;j<=i;++j)
+                        covariance_component(i,j)=checked_inference_add(covariance_component(i,j),
+                            checked_inference_product(original_influence[i],original_influence[j]));
+                if (retain_dkraay)
+                    for (int i=0;i<influence_columns;++i)
+                        dkraay_influences->values(g,i)=original_influence[i].value();
             }
         }
         for (int j=0;j<p;++j) {
@@ -2672,8 +2691,13 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
                   ParallelWorkObserver* parallel_observer,
                            const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means,
-    Eigen::VectorXd* intercept_covariance) {
+    Eigen::VectorXd* intercept_covariance,
+    DkraayInfluences* dkraay_influences) {
     if (intercept_covariance) intercept_covariance->resize(0);
+    if (dkraay_influences) {
+        dkraay_influences->values.resize(0,0);
+        dkraay_influences->time_ids.resize(0);
+    }
     const int n = static_cast<int>(y.size());
     if (X.rows() != n) {
         throw std::runtime_error("OLS called with inconsistent dimensions");
@@ -2848,7 +2872,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     }
     if(normal_equations_need_wide(xtx))
         return run_ols_wide(y,X,weights,clusters,nullptr,se_type,total_sum_squares,
-            within_sum_squares,n_eff,weights_are_frequencies,X_for_residuals,parallel_observer,ClusterDofMethod::Min,true,score_low,normalization_means,intercept_covariance);
+            within_sum_squares,n_eff,weights_are_frequencies,X_for_residuals,parallel_observer,ClusterDofMethod::Min,true,score_low,normalization_means,intercept_covariance,nullptr,dkraay_influences);
     Eigen::LDLT<Eigen::MatrixXd> solver;
     solver.compute(xtx);
     if (solver.info() != Eigen::Success) {
@@ -2971,7 +2995,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     } catch (const OlsInferenceRangeError&) {
         n1_normal.reset();
         return run_ols_wide(y,X,weights,clusters,nullptr,se_type,total_sum_squares,
-            within_sum_squares,n_eff,weights_are_frequencies,X_for_residuals,parallel_observer,ClusterDofMethod::Min,true,score_low,normalization_means,intercept_covariance);
+            within_sum_squares,n_eff,weights_are_frequencies,X_for_residuals,parallel_observer,ClusterDofMethod::Min,true,score_low,normalization_means,intercept_covariance,nullptr,dkraay_influences);
     }
     ols_phase.reset();
     double cov_scale = 1.0;

@@ -75,6 +75,9 @@ def main():
             receipt['status'] = 'EXPECTED_SERIAL_REJECTION'
         else:
             assert native['status'] == 'PASS' and native['release_gate_pass']
+            if args.kind == 'xhdfe':
+                assert native['dkraay_iv_cases'] == 4
+                assert 0 <= native['dkraay_iv_max_scaled_error'] <= 1e-8
             runtime = Path(native['openmp_runtime_path']).resolve(strict=True)
             receipt['loaded_runtime_path'] = str(runtime)
             receipt['loaded_runtime_sha256'] = sha(runtime)

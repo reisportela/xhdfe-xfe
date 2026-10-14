@@ -243,6 +243,8 @@ def selftest_t01(oracle, metadata, fixture, historical_assess):
                 rss=oracle["rss"], groups=truth.group.astype(int).tolist(),
                 residuals=truth.exact_residual.tolist(), converged=1, gpu_used=0,
                 singletons=oracle["dropped"])
+    good.update(parameters=oracle['parameters'], covariance_full=oracle['covariance_full'],
+                cons=oracle['parameters'][-1] if metadata['intercept'] else 0.)
     job = dict(engine="xhdfe", backend="cpu", case=metadata["name"],
                method="auto", precision="default")
     historical = historical_assess(job, good, fixture)

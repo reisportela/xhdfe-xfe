@@ -12002,6 +12002,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         Eigen::MatrixXd iv_score_low_storage;
         Eigen::VectorXd iv_intercept_covariance;
         detail::OlsWideCovariance iv_covariance_wide;
+        detail::DkraayInfluences iv_dkraay_influences;
         const auto ols_t0 = std::chrono::steady_clock::now();
         if (!wants_iv) {
             if (transformed_X_used.cols() == 0) {
@@ -12170,7 +12171,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                  tuned.se_type, total_tss, within_tss, nobs_effective,
                                                  false, &iv_actual_X,
                                                  tuned.num_threads_explicit,
-                                                 tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
+                                                 tuned.parallel_observer, score_low, means_ptr, intercept_ptr,
+                                                 tuned.dkraay_bandwidth >= 0 ? &iv_dkraay_influences : nullptr);
                 } else {
                     ols_result = detail::run_ols_multiway_with_score_low(absorption.y_tilde, second_stage, w_ptr, c_ptr,
                                                          tuned.se_type, total_tss, within_tss,
@@ -13472,7 +13474,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         if (tuned.dkraay_bandwidth >= 0) {
             detail::apply_dkraay_covariance(results_, ols_result, score_X_tilde_used,
                 X_use, w_ptr, c_ptr, kept_slope_cols, drop_intercept, tuned,
-                wants_iv && iv_score_low_storage.size() ? &iv_score_low_storage : nullptr);
+                wants_iv && iv_score_low_storage.size() ? &iv_score_low_storage : nullptr,
+                wants_iv ? &iv_dkraay_influences : nullptr);
         }
         recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
                             results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);

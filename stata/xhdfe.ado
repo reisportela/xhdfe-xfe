@@ -1,10 +1,10 @@
-*! version 2.29.0 14oct2026
+*! version 2.29.1 14oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.0 14oct2026"
+        local version "2.29.1 14oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -284,6 +284,7 @@ program define _xhdfe_estimate, eclass
     local grouped_bundle_count 0
     local absorb_ts_terms
     local absorb_ts_vars
+    local firststage_absorb
     local savefe_absorb 0
     local cluster_raw
     local cluster_ordered
@@ -355,6 +356,10 @@ program define _xhdfe_estimate, eclass
                         exit 198
                     }
                 }
+
+                // Auxiliary regressions inherit terms, never output aliases.
+                // Preserve the original time-series text before materialisation.
+                local firststage_absorb "`firststage_absorb' `body'"
 
                 // In absorb(), g#c.z is a group-specific slope and g##c.z is
                 // a joint group intercept plus group-specific slope.
@@ -2886,9 +2891,8 @@ program define _xhdfe_estimate, eclass
         local fsopts "`fsopts' minparallelrows(`minparrows') targetrowsperthread(`targetrpt')"
         local fsopts "`fsopts' statstyle(`statstyle') jacobirelaxation(`jacobirelaxation')"
         local fsopts "`fsopts' `keepsingletons' `noconstant' `constant' `noabsorb' `symmetricsweep' `nowarn'"
-        // The user's absorb() text (without suboptions) re-parses identically and
-        // does not depend on time-series temporaries of this estimation call.
-        if ("`absorb_vars'" != "") local fsopts "`fsopts' absorb(`absorb_vars')"
+        // Re-parse the same terms without save destinations or temporaries.
+        if ("`firststage_absorb'" != "") local fsopts "`fsopts' absorb(`firststage_absorb')"
         if (`dkraay_bw' > 0) local fsopts "`fsopts' vce(dkraay `dkraay_bw')"
         else if (`dkraay_bw' == 0) local fsopts "`fsopts' vce(dkraay)"
         else if ("`se_type'" == "cluster") local fsopts "`fsopts' vce(cluster `cluster_ordered')"

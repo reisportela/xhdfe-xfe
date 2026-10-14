@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.29.0). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.29.1). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.29.0) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.29.1) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.29.0.
+#' effects regression via a C++ backend." Version 2.29.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -742,13 +742,14 @@ NULL
 #' bound, exact redundancy proofs, per-row N1 evidence) run only under
 #' \code{XHDFE_CERTIFY=1}.
 #'
-#' Known limitations (2.28.1). A fit that converges by the solver's rule but
+#' Known limitations (2.29.1). A fit that converges by the solver's rule but
 #' does not pass the precision certificate returns no estimates in R, Python
 #' and Stata alike. Ill-conditioned specifications can still require a refusal.
-#' Heterogeneous slopes under an explicit \code{convergence = "reghdfe"}
-#' used to, and that rule is now continued once at tighter internal tolerances
-#' with the first certified stage returned (the default \code{"auto"} polishes
-#' the slope block further); \code{retain_fes = TRUE} on designs where the
+#' In \code{reghdfe-comparable}, heterogeneous slopes under an explicit
+#' \code{convergence = "reghdfe"} can require continuation at tighter internal
+#' tolerances, returning the first certified stage. The default \code{"auto"}
+#' checks the slope block; \code{xhdfe-fast} keeps its aggregate certificate
+#' without the Comparable block continuation. \code{retain_fes = TRUE} on designs where the
 #' effect-capturing sweep stops above the tolerance no longer refuses: the
 #' projection is recomputed without effect capture, certified, and the effects
 #' are recovered from it. \code{aggregation = "sum"} without an ordinary
@@ -769,9 +770,9 @@ NULL
 #' without saved effects. A failed check receives one continuation with the same
 #' method and tolerance, within the remaining iteration budget. A persistent
 #' failure returns no estimates and does not substitute CPU estimates. This
-#' prevents the previously reported inaccurate CUDA results on directors and the
-#' difficult 10M-row 3-FE benchmark; use \code{backend = "cpu"} for these cases.
-#' CUDA convergence on them remains unresolved. The opt-in accuracy-retry settings
+#' check admits the directors and difficult 10M-row 3-FE benchmark fits covered
+#' by the 2.29.0 CUDA validation, with bounded corrections. Other ill-conditioned
+#' specifications can still require a refusal. The opt-in accuracy-retry settings
 #' cannot bypass this necessary check. The
 #' individual block subtracts one exact redundancy against an ordinary fixed
 #' effect whenever the constant is provably in the span of the membership
@@ -1210,7 +1211,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.29.0.
+#' effects regression via a C++ backend." Version 2.29.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

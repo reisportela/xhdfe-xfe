@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.0 14oct2026}{...}
+{* *! version 2.29.1 14oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -89,6 +89,7 @@
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:##c.}{it:x}{cmd:)}}absorb a level FE plus group-specific slopes{p_end}
 {synopt: {cmdab:a:bsorb(}{it:...}{cmd:,} {cmd:savefe)}}save all fixed effect contributions with the {it:__hdfe*} prefix{p_end}
 {synopt: {opth savefes(prefix)}}save fixed effect contributions using a prefix{p_end}
+{synopt: {opt noa:bsorb}}explicitly fit without absorbed effects; incompatible with {cmd:absorb()}{p_end}
 {synopt : }{bf:- note:} savefe/savefes are not supported when both {cmd:group()} and {cmd:individual()} are specified{p_end}
 
 {syntab:Group FEs {help xhdfe##opt_group_fes:[+]}}
@@ -110,6 +111,7 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 {synopt : {opt res:iduals}}save regression residuals in {cmd:_reghdfe_resid}{p_end}
 {synopt : {opt keep:singletons}}do not drop singleton observations{p_end}
 {synopt : {opt nocon:stant}}suppress the intercept in the slope regression{p_end}
+{synopt : {opt cons:tant}}explicitly retain the default intercept; incompatible with {cmd:noconstant}{p_end}
 
 {syntab:IV/2SLS {help xhdfe##opt_iv:[+]}}
 {synopt : {opth endog:enous(varlist)}}endogenous regressors (subset of slopes){p_end}
@@ -263,7 +265,7 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.29.0 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+{bf:Version 2.29.1 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
 The inherited 2.28.0 matrix has 188 converged cells out of 192 across 24 specifications and eight language/backend/mode combinations;
 every CPU and Fast cell converged. Four difficult CUDA Comparable cells still refuse estimation.
 Separate extreme-offset and {cmd:group()}/{cmd:individual()} CUDA cases also retain documented refusals.
@@ -545,6 +547,11 @@ With fewer than two periods, inference is unavailable as for one cluster.
 The covariance includes the reported constant. Serial covariance is computed
 on the CPU after the selected CPU or CUDA absorption.
 
+{pmore}
+For IV models with nearly collinear projected regressors, the period influences
+and recovered constant retain the precision of the IV solve before the
+Bartlett covariance is formed. This also covers common shifts of the regressors.
+
 {phang}
 {opth res:iduals(newvar)} saves regression residuals in a new variable.
 {cmd:residuals} without parentheses is also accepted and saves residuals in {cmd:_reghdfe_resid},
@@ -558,6 +565,11 @@ xhdfe prints the reghdfe warning at
 
 {phang}
 {opt nocon:stant} remove the intercept from the slope regression.
+
+{phang}
+{opt cons:tant} explicitly requests the default intercept treatment; do not
+combine it with {cmd:noconstant}. {opt noa:bsorb} explicitly selects a model
+without absorbed effects and cannot be combined with {cmd:absorb()}.
 
 
 {marker opt_iv}{...}
@@ -594,12 +606,14 @@ first stage includes the exogenous controls and fixed effects only.
 
 {pmore}
 The auxiliary regressions use the final IV estimation sample, weights, fixed
-effects (the {cmd:absorb()} text as typed), covariance estimator (including
+effects (the same {cmd:absorb()} terms, without FE output names), covariance estimator (including
 {cmd:vce(dkraay} [{it:#}]{cmd:)} with the same bandwidth), DoF/SSC settings, and
 selected CPU/CUDA backend.
 They run only when requested, and preserve the structural coefficients,
 covariance matrix, estimation sample, and other {cmd:e()} results. These options
 perform additional xhdfe regressions and therefore add computation time.
+Aliases such as {cmd:absorb(firm_effect=firm)} save the structural effects only;
+the auxiliary regressions leave those variables unchanged.
 
 {pmore}
 F-statistics follow the same small-sample conventions as a direct xhdfe or
@@ -1024,7 +1038,7 @@ Driscoll-Kraay option described under {help xhdfe##opt_vce:vce()}{p_end}
 {p2colreset}{...}
 
 {marker known_limitations}{...}
-{title:Known limitations (2.29.0)}
+{title:Known limitations (2.29.1)}
 
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
@@ -1403,7 +1417,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.0.
+regression via a C++ backend." Version 2.29.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

@@ -12,6 +12,7 @@ conventional/robust/one-way/multiway covariance, singleton removal, group-only
 data, and genuine multiple group–individual incidence with sum/mean and
 uniform/variable group sizes. A 4,096-group Laplacian case retains the difficult
 numerical reference counterexample. The quick grouped matrix uses 256 groups.
+Fast is planned explicitly on both CPU and CUDA, for each applicable interface.
 
 Every fixture constructs `y = X beta + D alpha + e` with `X' W e = D' W e = 0`
 in the actual finite sample. The identified beta and residuals are therefore
@@ -29,17 +30,47 @@ reported DoF. For multiway clustering, the explicit OLS baseline uses
 conventional VCE, since repairing a full dummy covariance to positive
 semidefiniteness is not invariant to FE normalization; the independent
 multiway sandwich is the covariance oracle for HDFE fits.
+The HDFE receipts also carry the complete coefficient/covariance block. The
+identified reported constant follows the weighted zero-mean FE normalisation;
+the independent multiway reference applies the documented D-C repair when
+needed. Mutations of the constant, its variance and its cross-covariances must
+fail even when the slope block is correct. Explicit-dummy OLS retains its
+separate slope-contrast check because its extra coefficients use another basis.
 
 Run from the repository root with NumPy, pandas, SciPy, configured `build/`
 and `build_cuda/` modules, the current Stata plugin, and Stata/MP with original
 reghdfe installed. Use a **new** output directory for every prepared campaign:
 
 ```bash
-OPENBLAS_NUM_THREADS=1 python3 -B tests/analytic_precision/run.py prepare --output Verifications/analytic_precision/new-run
+OPENBLAS_NUM_THREADS=1 python3 -B tests/analytic_precision/run.py prepare \
+  --output Verifications/analytic_precision/new-run \
+  --native-cpu-module build/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so \
+  --native-cuda-module build_cuda/py_hdfe_v11.cpython-312-x86_64-linux-gnu.so \
+  --stata-package-root .
 OPENBLAS_NUM_THREADS=1 python3 -B tests/analytic_precision/run.py run --output Verifications/analytic_precision/new-run --backend cpu
 OPENBLAS_NUM_THREADS=1 python3 -B tests/analytic_precision/run.py run --output Verifications/analytic_precision/new-run --backend cuda
 OPENBLAS_NUM_THREADS=1 python3 -B tests/analytic_precision/run.py report --output Verifications/analytic_precision/new-run
 ```
+
+The example names the Linux CPython 3.12 modules; supply the exact filenames
+of the builds being assessed. An old receipt lacking the complete parameter
+block cannot pass the new full-parameter check and needs a new campaign.
+
+Two separate regression guards cover the 14oct2026 audit findings:
+
+```bash
+python3 -B tests/analytic_precision/dkraay_iv_influence_contract.py \
+  --backend cpu --package stata --output Verifications/dk_iv_cpu_new
+python3 -B tests/analytic_precision/dkraay_iv_influence_contract.py \
+  --backend cuda --package stata --output Verifications/dk_iv_cuda_new
+```
+
+The DK guard uses independent MP90/MP120 Walsh-score covariances, common and
+opposite regressor means, both tolerance modes and the bandwidth-one cluster
+identity. `tests/stata/iv_firststage_alias_contract.do cpu|cuda` exercises named
+FE outputs, interactions, slopes, time-series terms, weights, DK, replay and
+`nosample`; require `IV_FIRSTSTAGE_ALIAS_CONTRACT_PASS` with its backend. The
+Stata suite runs both new CPU guards; CUDA needs the GPU-visible context below.
 
 CUDA execution must run in a GPU-visible context. In a restricted Codex
 sandbox, follow AGENTS.md's host-level GPU probe policy. The runner records

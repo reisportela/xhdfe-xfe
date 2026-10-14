@@ -68,6 +68,29 @@ def assess(job, result, fixture):
     point_ok &= metrics.get('residual_error', float('inf')) <= 1e-7
     point_ok &= metrics.get('rss_direct_error', float('inf')) <= 1e-8+1e-10*abs(oracle['rss'])
     covariance_ok = np.isfinite(V).all() and np.allclose(vb, vg, atol=1e-12, rtol=1e-7)
+    if job['engine'] != 'ols':
+        # A slope-only receipt cannot certify an identified reported constant.
+        expected = np.asarray(oracle.get('parameters', []), dtype=float)
+        complete = np.asarray(result.get('parameters', []), dtype=float)
+        complete_V = np.asarray(result.get('covariance_full', []), dtype=float)
+        full_reference = np.asarray(oracle.get('covariance_full', []), dtype=float)
+        if (not expected.size or complete.shape != expected.shape or
+                complete_V.shape != (expected.size, expected.size) or
+                full_reference.shape != complete_V.shape):
+            return dict(out, verdict='HARNESS_ERROR',
+                        reason='complete parameter/covariance evidence missing or malformed')
+        P = np.asarray(oracle['parameter_contrast'], dtype=float)
+        complete_point_ok = np.isfinite(complete).all() and np.array_equal(complete[:3], beta)
+        if metadata['intercept']:
+            constant = result.get('cons', float('nan'))
+            complete_point_ok &= isinstance(constant, (int, float)) and np.isfinite(constant) and constant == complete[-1]
+        parameter_error = float(np.max(np.abs(P@(complete-expected))))
+        point_ok &= complete_point_ok and parameter_error <= beta_tol
+        full_actual, full_expected = P@complete_V@P.T, P@full_reference@P.T
+        covariance_ok &= (np.isfinite(complete_V).all() and np.array_equal(complete_V[:3,:3], V)
+                          and np.allclose(full_actual, full_expected, atol=1e-12, rtol=1e-7))
+        metrics.update(parameter_error=parameter_error,
+                       full_covariance_error=float(np.max(np.abs(full_actual-full_expected))))
     backend_ok = job.get('backend') != 'cuda' or result.get('gpu_used') == 1
     recovery_ok = not job.get('savefe') or metrics.get('fe_error', float('inf')) <= 1e-6
     converged = result.get('converged') == 1
@@ -105,6 +128,8 @@ def selftest(oracle, metadata, groups, fixture):
                 rss=oracle['rss'], groups=truth.group.tolist(),
                 residuals=truth.exact_residual.tolist(), converged=1, gpu_used=0,
                 singletons=oracle['dropped'])
+    good.update(parameters=oracle['parameters'], covariance_full=oracle['covariance_full'],
+                cons=oracle['parameters'][-1] if metadata['intercept'] else 0.)
     job = dict(engine='xhdfe', backend='cpu', case=metadata['name'], precision='default')
     assert assess(job, good, fixture)['verdict'] == 'PASS'
     bad = dict(good, beta=[oracle['beta'][0]+.01, *oracle['beta'][1:]], certified=1)
@@ -114,6 +139,13 @@ def selftest(oracle, metadata, groups, fixture):
     assert assess(dict(job, backend='cuda'), good, fixture)['verdict'] == 'BACKEND_MISMATCH'
     assert assess(job, dict(good, V=(np.asarray(good['V'])*2).tolist()), fixture)['verdict'] == 'FAIL_COVARIANCE'
     assert assess(job, dict(good, residuals=[float('nan')]*len(truth)), fixture)['verdict'] != 'PASS'
+    if metadata['intercept']:
+        assert assess(job, dict(good, cons=good['cons']+1000), fixture)['verdict'] != 'PASS'
+        assert assess(job, dict(good, cons=float('nan')), fixture)['verdict'] != 'PASS'
+        for index in ((-1,-1), (0,-1)):
+            mutated = np.array(good['covariance_full'])
+            mutated[index] += 1.
+            assert assess(job, dict(good, covariance_full=mutated.tolist()), fixture)['verdict'] == 'FAIL_COVARIANCE'
     negative = dict(job, expected_rejection=True, reject_pattern='deliberate unsupported mode')
     assert assess(negative, dict(rc=199, error='command missing'), fixture)['verdict'] == 'ESTIMATION_ERROR'
     assert assess(negative, dict(rc=198, error='deliberate unsupported mode'), fixture)['verdict'] == 'UNSUPPORTED_EXPECTED'

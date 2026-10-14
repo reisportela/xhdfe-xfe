@@ -1,4 +1,16 @@
-# OpenMP release checklist — 2.28.1.20260929
+# OpenMP release checklist — 2.29.1.20261014
+
+The 2.29.1 release repeats every gate below with fresh version-tag artifacts.
+Completion is pending the current preflight, version-tag build, exact H100
+validation and public installation readback. The historical completion record
+below belongs to 2.28.1 and does not substitute for these executions.
+
+The native xhdfe probe now also checks the IV Driscoll–Kraay counterexample
+against an independent MP90/MP120 reference, in both tolerance modes and with
+one/two threads. Locally, the corrected plugin passes all four cases and the
+frozen 2.29.0 plugin is rejected for its incorrect full covariance.
+
+## Historical gate definitions and 2.28.1 completion
 
 The preflight validates the build and distribution gates below. The version-tag
 workflow repeats them; publication additionally requires validation of the exact

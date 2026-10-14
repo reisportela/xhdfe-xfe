@@ -1,6 +1,6 @@
 # xhdfe Gelbach decomposition help
 
-Release version: xhdfe 2.29.0.20261014 (`xhdfegelbach` 1.6.1). This version
+Package version: xhdfe 2.29.1.20261014 (`xhdfegelbach` 1.6.1). This version
 includes the bootstrap, table and waterfall interfaces documented below.
 Inspect the installed package version with `python -m xhdfe --version`.
 

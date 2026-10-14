@@ -1,4 +1,4 @@
-*! version 2.29.0 06oct2026
+*! version 2.29.1 14oct2026
 program define xhdfe_p, rclass
     // Note: we IGNORE typlist and generate the newvar as double
     // Note: e(resid) is missing outside of e(sample), so we don't need to condition on e(sample)

@@ -435,6 +435,66 @@ Snapshot run(Call call, bool xhdfe, int threads) {
     return result;
 }
 
+// Independent MP90/MP120 reference: tests/analytic_precision/plugin_dkraay_reference.py.
+// Exercise the exact plugin's IV/DK covariance on every native release platform.
+double run_dkraay_iv(Call call, int threads, const char* mode) {
+    constexpr int n = 512;
+    constexpr double reference[9] = {
+        15833088979687.383, -15833088963788.713, -15534.578670724983,
+        -15833088963788.713, 15833088947890.043, 15534.578476315215,
+        -15534.578670724983, 15534.578476315215, 0.0004991357749634189
+    };
+    state = SpiState{};
+    state.data = Columns(8, std::vector<double>(n, kMissing));
+    for (int i = 0; i < n; ++i) {
+        const auto walsh = [i](int j) { return 2.0*((i >> j) & 1)-1.0; };
+        const double x1 = 2*walsh(0) + walsh(3) + 1;
+        const double x2 = 2*walsh(0) + std::ldexp(walsh(1), -27) + walsh(4) + 1;
+        state.data[0][i] = 0.5*x1 - 0.25*x2 + 3 + walsh(5);
+        state.data[1][i] = x1; state.data[2][i] = x2;
+        state.data[3][i] = 0;
+        state.data[4][i] = (73*i + 19*(i/7) + 5*(i/23)) % 17;
+        state.data[5][i] = 3*walsh(0) + walsh(2);
+        state.data[6][i] = walsh(1);
+    }
+    const Columns original = state.data;
+    state.matrices["probe_b"] = Matrix{1, 3, std::vector<double>(3, kMissing)};
+    state.matrices["probe_V"] = Matrix{3, 3, std::vector<double>(9, kMissing)};
+    std::string config = "cfg=b=probe_b;V=probe_V;p=2;nfe=1;nslope=0;nclust=1;ninst=2;"
+        "endogenous_idx=0,1;has_weight=0;group_mode=0;has_individual=0;"
+        "store_resid=0;store_groupvar=0;store_fes=0;retain_fes=0;fit_intercept=1;"
+        "se_type=cluster;dkraay_bandwidth=3;statstyle=reghdfe;level=95;"
+        "tol=1e-8;max_iter=1000;drop_singletons=0;symmetric_sweep=0;"
+        "absorption_method=auto;jacobi_relaxation=0;gpu_backend=cpu;"
+        "default_threads=0;max_threads=0;min_parallel_rows=0;target_rows_per_thread=1;"
+        "mobility_profile_mode=off;absorption_cache_mode=off;fe_structure_cache_mode=off;"
+        "s_N=probe_N;s_converged=probe_converged;s_gpu_used=probe_gpu;";
+    config += "num_threads=" + std::to_string(threads) + ";tolerance_mode=" + mode + ';';
+    char* arguments[] = {config.data()};
+    require(call(1, arguments) == 0, "DK IV fixture failed: " + state.errors);
+    require(state.scalars.at("probe_N") == n && state.scalars.at("probe_converged") == 1 &&
+            state.scalars.at("probe_gpu") == 0, "DK IV sample/convergence/backend mismatch");
+    for (int j = 0; j < 7; ++j)
+        require(state.data[j] == original[j], "DK IV fixture input was modified");
+    for (double value : state.data.back()) require(value == 1, "DK IV sample is incomplete");
+    const double beta[] = {0.5, -0.25, 3};
+    for (int j = 0; j < 3; ++j) {
+        const double actual = state.matrices.at("probe_b").values[j];
+        require(std::isfinite(actual) && std::abs(actual-beta[j]) <= 1e-9,
+                "DK IV coefficient disagrees with the analytic reference");
+    }
+    double maximum = 0;
+    for (int j = 0; j < 3; ++j) for (int k = 0; k < 3; ++k) {
+        const double actual = state.matrices.at("probe_V").values[3*j+k];
+        const double scale = std::sqrt(reference[3*j+j]*reference[3*k+k]);
+        const double error = std::abs(actual-reference[3*j+k])/scale;
+        require(std::isfinite(actual) && error <= 1e-8,
+                "DK IV full covariance disagrees with the independent reference");
+        maximum = std::max(maximum, error);
+    }
+    return maximum;
+}
+
 void print_snapshot(const Snapshot& value) {
     std::cout << "{\"request\":" << value.requested << ",\"rc\":" << value.rc
               << ",\"numeric_ok\":" << (value.numeric_ok ? "true" : "false")
@@ -471,6 +531,8 @@ int probe_main(int argc, char** argv) {
     bool expect_serial = false, passed = false, serial_rejected = false;
     bool numerical_parity = false;
     double parity_error = 0;
+    int dkraay_iv_cases = 0;
+    double dkraay_iv_max_error = 0;
     Snapshot one, two;
     try {
         require(argc == 4 || argc == 5,
@@ -526,6 +588,12 @@ int probe_main(int argc, char** argv) {
                     scalar(two, "used") == 2 && scalar(two, "workers") == 2,
                     "two actual estimator workers were not observed");
             require(!runtime_path.empty(), "loaded OpenMP runtime could not be identified");
+            if (kind == "xhdfe") {
+                for (int threads : {1, 2}) for (const char* mode : {"xhdfe-fast", "reghdfe-comparable"}) {
+                    dkraay_iv_max_error = std::max(dkraay_iv_max_error, run_dkraay_iv(call, threads, mode));
+                    ++dkraay_iv_cases;
+                }
+            }
             passed = true;
         }
     } catch (const std::exception& error) { reason = error.what(); }
@@ -541,6 +609,8 @@ int probe_main(int argc, char** argv) {
               << ",\"openmp_runtime_path\":" << quote(runtime_path)
               << ",\"fixture_rows\":" << kRows << ",\"numerical_parity_pass\":" << (numerical_parity ? "true" : "false")
               << ",\"full_numeric_parity_max_error\":" << parity_error
+              << ",\"dkraay_iv_cases\":" << dkraay_iv_cases
+              << ",\"dkraay_iv_max_scaled_error\":" << dkraay_iv_max_error
               << ",\"thread1\":";
     print_snapshot(one); std::cout << ",\"thread2\":"; print_snapshot(two);
     std::cout << ",\"scope\":\"Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification\"}\n";

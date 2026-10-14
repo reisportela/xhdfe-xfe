@@ -153,6 +153,7 @@ def catalogue(case, interfaces, backends):
                 reject |= case.kind=='group_individual' and method in ('jacobi','schwarz','auto-mlsmr')
                 add(interface, 'xhdfe', method, backend='cuda', expected_rejection=reject)
             add(interface, 'xhdfe', precision='strict', backend='cuda')
+            add(interface, 'xhdfe', precision='fast', backend='cuda')
             if case.name in ('two_fe','heterogeneous'):
                 add(interface, 'xhdfe', backend='cuda', savefe=True, recovery='hybrid')
     return jobs
@@ -260,6 +261,11 @@ def stata_result(directory):
                groups=residual.group.astype(int).tolist(), residuals=residual.fit_residual.tolist(),
                recovered_fe=residual.recovered_fe.tolist(), gpu_used=row['gpu'],
                method_used=row['method'])
+    parameters = directory/'parameters.dta'
+    if parameters.is_file():
+        complete = pd.read_stata(parameters)
+        row['parameters'] = complete.parameter1.tolist()
+        row['covariance_full'] = complete[[f'covariance{i}' for i in range(1, len(complete)+1)]].to_numpy().tolist()
     return row
 
 

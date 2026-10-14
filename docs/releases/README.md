@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.29.1 | 14 October 2026 | [DK IV covariance, first-stage aliases and complete-parameter validation](RELEASE_NOTES_2.29.1.20261014.md) |
 | 2.29.0 | 14 October 2026 | [Cumulative 2.28.1 → 2.29.0: maximum-performance absorption, corrections, IV diagnostics](RELEASE_NOTES_2.29.0.20261014.md); development candidates of the PR #13 series: [candidates/](candidates/README.md) |
 | 2.28.1 | 29 September 2026 | [Safe Polars formulas, faster label IDs and enforced Python frontend gates](RELEASE_NOTES_2.28.1.20260929.md) |
 | 2.28.0 | 24 September 2026 | [Audited integration, correctness fixes and declared performance trade-offs](RELEASE_NOTES_2.28.0.20260924.md) |

@@ -39,7 +39,8 @@ inline void apply_dkraay_covariance(
     const Eigen::VectorXd* weights,
     const std::vector<Eigen::VectorXi>* clusters,
     const std::vector<int>& kept, bool recovered_intercept,
-    const HdfeOptions& options, const Eigen::MatrixXd* score_low = nullptr) {
+    const HdfeOptions& options, const Eigen::MatrixXd* score_low = nullptr,
+    const DkraayInfluences* retained = nullptr) {
     if (options.se_type != StandardErrorType::Cluster || !clusters || clusters->size() != 1)
         throw std::runtime_error("Driscoll-Kraay requires exactly one ordered time vector");
     const int n = static_cast<int>(scores.rows());
@@ -52,17 +53,24 @@ inline void apply_dkraay_covariance(
         (score_low && (score_low->rows() != n || score_low->cols() != p)))
         throw std::runtime_error("Driscoll-Kraay score/bread dimensions do not agree");
 
-    std::vector<int> order(static_cast<std::size_t>(n));
+    const bool have_retained = retained && retained->values.size() != 0;
+    if (have_retained && (retained->values.cols() != q ||
+        retained->time_ids.size() != retained->values.rows() ||
+        !ieee_all_finite(retained->values)))
+        throw std::runtime_error("Driscoll-Kraay retained influences are inconsistent");
+    const int ordered_rows = have_retained ? static_cast<int>(retained->values.rows()) : n;
+    std::vector<int> order(static_cast<std::size_t>(ordered_rows));
     std::iota(order.begin(), order.end(), 0);
+    const auto& labels = have_retained ? retained->time_ids : time;
     std::sort(order.begin(), order.end(), [&](int a, int b) {
-        return time[a] < time[b] || (time[a] == time[b] && a < b);
+        return labels[a] < labels[b] || (labels[a] == labels[b] && a < b);
     });
     std::vector<int> starts;
-    for (int i = 0; i < n; ++i)
-        if (i == 0 || time[order[i]] != time[order[i-1]]) starts.push_back(i);
+    for (int i = 0; i < ordered_rows; ++i)
+        if (i == 0 || labels[order[i]] != labels[order[i-1]]) starts.push_back(i);
     const int T = static_cast<int>(starts.size());
-    starts.push_back(n);
-    if (T != result.num_clusters)
+    starts.push_back(ordered_rows);
+    if (T != result.num_clusters || (have_retained && T != ordered_rows))
         throw std::runtime_error("Driscoll-Kraay time count disagrees with final sample");
     // Existing saturated/one-cluster handling marks inference unavailable.
     if (T < 2 || result.df_resid_unadj <= 0.0) return;
@@ -90,8 +98,15 @@ inline void apply_dkraay_covariance(
     if (q == 0) return;
 
     using Matrix = Eigen::Matrix<long double, Eigen::Dynamic, Eigen::Dynamic>;
-    Matrix h = Matrix::Zero(T, q);
     const int team = std::max(1, options.num_threads);
+    Matrix influence = Matrix::Zero(T, q);
+    if (have_retained) {
+        // The wide solve has already applied its factorisation and recovered
+        // the constant. No rounded inverse or second data pass is needed.
+        for (int t = 0; t < T; ++t)
+            influence.row(t) = retained->values.row(order[t]).cast<long double>();
+    } else {
+    Matrix h = Matrix::Zero(T, q);
     if (options.parallel_observer) options.parallel_observer->begin_region(team);
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(team)
@@ -113,7 +128,6 @@ inline void apply_dkraay_covariance(
     if (options.parallel_observer) options.parallel_observer->end_region();
 
     // Apply the bread before forming squares, avoiding large unscaled meats.
-    Matrix influence = Matrix::Zero(T, q);
     std::vector<long double> means(static_cast<std::size_t>(p), 0.0L);
     DkraaySum sum_w;
     if (add_constant) {
@@ -147,6 +161,7 @@ inline void apply_dkraay_covariance(
     }
     if (options.parallel_observer) options.parallel_observer->end_region();
 
+    }
     // Bartlett identity: M = (1/B) sum_s v_s v_s', where v_s is the sum
     // over a B-period window, zero-padded at BOTH ends. O(T*q^2), independent
     // of B, and a Gram matrix by construction (no eigenvalue repair needed).

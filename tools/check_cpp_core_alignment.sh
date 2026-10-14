@@ -162,6 +162,21 @@ pairs=(
   "stata/xhdfe.sthlp:share/xhdfe_estimation_cpp/stata/xhdfe.sthlp"
 )
 
+# Every installed Stata helper/help must accompany the mirrored command.
+# Checking only xhdfe.ado/sthlp missed an old xhdfe_estat without firststage.
+while read -r marker name rest; do
+  [[ "${marker}" == "f" ]] || continue
+  case "${name}" in
+    *.ado|*.sthlp) pairs+=("stata/${name}:share/xhdfe_estimation_cpp/stata/${name}") ;;
+  esac
+done < "stata/xhdfe.pkg"
+while read -r marker name rest; do
+  [[ "${marker}" == "f" ]] || continue
+  case "${name}" in
+    *.ado|*.sthlp) pairs+=("stata/${name}:share/xhdfe_estimation_cpp/stata/${name}") ;;
+  esac
+done < "stata/xfepout.pkg"
+
 # Report EVERY divergent pair before exiting. The previous exit-on-first
 # behaviour systematically understated the remaining work: fixing the reported
 # pair and re-running produced a new DIFF instead of green (WP0 finding F-09).
