@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.5 09oct2026}{...}
+{* *! version 2.29.0 14oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -103,7 +103,7 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 
 {syntab:Model {help xhdfe##opt_model:[+]}}
 {synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be
-{opt un:adjusted} (default), {opt r:obust}, or {opt cl:uster} {help fvvarlist} (multiway){p_end}
+{opt un:adjusted} (default), {opt r:obust}, {opt cl:uster} {help fvvarlist} (multiway), or {opt dk:raay} [{it:#}]{p_end}
 {synopt : {opt r:obust}}equivalent to {cmd:vce(robust)}{p_end}
 {synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)}; multiway clustering allowed; supports two-way interactions with {cmd:#}/{cmd:##}{p_end}
 {synopt : {opth res:iduals(newvar)}}save regression residuals{p_end}
@@ -263,7 +263,7 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.28.1 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+{bf:Version 2.29.0 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
 The inherited 2.28.0 matrix has 188 converged cells out of 192 across 24 specifications and eight language/backend/mode combinations;
 every CPU and Fast cell converged. Four difficult CUDA Comparable cells still refuse estimation.
 Separate extreme-offset and {cmd:group()}/{cmd:individual()} CUDA cases also retain documented refusals.
@@ -434,6 +434,12 @@ Saving FE contributions is not supported when both {cmd:group()} and {cmd:indivi
 For heterogeneous slopes, {cmd:g##c.z} saves the base FE and a {it:Slope1} variable
 (for example, {it:__hdfe1__} and {it:__hdfe1__Slope1}); {cmd:g#c.z} saves only
 the {it:Slope1} coefficient variable, matching reghdfe's savefe layout.
+For {cmd:g##c.(x z)}, the two slope coefficients are named
+{it:__hdfe1__Slope1} and {it:__hdfe1__Slope2} within the same FE block.
+Repeated calls may refresh automatic FE variables created by xhdfe. A variable
+created by the user, or used as an input to the current model, is protected.
+Models with only absorbed slopes and no constant or regressors return fit
+statistics and predictions without coefficient or covariance matrices.
 With {cmd:ferecoverymethod(hybrid)} (default), xhdfe accumulates FE alphas during absorption when feasible,
 so savefe/savefes typically avoids a second recovery sweep. {cmd:fetolerance()} applies only to the
 fallback MAP recovery.
@@ -492,12 +498,52 @@ Valid options are {cmd:mean} (default; aliases {cmd:avg}/{cmd:average}) and {cmd
 Multiway clustering is supported by listing multiple cluster variables.
 
 {pmore}
+If multiway inclusion-exclusion produces an indefinite covariance matrix,
+xhdfe applies the positive-semidefinite correction to the slope block and
+preserves that corrected block when repairing the reported constant.
+The constant's cross-covariances are projected onto the retained slope space;
+its variance is increased only as needed to make the complete covariance
+positive semidefinite. Coefficients and degrees of freedom are unchanged.
+The constant's standard error and contrasts involving it can change substantially;
+{cmd:statstyle(reghdfe)} does not imply equality of that repaired row with reghdfe.
+The policy applies in both tolerance modes and to ordinary and grouped models.
+Numerically positive IV score covariance is classified before the ill-conditioned
+covariance transformation, avoiding an unnecessary repair of a valid constant.
+
+{pmore}
 Each {it:clustervar} may be a variable or a two-way interaction specified with {cmd:#}/{cmd:##}.
 Interaction clusters are materialized with {cmd:egen group()} after sample marking. Plain numeric
 cluster identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
 
 {pmore}
 {cmd:robust} and {cmd:cluster()} are equivalent to {cmd:vce(robust)} and {cmd:vce(cluster ...)}; do not combine them with {cmd:vce()}.
+
+{pmore}
+{opt dk:raay} [{it:#}] computes Driscoll-Kraay standard errors using cross-sectional
+score sums and the Bartlett kernel. Requires {cmd:tsset} or {cmd:xtset} with a time
+variable. {it:#} is a positive integer bandwidth: {cmd:vce(dkraay 4)} includes
+three lags. With {cmd:vce(dkraay)}, the bandwidth is
+{it:floor(4*(T/100)^(2/9))+1}, capped at {it:T}, the number of observed periods in
+the final estimation sample. An explicit bandwidth above {it:T} is also capped.
+
+{pmore}
+As in reghdfe 6.14.1, lags index chronologically ordered {it:observed} periods.
+Entirely absent periods are not inserted as zero scores; this differs from a
+calendar-gap HAC calculation. Unbalanced panels are supported. Missing times
+are excluded, and periods removed with singletons do not enter {it:T}.
+Weights enter the period score sums once; frequency weights represent literal
+replication. Coefficients, absorption and FE recovery use the existing estimator.
+
+{pmore}
+Under the default {cmd:statstyle(reghdfe)}, the finite-sample multiplier is
+{it:(N-1)/(N-df_m-df_a) * T/(T-1)} and inference uses
+{it:min(N-df_m-df_a,T-1)} degrees of freedom; {cmd:ssc()} switches still apply.
+FE nesting is evaluated against time. When FEs are nested in time, reghdfe's DK
+convention omits the extra nested-constant subtraction used by cluster VCE;
+thus bandwidth one equals time clustering when that subtraction is inactive.
+With fewer than two periods, inference is unavailable as for one cluster.
+The covariance includes the reported constant. Serial covariance is computed
+on the CPU after the selected CPU or CUDA absorption.
 
 {phang}
 {opth res:iduals(newvar)} saves regression residuals in a new variable.
@@ -548,7 +594,9 @@ first stage includes the exogenous controls and fixed effects only.
 
 {pmore}
 The auxiliary regressions use the final IV estimation sample, weights, fixed
-effects, covariance estimator, DoF/SSC settings, and selected CPU/CUDA backend.
+effects (the {cmd:absorb()} text as typed), covariance estimator (including
+{cmd:vce(dkraay} [{it:#}]{cmd:)} with the same bandwidth), DoF/SSC settings, and
+selected CPU/CUDA backend.
 They run only when requested, and preserve the structural coefficients,
 covariance matrix, estimation sample, and other {cmd:e()} results. These options
 perform additional xhdfe regressions and therefore add computation time.
@@ -721,6 +769,9 @@ successive transformed {it:y}/{it:X} columns; {cmd:both} requires both criteria.
 {phang}
 {opth fetol:erance(#)} specifies the tolerance criterion for fixed-effect recovery (savefe); default is {cmd:fetolerance(1e-6)}.
 This tolerance is separate from {cmd:tolerance()} and is only used when the MAP recovery path runs.
+It bounds the maximum absolute update in recovered effects, whereas the
+absorption tolerance uses its selected convergence criterion. Their numeric
+values therefore do not define interchangeable accuracy requirements.
 
 {phang}
 {opth ferecoverymethod(str)} selects the fixed-effect recovery strategy. Valid values are
@@ -968,11 +1019,12 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {p2col: -}Heterogeneous slopes with {cmd:group()}/{cmd:individual()} are not supported{p_end}
 {p2col: -}{cmd:savefe}/{cmd:savefes} with both {cmd:group()} and {cmd:individual()} are not supported{p_end}
 {p2col: -}IV/2SLS with factor-variable slope syntax or with {cmd:group()}/{cmd:individual()} is not supported{p_end}
-{p2col: -}HAC or Driscoll-Kraay standard errors (see ivreghdfe in reghdfe ecosystem){p_end}
+{p2col: -}General HAC kernels and bandwidth selectors beyond the Bartlett
+Driscoll-Kraay option described under {help xhdfe##opt_vce:vce()}{p_end}
 {p2colreset}{...}
 
 {marker known_limitations}{...}
-{title:Known limitations (2.28.1)}
+{title:Known limitations (2.29.0)}
 
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
@@ -1001,13 +1053,13 @@ deviates by more than ten times the forward tolerance of the mode; use the CPU b
 designs.{p_end}
 {p2col: -}{cmd:gpubackend(cuda)} with {cmd:tolerancemode(reghdfe-comparable)} on ill-conditioned
 ordinary designs: unweighted OLS without saved effects also checks the normal equations
-against the original regressors. A failed check receives one continuation with the same
-method and tolerance, within the remaining iteration budget. A persistent failure returns
-no estimates; it does not substitute CPU estimates. This prevents the previously reported
-inaccurate CUDA results on the directors and difficult 10M-row 3-FE benchmarks; use
-{cmd:gpubackend(cpu)} for those specifications. CUDA convergence on them remains unresolved.
-The opt-in accuracy-retry environment settings remain available, but cannot bypass this
-necessary check.{p_end}
+against the original regressors. A failed check receives one bounded correction,
+preserving the requested tolerance and total iteration budget. A persistent failure returns
+no estimates; it does not substitute CPU estimates. The previously reported directors
+and difficult 10M-row 3-FE cases have passed independent CPU/CUDA validation after their
+corrections. Other ill-conditioned specifications can still require a refusal.
+The opt-in accuracy-retry environment settings remain available, but cannot bypass
+this necessary check.{p_end}
 {p2col: -}Degrees of freedom of the individual block: one exact redundancy against an
 ordinary absorbed FE is subtracted whenever the constant is provably in the span of the
 membership columns ({cmd:aggregation(mean)}; {cmd:aggregation(sum)} with a uniform team size);
@@ -1161,7 +1213,8 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(auto_retry_abs_res_rel)}}retry canonical certificate metric{p_end}
 {synopt:{cmd:e(auto_retry_elapsed_seconds)}}retry wall time in seconds{p_end}
 {synopt:{cmd:e(slope_block_checked)}}1 if the heterogeneous-slope block check ran; 0 in fast mode or without slopes{p_end}
-{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate; only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise contain zero placeholders){p_end}
+{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate;
+only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise contain zero placeholders){p_end}
 {synopt:{cmd:e(slope_block_frobenius_rel)}}heterogeneous slopes: maximum Frobenius-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_rms_rel)}}heterogeneous slopes: maximum RMS diagonal-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_max_rel)}}heterogeneous slopes: maximum worst-group block moment{p_end}
@@ -1193,11 +1246,15 @@ other redundancies are not detected by default and the footnote marks the count 
 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR,
 6 MLSMR, 7 auto-MLSMR{p_end}
 {synopt:{cmd:e(N_clust)}}minimum number of clusters (if clustered){p_end}
+{synopt:{cmd:e(dkraay_bw)}}effective Driscoll-Kraay bandwidth (lags + 1){p_end}
+{synopt:{cmd:e(dkraay_lags)}}number of Driscoll-Kraay lags{p_end}
+{synopt:{cmd:e(dkraay_timevar)}}tsset/xtset time variable; {cmd:e(N_clust)} counts observed periods{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster dimensions{p_end}
 {synopt:{cmd:e(N_clust#)}}cluster counts by dimension{p_end}
 {synopt:{cmd:e(cluster_scale)}}cluster scaling factor (SSC){p_end}
-{synopt:{cmd:e(vcv_psd_fixed)}}1 if the multiway-cluster VCV required the Cameron-Gelbach-Miller
-positive-semi-definite adjustment (a warning is printed, matching {helpb reghdfe}){p_end}
+{synopt:{cmd:e(vcv_psd_fixed)}}1 if the multiway-cluster VCV required the positive-semidefinite
+adjustment; the corrected slope block is preserved when repairing the constant, as described
+under {help xhdfe##opt_vce:vce()}. A warning is printed.{p_end}
 {synoptline}
 
 {pstd}Notes:{p_end}
@@ -1346,7 +1403,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.5.
+regression via a C++ backend." Version 2.29.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.5.20261009 — development candidate
 
 Explicit `xhdfe-fast` fits with heterogeneous slopes use the historical
@@ -35,7 +38,7 @@ coefficient/SE differences stay below 2.6e-11 / 5.6e-11. GPU control iteration
 counts differ; this does not certify comparable-mode runtime non-regression.
 Two existing comparable CUDA refusal pairs also remain in the synthetic suite.
 The corrected subset harness and all rejected initial attempts are documented
-in the [validation report](../FAST_SLOPE_POLICY_VALIDATION_20261009.md).
+in the [validation report](../../FAST_SLOPE_POLICY_VALIDATION_20261009.md).
 
 This development candidate is recorded in a local commit after the focused
 validation above. It has not been pushed, installed, issued or promoted through

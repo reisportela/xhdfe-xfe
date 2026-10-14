@@ -1,4 +1,4 @@
-*! version 2.29.5 09oct2026
+*! version 2.29.0 14oct2026
 program define xhdfe_p, rclass
     // Note: we IGNORE typlist and generate the newvar as double
     // Note: e(resid) is missing outside of e(sample), so we don't need to condition on e(sample)
@@ -47,19 +47,22 @@ program define xhdfe_p, rclass
         // d: y - xb - resid
         tempvar xb
         PredictXB `xb' `if' `in', xb
-        gen double `varlist' = `e(depvar)' -  `xb' - `e(resid)' `if' `in'
+        quietly fvrevar `e(depvar)'
+        gen double `varlist' = `r(varlist)' -  `xb' - `e(resid)' `if' `in'
         la var `varlist' "d[`fixed_effects']"
     }
     else if ("`xbd'" != "") {
         // xbd: y - resid
-        gen double `varlist' = `e(depvar)' - `e(resid)' `if' `in'
+        quietly fvrevar `e(depvar)'
+        gen double `varlist' = `r(varlist)' - `e(resid)' `if' `in'
         la var `varlist' "Xb + d[`fixed_effects']"
     }
     else if ("`dresiduals'" != "") {
         // dresid: y - xb
         tempvar xb
         PredictXB `xb' `if' `in', xb
-        gen double `varlist' = `e(depvar)' -  `xb' `if' `in'
+        quietly fvrevar `e(depvar)'
+        gen double `varlist' = `r(varlist)' -  `xb' `if' `in'
     }
     else {
         error 100

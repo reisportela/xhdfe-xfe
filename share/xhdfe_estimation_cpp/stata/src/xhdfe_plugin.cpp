@@ -2267,6 +2267,12 @@ STDLL stata_call(int argc, char* argv[]) {
 
         HdfeOptions opts;
         opts.se_type = parse_se_type(args.get_required("se_type"));
+        if (auto val = args.get_optional("dkraay_bandwidth")) {
+            opts.dkraay_bandwidth = parse_int(*val, "dkraay_bandwidth");
+            if (opts.dkraay_bandwidth < 0 || opts.se_type != StandardErrorType::Cluster || nclust != 1) {
+                throw_with_prefix("xhdfe plugin: ", "Driscoll-Kraay requires one time variable and a nonnegative bandwidth code");
+            }
+        }
         opts.tol = parse_double(args.get_required("tol"), "tol");
         opts.max_iter = parse_int(args.get_required("max_iter"), "max_iter");
         opts.fit_intercept = parse_bool(args.get_required("fit_intercept"), "fit_intercept");
@@ -3006,8 +3012,10 @@ STDLL stata_call(int argc, char* argv[]) {
 
                 const hdfe::HdfeResults& r = reg.results();
 
-                store_row_vector(bmat, r.coefficients);
-                store_matrix(Vmat, r.covariance);
+                if (r.coefficients.size() > 0) {
+                    store_row_vector(bmat, r.coefficients);
+                    store_matrix(Vmat, r.covariance);
+                }
 
                 maybe_save_scalar(s_N, r.nobs_effective);
                 maybe_save_scalar(s_N_full, r.nobs_full_effective);
@@ -3119,7 +3127,7 @@ STDLL stata_call(int argc, char* argv[]) {
                     }
                     if (store_groupvar) {
                         const double gv = (r.groupvar.size() == r.nobs)
-                                              ? static_cast<double>(r.groupvar(i) + 1)
+                                              ? static_cast<double>(r.groupvar(i))
                                               : SV_missval;
                         const ST_retcode rc = SF_vstore(idx_groupvar_out, obs_no, gv);
                         if (rc) {
@@ -3154,8 +3162,10 @@ STDLL stata_call(int argc, char* argv[]) {
             if (importance_weights) reg.apply_importance_weights(*w_ptr);
             const hdfe::HdfeResults& r = reg.results();
 
-            store_row_vector(bmat, r.coefficients);
-            store_matrix(Vmat, r.covariance);
+            if (r.coefficients.size() > 0) {
+                store_row_vector(bmat, r.coefficients);
+                store_matrix(Vmat, r.covariance);
+            }
 
             maybe_save_scalar(s_N, r.nobs_effective);
             maybe_save_scalar(s_N_full, r.nobs_full_effective);
@@ -3246,7 +3256,7 @@ STDLL stata_call(int argc, char* argv[]) {
                 }
                 if (store_groupvar) {
                     const double gv = (r.groupvar.size() == r.nobs)
-                                          ? static_cast<double>(r.groupvar(i) + 1)
+                                          ? static_cast<double>(r.groupvar(i))
                                           : SV_missval;
                     const ST_retcode rc = SF_vstore(idx_groupvar_out, obs_no, gv);
                     if (rc) {
@@ -3269,8 +3279,10 @@ STDLL stata_call(int argc, char* argv[]) {
         plugin_cpu_profile_log_elapsed("fit_standard", fit_standard_t0);
         const hdfe::HdfeResults& r = reg.results();
 
-        store_row_vector(bmat, r.coefficients);
-        store_matrix(Vmat, r.covariance);
+        if (r.coefficients.size() > 0) {
+            store_row_vector(bmat, r.coefficients);
+            store_matrix(Vmat, r.covariance);
+        }
 
         maybe_save_scalar(s_N, r.nobs_effective);
         maybe_save_scalar(s_N_full, r.nobs_full_effective);
@@ -3382,7 +3394,7 @@ STDLL stata_call(int argc, char* argv[]) {
             }
             if (store_groupvar) {
                 const double gv = (r.groupvar.size() == r.nobs)
-                                      ? static_cast<double>(r.groupvar(i) + 1)
+                                      ? static_cast<double>(r.groupvar(i))
                                       : SV_missval;
                 const ST_retcode rc = SF_vstore(idx_groupvar_out, obs_no, gv);
                 if (rc) {

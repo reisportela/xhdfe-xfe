@@ -55,6 +55,10 @@ def custody(extra_paths=()):
              HERE/'supplemental_cases.json',
              *(p for p in (HERE/'supplemental').glob('*') if p.is_file()),
              ROOT/'src/fe_absorption.cpp',
+             ROOT/'src/ac_arena_storage.hpp',
+             ROOT/'src/lockstep_memory_plan.hpp',
+             ROOT/'src/n1_continuation.hpp',
+             ROOT/'src/n1_graph_preconditioner.hpp',
              ROOT/'src/hdfe_regressor_v11.cpp', ROOT/'src/fe_absorption_cuda.cu',
              ]
     for name in ('reghdfe.ado', 'reghdfe.mata'):
@@ -280,15 +284,25 @@ def run(args):
         jobs = [j for j in jobs if args.filter in j['id']]
     if args.backend:
         jobs = [j for j in jobs if j['backend']==args.backend]
-    if any(j['backend']=='cuda' for j in jobs):
+    if not jobs:
+        raise SystemExit(f'No jobs match this selection: backend={args.backend!r}, filter={args.filter!r}')
+    pending = [j for j in jobs if not (out/'attempts'/j['id']/'assessment.json').is_file()]
+    incomplete = [j['id'] for j in pending if (out/'attempts'/j['id']).exists()]
+    if incomplete:
+        raise SystemExit('Incomplete attempts preserved; prepare a new campaign: ' + ', '.join(incomplete))
+    print('SELECTED_JOBS', len(jobs), 'COMPLETED', len(jobs)-len(pending),
+          'PENDING', len(pending), flush=True)
+    if not pending:
+        print('RUN_SCOPE ALREADY_COMPLETE; no new attempts; use report for the campaign verdict', flush=True)
+        print('RECORDED_ATTEMPTS', 0, flush=True)
+        return
+    if any(j['backend']=='cuda' for j in pending):
         probe = subprocess.run(['nvidia-smi'],capture_output=True,text=True,check=True)
         context = out/f'gpu_context_{len(list(out.glob("gpu_context_*.txt")))+1:03d}.txt'
         context.write_text(probe.stdout+probe.stderr)
     count = 0
-    for job in jobs:
+    for job in pending:
         destination = out/'attempts'/job['id']
-        if (destination/'assessment.json').is_file():
-            continue
         destination.mkdir(exist_ok=False)
         fixture = out/'fixtures'/job['case']
         actual_job = dict(job, fixture=str(fixture))
@@ -362,6 +376,10 @@ def run(args):
         if args.limit and count >= args.limit:
             break
     print('RECORDED_ATTEMPTS', count, flush=True)
+    remaining = len(pending)-count
+    print('RUN_SCOPE', 'PARTIAL' if remaining else 'SELECTED_COMPLETE',
+          'SELECTED', len(jobs), 'PENDING', remaining,
+          '; use report for the campaign verdict', flush=True)
 
 
 def report(args):

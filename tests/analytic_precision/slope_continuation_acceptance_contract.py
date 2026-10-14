@@ -233,7 +233,8 @@ def main():
     executable = args.out/'contract'
     harness.write_text('#include <algorithm>\n#include <cmath>\n#include <iostream>\n'
                        '#include <limits>\n#include <sstream>\n#include <stdexcept>\n'
-                       '#include "fe_absorption.hpp"\n'+FIXTURE+SEED_ADAPTER+
+                       '#include "fe_absorption.hpp"\n'
+                       '#include "hdfe/audit_environment.hpp"\n'+FIXTURE+SEED_ADAPTER+
                        '\nnamespace hdfe { namespace detail {\n'+effective+wrapper+'\n}}\n'
                        'namespace hdfe { namespace v11 {\n'+guard+'\n}}\n'+CONTROLS)
     command = [args.cxx, '-std=c++17', '-O2', '-ffast-math', '-fno-finite-math-only',

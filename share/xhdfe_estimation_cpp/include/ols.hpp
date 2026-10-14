@@ -36,6 +36,9 @@ struct OlsResult {
     int nobs = 0;
     int num_clusters = 0;
     std::shared_ptr<N1NormalEvidence> n1_normal;
+    // Sign of the augmented IV meat before the ill-conditioned bread and
+    // binary64 output transport. False also covers unclassified/singular cases.
+    bool augmented_meat_positive_definite = false;
 };
 
 // X_for_residuals: when set (2SLS), the coefficients are solved on X (the

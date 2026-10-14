@@ -1,10 +1,10 @@
-*! version 2.29.5 09oct2026
+*! version 2.29.0 14oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.5 09oct2026"
+        local version "2.29.0 14oct2026"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -146,9 +146,10 @@ program define _xhdfe_estimate, eclass
     local optline : subinstr local optline " targetrowsperthread(" " targetrpt(", all
     local 0 `"`cmdprefix' `optline'"'
 
-    syntax varlist(min=1 fv numeric) [if] [in] [aw fw pw iw], ///
+    syntax varlist(min=1 fv ts numeric) [if] [in] [aw fw pw iw], ///
         [ ///
         ABSorb(string asis) ///
+        NOAbsorb ///
         VCE(string asis) ///
         CLuster(string asis) ///
         ROBust ///
@@ -170,6 +171,7 @@ program define _xhdfe_estimate, eclass
         NOLSTRetch ///
         NOFVLABEL ///
         NOConstant ///
+        CONStant ///
         TOLerance(real 1e-8) ///
         CONVERGENCE(string) ///
         FETOLerance(real 1e-6) ///
@@ -211,8 +213,8 @@ program define _xhdfe_estimate, eclass
         DOFAdjustments(string asis) ///
         SSC(string asis) ///
         STATStyle(string) ///
-        GROUP(varname) ///
-        INDIVIDUAL(varname) ///
+        GRoup(varname) ///
+        INdividual(varname) ///
         I(varname) ///
         AGGregation(string) ///
         ENDOGenous(varlist numeric) ///
@@ -225,6 +227,14 @@ program define _xhdfe_estimate, eclass
         ]
 
     // Validate formats before estimating or displaying any fit statistics.
+    if ("`noabsorb'" != "" & "`absorb'" != "") {
+        di as err "noabsorb and absorb() may not be combined"
+        exit 198
+    }
+    if ("`constant'" != "" & "`noconstant'" != "") {
+        di as err "constant and noconstant may not be combined"
+        exit 198
+    }
     foreach fmt in cformat pformat sformat {
         if ("``fmt''" != "") confirm numeric format ``fmt''
     }
@@ -268,6 +278,12 @@ program define _xhdfe_estimate, eclass
     local absorb_slopeintercepts
     local absorb_markvars
     local absorb_subopts
+    local grouped_savefe_tokens
+    local grouped_savefe_bundles
+    local grouped_savefe_slopes
+    local grouped_bundle_count 0
+    local absorb_ts_terms
+    local absorb_ts_vars
     local savefe_absorb 0
     local cluster_raw
     local cluster_ordered
@@ -292,18 +308,24 @@ program define _xhdfe_estimate, eclass
             local absorb_expanded
             while (`"`absorb_pending'"' != "") {
                 gettoken grouped_tok absorb_pending : absorb_pending, bind
-                if (regexm(`"`grouped_tok'"', "^([^#= ]+)(##|#)c[.]\(([^()]*)\)$")) {
+                if (regexm(`"`grouped_tok'"', "^([^#= ]+)(##|#)c[.]\((.+)\)$")) {
+                    local ++grouped_bundle_count
                     local grouped_carrier = regexs(1)
                     local grouped_operator = regexs(2)
                     local grouped_vars = regexs(3)
-                    unab grouped_varlist : `grouped_vars'
+                    tsunab grouped_varlist : `grouped_vars'
                     local grouped_first 1
+                    local grouped_slope 0
                     foreach grouped_var of local grouped_varlist {
+                        local ++grouped_slope
                         local expanded_operator "#"
                         if (`grouped_first' & "`grouped_operator'" == "##") {
                             local expanded_operator "##"
                         }
                         local absorb_expanded `"`absorb_expanded' `grouped_carrier'`expanded_operator'c.`grouped_var'"'
+                        local grouped_savefe_tokens `"`grouped_savefe_tokens' `grouped_carrier'`expanded_operator'c.`grouped_var'"'
+                        local grouped_savefe_bundles "`grouped_savefe_bundles' `grouped_bundle_count'"
+                        local grouped_savefe_slopes "`grouped_savefe_slopes' `grouped_slope'"
                         local grouped_first 0
                     }
                 }
@@ -346,6 +368,7 @@ program define _xhdfe_estimate, eclass
                         exit 198
                     }
                     local parts
+                    local part_labels
                     local part_is_cont
                     local rest "`tok_clean'"
                     while ("`rest'" != "") {
@@ -372,6 +395,21 @@ program define _xhdfe_estimate, eclass
                         else if (regexm("`clean'", "^b[0-9]+\\.")) {
                             local clean = regexr("`clean'", "^b[0-9]+\\.", "")
                         }
+                        local part_label
+                        if (`is_cont' & strpos("`clean'", ".")) {
+                            tsunab clean_ts : `clean'
+                            local part_label "`clean_ts'"
+                            local ts_pos : list posof "`clean_ts'" in absorb_ts_terms
+                            if (`ts_pos') {
+                                local clean : word `ts_pos' of `absorb_ts_vars'
+                            }
+                            else {
+                                quietly tsrevar `clean_ts'
+                                local clean "`r(varlist)'"
+                                local absorb_ts_terms "`absorb_ts_terms' `clean_ts'"
+                                local absorb_ts_vars "`absorb_ts_vars' `clean'"
+                            }
+                        }
                         unab clean_list : `clean'
                         local clean_count : word count `clean_list'
                         if (`clean_count' != 1) {
@@ -379,7 +417,9 @@ program define _xhdfe_estimate, eclass
                             exit 198
                         }
                         local clean : word 1 of `clean_list'
+                        if ("`part_label'" == "") local part_label "`clean'"
                         local parts "`parts' `clean'"
+                        local part_labels "`part_labels' `part_label'"
                         local part_is_cont "`part_is_cont' `is_cont'"
                     }
                     local nparts : word count `parts'
@@ -397,10 +437,12 @@ program define _xhdfe_estimate, eclass
                         if (`c1') {
                             local slope_var "`v1'"
                             local slope_group "`v2'"
+                            local slope_display : word 1 of `part_labels'
                         }
                         else {
                             local slope_group "`v1'"
                             local slope_var "`v2'"
+                            local slope_display : word 2 of `part_labels'
                         }
 
                         local pos : list posof "`slope_group'" in absorb_markvars
@@ -410,7 +452,8 @@ program define _xhdfe_estimate, eclass
 
                         local slope_token "`slope_group'#c.`slope_var'"
                         if (`include_slope_intercept') local slope_token "`slope_group'##c.`slope_var'"
-                        local slope_label "`slope_token'"
+                        local slope_label "`slope_group'#c.`slope_display'"
+                        if (`include_slope_intercept') local slope_label "`slope_group'##c.`slope_display'"
                         if ("`alias'" != "") local slope_label "`alias'"
                         local pos : list posof "`slope_token'" in absorb_ordered
                         if (`pos' == 0) {
@@ -545,7 +588,7 @@ program define _xhdfe_estimate, eclass
         local absorb_subopts_clean = strtrim("`absorb_subopts_clean'")
         foreach tok of local absorb_subopts_clean {
             local tok_l = lower("`tok'")
-            if ("`tok_l'" == "savefe") {
+            if (inlist("`tok_l'", "save", "savef", "savefe")) {
                 local savefe_absorb 1
             }
             else {
@@ -692,6 +735,8 @@ program define _xhdfe_estimate, eclass
     // Determine SE type.
     local vce_given 0
     local se_type "unadjusted"
+    local dkraay_bw -1
+    local dkraay_timevar
     if ("`vce'" != "") {
         local vce_given 1
         if ("`robust'" != "" | "`cluster'" != "") {
@@ -707,7 +752,31 @@ program define _xhdfe_estimate, eclass
         else if (inlist("`vce_key'", "ols", "unadjusted", "homoskedastic", "classical")) {
             local se_type "unadjusted"
         }
-        else if (inlist("`vce_key'", "cluster", "clustered")) {
+        else if (inlist("`vce_key'", "dk", "dkr", "dkra", "dkraa", "dkraay")) {
+            local se_type "cluster"
+            local dkraay_bw 0
+            local vce_rest = strtrim("`vce_rest'")
+            if ("`vce_rest'" != "") {
+                capture confirm integer number `vce_rest'
+                if (_rc) {
+                    di as err "vce(dkraay #): bandwidth must be a positive integer"
+                    exit 198
+                }
+                if (`vce_rest' < 1 | `vce_rest' > 2147483647) {
+                    di as err "vce(dkraay #): bandwidth must be between 1 and 2147483647"
+                    exit 198
+                }
+                local dkraay_bw `vce_rest'
+            }
+            local dkraay_timevar "`_dta[_TStvar]'"
+            if ("`dkraay_timevar'" == "") {
+                di as err "vce(dkraay) requires tsset or xtset with a time variable"
+                exit 198
+            }
+            confirm numeric variable `dkraay_timevar', exact
+            local cluster_raw "`dkraay_timevar'"
+        }
+        else if (inlist("`vce_key'", "cl", "clu", "clus", "clust", "cluste", "cluster", "clustered")) {
             local se_type "cluster"
             local vce_rest = strtrim("`vce_rest'")
             if ("`vce_rest'" == "") {
@@ -877,6 +946,18 @@ program define _xhdfe_estimate, eclass
 
     // Sample restriction and missing values.
     marksample touse, strok
+    // The plugin reads variables; retain the public FV/TS response expression
+    // for e(depvar) and materialise only its numeric input.
+    local responsevar "`depvar'"
+    if (strpos("`depvar'", ".") | strpos("`depvar'", "#")) {
+        quietly fvrevar `depvar' if `touse'
+        local responsevar "`r(varlist)'"
+        local response_count : word count `responsevar'
+        if (`response_count' != 1) {
+            di as err "the dependent variable must expand to one variable"
+            exit 198
+        }
+    }
     local markvars_raw "`absorb_markvars' `cluster_markvars' `wvar' `group' `individual' `endogenous' `instruments'"
     local markvars
     foreach v of local markvars_raw {
@@ -1056,7 +1137,14 @@ program define _xhdfe_estimate, eclass
 
             // Reuse absorb() encodings when the same variable appears in absorb() and cluster().
             local pos : list posof "`v'" in fe_raw
-            if (`pos' > 0) {
+            if (`dkraay_bw' >= 0) {
+                // Preserve chronological order, including negative dates. FE
+                // encodings may use an order unrelated to the time variable.
+                tempvar dkraay_id
+                quietly egen long `dkraay_id' = group(`v') if `touse'
+                local clid "`dkraay_id'"
+            }
+            else if (`pos' > 0) {
                 local clid : word `pos' of `fe_ids'
                 local cluster_fe_pos = `pos' - 1
             }
@@ -1170,7 +1258,9 @@ program define _xhdfe_estimate, eclass
     if (`savefe_absorb') {
         local store_fes 1
         local retain_fes 1
+        local fe_inputvars "`varlist' `markvars' `absorb_list' `slope_absorb_vars'"
         local k 0
+        local savefe_block 0
         foreach fe of local fe_orig {
             local ++k
             local kind : word `k' of `absorb_kinds'
@@ -1183,23 +1273,35 @@ program define _xhdfe_estimate, eclass
                 local fe_group_label : subinstr local fe_group_label "#c.`slopevar'" "", all
                 local fe_slope_label "`fe_group_label'#c.`slopevar'"
             }
-            local vname "__hdfe`k'__"
+            local bundle_pos : list posof "`fe'" in grouped_savefe_tokens
+            local slope_number 1
+            if (`bundle_pos') {
+                local bundle : word `bundle_pos' of `grouped_savefe_bundles'
+                local slope_number : word `bundle_pos' of `grouped_savefe_slopes'
+                if ("`savefe_bundle_`bundle''" == "") {
+                    local ++savefe_block
+                    local savefe_bundle_`bundle' `savefe_block'
+                }
+                local output_block `savefe_bundle_`bundle''
+            }
+            else {
+                local ++savefe_block
+                local output_block `savefe_block'
+            }
+            local vname "__hdfe`output_block'__"
             if ("`kind'" == "slope" & "`slopeintercept'" == "0") {
-                local slope_vname "`vname'Slope1"
-                confirm new variable `slope_vname'
-                gen double `slope_vname' = .
+                local slope_vname "`vname'Slope`slope_number'"
+                _xhdfe_auto_fe_variable `slope_vname' "`fe_inputvars'"
                 label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                 local fe_out_vars "`fe_out_vars' `slope_vname'"
             }
             else {
-                confirm new variable `vname'
-                gen double `vname' = .
+                _xhdfe_auto_fe_variable `vname' "`fe_inputvars'"
                 label variable `vname' "[FE] 1.`fe'"
                 local fe_out_vars "`fe_out_vars' `vname'"
                 if ("`kind'" == "slope" & "`slopeintercept'" == "1") {
-                    local slope_vname "`vname'Slope1"
-                    confirm new variable `slope_vname'
-                    gen double `slope_vname' = .
+                    local slope_vname "`vname'Slope`slope_number'"
+                    _xhdfe_auto_fe_variable `slope_vname' "`fe_inputvars'"
                     label variable `slope_vname' "[FE] 1.`fe_slope_label'"
                     local fe_out_vars "`fe_out_vars' `slope_vname'"
                 }
@@ -1698,7 +1800,7 @@ program define _xhdfe_estimate, eclass
     }
 
     // Build the plugin varlist in the exact order expected by the plugin.
-    local plugin_varlist "`depvar' `plugin_indepvars' `fe_ids' `slope_absorb_vars' `clust_ids'"
+    local plugin_varlist "`responsevar' `plugin_indepvars' `fe_ids' `slope_absorb_vars' `clust_ids'"
     if (`has_weight') {
         local plugin_varlist "`plugin_varlist' `wvar'"
     }
@@ -1725,16 +1827,26 @@ program define _xhdfe_estimate, eclass
     // Matrices and scalars to receive results.
     tempname b V
     local k = `p' + `fit_intercept'
+    local empty_parameter_model = (`k' == 0)
+    // Stata matrices cannot have zero columns. A private transport placeholder
+    // is not posted as a coefficient when the model contains only absorbed
+    // slopes and no constant or regressors.
+    if (`empty_parameter_model') local k 1
     matrix `b' = J(1, `k', .)
     matrix `V' = J(`k', `k', .)
+    if (`empty_parameter_model') {
+        matrix `b' = J(1, 1, 0)
+        matrix `V' = J(1, 1, 0)
+    }
     tempname omit_reason
     if (`k' > 0) {
-        matrix `omit_reason' = J(`k', 1, 0)
+        matrix `omit_reason' = J(`k', 1, `empty_parameter_model')
     }
 
     // Name columns/rows to match Stata conventions.
     local coefnames "`coef_indepvars'"
     if (`fit_intercept') local coefnames "`coefnames' _cons"
+    if (`empty_parameter_model') local coefnames "_cons"
     matrix colnames `b' = `coefnames'
     matrix colnames `V' = `coefnames'
     matrix rownames `V' = `coefnames'
@@ -1817,6 +1929,7 @@ program define _xhdfe_estimate, eclass
     }
     local cfg "`cfg'store_resid=`store_resid';store_groupvar=`store_groupvar';store_fes=`store_fes';savefe_out_count=`fe_out_count';"
     local cfg "`cfg'se_type=`se_type';tol=`tolerance';convergence=`convergence';fetol=`fetolerance';max_iter=`maxiter';fit_intercept=`fit_intercept';"
+    if (`dkraay_bw' >= 0) local cfg "`cfg'dkraay_bandwidth=`dkraay_bw';"
     local cfg "`cfg'num_threads=`numthreads';default_threads=`defaultthreads';max_threads=`maxthreads';"
     local cfg "`cfg'min_parallel_rows=`minparrows';target_rows_per_thread=`targetrpt';"
     local cfg "`cfg'drop_singletons=`drop_singletons';retain_fes=`retain_fes';symmetric_sweep=`symmetric_sweep';"
@@ -2131,6 +2244,7 @@ program define _xhdfe_estimate, eclass
                 local group_label : subinstr local group_label "##c.`slopevar'" "", all
                 local group_label : subinstr local group_label "#c.`slopevar'" "", all
                 local slope_label "`group_label'#c.`slopevar'"
+                if (strpos("`label'", "#")) local slope_label : subinstr local label "##" "#", all
 
                 // Prefer the plugin-provided count of distinct FE levels in
                 // e(sample) (dof_table col 6); the egen-tag recount below is
@@ -2299,7 +2413,7 @@ program define _xhdfe_estimate, eclass
                 scalar `xbarb' = scalar(`xbarb') + r(mean) * `bval'
             }
         }
-        quietly summarize `depvar' `wgt' if `esample', meanonly
+        quietly summarize `responsevar' `wgt' if `esample', meanonly
         matrix `b'[1,`k'] = r(mean) - scalar(`xbarb')
     }
 
@@ -2365,7 +2479,12 @@ program define _xhdfe_estimate, eclass
     }
     local esample_postopt "esample(`esample')"
     if ("`nosample'" != "") local esample_postopt ""
-    ereturn post `b' `V', `esample_postopt' obs(`=scalar(`sN')') `dof_arg' depname(`depvar') buildfvinfo
+    if (`empty_parameter_model') {
+        ereturn post, `esample_postopt' obs(`=scalar(`sN')') `dof_arg' depname(`depvar')
+    }
+    else {
+        ereturn post `b' `V', `esample_postopt' obs(`=scalar(`sN')') `dof_arg' depname(`depvar') buildfvinfo
+    }
     if (!missing(`dof_raw') & `dof_raw' < 0) {
         ereturn scalar df_r = `dof_raw'
     }
@@ -2427,7 +2546,7 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.29.5 09oct2026"
+    ereturn local version "2.29.0 14oct2026"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2456,6 +2575,20 @@ program define _xhdfe_estimate, eclass
     if ("`se_type'" == "cluster") {
         ereturn local vce "cluster"
         ereturn local vcetype "Robust"
+        if (`dkraay_bw' >= 0) {
+            local dkraay_T = scalar(`sNclust')
+            local dkraay_used = `dkraay_bw'
+            if (`dkraay_used' == 0) local dkraay_used = floor(4 * (`dkraay_T'/100)^(2/9)) + 1
+            local dkraay_used = min(`dkraay_used', `dkraay_T')
+            ereturn local vce "dkraay"
+            ereturn local vcetype "Driscoll-Kraay"
+            ereturn local dkraay_timevar "`dkraay_timevar'"
+            ereturn scalar dkraay_bw = `dkraay_used'
+            ereturn scalar dkraay_lags = `dkraay_used' - 1
+            if (`dkraay_bw' > `dkraay_T') {
+                di as txt "note: Driscoll-Kraay bandwidth reduced to `dkraay_T' observed time periods"
+            }
+        }
     }
     else if ("`se_type'" == "robust") {
         ereturn local vce "robust"
@@ -2490,7 +2623,7 @@ program define _xhdfe_estimate, eclass
         ereturn matrix dof_table = `dof_table'
     }
     if (`k' > 0) {
-        ereturn matrix omit_reason = `omit_reason'
+        if (!`empty_parameter_model') ereturn matrix omit_reason = `omit_reason'
     }
     ereturn scalar r2 = scalar(`sR2')
     ereturn scalar r2_within = scalar(`sR2w')
@@ -2669,7 +2802,8 @@ program define _xhdfe_estimate, eclass
             matrix `W' = `b1' * `Vinv' * `b1''
             scalar `Fstat' = `W'[1,1] / `wald_df'
         }
-        if (`wald_df' > 0 & !missing(`Fstat')) {
+        if (`wald_df' > 0 & !missing(`Fstat') & ///
+            ("`statstyle'" != "reghdfe" | `wald_df' == `df_m_eff')) {
             ereturn scalar F = `Fstat'
             ereturn scalar p = Ftail(`wald_df', e(df_r), `Fstat')
         }
@@ -2751,9 +2885,13 @@ program define _xhdfe_estimate, eclass
         local fsopts "`fsopts' numthreads(`numthreads') defaultthreads(`defaultthreads') maxthreads(`maxthreads')"
         local fsopts "`fsopts' minparallelrows(`minparrows') targetrowsperthread(`targetrpt')"
         local fsopts "`fsopts' statstyle(`statstyle') jacobirelaxation(`jacobirelaxation')"
-        local fsopts "`fsopts' `keepsingletons' `noconstant' `symmetricsweep' `nowarn'"
-        if ("`absorb_ordered'" != "") local fsopts "`fsopts' absorb(`absorb_ordered')"
-        if ("`se_type'" == "cluster") local fsopts "`fsopts' vce(cluster `cluster_ordered')"
+        local fsopts "`fsopts' `keepsingletons' `noconstant' `constant' `noabsorb' `symmetricsweep' `nowarn'"
+        // The user's absorb() text (without suboptions) re-parses identically and
+        // does not depend on time-series temporaries of this estimation call.
+        if ("`absorb_vars'" != "") local fsopts "`fsopts' absorb(`absorb_vars')"
+        if (`dkraay_bw' > 0) local fsopts "`fsopts' vce(dkraay `dkraay_bw')"
+        else if (`dkraay_bw' == 0) local fsopts "`fsopts' vce(dkraay)"
+        else if ("`se_type'" == "cluster") local fsopts "`fsopts' vce(cluster `cluster_ordered')"
         else local fsopts "`fsopts' vce(`se_type')"
         if (`"`ssc'"' != "") local fsopts `"`fsopts' ssc(`ssc')"'
         if (`"`dofadjustments'"' != "") local fsopts `"`fsopts' dofadjustments(`dofadjustments')"'
@@ -2785,6 +2923,31 @@ program define _xhdfe_estimate, eclass
     }
 end
 
+program define _xhdfe_auto_fe_variable
+    version 16
+    args target inputs
+    capture confirm new variable `target'
+    if (_rc) {
+        // Reuse only output owned by xhdfe, never a source regressor or a
+        // user-created variable occupying the reserved output name.
+        if (regexm("`inputs'", "(^|[^a-zA-Z0-9_])`target'([^a-zA-Z0-9_]|$)")) {
+            di as err "savefe output `target' is also an input variable"
+            exit 198
+        }
+        local owner : char `target'[xhdfe_auto_fe]
+        local type : type `target'
+        if ("`owner'" != "1" | "`type'" != "double") {
+            di as err "variable `target' already defined and is not an xhdfe automatic FE output"
+            exit 110
+        }
+        quietly replace `target' = .
+    }
+    else {
+        quietly gen double `target' = .
+    }
+    char `target'[xhdfe_auto_fe] "1"
+end
+
 program define xhdfe__footnote
     version 16.0
     if (!missing(e(drop_singletons)) & e(drop_singletons) == 0 & !missing(e(num_singletons)) & e(num_singletons) > 0 & "`e(nowarn)'" == "") {
@@ -2797,7 +2960,7 @@ program define xhdfe__footnote
     exit 0
 end
 
-program define xhdfe_display
+program define xhdfe_display, rclass
     version 16.0
     local optline `"`0'"'
     local optline : subinstr local optline ",fvwrapon(" ", fvwon(", all
@@ -2890,7 +3053,10 @@ program define xhdfe_display
     }
 
     local vce_desc ""
-    if (inlist("`e(vce)'", "cluster", "robust")) {
+    if ("`e(vce)'" == "dkraay") {
+        local vce_desc "Driscoll-Kraay standard errors"
+    }
+    else if (inlist("`e(vce)'", "cluster", "robust")) {
         local vce_desc "Statistics robust to heteroskedasticity"
     }
     else {
@@ -2955,6 +3121,9 @@ program define xhdfe_display
         if (!missing(e(rmse))) {
             di as txt _col(50) "Root MSE" _col(67) "= " as res %10.4f e(rmse)
         }
+        if ("`e(vce)'" == "dkraay") {
+            di as txt "Time periods = " as res %9.0fc e(N_clust) as txt _col(50) "DK bandwidth" _col(67) "= " as res %10.0fc e(dkraay_bw)
+        }
     }
 
     local display_opts
@@ -2969,8 +3138,12 @@ program define xhdfe_display
     // ereturn display in supported Stata versions rejects fvwrapon().
 
     if ("`notable'" == "") {
-        if ("`noheader'" == "") di as txt ""
-        ereturn display, level(`level') `display_opts'
+        capture confirm matrix e(b)
+        if (!_rc) {
+            if ("`noheader'" == "") di as txt ""
+            ereturn display, level(`level') `display_opts'
+            return add
+        }
     }
 
     if ("`nofootnote'" == "") {

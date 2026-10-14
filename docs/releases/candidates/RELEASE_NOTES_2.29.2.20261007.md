@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.2.20261007 — development candidate
 
 This unissued candidate includes the first-stage diagnostics and repeated-control
@@ -16,4 +19,4 @@ created only by absorption remain outside this repair.
 
 Native source mirrors and package metadata identify candidate 2.29.2.20261007.
 The focused CPU/CUDA evidence and remaining release gates are recorded in the
-[validation report](../certification/iv-proportional-instruments-20261007.md).
+[validation report](../../certification/iv-proportional-instruments-20261007.md).

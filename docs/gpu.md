@@ -166,11 +166,11 @@ stopifnot(m$gpu_used == 1, m$gpu_status == "used")
 If you request the GPU but it can't be honored (you installed a CPU build, no
 device is present, or the GPU path fails), the behavior differs by version:
 
-- **Stata and R are fail-closed**: the call **stops with an error** rather than
-  quietly returning CPU results (Stata error 498; R `stop()`).
-- **Python does not auto-error**: `.fit()` returns a CPU result with
-  `reg.gpu_used_ == 0`. In Python you must **check `reg.gpu_used_` yourself** —
-  it will not raise.
+- **Stata, R and Python are fail-closed**: an explicit CUDA request that cannot
+  be honoured **stops with an error** rather than quietly returning CPU
+  results (Stata error 498; R `stop()`; Python `RuntimeError` "Requested GPU
+  backend is unavailable; CPU fallback is disabled"). Check `gpu_used_` /
+  `e(gpu_used)` / `gpu_used` to confirm actual GPU execution.
 
 `gpu_status_code` values (Stata `e(gpu_status_code)`, Python
 `reg.gpu_status_code_`): `0` not requested, `1` used, `2` unavailable,

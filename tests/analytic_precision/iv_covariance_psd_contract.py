@@ -3,8 +3,12 @@
 
 Positive controls must preserve the sandwich; distinct, fixed partitions with
 genuinely negative eigenvalues must apply the existing standardized-metric
-projection, including its separate slope-block correction. No estimator result
-enters the reference. The original intercept covariance contract is unchanged.
+projection, including its separate slope-block correction, followed by the
+constant repair chosen by the maintainer on 10oct2026 (policy D-C, 2.29): the
+corrected slope block is kept, the constant's cross-covariances are projected
+onto the positive spectrum of the original standardized slope block, and the
+constant's variance is raised to at least c'B+c. No estimator result enters the
+reference. The original intercept covariance contract is unchanged.
 """
 import argparse
 import hashlib
@@ -97,9 +101,32 @@ def reference(case, digits=90):
             inverse = mp.diag([1/value for value in d])
             return inverse*vectors*positive*vectors.T*inverse, eigenvalues, True
 
+        def repair_constant(v, original_block, d):
+            # Policy D-C: range and Schur condition of the constant against the
+            # retained slope block, using the positive spectrum of the original
+            # standardized block (the same spectrum the clip used).
+            scale = mp.diag(d[:2])
+            block = scale*((original_block+original_block.T)/2)*scale
+            eigenvalues, vectors = mp.eigsy(block)
+            cross = mp.matrix([d[j]*v[j, 2]*d[2] for j in range(2)])
+            coordinates = vectors.T*cross
+            projected = mp.zeros(2, 1)
+            required = mp.mpf(0)
+            for j in range(2):
+                if eigenvalues[j] > 0:
+                    projected += vectors[:, j]*coordinates[j]
+                    required += coordinates[j]**2/eigenvalues[j]
+            out = v.copy()
+            for j in range(2):
+                out[j, 2] = out[2, j] = projected[j]/(d[j]*d[2])
+            out[2, 2] = max(required, v[2, 2]*d[2]**2)/d[2]**2
+            return out
+
         corrected, eig, full_fixed = project(raw, scales)
         slopes, slope_eig, slopes_fixed = project(raw[:2, :2], scales[:2])
         corrected[:2, :2] = slopes
+        if full_fixed or slopes_fixed:
+            corrected = repair_constant(corrected, raw[:2, :2], scales)
         return dict(raw=raw, V=corrected, eigenvalues=eig, slope_eigenvalues=slope_eig,
                     fixed=full_fixed or slopes_fixed, full_fixed=full_fixed,
                     slopes_fixed=slopes_fixed, df=min(effective-3, min(counts[:2])-1))

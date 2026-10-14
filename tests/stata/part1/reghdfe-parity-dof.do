@@ -50,6 +50,7 @@ program define xpd_spec, rclass
     syntax anything(everything) [aweight fweight pweight iweight], ///
         Name(string) [XOPTS(string) ROPTS(string) BTOL(real 1e-10) ///
         SETOL(real 1e-8) SKIPF EXCEPT(string) KNOWN(string) KNOWNSE(real 0) ///
+        KNOWNCOEF(string) ///
         XEXCEPT(string) XKNOWN(string) DTABLE(string) DMETHOD(string)]
 
     * Base set handled by xcert_parity_check, extended set handled here.
@@ -184,7 +185,7 @@ program define xpd_spec, rclass
 
     * ---- base surface -------------------------------------------------------
     xcert_parity_check, name("`name'") btol(`btol') setol(`setol') `skipf' ///
-        except(`except') known(`known') knownse(`knownse')
+        except(`except') known(`known') knownse(`knownse') knowncoef(`knowncoef')
     local fails = `fails' + r(fails)
     if (`fails' > 0) {
         di as error "  FAIL  `name' (`fails' divergence(s) including the extended surface)"
@@ -750,9 +751,14 @@ if (`d4_r1_usable' | `d4_r2_usable') {
         (`d4_xref'/`d4_rref') 1 1e-8
     di as text "XHDFE_ORACLE_VARIATION|D4|selected cluster order `d4_order'|" ///
         "reghdfe V11 order1=" %21.17g `r_v1' " order2=" %21.17g `r_v2'
+    * Policy D-C (10oct2026, docs/LICOES_FECHO_REVISAO_20261010.md): when the
+    * multiway CGM covariance is indefinite, xhdfe keeps the corrected slope
+    * block and repairs the constant's row; reghdfe only clamps. se[_cons] is
+    * therefore a KNOWN open divergence (reported, not failed); x1/x2 stay exact.
     xpd_spec y x1 x2, name("D4 2-way cluster, one dimension nests") ///
         xopts(absorb(firm year) vce(cluster `d4_order')) ///
-        ropts(absorb(firm year) vce(cluster `d4_order'))
+        ropts(absorb(firm year) vce(cluster `d4_order')) ///
+        knownse(0.05) knowncoef(_cons)
     xcert_parity_tally
 }
 else {
@@ -762,7 +768,8 @@ else {
 }
 xpd_spec y x1 x2, name("D4 2-way cluster, neither nests") ///
     xopts(absorb(firm year) vce(cluster other year)) ///
-    ropts(absorb(firm year) vce(cluster other year))
+    ropts(absorb(firm year) vce(cluster other year)) ///
+    knownse(0.05) knowncoef(_cons)
 xcert_parity_tally
 
 * every absorbed dimension is a cluster variable: df_a collapses to zero
@@ -770,7 +777,8 @@ xcert_parity_tally
 * by 1.6e-08 relative, while x1 and x2 agree to 1e-12.
 xpd_spec y x1 x2, name("D4 all FE are cluster vars") ///
     xopts(absorb(firm year) vce(cluster firm year)) ///
-    ropts(absorb(firm year) vce(cluster firm year)) setol(1e-7)
+    ropts(absorb(firm year) vce(cluster firm year)) setol(1e-7) ///
+    knownse(0.05) knowncoef(_cons)
 xcert_parity_tally
 quietly xhdfe y x1 x2, absorb(firm year) vce(cluster firm year) ///
     tolerancemode(reghdfe-comparable) tolerance(1e-12) noheader notable nofootnote

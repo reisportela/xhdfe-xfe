@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.3.20261007 — development candidate
 
 This unissued candidate includes the first-stage diagnostics and redundant-
@@ -22,4 +25,4 @@ needs performance work before a PR. Concurrent Athena CUDA measurements show
 approximately 8–13% paired median costs in the distinct-cluster cases, with
 wide uncertainty from overlapping load. Clean CUDA timing and the complete
 release performance matrix remain pending. See the
-[validation report](../certification/iv-covariance-precision-20261007.md).
+[validation report](../../certification/iv-covariance-precision-20261007.md).

@@ -26,6 +26,10 @@ def main():
         directory = args.scratch / label
         directory.mkdir()
         shutil.copy2(args.makevars, directory / "Makevars.win")
+        header_dir = directory / "include" / "hdfe"
+        header_dir.mkdir(parents=True)
+        shutil.copy2(args.makevars.parent / "include" / "hdfe" /
+                     "deterministic_parallel.hpp", header_dir)
         (directory / "Makeconf").write_text(
             f"CXX17 = {compiler}\nCXX17STD = -std=gnu++17\n"
             f"SHLIB_OPENMP_CXXFLAGS = {flags}\n")

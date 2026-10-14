@@ -1,0 +1,107 @@
+{
+  "status": "IMPLEMENTED_AND_VALIDATED_IN_PRIVATE_STATA_CANDIDATE",
+  "version": "2.29.0.20261006",
+  "production_release": false,
+  "changed_product_files": {
+    "stata/xhdfe.ado": {
+      "baseline_sha256": "535d858299a931e21d446dd564c9aae06d70836b83de18f3f0845d2aaf0e75a0",
+      "candidate_sha256": "5203292a67d3f0e64ff9ee83de66e1ec1c454d4998b94162221f381377b3a3d2"
+    },
+    "stata/xhdfe.sthlp": {
+      "baseline_sha256": "513466d5e32f57e8141c183b89e2991a3f8437ed44f9b75862783675fcb1ecf9",
+      "candidate_sha256": "339560a42063fbee77cd264cfe691589cb5e3cd9cf4c227292ec9d778ea823e1"
+    },
+    "stata/include/hdfe/hdfe_regressor.hpp": {
+      "baseline_sha256": "8a55dff1b4be319a8b2637318120733b015e6fa30f5a25db6a86d65d68f3681a",
+      "candidate_sha256": "3e0a48c16d23ec6278b45a4337b3d8084104d7102f364029dc9d168af33316a4"
+    },
+    "stata/src/xhdfe_plugin.cpp": {
+      "baseline_sha256": "c95b59efaf046338c72f3a6d30a6e53e542f7479a33368a212e8d4aaeaaba06d",
+      "candidate_sha256": "186c2b3aac16dd8eee0ba3b251053a2a65d4b9965e3e19abff104652cf2c1cae"
+    },
+    "stata/src/hdfe_regressor_v11.cpp": {
+      "baseline_sha256": "5c47d54303e24bf059f2d092bc621757fdc93f275427188d62c3c929bff6e5dd",
+      "candidate_sha256": "f74b0e77bea3bf16094c6d14604739f5cb7761fbde9c0ad81943e95b7107ddc4"
+    },
+    "stata/src/dkraay_covariance.hpp": {
+      "baseline_sha256": null,
+      "candidate_sha256": "0fe003cde374e010a31a5e8cd829cb9b7a9d11bb13ffe167509401a34116cd07"
+    }
+  },
+  "diff_sha256": "837ffecd3a21150a43e59e847134c3c4f9495dc36bc8df1ec06312f261ef9ecc",
+  "plugins": {
+    "xhdfe.plugin": "b7732af768ac56398ba93d41eea283c3aa80634493966e445e09668564ab4312",
+    "xfepout.plugin": "b9a8fae7ed62705c06511a2d9a06aaf6f2f1203a30c35382edfafc65d768ddf8"
+  },
+  "baseline_unchanged": true,
+  "baseline_files_checked": 1896,
+  "upstream_cpu_documented_port": {
+    "PASS": 54,
+    "REFERENCE_ONLY_PASS": 3,
+    "EXPECTED_UPSTREAM_FAILURE": 1
+  },
+  "upstream_dk_cuda_pass": 3,
+  "upstream_cuda_successful_fits": 21,
+  "upstream_original_dk": {
+    "PASS": 2,
+    "FAIL": 1,
+    "reason": "two-FE comparison against an approximate reference at 1e-12"
+  },
+  "independent_cpu_pass": 39,
+  "independent_cuda_pass": 32,
+  "independent_cpu_max_scaled_V_error": 4.2384696384131246e-13,
+  "independent_cuda_max_scaled_V_error": 2.3679402828417427e-14,
+  "diagnostics": {
+    "final_contracts": {
+      "receipt": "diagnostics/final_contracts/PROCESS.json",
+      "log_sha256": "f80c66175ed59c012a48d25d4154500d6c2e1dee0ecb08aad1579c2798dd28dc"
+    },
+    "final_aligned_cpu": {
+      "receipt": "diagnostics/final_aligned_cpu/PROCESS.json",
+      "log_sha256": "4558e10c1cb1c42fc626ae684f37849e27bea22ec5f8df00158b1cb69ec416af"
+    },
+    "final_aligned_cuda": {
+      "receipt": "diagnostics/final_aligned_cuda/PROCESS.json",
+      "log_sha256": "a5b5dd976b7ee4af855aec05ccd116173fd2681a0bf3e9dcbeb2ac0aad94c5ad"
+    },
+    "final_audit_and_controls_r3": {
+      "receipt": "diagnostics/final_audit_and_controls_r3/PROCESS.json",
+      "log_sha256": "4701203fcebaee7af40bbfc0f17b3bc1dc7f12691abb98926126cb1f51bbfcab"
+    },
+    "numbers_r1": {
+      "receipt": "diagnostics/numbers_r1/PROCESS.json",
+      "log_sha256": "b84500bef07d878637deeb161e1519820620aa3edc4dab7c0bd99b35e0e9450c"
+    }
+  },
+  "large_cpu_smoke": {
+    "fit_seconds": 61.598,
+    "prior_seconds": 67.004,
+    "N": 46156187.0,
+    "threads_used": 16,
+    "active_workers": 16,
+    "iterations": 23,
+    "converged": 1,
+    "max_abs_b": 0.0,
+    "max_abs_V": 0.0,
+    "input_signature_same": true,
+    "sample_signature_same": true,
+    "residual_signature_same": true,
+    "performance_scope": "Single large CPU smoke, not interleaved performance adjudication"
+  },
+  "native_openmp_links": {
+    "xhdfe.plugin": "\tlinux-vdso.so.1 (0x00007ffe27df9000)\n\tlibstdc++.so.6 => /lib64/libstdc++.so.6 (0x00007f1a6a600000)\n\tlibm.so.6 => /lib64/libm.so.6 (0x00007f1a6a925000)\n\tlibgomp.so.1 => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libgomp.so.1 (0x00007f1a69400000)\n\tlibgcc_s.so.1 => /lib64/libgcc_s.so.1 (0x00007f1a6b4e9000)\n\tlibc.so.6 => /lib64/libc.so.6 (0x00007f1a69000000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f1a6b51d000)\n\tlibnvc.so => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libnvc.so (0x00007f1a68c00000)\n\tlibnvcpumath.so => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libnvcpumath.so (0x00007f1a68600000)\n\tlibdl.so.2 => /lib64/libdl.so.2 (0x00007f1a6b4e2000)\n\tlibpthread.so.0 => /lib64/libpthread.so.0 (0x00007f1a6b4dd000)\n",
+    "xfepout.plugin": "\tlinux-vdso.so.1 (0x00007ffd34d45000)\n\tlibstdc++.so.6 => /lib64/libstdc++.so.6 (0x00007f51f6600000)\n\tlibm.so.6 => /lib64/libm.so.6 (0x00007f51f72ac000)\n\tlibgomp.so.1 => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libgomp.so.1 (0x00007f51f5400000)\n\tlibgcc_s.so.1 => /lib64/libgcc_s.so.1 (0x00007f51f69e3000)\n\tlibc.so.6 => /lib64/libc.so.6 (0x00007f51f5000000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f51f739e000)\n\tlibnvc.so => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libnvc.so (0x00007f51f4c00000)\n\tlibnvcpumath.so => /opt/nvidia/hpc_sdk/Linux_x86_64/25.3/compilers/lib/libnvcpumath.so (0x00007f51f4600000)\n\tlibdl.so.2 => /lib64/libdl.so.2 (0x00007f51f72a5000)\n\tlibpthread.so.0 => /lib64/libpthread.so.0 (0x00007f51f72a0000)\n"
+  },
+  "cuda_arch": 90,
+  "not_run": [
+    "Windows native",
+    "macOS native",
+    "R/Python rebuild and integration",
+    "full core24 x 8 interleaved performance matrix"
+  ],
+  "limits": [
+    "observed-period lag convention (not calendar-gap HAC)",
+    "XHDFE_CERTIFY DK covariance proof reports UNSUPPORTED; validated by separate offline oracles",
+    "canonical checkout metadata drift remains pre-existing; no promotion or publication"
+  ]
+}

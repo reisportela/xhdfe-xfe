@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -33,6 +35,26 @@
 namespace hdfe {
 namespace detail {
 namespace {
+
+// Phase timings on the cpu_profile channel (XHDFE_PROFILE_CPU=1).
+struct OlsPhaseTimer {
+    explicit OlsPhaseTimer(const char* label)
+        : label_(label), start_(std::chrono::steady_clock::now()) {}
+    ~OlsPhaseTimer() {
+        static const bool enabled = [] {
+            const char* raw = std::getenv("XHDFE_PROFILE_CPU");
+            return raw != nullptr && *raw != '\0' && *raw != '0';
+        }();
+        if (enabled) {
+            std::fprintf(stderr, "cpu_profile label=%s ms=%g\n", label_,
+                         1000.0 * std::chrono::duration<double>(
+                                      std::chrono::steady_clock::now() - start_)
+                                      .count());
+        }
+    }
+    const char* label_;
+    std::chrono::steady_clock::time_point start_;
+};
 
 struct KahanSum {
     long double sum = 0.0L;
@@ -982,22 +1004,71 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
     if (clusters->size() != n) {
         throw std::runtime_error("Cluster vector length must equal the number of observations");
     }
+    std::optional<OlsPhaseTimer> phase;
+    phase.emplace("ols_cluster_scan");
     int min_id = (*clusters)(0);
     int max_id = (*clusters)(0);
     int adjacent_matches = 0;
     bool nondecreasing = true;
-    int prev_id = (*clusters)(0);
-    for (int i = 1; i < n; ++i) {
-        const int v = (*clusters)(i);
-        min_id = std::min(min_id, v);
-        max_id = std::max(max_id, v);
-        if (v == prev_id) {
-            ++adjacent_matches;
+    // Minima, counts and order tests are exact: a team takes the rows by
+    // blocks, each block comparing its first row with the row before it.
+    int scan_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    scan_threads = (num_threads_explicit || n >= 4194304) && !omp_in_parallel()
+                       ? std::max(1, omp_get_max_threads())
+                       : 1;
+#endif
+    const int* const cluster_ids = clusters->data();
+    if (scan_threads > 1) {
+        const int blocks = deterministic_ols_chunk_count(n);
+        std::vector<int> low(static_cast<std::size_t>(blocks), cluster_ids[0]);
+        std::vector<int> high(static_cast<std::size_t>(blocks), cluster_ids[0]);
+        std::vector<int> matches(static_cast<std::size_t>(blocks), 0);
+        std::vector<uint8_t> rising(static_cast<std::size_t>(blocks), 1);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(scan_threads)
+#endif
+        for (int block = 0; block < blocks; ++block) {
+            const int first = std::max(1, deterministic_ols_chunk_begin(n, block, blocks));
+            const int last = deterministic_ols_chunk_end(n, block, blocks);
+            int minimum = cluster_ids[first - 1];
+            int maximum = cluster_ids[first - 1];
+            int equal = 0;
+            bool ordered = true;
+            int before = cluster_ids[first - 1];
+            for (int i = first; i < last; ++i) {
+                const int v = cluster_ids[i];
+                minimum = std::min(minimum, v);
+                maximum = std::max(maximum, v);
+                equal += v == before ? 1 : 0;
+                ordered = ordered && v >= before;
+                before = v;
+            }
+            low[static_cast<std::size_t>(block)] = minimum;
+            high[static_cast<std::size_t>(block)] = maximum;
+            matches[static_cast<std::size_t>(block)] = equal;
+            rising[static_cast<std::size_t>(block)] = ordered ? 1 : 0;
         }
-        if (v < prev_id) {
-            nondecreasing = false;
+        for (int block = 0; block < blocks; ++block) {
+            min_id = std::min(min_id, low[static_cast<std::size_t>(block)]);
+            max_id = std::max(max_id, high[static_cast<std::size_t>(block)]);
+            adjacent_matches += matches[static_cast<std::size_t>(block)];
+            nondecreasing = nondecreasing && rising[static_cast<std::size_t>(block)] != 0;
         }
-        prev_id = v;
+    } else {
+        int prev_id = (*clusters)(0);
+        for (int i = 1; i < n; ++i) {
+            const int v = (*clusters)(i);
+            min_id = std::min(min_id, v);
+            max_id = std::max(max_id, v);
+            if (v == prev_id) {
+                ++adjacent_matches;
+            }
+            if (v < prev_id) {
+                nondecreasing = false;
+            }
+            prev_id = v;
+        }
     }
     const long long range_ll =
         static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
@@ -1017,23 +1088,73 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
         constexpr double kRunFastThreshold = 0.20;
         const bool use_run_fast = (run_frac >= kRunFastThreshold);
         if (nondecreasing && p <= 8) {
+            phase.emplace("ols_cluster_runs");
             std::vector<int> run_starts;
             std::vector<int> run_ends;
-            run_starts.reserve(static_cast<std::size_t>(range));
-            run_ends.reserve(static_cast<std::size_t>(range));
-            int i = 0;
-            while (i < n) {
-                const int start = i;
-                do {
-                    ++i;
-                } while (i < n && (*clusters)(i) == (*clusters)(start));
-                run_starts.push_back(start);
-                run_ends.push_back(i);
+            if (scan_threads > 1) {
+                // A run begins where the identifier changes: count the
+                // beginnings by block, place the blocks, fill them.
+                const int blocks = deterministic_ols_chunk_count(n);
+                std::vector<int> begin(static_cast<std::size_t>(blocks) + 1U, 0);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(scan_threads)
+#endif
+                for (int block = 0; block < blocks; ++block) {
+                    const int first = deterministic_ols_chunk_begin(n, block, blocks);
+                    const int last = deterministic_ols_chunk_end(n, block, blocks);
+                    int found = 0;
+                    for (int i = first; i < last; ++i) {
+                        found += (i == 0 || cluster_ids[i] != cluster_ids[i - 1]) ? 1 : 0;
+                    }
+                    begin[static_cast<std::size_t>(block) + 1U] = found;
+                }
+                for (int block = 0; block < blocks; ++block) {
+                    begin[static_cast<std::size_t>(block) + 1U] +=
+                        begin[static_cast<std::size_t>(block)];
+                }
+                const int runs = begin[static_cast<std::size_t>(blocks)];
+                run_starts.resize(static_cast<std::size_t>(runs));
+                run_ends.resize(static_cast<std::size_t>(runs));
+                int* const starts = run_starts.data();
+                int* const ends = run_ends.data();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(scan_threads)
+#endif
+                for (int block = 0; block < blocks; ++block) {
+                    const int first = deterministic_ols_chunk_begin(n, block, blocks);
+                    const int last = deterministic_ols_chunk_end(n, block, blocks);
+                    int position = begin[static_cast<std::size_t>(block)];
+                    for (int i = first; i < last; ++i) {
+                        if (i == 0 || cluster_ids[i] != cluster_ids[i - 1]) {
+                            starts[position] = i;
+                            if (position > 0) {
+                                ends[position - 1] = i;
+                            }
+                            ++position;
+                        }
+                    }
+                }
+                if (runs > 0) {
+                    ends[runs - 1] = n;
+                }
+            } else {
+                run_starts.reserve(static_cast<std::size_t>(range));
+                run_ends.reserve(static_cast<std::size_t>(range));
+                int i = 0;
+                while (i < n) {
+                    const int start = i;
+                    do {
+                        ++i;
+                    } while (i < n && (*clusters)(i) == (*clusters)(start));
+                    run_starts.push_back(start);
+                    run_ends.push_back(i);
+                }
             }
             next_cluster = static_cast<int>(run_starts.size());
             std::vector<double> run_scores(
                 static_cast<std::size_t>(next_cluster) * static_cast<std::size_t>(p));
             std::vector<double> run_u_sums(static_cast<std::size_t>(next_cluster));
+            phase.emplace("ols_cluster_scores");
 
             // Per-run scores are each accumulated serially by one thread in
             // observation order and combined serially in run order below, so
@@ -1089,6 +1210,7 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
                 }
             }
 
+            phase.emplace("ols_cluster_meat");
             Eigen::MatrixXd meat = Eigen::MatrixXd::Zero(p, p);
             auto meat_lower = meat.selfadjointView<Eigen::Lower>();
             Eigen::VectorXd cluster_ux;
@@ -1107,6 +1229,7 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
                     cluster_ux.noalias() += ug * score;
                 }
             }
+            phase.emplace("ols_cluster_checks");
             double scale = 1.0;
             const int G = next_cluster;
             if (num_clusters_out) {
@@ -1644,6 +1767,34 @@ Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
     return cov;
 }
 
+bool wide_augmented_meat_positive_definite(const std::vector<OlsWide>& meat,
+    const std::vector<OlsWide>& cross, OlsWide total, int p) {
+    // The augmented score meat is congruent to the full IV covariance.
+    // Classify before the weak-design bread amplifies binary64 rounding.
+    // Strict LDL' pivots: no eigenvalue floor and no fit refusal on uncertainty.
+    const int q = p + 1;
+    std::vector<OlsWide> lower(static_cast<std::size_t>(q)*q), diagonal(q);
+    for (int k=0;k<q;++k) {
+        OlsWide pivot = k<p ? meat[static_cast<std::size_t>(k)*p+k] : total;
+        for (int j=0;j<k;++j) {
+            const OlsWide value = lower[static_cast<std::size_t>(k)*q+j];
+            pivot -= value*value*diagonal[j];
+        }
+        if (!pivot.finite() || !(pivot>OlsWide(0))) return false;
+        diagonal[k] = pivot;
+        for (int i=k+1;i<q;++i) {
+            OlsWide value = i<p ? meat[static_cast<std::size_t>(i)*p+k] : cross[k];
+            for (int j=0;j<k;++j)
+                value -= lower[static_cast<std::size_t>(i)*q+j]*
+                         lower[static_cast<std::size_t>(k)*q+j]*diagonal[j];
+            value = value/pivot;
+            if (!value.finite()) return false;
+            lower[static_cast<std::size_t>(i)*q+k] = value;
+        }
+    }
+    return true;
+}
+
 OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::MatrixXd>& X,
     const Eigen::VectorXd* weights,const Eigen::VectorXi* cluster,
     const std::vector<Eigen::VectorXi>* multiway,StandardErrorType se_type,
@@ -1939,7 +2090,9 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
             for(int j=0;j<p;++j) score[j]=checked_inference_add(score[j],
                 checked_inference_product(checked_inference_product(wu,coordinate(row,j,false)),inverse_scales[j]));
         }
-        const bool need_cross=auxiliary || (capture_intercept && !retain_cluster_covariance);
+        // The retained path still accumulates the augmented meat: the PSD policy
+        // classifies its sign in wide arithmetic before the ill-conditioned bread.
+        const bool need_cross=auxiliary || capture_intercept;
         Matrix value(square),cross(p);Number total_u2;
         if (retain_cluster_covariance) covariance_component.setZero();
         for(std::size_t g=0;g<totals.size();++g) {
@@ -1949,9 +2102,7 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                 if (inference_nonzero(score[j]) &&
                     inference_bad_product(score_square.value()))
                     throw OlsInferenceRangeError("wide cluster score square lost range");
-                if (retain_cluster_covariance)
-                    value[static_cast<std::size_t>(j)*p+j]+=score_square;
-                else for(int k=0;k<=j;++k) value[static_cast<std::size_t>(j)*p+k]+=score[j]*score[k];
+                for(int k=0;k<=j;++k) value[static_cast<std::size_t>(j)*p+k]+=score[j]*score[k];
                 if(need_cross) cross[j]=checked_inference_add(cross[j],checked_inference_product(totals[g],score[j]));
             }
             if(need_cross) total_u2=checked_inference_add(total_u2,checked_inference_product(totals[g],totals[g]));
@@ -1988,7 +2139,7 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
             if (!inference_nonzero(entry)) for (std::size_t g=0;g<totals.size();++g)
                 if (inference_nonzero(group_score(g)[j])) throw OlsInferenceRangeError("wide cluster lost a positive meat diagonal");
         }
-        if(capture_intercept && !retain_cluster_covariance) {
+        if(capture_intercept) {
             intercept_component_cross=cross;
             intercept_component_total=total_u2;
         }
@@ -2015,9 +2166,9 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
                 Number multiplier(dims.size()%2 ? 1 : -1);
                 if(g_df==ClusterDofMethod::Conventional && g_adj && block.second>1)
                     multiplier=multiplier*Number(block.second)/Number(block.second-1);
-                if (!retain_cluster_covariance) for(std::size_t j=0;j<square;++j)
+                for(std::size_t j=0;j<square;++j)
                     meat[j]=checked_inference_add(meat[j],checked_inference_product(multiplier,block.first[j]));
-                if(capture_intercept && !retain_cluster_covariance) {
+                if(capture_intercept) {
                     intercept_total+=multiplier*intercept_component_total;
                     for(int j=0;j<p;++j) intercept_cross[j]+=multiplier*intercept_component_cross[j];
                 }
@@ -2042,6 +2193,10 @@ OlsResult run_ols_wide(const Eigen::VectorXd& y,const Eigen::Ref<const Eigen::Ma
             result.cov_scale=adjustment.value();
         }
     }
+    if (capture_intercept && score_low && residual_design && multiway &&
+        se_type==StandardErrorType::Cluster)
+        result.augmented_meat_positive_definite =
+            wide_augmented_meat_positive_definite(meat,intercept_cross,intercept_total,p);
     Matrix covariance(square);
     if(se_type==StandardErrorType::Homoskedastic) {
         const Number sigma=df>0 ? rss/Number(df) : Number();
@@ -2590,6 +2745,8 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
         ((weights == nullptr) && n >= kParallelOlsMinObs);
 #endif
 
+    std::optional<OlsPhaseTimer> ols_phase;
+    ols_phase.emplace("ols_moments");
     Eigen::VectorXd Wy;
     Eigen::MatrixXd WX;
     Eigen::VectorXd sqrt_weights;
@@ -2682,6 +2839,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     }
 #endif
 
+    ols_phase.emplace("ols_origin_shift");
     if (!score_low && !normalization_means) {
         if (auto shift = find_ols_origin_shift(xtx, X))
             return run_ols_origin_shifted(*shift,y,X,weights,clusters,nullptr,se_type,
@@ -2699,6 +2857,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     Eigen::VectorXd beta = solver.solve(xty);
     Eigen::MatrixXd xtx_inv = solver.solve(Eigen::MatrixXd::Identity(p, p));
 
+    ols_phase.emplace("ols_residuals");
     Eigen::VectorXd residuals(n);
     double rss = 0.0;
     std::shared_ptr<N1NormalEvidence> n1_normal;
@@ -2802,6 +2961,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
             ? Eigen::Ref<const Eigen::MatrixXd>(X)
             : Eigen::Ref<const Eigen::MatrixXd>(WX);
     Eigen::MatrixXd covariance;
+    ols_phase.emplace("ols_covariance");
     try {
         covariance = compute_covariance(xtx_inv,WX_used,X,residuals,weights,sqrt_ptr,clusters,
             se_type,sigma2,df_resid,n_eff,&num_clusters,
@@ -2813,6 +2973,7 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
         return run_ols_wide(y,X,weights,clusters,nullptr,se_type,total_sum_squares,
             within_sum_squares,n_eff,weights_are_frequencies,X_for_residuals,parallel_observer,ClusterDofMethod::Min,true,score_low,normalization_means,intercept_covariance);
     }
+    ols_phase.reset();
     double cov_scale = 1.0;
     if (se_type == StandardErrorType::Cluster) {
         const int G = num_clusters;

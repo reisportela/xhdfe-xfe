@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "package_version": "2.26.0.20260902",
-  "generated_date": "2026-09-02",
-  "python": "/home/mangelo/miniconda3/bin/python3.12",
-  "python_module_sha256": "ca95b512fa79519ecd3e3a5fc77f433cf4ce125ff9e7fcc057b7bf98adcc4363",
+  "package_version": "2.29.0.20261013",
+  "generated_date": "2026-10-13",
+  "python": "/home/mangelo/miniconda3/bin/python3",
+  "python_module_sha256": "74855148e0946af6f1b17afb9b56d363b210adf91021cc2c293dca96d8c5df3a",
   "data_generator_sha256": "017d0d4f61e15f341b02573f3e5ec8ff96bef9308c5329f97c417ce77873ea94",
   "data_definition_sha256": "ec4955169ea104a678bc918901eb3c57ab4eb14c8ea121431be35e81cab0fb8b",
   "fixture_generator_sha256": "2729c88bc98f257555051d07d67291e1700056911da4fb9c6914a0a139c5e559",
-  "fixture_sha256": "ff114e1ccc89b1128c617d05b2b6e2a918709c7dcb03f1c744ae493a85d6e319",
+  "fixture_sha256": "37c8ec3a1cdd61acf02020edc4d4135bfbca9833939b95dac5154f6c4b1b0ea1",
   "spec_count": 24,
-  "reason": "Refresh R-Python parity against the final 2.26.0.20260902 CPU module after the bounded Auto retry and grouped LSMR precision floor; the previous fixture remains immutable historical evidence."
+  "reason": "Refresh R-Python parity against the 2.29.0.20261013 CPU module (native/cpu, -march=native; two generator runs are byte-identical). Localised with the frozen public 2.28.1 module: 2.26.0 -> 2.28.1 moved only the group_fes_decomposition individual-effect digests (<= 1.4e-6 relative, identical iterations and mse; not graded numerically by the R suite); 2.28.1 -> 2.29.0 moved only fe3_cluster2 se[_cons] (2.4e-5 relative, slopes bit-identical) under the multiway-cluster intercept policy D-C of 10oct2026 (corrected slope block kept, constant repaired by range and Schur condition; independent evidence in tests/analytic_precision/intercept_psd_contract.py and iv_covariance_psd_contract.py). The previous fixture remains immutable historical evidence."
 }

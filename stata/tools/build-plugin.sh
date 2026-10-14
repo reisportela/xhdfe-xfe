@@ -294,6 +294,9 @@ else
 fi
 common_compile_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
 common_compile_flags+=( -ffast-math -fno-finite-math-only -funroll-loops )
+if "${CXX}" -dM -E -x c++ /dev/null 2>/dev/null | grep -q '^#define __clang__ '; then
+  common_compile_flags+=( -ffp-contract=off -DXHDFE_FP_CONTRACT_OFF=1 )
+fi
 
 # The direct Stata build bypasses CMake, so run the same native code-generation
 # probe before producing an installable plugin. In particular, AppleClang must
@@ -315,6 +318,43 @@ if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" 
   else
     echo "Warning: ignoring --march-native because XHDFE_ENABLE_CUDA=ON. Set XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA=ON to override." >&2
   fi
+fi
+# With the final target flags: the exact kernels assume std::fma rounds once
+# and that target_mul_add() rounds a * b + c as a plain loop of this build
+# does (tests/fma_liveness.cpp). A plugin built for a target where either
+# fails would not compute the arithmetic that was validated.
+fma_source="${STATA_DIR}/../tests/fma_liveness.cpp"
+fma_bin="${BUILD_DIR}/xhdfe_fma_liveness"
+fma_link_flags=()
+if [[ "${TARGET}" == "windows" ]]; then
+  fma_bin+=".exe"
+  fma_link_flags+=( -static )
+fi
+echo "Checking fused multiply-add liveness..."
+"${CXX}" "${common_compile_flags[@]}" "${pthread_flag[@]}" \
+  "${fma_source}" "${fma_link_flags[@]}" -o "${fma_bin}"
+if [[ "${TARGET}" == "windows" && ! "${UNAME_S}" =~ ^(MINGW|MSYS|CYGWIN) ]]; then
+  echo "FMA liveness NOT_RUN: Windows target is not executable on ${UNAME_S}; .github/workflows/windows-stata-loader.yml native-loader must run this probe" >&2
+elif [[ "${UNAME_S}" == "Darwin" ]]; then
+  fma_archs="$(lipo -archs "${fma_bin}")"
+  if [[ -z "${fma_archs//[[:space:]]/}" ]]; then
+    echo "FMA liveness NOT_RUN: macOS lipo reported no executable slices" >&2
+    if [[ "${XHDFE_RELEASE_BUILD:-0}" == "1" ]]; then exit 1; fi
+  fi
+  for arch in ${fma_archs}; do
+    if ! command -v arch >/dev/null 2>&1 || ! arch -"${arch}" /usr/bin/true; then
+      echo "FMA liveness NOT_RUN: macOS ${arch} execution is unavailable" >&2
+      if [[ "${XHDFE_RELEASE_BUILD:-0}" == "1" ]]; then exit 1; fi
+    elif arch -"${arch}" "${fma_bin}"; then
+      :
+    else
+      fma_rc=$?
+      echo "FMA liveness FAIL: macOS ${arch} slice exited ${fma_rc}" >&2
+      exit "${fma_rc}"
+    fi
+  done
+else
+  "${fma_bin}"
 fi
 common_link_flags=( "${link_flag}" )
 if [[ "${TARGET}" == "windows" ]]; then

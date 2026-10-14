@@ -5,12 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
-| 2.29.5 candidate | 9 October 2026 (unissued) | [Fast-mode heterogeneous-slope acceptance](RELEASE_NOTES_2.29.5.20261009.md) |
-| 2.29.4 candidate | 8 October 2026 (unissued) | [Wide cluster covariance optimization](RELEASE_NOTES_2.29.4.20261008.md) |
-| 2.29.3 candidate | 7 October 2026 (unissued) | [IV multiway covariance precision](RELEASE_NOTES_2.29.3.20261007.md) |
-| 2.29.2 candidate | 7 October 2026 (unissued) | [Exactly proportional IV instruments on CPU and CUDA](RELEASE_NOTES_2.29.2.20261007.md) |
-| 2.29.1 candidate | 7 October 2026 (unissued) | [Repeated included controls in Stata IV](RELEASE_NOTES_2.29.1.20261007.md) |
-| 2.29.0 candidate | 7 October 2026 (unissued) | [First-stage excluded-instrument diagnostics](RELEASE_NOTES_2.29.0.20261007.md) |
+| 2.29.0 | 14 October 2026 | [Cumulative 2.28.1 → 2.29.0: maximum-performance absorption, corrections, IV diagnostics](RELEASE_NOTES_2.29.0.20261014.md); development candidates of the PR #13 series: [candidates/](candidates/README.md) |
 | 2.28.1 | 29 September 2026 | [Safe Polars formulas, faster label IDs and enforced Python frontend gates](RELEASE_NOTES_2.28.1.20260929.md) |
 | 2.28.0 | 24 September 2026 | [Audited integration, correctness fixes and declared performance trade-offs](RELEASE_NOTES_2.28.0.20260924.md) |
 | 2.26.2 | 3 September 2026 | [Certified 2.26 line: Windows Student-t, SMCL Viewer safety, and CUDA gate alignment](RELEASE_NOTES_2.26.2.20260903.md) |

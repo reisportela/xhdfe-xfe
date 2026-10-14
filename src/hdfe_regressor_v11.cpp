@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <deque>
+#include <exception>
 #include <fstream>
 #ifdef __APPLE__
 #include <limits.h>
@@ -20,6 +22,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -44,8 +47,10 @@
 #include "cache_digest.hpp"
 #include "wide_float.hpp"
 #include "wide_covariance.hpp"
+#include <type_traits>
 #include "fe_recovery_scale.hpp"
 #include "n1_checks.hpp"
+#include "n1_continuation.hpp"
 #include "hdfe/deterministic_parallel.hpp"
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
@@ -54,6 +59,7 @@
 #include "iv_input.hpp"
 #include "ols.hpp"
 #include "ols_precision.hpp"
+#include "dkraay_covariance.hpp"
 #include "additive_cell_projection.hpp"
 #include "audit/ordinary_post_ols.hpp"
 
@@ -815,6 +821,100 @@ bool fix_psd(Eigen::MatrixXd& V) {
     return true;
 }
 
+// CovMatrix/BlockMatrix are Eigen::MatrixXd (ordinary path) or the OlsWide
+// matrix retained by the wide IV solve; Real selects the repair arithmetic.
+template <typename Real, typename CovMatrix, typename BlockMatrix>
+void repair_intercept_covariance_spectral(
+    CovMatrix& covariance, const BlockMatrix& original_scaled_slopes,
+    const Eigen::VectorXd& scale) {
+    using Matrix = Eigen::Matrix<Real, Eigen::Dynamic, Eigen::Dynamic>;
+    using Vector = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
+    using Scalar = typename CovMatrix::Scalar;
+    auto scalar_finite = [](const Scalar& value) {
+        if constexpr (std::is_same_v<Scalar, double>) return hdfe::detail::ieee_finite(value);
+        else return value.finite();
+    };
+    const int slopes = static_cast<int>(original_scaled_slopes.rows());
+    const Matrix block = original_scaled_slopes.template cast<Real>();
+    Eigen::SelfAdjointEigenSolver<Matrix> solver(block);
+    if (solver.info() != Eigen::Success)
+        throw std::runtime_error("Intercept covariance PSD repair did not converge; no estimates returned");
+    Vector cross(slopes);
+    for (int j = 0; j < slopes; ++j)
+        cross[j] = Real(scale[j]) * Real(covariance(j, slopes)) * Real(scale[slopes]);
+    const Vector coordinates = solver.eigenvectors().transpose() * cross;
+    Vector projected = Vector::Zero(slopes);
+    Real required = Real(0.0);
+    for (int j = 0; j < slopes; ++j) {
+        const Real eigenvalue = solver.eigenvalues()[j];
+        // Keep exactly the positive spectrum used by the original PSD cut.
+        // Re-diagonalising its rounded reconstruction could invent tiny ranks.
+        if (eigenvalue > Real(0.0)) {
+            projected += solver.eigenvectors().col(j) * coordinates[j];
+            required += coordinates[j] * coordinates[j] / eigenvalue;
+        }
+    }
+    const Real intercept_scale = Real(scale[slopes]);
+    const Real previous = Real(covariance(slopes, slopes)) *
+                          intercept_scale * intercept_scale;
+    const Scalar variance = Eigen::internal::cast<Real, Scalar>(
+        (required > previous ? required : previous) /
+        (intercept_scale * intercept_scale));
+    if (!scalar_finite(variance))
+        throw std::runtime_error("Intercept covariance PSD repair exceeded numeric range; no estimates returned");
+    for (int j = 0; j < slopes; ++j) {
+        const Scalar value = Eigen::internal::cast<Real, Scalar>(
+            projected[j] / (Real(scale[j]) * intercept_scale));
+        if (!scalar_finite(value))
+            throw std::runtime_error("Intercept covariance PSD repair exceeded numeric range; no estimates returned");
+        covariance(j, slopes) = covariance(slopes, j) = value;
+    }
+    covariance(slopes, slopes) = variance;
+}
+
+// Same policy on the covariance retained in OlsWide by the wide IV solve:
+// the clip and the repair then share one arithmetic, before any rounding.
+void repair_intercept_covariance_wide(
+    detail::OlsWideCovariance::Matrix& covariance,
+    const detail::OlsWideCovariance::Matrix& original_slopes,
+    const Eigen::VectorXd& scale) {
+    const int slopes = static_cast<int>(original_slopes.rows());
+    if (slopes == 0) return;
+    detail::OlsWideCovariance::Matrix block(slopes, slopes);
+    for (int i = 0; i < slopes; ++i)
+        for (int j = 0; j < slopes; ++j)
+            block(i, j) = detail::OlsWide(scale[i]) *
+                ((original_slopes(i, j) + original_slopes(j, i)) * detail::OlsWide(0.5)) *
+                detail::OlsWide(scale[j]);
+    repair_intercept_covariance_spectral<detail::OlsWide>(covariance, block, scale);
+}
+
+void repair_intercept_covariance(
+    Eigen::MatrixXd& covariance, const Eigen::MatrixXd& original_slopes,
+    const Eigen::VectorXd& scale) {
+    const int slopes = static_cast<int>(original_slopes.rows());
+    if (slopes == 0) return;
+    Eigen::MatrixXd block = scale.head(slopes).asDiagonal() * original_slopes *
+                            scale.head(slopes).asDiagonal();
+    block = (0.5 * (block + block.transpose())).eval();
+    double largest = 0.0;
+    double smallest = std::numeric_limits<double>::infinity();
+    for (int j = 0; j < slopes; ++j) {
+        const double magnitude = std::abs(block(j, j));
+        if (magnitude > 0.0) {
+            largest = std::max(largest, magnitude);
+            smallest = std::min(smallest, magnitude);
+        }
+    }
+    // Match fix_psd's arithmetic for the same original slope block.
+    if (hdfe::detail::ieee_finite(largest) && smallest > 0.0 &&
+        largest / smallest > 16777216.0) {
+        repair_intercept_covariance_spectral<detail::OlsWide>(covariance, block, scale);
+    } else {
+        repair_intercept_covariance_spectral<double>(covariance, block, scale);
+    }
+}
+
 struct ClusterInterceptMeat {
     Eigen::VectorXd cross;
     double alpha = 0.0;
@@ -1049,7 +1149,8 @@ bool update_intercept_covariance(
     double sigma2,
     double robust_scale,
     double cluster_ratio,
-    bool weights_are_frequencies) {
+    bool weights_are_frequencies,
+    bool cluster_residual_sums_zero = false) {
     const int intercept_idx = static_cast<int>(results.coefficients.size()) - 1;
     if (intercept_idx < 0) {
         return false;
@@ -1105,7 +1206,21 @@ bool update_intercept_covariance(
         }
     } else {
         bool used_cached_cluster_intercept = false;
-        if (k_active > 0 && se_type == StandardErrorType::Cluster && clusters && clusters->size() == 1 &&
+        if (cluster_residual_sums_zero && se_type == StandardErrorType::Cluster &&
+            clusters && clusters->size() == 1 &&
+            ols_result.covariance.rows() == k_active &&
+            ols_result.covariance.cols() == k_active) {
+            // Every cluster is a union of FE levels, hence its residual score
+            // is exactly zero. Do not turn the remaining projection roundoff
+            // into inference on the recovered constant.
+            const Eigen::VectorXd cov_xbar =
+                (ols_result.covariance * xbar) * cluster_ratio;
+            cov_beta_alpha = -cov_xbar;
+            for (int j = 0; j < k_active; ++j)
+                var_alpha += static_cast<long double>(xbar[j]) * cov_xbar[j];
+            used_cached_cluster_intercept = true;
+        }
+        if (!used_cached_cluster_intercept && k_active > 0 && se_type == StandardErrorType::Cluster && clusters && clusters->size() == 1 &&
             !weights && ols_result.cluster_ux.size() == k_active &&
             hdfe::detail::ieee_finite(ols_result.cluster_u2) &&
             ols_result.cov_scale > 0.0 && hdfe::detail::ieee_finite(ols_result.cov_scale) &&
@@ -1560,6 +1675,240 @@ FeIndexerLite build_indexer_lite(const Eigen::VectorXi& raw_ids) {
     idx.num_groups = next_id;
     return idx;
 }
+
+#ifdef HDFE_USE_OPENMP
+// build_indexer_lite() on a team, for identifiers in a compact range: the
+// same dense ranks by order of first appearance. The first row of every
+// identifier is a minimum, the rank of an identifier is the number of first
+// rows before its own, and both are exact whatever the team.
+FeIndexerLite build_indexer_lite_team(const Eigen::VectorXi& raw_ids,
+                                      int threads,
+                                      detail::ParallelWorkObserver* observer) {
+    const int n = static_cast<int>(raw_ids.size());
+    if (n == 0 || threads <= 1) {
+        return build_indexer_lite(raw_ids);
+    }
+    const int* const raw = raw_ids.data();
+    const int blocks = detail::deterministic_parallel_chunk_count(n);
+    std::vector<int> block_min(static_cast<std::size_t>(blocks), raw[0]);
+    std::vector<int> block_max(static_cast<std::size_t>(blocks), raw[0]);
+    if (observer) {
+        observer->begin_region(threads);
+    }
+#pragma omp parallel num_threads(threads)
+    {
+        bool observed_work = false;
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            if (observer && !observed_work) {
+                observer->observe_work();
+                observed_work = true;
+            }
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int low = raw[first];
+            int high = raw[first];
+            for (int i = first + 1; i < last; ++i) {
+                low = std::min(low, raw[i]);
+                high = std::max(high, raw[i]);
+            }
+            block_min[static_cast<std::size_t>(block)] = low;
+            block_max[static_cast<std::size_t>(block)] = high;
+        }
+    }
+    if (observer) {
+        observer->end_region();
+    }
+    const int min_id = *std::min_element(block_min.begin(), block_min.end());
+    const int max_id = *std::max_element(block_max.begin(), block_max.end());
+    const long long range =
+        static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
+    constexpr long long kDenseRangeCap = 50000000LL;
+    if (!(min_id >= 0 && range > 0 && range <= kDenseRangeCap &&
+          range <= static_cast<long long>(n) * 2LL)) {
+        return build_indexer_lite(raw_ids);
+    }
+
+    const std::size_t levels = static_cast<std::size_t>(range);
+    const std::unique_ptr<std::atomic<int>[]> first_row(new std::atomic<int>[levels]);
+    std::vector<int> dense_map(levels);
+    std::vector<int> block_begin(static_cast<std::size_t>(blocks) + 1U, 0);
+    FeIndexerLite idx;
+    idx.group_ids.resize(static_cast<std::size_t>(n));
+    int* const group_ids = idx.group_ids.data();
+#pragma omp parallel num_threads(threads)
+    {
+#pragma omp for schedule(static)
+        for (std::ptrdiff_t level = 0; level < static_cast<std::ptrdiff_t>(levels);
+             ++level) {
+            first_row[static_cast<std::size_t>(level)].store(
+                std::numeric_limits<int>::max(), std::memory_order_relaxed);
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            for (int i = first; i < last; ++i) {
+                std::atomic<int>& slot =
+                    first_row[static_cast<std::size_t>(raw[i] - min_id)];
+                int seen = slot.load(std::memory_order_relaxed);
+                while (i < seen &&
+                       !slot.compare_exchange_weak(seen, i, std::memory_order_relaxed)) {
+                }
+            }
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int firsts = 0;
+            for (int i = first; i < last; ++i) {
+                firsts += first_row[static_cast<std::size_t>(raw[i] - min_id)].load(
+                              std::memory_order_relaxed) == i
+                              ? 1
+                              : 0;
+            }
+            block_begin[static_cast<std::size_t>(block) + 1U] = firsts;
+        }
+#pragma omp single
+        {
+            for (int block = 0; block < blocks; ++block) {
+                block_begin[static_cast<std::size_t>(block) + 1U] +=
+                    block_begin[static_cast<std::size_t>(block)];
+            }
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int rank = block_begin[static_cast<std::size_t>(block)];
+            for (int i = first; i < last; ++i) {
+                const std::size_t level = static_cast<std::size_t>(raw[i] - min_id);
+                if (first_row[level].load(std::memory_order_relaxed) == i) {
+                    dense_map[level] = rank++;
+                }
+            }
+        }
+#pragma omp for schedule(static)
+        for (int i = 0; i < n; ++i) {
+            group_ids[i] = dense_map[static_cast<std::size_t>(raw[i] - min_id)];
+        }
+    }
+    idx.num_groups = block_begin[static_cast<std::size_t>(blocks)];
+    return idx;
+}
+#endif
+
+#ifdef HDFE_USE_OPENMP
+// build_lookup_compact() on the team of the caller, for identifiers in a
+// compact range: the same ranks by order of first appearance.
+FeLookup build_lookup_compact_team(const Eigen::VectorXi& raw_ids,
+                                   int expected_levels,
+                                   int threads,
+                                   bool explicit_threads) {
+    const int n = static_cast<int>(raw_ids.size());
+    constexpr int kTeamMinRows = 1048576;
+    if ((n < kTeamMinRows && !explicit_threads) ||
+        threads <= 1 || omp_in_parallel()) {
+        return build_lookup_compact(raw_ids, expected_levels);
+    }
+    const int* const raw = raw_ids.data();
+    const int blocks = detail::deterministic_parallel_chunk_count(n);
+    std::vector<int> block_min(static_cast<std::size_t>(blocks), raw[0]);
+    std::vector<int> block_max(static_cast<std::size_t>(blocks), raw[0]);
+#pragma omp parallel for schedule(static) num_threads(threads)
+    for (int block = 0; block < blocks; ++block) {
+        const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+        const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+        int low = raw[first];
+        int high = raw[first];
+        for (int i = first + 1; i < last; ++i) {
+            low = std::min(low, raw[i]);
+            high = std::max(high, raw[i]);
+        }
+        block_min[static_cast<std::size_t>(block)] = low;
+        block_max[static_cast<std::size_t>(block)] = high;
+    }
+    const int min_id = *std::min_element(block_min.begin(), block_min.end());
+    const int max_id = *std::max_element(block_max.begin(), block_max.end());
+    const long long range =
+        static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
+    constexpr long long kDenseRangeCap = 50000000LL;
+    if (!(min_id >= 0 && range > 0 && range <= kDenseRangeCap &&
+          range <= static_cast<long long>(n) * 2LL)) {
+        return build_lookup_compact(raw_ids, expected_levels);
+    }
+    FeLookup lookup;
+    lookup.min_id = min_id;
+    if (expected_levels > 0 && expected_levels == range) {
+        lookup.mode = FeLookupMode::Dense;
+        lookup.num_groups = static_cast<int>(range);
+        return lookup;
+    }
+    lookup.mode = FeLookupMode::DenseMap;
+    const std::size_t levels = static_cast<std::size_t>(range);
+    const std::unique_ptr<std::atomic<int>[]> first_row(new std::atomic<int>[levels]);
+    lookup.dense_map.assign(levels, -1);
+    int* const dense_map = lookup.dense_map.data();
+    std::vector<int> block_begin(static_cast<std::size_t>(blocks) + 1U, 0);
+#pragma omp parallel num_threads(threads)
+    {
+#pragma omp for schedule(static)
+        for (std::ptrdiff_t level = 0; level < static_cast<std::ptrdiff_t>(levels);
+             ++level) {
+            first_row[static_cast<std::size_t>(level)].store(
+                std::numeric_limits<int>::max(), std::memory_order_relaxed);
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            for (int i = first; i < last; ++i) {
+                std::atomic<int>& slot =
+                    first_row[static_cast<std::size_t>(raw[i] - min_id)];
+                int seen = slot.load(std::memory_order_relaxed);
+                while (i < seen &&
+                       !slot.compare_exchange_weak(seen, i, std::memory_order_relaxed)) {
+                }
+            }
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int firsts = 0;
+            for (int i = first; i < last; ++i) {
+                firsts += first_row[static_cast<std::size_t>(raw[i] - min_id)].load(
+                              std::memory_order_relaxed) == i
+                              ? 1
+                              : 0;
+            }
+            block_begin[static_cast<std::size_t>(block) + 1U] = firsts;
+        }
+#pragma omp single
+        {
+            for (int block = 0; block < blocks; ++block) {
+                block_begin[static_cast<std::size_t>(block) + 1U] +=
+                    block_begin[static_cast<std::size_t>(block)];
+            }
+        }
+#pragma omp for schedule(static)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int rank = block_begin[static_cast<std::size_t>(block)];
+            for (int i = first; i < last; ++i) {
+                const std::size_t level = static_cast<std::size_t>(raw[i] - min_id);
+                if (first_row[level].load(std::memory_order_relaxed) == i) {
+                    dense_map[level] = rank++;
+                }
+            }
+        }
+    }
+    lookup.num_groups = block_begin[static_cast<std::size_t>(blocks)];
+    return lookup;
+}
+#endif
 
 int count_unique_ids(const Eigen::VectorXi& ids) {
     std::unordered_map<int, int> uniq;
@@ -4433,10 +4782,97 @@ int count_bipartite_components(const Eigen::VectorXi& base_raw,
     }
     const int total_nodes = base.num_groups + other.num_groups;
     UnionFind uf(total_nodes);
-    for (int i = 0; i < base_raw.size(); ++i) {
-        const int a = base.index(base_raw(i));
-        const int b = other.index(other_raw(i));
-        uf.unite(a, base.num_groups + b);
+    // The components depend on the set of pairs of levels, not on the rows
+    // that carry them nor on their order. When one bit per pair fits, the
+    // rows mark their pair and the unions run over the marked pairs.
+    bool united = false;
+#ifdef HDFE_USE_OPENMP
+    {
+        const long long cells = static_cast<long long>(base.num_groups) *
+                                static_cast<long long>(other.num_groups);
+        constexpr long long kMaxCells = 1LL << 28;
+        constexpr int kMinRows = 1048576;
+        const int rows = static_cast<int>(base_raw.size());
+        if (cells <= kMaxCells && rows >= kMinRows &&
+            base.mode != FeLookupMode::Sparse &&
+            other.mode != FeLookupMode::Sparse && !omp_in_parallel()) {
+            const std::size_t words = static_cast<std::size_t>((cells + 63) / 64);
+            const std::unique_ptr<std::atomic<std::uint64_t>[]> marks(
+                new std::atomic<std::uint64_t>[words]);
+            const int other_groups = other.num_groups;
+            auto level = [](const FeLookup& lookup, int raw) {
+                const int index = raw - lookup.min_id;
+                if (lookup.mode == FeLookupMode::Dense) {
+                    return index >= 0 && index < lookup.num_groups ? index : -1;
+                }
+                return index >= 0 &&
+                               index < static_cast<int>(lookup.dense_map.size())
+                           ? lookup.dense_map[static_cast<std::size_t>(index)]
+                           : -1;
+            };
+            bool valid = true;
+#pragma omp parallel
+            {
+#pragma omp for schedule(static)
+                for (std::ptrdiff_t w = 0; w < static_cast<std::ptrdiff_t>(words); ++w) {
+                    marks[static_cast<std::size_t>(w)].store(
+                        0, std::memory_order_relaxed);
+                }
+#pragma omp for schedule(static) reduction(&& : valid)
+                for (int i = 0; i < rows; ++i) {
+                    const int a = level(base, base_raw(i));
+                    const int b = level(other, other_raw(i));
+                    if (a < 0 || b < 0) {
+                        valid = false;
+                        continue;
+                    }
+                    const std::size_t cell =
+                        static_cast<std::size_t>(a) *
+                            static_cast<std::size_t>(other_groups) +
+                        static_cast<std::size_t>(b);
+                    const std::uint64_t bit = std::uint64_t{1} << (cell & 63U);
+                    std::atomic<std::uint64_t>& word = marks[cell >> 6U];
+                    if (!(word.load(std::memory_order_relaxed) & bit)) {
+                        word.fetch_or(bit, std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (valid) {
+                for (std::size_t w = 0; w < words; ++w) {
+                    std::uint64_t pending =
+                        marks[w].load(std::memory_order_relaxed);
+                    while (pending != 0) {
+                        const int offset = __builtin_ctzll(pending);
+                        pending &= pending - 1U;
+                        const std::size_t cell = (w << 6U) +
+                                                 static_cast<std::size_t>(offset);
+                        const int a = static_cast<int>(
+                            cell / static_cast<std::size_t>(other_groups));
+                        const int b = static_cast<int>(
+                            cell % static_cast<std::size_t>(other_groups));
+                        uf.unite(a, base.num_groups + b);
+                    }
+                }
+                united = true;
+            }
+        }
+    }
+#endif
+    if (!united) {
+        // A row that repeats the pair of the row before it adds no edge; in
+        // a panel sorted by unit that is most rows.
+        int previous_a = std::numeric_limits<int>::min();
+        int previous_b = std::numeric_limits<int>::min();
+        for (int i = 0; i < base_raw.size(); ++i) {
+            const int a = base.index(base_raw(i));
+            const int b = other.index(other_raw(i));
+            if (a == previous_a && b == previous_b) {
+                continue;
+            }
+            previous_a = a;
+            previous_b = b;
+            uf.unite(a, base.num_groups + b);
+        }
     }
 
     if (edge_components == nullptr && component_stats == nullptr) {
@@ -4581,7 +5017,8 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                                  Eigen::VectorXi* groupvar,
                                  int threads,
                                  FeComponentStats* first_pair_stats = nullptr,
-                                 const Eigen::VectorXd* weights = nullptr) {
+                                 const Eigen::VectorXd* weights = nullptr,
+                                 bool explicit_threads = false) {
     FeDofInfo info;
     if (first_pair_stats != nullptr) {
         *first_pair_stats = FeComponentStats{};
@@ -4595,13 +5032,22 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
     info.num_coefs.resize(static_cast<std::size_t>(dims), 0);
     info.inexact.resize(static_cast<std::size_t>(dims), 0);
 
+    auto dof_t0 = std::chrono::steady_clock::now();
     std::vector<FeLookup> lookups;
     lookups.reserve(static_cast<std::size_t>(dims));
     for (int d = 0; d < dims; ++d) {
         const int expected =
             (d < static_cast<int>(fe_levels.size())) ? fe_levels[static_cast<std::size_t>(d)] : -1;
+#ifdef HDFE_USE_OPENMP
+        lookups.push_back(build_lookup_compact_team(
+            fes[static_cast<std::size_t>(d)], expected,
+            std::max(1, threads), explicit_threads));
+#else
         lookups.push_back(build_lookup_compact(fes[static_cast<std::size_t>(d)], expected));
+#endif
     }
+    cpu_profile_log_elapsed("dof_lookups", dof_t0);
+    dof_t0 = std::chrono::steady_clock::now();
     if (info.levels.size() != static_cast<std::size_t>(dims)) {
         info.levels.assign(static_cast<std::size_t>(dims), 0);
         for (int d = 0; d < dims; ++d) {
@@ -4666,7 +5112,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                         first_pair_stats, weights);
                 }
                 FeDofInfo effective =
-                    compute_fe_dof_reghdfe(effective_fes, effective_levels, method, nullptr, threads);
+                    compute_fe_dof_reghdfe(effective_fes, effective_levels,
+                                           method, nullptr, threads, nullptr,
+                                           nullptr, explicit_threads);
                 for (int d = 0; d < dims; ++d) {
                     if (coarsened[static_cast<std::size_t>(d)]) {
                         info.redundant[static_cast<std::size_t>(d)] =
@@ -4696,6 +5144,12 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
         }
     }
 
+    cpu_profile_log_elapsed("dof_coarsening", dof_t0);
+    dof_t0 = std::chrono::steady_clock::now();
+    struct DofLap {
+        std::chrono::steady_clock::time_point start;
+        ~DofLap() { cpu_profile_log_elapsed("dof_components", start); }
+    } dof_lap{dof_t0};
     if (method == DofAdjustmentMethod::None) {
         if (first_pair_stats != nullptr && dims >= 2) {
             count_bipartite_components(
@@ -4763,7 +5217,8 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
 #ifdef HDFE_USE_OPENMP
         use_threads = std::max(1, threads);
 #endif
-        if (!pairs.empty() && use_threads > 1) {
+        // One pair alone keeps the team for its own rows.
+        if (pairs.size() > 1 && use_threads > 1) {
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(use_threads)
 #endif
@@ -4828,7 +5283,8 @@ FeDofInfo compute_fe_dof_for_intercept_dims(
     Eigen::VectorXi* groupvar,
     int threads,
     FeComponentStats* first_pair_stats = nullptr,
-    const Eigen::VectorXd* weights = nullptr) {
+    const Eigen::VectorXd* weights = nullptr,
+    bool explicit_threads = false) {
     const std::size_t dims = fes.size();
     bool has_slope_only = false;
     for (std::size_t d = 0; d < dims && d < slope_only_flags.size(); ++d) {
@@ -4836,7 +5292,8 @@ FeDofInfo compute_fe_dof_for_intercept_dims(
     }
     if (!has_slope_only) {
         return compute_fe_dof_reghdfe(
-            fes, fe_levels, method, groupvar, threads, first_pair_stats, weights);
+            fes, fe_levels, method, groupvar, threads, first_pair_stats,
+            weights, explicit_threads);
     }
 
     FeDofInfo info;
@@ -4870,7 +5327,7 @@ FeDofInfo compute_fe_dof_for_intercept_dims(
     } else {
         const FeDofInfo intercept_dof = compute_fe_dof_reghdfe(
             intercept_fes, intercept_levels, method, groupvar, threads,
-            first_pair_stats, weights);
+            first_pair_stats, weights, explicit_threads);
         for (std::size_t pos = 0; pos < intercept_map.size(); ++pos) {
             const std::size_t d = intercept_map[pos];
             info.levels[d] = intercept_dof.levels[pos];
@@ -4928,48 +5385,110 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
     // and OpenMP dynamic teams must not silently shrink an explicit request.
     ScopedParallelRuntime scan_runtime(scan_threads, runtime_capacity);
 
-    std::vector<FeIndexerLite> indexers(fes.size());
+    auto scan_t0 = std::chrono::steady_clock::now();
+    // The scan needs one slot per level, not a numbering by order of first
+    // appearance: a level whose identifiers fill a compact range keeps
+    // identifier minus minimum, and its rows are never renumbered. The rows
+    // kept and the rows dropped do not depend on the numbering.
+    struct ScanDim {
+        const int* raw = nullptr;
+        int shift = 0;
+        int groups = 0;
+        bool ascending = false;
+        FeIndexerLite renumbered;  //!< only when the range is not compact
+        int level(int row) const {
+            return renumbered.group_ids.empty()
+                       ? raw[row] - shift
+                       : renumbered.group_ids[static_cast<std::size_t>(row)];
+        }
+    };
+    std::vector<ScanDim> indexers(fes.size());
+    bool team_scan = false;
 #ifdef HDFE_USE_OPENMP
-    if (scan_threads > 1 && fes.size() > 1 &&
-        (explicit_thread_request || n >= kParallelScanMinObs)) {
-        // Each dimension's dense-rank mapping is independent; building them
-        // concurrently keeps the per-dimension first-appearance order (and
-        // therefore the result) bit-identical to the serial build.
-        const int dim_threads =
-            std::min<int>(scan_threads, static_cast<int>(fes.size()));
-        if (observer) {
-            observer->begin_region(dim_threads);
-        }
-#pragma omp parallel for schedule(dynamic, 1) num_threads(dim_threads)
-        for (std::ptrdiff_t d = 0; d < static_cast<std::ptrdiff_t>(fes.size()); ++d) {
+    team_scan = scan_threads > 1 &&
+                (explicit_thread_request || n >= kParallelScanMinObs);
+    if (team_scan) {
+        const int blocks = detail::deterministic_parallel_chunk_count(n);
+        for (std::size_t d = 0; d < fes.size(); ++d) {
+            ScanDim& dim = indexers[d];
+            const int* const raw = fes[d].data();
+            dim.raw = raw;
+            std::vector<int> low(static_cast<std::size_t>(blocks), raw[0]);
+            std::vector<int> high(static_cast<std::size_t>(blocks), raw[0]);
+            std::vector<uint8_t> sorted(static_cast<std::size_t>(blocks), 1);
             if (observer) {
-                observer->observe_work();
+                observer->begin_region(scan_threads);
             }
-            indexers[static_cast<std::size_t>(d)] =
-                build_indexer_lite(fes[static_cast<std::size_t>(d)]);
-        }
-        if (observer) {
-            observer->end_region();
+#pragma omp parallel num_threads(scan_threads)
+            {
+                bool observed_work = false;
+#pragma omp for schedule(static)
+                for (int block = 0; block < blocks; ++block) {
+                    if (observer && !observed_work) {
+                        observer->observe_work();
+                        observed_work = true;
+                    }
+                    const int first =
+                        detail::deterministic_parallel_chunk_begin(n, block, blocks);
+                    const int last =
+                        detail::deterministic_parallel_chunk_end(n, block, blocks);
+                    int minimum = raw[first];
+                    int maximum = raw[first];
+                    int previous = first > 0 ? raw[first - 1] : raw[first];
+                    bool rising = true;
+                    for (int i = first; i < last; ++i) {
+                        const int value = raw[i];
+                        minimum = std::min(minimum, value);
+                        maximum = std::max(maximum, value);
+                        rising = rising && value >= previous;
+                        previous = value;
+                    }
+                    low[static_cast<std::size_t>(block)] = minimum;
+                    high[static_cast<std::size_t>(block)] = maximum;
+                    sorted[static_cast<std::size_t>(block)] = rising ? 1 : 0;
+                }
+            }
+            if (observer) {
+                observer->end_region();
+            }
+            const int min_id = *std::min_element(low.begin(), low.end());
+            const int max_id = *std::max_element(high.begin(), high.end());
+            const long long range =
+                static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
+            constexpr long long kDenseRangeCap = 50000000LL;
+            if (range > 0 && range <= kDenseRangeCap &&
+                range <= static_cast<long long>(n) * 2LL) {
+                dim.shift = min_id;
+                dim.groups = static_cast<int>(range);
+                dim.ascending = std::all_of(sorted.begin(), sorted.end(),
+                                            [](uint8_t flag) { return flag != 0; });
+            } else {
+                dim.renumbered = build_indexer_lite(fes[d]);
+                dim.groups = dim.renumbered.num_groups;
+            }
         }
     } else
 #endif
     {
         for (std::size_t d = 0; d < fes.size(); ++d) {
-            indexers[d] = build_indexer_lite(fes[d]);
+            indexers[d].raw = fes[d].data();
+            indexers[d].renumbered = build_indexer_lite(fes[d]);
+            indexers[d].groups = indexers[d].renumbered.num_groups;
         }
     }
+    cpu_profile_log_elapsed("singleton_indexers", scan_t0);
+    scan_t0 = std::chrono::steady_clock::now();
 
     std::vector<std::vector<int>> counts(indexers.size());
     std::vector<std::vector<int>> active_xor(indexers.size());
     for (std::size_t d = 0; d < indexers.size(); ++d) {
-        const int groups = indexers[d].num_groups;
+        const int groups = indexers[d].groups;
         counts[d].assign(static_cast<std::size_t>(groups), 0);
         active_xor[d].assign(static_cast<std::size_t>(groups), 0);
     }
 
 #ifdef HDFE_USE_OPENMP
-    if (scan_threads > 1 &&
-        (explicit_thread_request || n >= kParallelScanMinObs)) {
+    if (team_scan) {
         // Integer add and xor are associative and commutative, so any
         // aggregation order produces bit-identical counts/xor values. These
         // are transient scratch arrays, not solver state. Low-cardinality
@@ -4979,10 +5498,52 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
         // addresses that atomic contention is negligible.
         constexpr int kAtomicMinGroups = 65536;
         for (std::size_t d = 0; d < indexers.size(); ++d) {
-            const int groups = indexers[d].num_groups;
-            const int* __restrict gid = indexers[d].group_ids.data();
+            const ScanDim& dim = indexers[d];
+            const int groups = dim.groups;
             int* __restrict cnt = counts[d].data();
             int* __restrict axr = active_xor[d].data();
+            if (dim.ascending && dim.renumbered.group_ids.empty()) {
+                // Sorted rows: a level is one run. Its count is the length
+                // of the run and its xor the xor of consecutive integers,
+                // which has a closed form.
+                const int* const raw = dim.raw;
+                const int shift = dim.shift;
+                std::vector<int> run_begin(static_cast<std::size_t>(groups), -1);
+                int* const begin_of = run_begin.data();
+#pragma omp parallel num_threads(scan_threads)
+                {
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        if (i == 0 || raw[i - 1] != raw[i]) {
+                            begin_of[raw[i] - shift] = i;
+                        }
+                    }
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        if (i + 1 == n || raw[i + 1] != raw[i]) {
+                            const int g = raw[i] - shift;
+                            const int first = begin_of[g];
+                            auto xor_to = [](int k) {
+                                // xor of 0, 1, ..., k
+                                switch (k & 3) {
+                                    case 0: return k;
+                                    case 1: return 1;
+                                    case 2: return k + 1;
+                                    default: return 0;
+                                }
+                            };
+                            cnt[g] = i - first + 1;
+                            axr[g] = xor_to(i) ^ (first > 0 ? xor_to(first - 1) : 0);
+                        }
+                    }
+                }
+                continue;
+            }
+            const int* __restrict gid =
+                dim.renumbered.group_ids.empty() ? nullptr
+                                                 : dim.renumbered.group_ids.data();
+            const int* __restrict raw = dim.raw;
+            const int shift = dim.shift;
             if (groups >= kAtomicMinGroups) {
                 if (observer) {
                     observer->begin_region(scan_threads);
@@ -4996,7 +5557,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                             observer->observe_work();
                             observed_work = true;
                         }
-                        const int g = gid[i];
+                        const int g = gid ? gid[i] : raw[i] - shift;
 #pragma omp atomic
                         cnt[g] += 1;
 #pragma omp atomic
@@ -5011,6 +5572,8 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                     static_cast<std::size_t>(scan_threads));
                 std::vector<std::vector<int>> axr_tls(
                     static_cast<std::size_t>(scan_threads));
+                std::vector<std::exception_ptr> allocation_failures(
+                    static_cast<std::size_t>(scan_threads));
                 if (observer) {
                     observer->begin_region(scan_threads);
                 }
@@ -5019,8 +5582,20 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                     const int tid = omp_get_thread_num();
                     std::vector<int>& c = cnt_tls[static_cast<std::size_t>(tid)];
                     std::vector<int>& a = axr_tls[static_cast<std::size_t>(tid)];
-                    c.assign(static_cast<std::size_t>(groups), 0);
-                    a.assign(static_cast<std::size_t>(groups), 0);
+                    try {
+                        c.assign(static_cast<std::size_t>(groups), 0);
+                        a.assign(static_cast<std::size_t>(groups), 0);
+                    } catch (...) {
+                        allocation_failures[static_cast<std::size_t>(tid)] = std::current_exception();
+                    }
+                    // Every thread reaches the barrier, including a failed
+                    // allocator. All then enter or skip the worksharing loop.
+#pragma omp barrier
+                    const bool ready = std::none_of(allocation_failures.begin(),
+                        allocation_failures.end(), [](const std::exception_ptr& failure) {
+                            return static_cast<bool>(failure);
+                        });
+                    if (ready) {
                     bool observed_work = false;
 #pragma omp for schedule(static)
                     for (int i = 0; i < n; ++i) {
@@ -5028,14 +5603,17 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                             observer->observe_work();
                             observed_work = true;
                         }
-                        const int g = gid[i];
+                        const int g = gid ? gid[i] : raw[i] - shift;
                         c[static_cast<std::size_t>(g)] += 1;
                         a[static_cast<std::size_t>(g)] ^= i;
+                    }
                     }
                 }
                 if (observer) {
                     observer->end_region();
                 }
+                for (const auto& failure : allocation_failures)
+                    if (failure) std::rethrow_exception(failure);
                 for (int t = 0; t < scan_threads; ++t) {
                     const std::vector<int>& c = cnt_tls[static_cast<std::size_t>(t)];
                     const std::vector<int>& a = axr_tls[static_cast<std::size_t>(t)];
@@ -5054,13 +5632,15 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
     {
         for (int i = 0; i < n; ++i) {
             for (std::size_t d = 0; d < indexers.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
+                const int g = indexers[d].level(i);
                 counts[d][static_cast<std::size_t>(g)] += 1;
                 active_xor[d][static_cast<std::size_t>(g)] ^= i;
             }
         }
     }
 
+    cpu_profile_log_elapsed("singleton_counts", scan_t0);
+    scan_t0 = std::chrono::steady_clock::now();
     std::vector<int> current;
     std::vector<int> next;
     std::vector<int> to_drop;
@@ -5087,7 +5667,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
             }
             bool singleton = false;
             for (std::size_t d = 0; d < fes.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
+                const int g = indexers[d].level(i);
                 if (counts[d][static_cast<std::size_t>(g)] == 1) {
                     singleton = true;
                     break;
@@ -5106,7 +5686,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
 
         for (const int i : to_drop) {
             for (std::size_t d = 0; d < fes.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
+                const int g = indexers[d].level(i);
                 int& count = counts[d][static_cast<std::size_t>(g)];
                 count -= 1;
                 active_xor[d][static_cast<std::size_t>(g)] ^= i;
@@ -5117,7 +5697,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
         next.reserve(to_drop.size());
         for (const int i : to_drop) {
             for (std::size_t d = 0; d < fes.size(); ++d) {
-                const int g = indexers[d].group_ids[static_cast<std::size_t>(i)];
+                const int g = indexers[d].level(i);
                 if (counts[d][static_cast<std::size_t>(g)] == 1) {
                     next.push_back(active_xor[d][static_cast<std::size_t>(g)]);
                 }
@@ -5125,6 +5705,7 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
         }
         current.swap(next);
     }
+    cpu_profile_log_elapsed("singleton_waves", scan_t0);
 
     if (dropped_out) {
         *dropped_out = dropped_total;
@@ -5196,24 +5777,10 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
 
     std::vector<FeIndexerLite> indexers(fes.size());
 #ifdef HDFE_USE_OPENMP
-    if (scan_threads > 1 && fes.size() > 1 &&
+    if (scan_threads > 1 &&
         (explicit_thread_request || n >= kParallelScanMinObs)) {
-        const int dim_threads =
-            std::min<int>(scan_threads, static_cast<int>(fes.size()));
-        if (observer) {
-            observer->begin_region(dim_threads);
-        }
-#pragma omp parallel for schedule(dynamic, 1) num_threads(dim_threads)
-        for (std::ptrdiff_t d = 0;
-             d < static_cast<std::ptrdiff_t>(fes.size()); ++d) {
-            if (observer) {
-                observer->observe_work();
-            }
-            indexers[static_cast<std::size_t>(d)] =
-                build_indexer_lite(fes[static_cast<std::size_t>(d)]);
-        }
-        if (observer) {
-            observer->end_region();
+        for (std::size_t d = 0; d < fes.size(); ++d) {
+            indexers[d] = build_indexer_lite_team(fes[d], scan_threads, observer);
         }
     } else
 #endif
@@ -5403,8 +5970,63 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons_fweights(
     return keep;
 }
 
-std::vector<int> build_keep_indices(const std::vector<uint8_t>& keep) {
+// The rows a team copies when the sample is filtered. Copies and counts
+// are exact, so the team changes nothing but the time; `threads` is the
+// resolved request of the caller and 1 keeps the serial loops.
+struct RowFilterTeam {
+    int threads = 1;
+    bool explicit_request = false;
+
+    // Small inputs stay serial unless the team was asked for.
+    bool shares(std::size_t rows) const {
+        constexpr std::size_t kParallelFilterMinRows = 4194304;
+        return threads > 1 && (explicit_request || rows >= kParallelFilterMinRows);
+    }
+};
+
+std::vector<int> build_keep_indices(const std::vector<uint8_t>& keep,
+                                    const RowFilterTeam& team = {}) {
     std::vector<int> out;
+#ifdef HDFE_USE_OPENMP
+    if (team.shares(keep.size())) {
+        // Count by block, place the blocks, then fill: the indices come out
+        // in ascending order whatever the team.
+        const int n = static_cast<int>(keep.size());
+        const int blocks = detail::deterministic_parallel_chunk_count(n);
+        std::vector<int> begin(static_cast<std::size_t>(blocks) + 1U, 0);
+        const uint8_t* const flags = keep.data();
+#pragma omp parallel for schedule(static) num_threads(team.threads)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int kept = 0;
+            for (int i = first; i < last; ++i) {
+                kept += flags[i] ? 1 : 0;
+            }
+            begin[static_cast<std::size_t>(block) + 1U] = kept;
+        }
+        for (int block = 0; block < blocks; ++block) {
+            begin[static_cast<std::size_t>(block) + 1U] +=
+                begin[static_cast<std::size_t>(block)];
+        }
+        out.resize(static_cast<std::size_t>(begin[static_cast<std::size_t>(blocks)]));
+        int* const indices = out.data();
+#pragma omp parallel for schedule(static) num_threads(team.threads)
+        for (int block = 0; block < blocks; ++block) {
+            const int first = detail::deterministic_parallel_chunk_begin(n, block, blocks);
+            const int last = detail::deterministic_parallel_chunk_end(n, block, blocks);
+            int position = begin[static_cast<std::size_t>(block)];
+            for (int i = first; i < last; ++i) {
+                if (flags[i]) {
+                    indices[position++] = i;
+                }
+            }
+        }
+        return out;
+    }
+#else
+    (void)team;
+#endif
     out.reserve(keep.size());
     for (std::size_t i = 0; i < keep.size(); ++i) {
         if (keep[i]) {
@@ -5414,9 +6036,32 @@ std::vector<int> build_keep_indices(const std::vector<uint8_t>& keep) {
     return out;
 }
 
+template <typename Value>
+void filter_values(const Value* from,
+                   Value* to,
+                   const std::vector<int>& idx,
+                   const RowFilterTeam& team) {
+    const std::ptrdiff_t rows = static_cast<std::ptrdiff_t>(idx.size());
+    const int* const source = idx.data();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team.threads) \
+    if(team.shares(idx.size()))
+#else
+    (void)team;
+#endif
+    for (std::ptrdiff_t r = 0; r < rows; ++r) {
+        to[r] = from[source[r]];
+    }
+}
+
 Eigen::VectorXd filter_vector(const Eigen::Ref<const Eigen::VectorXd>& v,
-                              const std::vector<int>& idx) {
+                              const std::vector<int>& idx,
+                              const RowFilterTeam& team = {}) {
     Eigen::VectorXd out(static_cast<Eigen::Index>(idx.size()));
+    if (v.innerStride() == 1) {
+        filter_values(v.data(), out.data(), idx, team);
+        return out;
+    }
     for (std::size_t r = 0; r < idx.size(); ++r) {
         out(static_cast<Eigen::Index>(r)) = v(idx[r]);
     }
@@ -5424,8 +6069,13 @@ Eigen::VectorXd filter_vector(const Eigen::Ref<const Eigen::VectorXd>& v,
 }
 
 Eigen::VectorXi filter_vector(const Eigen::Ref<const Eigen::VectorXi>& v,
-                              const std::vector<int>& idx) {
+                              const std::vector<int>& idx,
+                              const RowFilterTeam& team = {}) {
     Eigen::VectorXi out(static_cast<Eigen::Index>(idx.size()));
+    if (v.innerStride() == 1) {
+        filter_values(v.data(), out.data(), idx, team);
+        return out;
+    }
     for (std::size_t r = 0; r < idx.size(); ++r) {
         out(static_cast<Eigen::Index>(r)) = v(idx[r]);
     }
@@ -5433,8 +6083,16 @@ Eigen::VectorXi filter_vector(const Eigen::Ref<const Eigen::VectorXi>& v,
 }
 
 Eigen::MatrixXd filter_rows(const Eigen::Ref<const Eigen::MatrixXd>& m,
-                            const std::vector<int>& idx) {
+                            const std::vector<int>& idx,
+                            const RowFilterTeam& team = {}) {
     Eigen::MatrixXd out(static_cast<Eigen::Index>(idx.size()), m.cols());
+    if (m.innerStride() == 1) {
+        // One column at a time: every column is one stream.
+        for (Eigen::Index j = 0; j < m.cols(); ++j) {
+            filter_values(m.data() + j * m.outerStride(), out.col(j).data(), idx, team);
+        }
+        return out;
+    }
     for (std::size_t r = 0; r < idx.size(); ++r) {
         out.row(static_cast<Eigen::Index>(r)) = m.row(idx[r]);
     }
@@ -5443,14 +6101,15 @@ Eigen::MatrixXd filter_rows(const Eigen::Ref<const Eigen::MatrixXd>& m,
 
 std::vector<detail::HeterogeneousSlopeTerm> filter_slope_terms(
     const std::vector<detail::HeterogeneousSlopeTerm>& slopes,
-    const std::vector<int>& idx) {
+    const std::vector<int>& idx,
+    const RowFilterTeam& team = {}) {
     std::vector<detail::HeterogeneousSlopeTerm> out;
     out.reserve(slopes.size());
     for (const auto& slope : slopes) {
         detail::HeterogeneousSlopeTerm filtered;
         filtered.fe_index = slope.fe_index;
         filtered.include_intercept = slope.include_intercept;
-        filtered.values = filter_vector(slope.values, idx);
+        filtered.values = filter_vector(slope.values, idx, team);
         out.push_back(std::move(filtered));
     }
     return out;
@@ -8491,18 +9150,174 @@ detail::AbsorptionResult refine_n1_absorption(
     const HdfeOptions& options, AbsorptionMethod method,
     const std::vector<detail::HeterogeneousSlopeTerm>& slopes,
     const detail::GroupIndividualStructure* gi,
-    const detail::AbsorptionResult& previous, int remaining) {
+    const detail::AbsorptionResult& previous, int remaining,
+    const Eigen::VectorXd* previous_coefficients = nullptr,
+    const std::vector<int>* previous_columns = nullptr) {
     HdfeOptions continuation = options;
     continuation.max_iter = remaining;
     continuation.absorption_method = method;
     continuation.from_auto = false;
     if (!previous.sweep_order_used.empty())
         continuation.sweep_order_override = previous.sweep_order_used;
+    detail::N1ContinuationPredicate necessary_moments;
+    Eigen::VectorXd refinement_coefficients;
+    std::vector<FeIndexMap> refinement_maps;
+    // A failed three-FE CUDA fit uses the graph-preconditioned correction.
+    // Reconstruct from the original inputs to avoid preserving orthogonal
+    // drift from the failed primary transform. Other continuations are unchanged.
+    const bool three_fe_cg = fes.size() == 3 &&
+        (method == AbsorptionMethod::GaussSeidel ||
+         method == AbsorptionMethod::SymmetricGaussSeidel);
+    if (!gi && (fes.size() == 2 || three_fe_cg) && !weights && slopes.empty() && previous.gpu_used &&
+        !options.retain_fixed_effects &&
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+        previous_coefficients && previous_columns &&
+        previous_coefficients->size() == static_cast<int>(previous_columns->size())) {
+        refinement_coefficients = Eigen::VectorXd::Zero(previous.X_tilde.cols());
+        for (std::size_t j = 0; j < previous_columns->size(); ++j)
+            refinement_coefficients[(*previous_columns)[j]] = (*previous_coefficients)[j];
+        refinement_maps.reserve(fes.size());
+        for (const auto& fe : fes) {
+            refinement_maps.push_back(build_fe_index_map(fe));
+            // Only stable groups-by-level CSR is needed during the continuation.
+            refinement_maps.back().level_index.resize(0);
+            refinement_maps.back().raw_values.resize(0);
+        }
+        necessary_moments = [&](const Eigen::VectorXd& yr, const Eigen::MatrixXd& xr) {
+            const int rows = static_cast<int>(yr.size());
+            const int threads = std::max(1, options.num_threads);
+            Eigen::VectorXd residual(rows);
+            double maximum = 0.0;
+            std::atomic<bool> finite{true};
+            if (options.parallel_observer) options.parallel_observer->begin_region(threads);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads) reduction(max:maximum)
+#endif
+            for (int i = 0; i < rows; ++i) {
+                if (options.parallel_observer) options.parallel_observer->observe_work();
+                double value = yr[i];
+                for (int j = 0; j < xr.cols(); ++j)
+                    value -= xr(i, j) * refinement_coefficients[j];
+                residual[i] = value;
+                if (!hdfe::detail::ieee_finite(value)) finite.store(false, std::memory_order_relaxed);
+                maximum = std::max(maximum, std::abs(value));
+            }
+            if (options.parallel_observer) options.parallel_observer->end_region();
+            if (!finite.load(std::memory_order_relaxed)) return false;
+            if (maximum == 0.0) return true;
+            const int chunks = detail::deterministic_parallel_chunk_count(rows);
+            std::vector<long double> norm_parts(static_cast<std::size_t>(chunks), 0.0L);
+            if (options.parallel_observer) options.parallel_observer->begin_region(threads);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                if (options.parallel_observer) options.parallel_observer->observe_work();
+                const int begin = detail::deterministic_parallel_chunk_begin(rows, chunk, chunks);
+                const int end = detail::deterministic_parallel_chunk_end(rows, chunk, chunks);
+                long double sum = 0.0L;
+                for (int i = begin; i < end; ++i) {
+                    residual[i] /= maximum;
+                    const long double value = residual[i];
+                    sum += value * value;
+                }
+                norm_parts[static_cast<std::size_t>(chunk)] = sum;
+            }
+            if (options.parallel_observer) options.parallel_observer->end_region();
+            long double norm_squared = 0.0L;
+            for (const auto value : norm_parts) norm_squared += value;
+            long double worst = 0.0L;
+            for (const auto& map : refinement_maps) {
+                const int levels = static_cast<int>(map.level_ptr.size()) - 1;
+                if (options.parallel_observer) options.parallel_observer->begin_region(threads);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads) reduction(max:worst)
+#endif
+                for (int g = 0; g < levels; ++g) {
+                    if (options.parallel_observer) options.parallel_observer->observe_work();
+                    const int begin = map.level_ptr[g], end = map.level_ptr[g + 1];
+                    long double sum = 0.0L;
+                    for (int i = begin; i < end; ++i) sum += residual[map.level_groups[i]];
+                    if (end > begin)
+                        worst = std::max(worst, std::abs(sum) /
+                            std::sqrt(static_cast<long double>(end - begin) * norm_squared));
+                }
+                if (options.parallel_observer) options.parallel_observer->end_region();
+            }
+            const double target = n1_tolerance(options);
+            if (read_env_bool("XHDFE_ORIGINAL_NORMAL_DIAG").value_or(false))
+                std::cerr << "xhdfe n1_continuation_fe maximum=" << static_cast<double>(worst)
+                          << " target=" << target << " pass=" << (worst <= target) << '\n';
+            if (worst > target) return false;
+
+            // At the final within-OLS solution, Xr'u=0, hence X'u=(X-Xr)'u.
+            // Check the absorption contribution using the previous slopes;
+            // the caller still solves OLS and applies the unchanged full check.
+            const int p = static_cast<int>(previous_columns->size());
+            constexpr int block = 4096;
+            const int blocks = rows / block + (rows % block != 0);
+            const int width = 4 * p + 1;
+            std::vector<long double> partials(static_cast<std::size_t>(blocks) * width, 0.0L);
+            if (options.parallel_observer) options.parallel_observer->begin_region(threads);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+            for (int chunk = 0; chunk < blocks; ++chunk) {
+                if (options.parallel_observer) options.parallel_observer->observe_work();
+                long double* out = partials.data() + static_cast<std::size_t>(chunk) * width;
+                const int first = chunk * block, last = std::min(rows, first + block);
+                for (int i = first; i < last; ++i) {
+                    const long double u = static_cast<long double>(residual[i]) * maximum;
+                    long double formation = std::abs(static_cast<long double>(yr[i]));
+                    for (int j = 0; j < xr.cols(); ++j)
+                        formation += std::abs(static_cast<long double>(xr(i,j)) * refinement_coefficients[j]);
+                    for (int j = 0; j < p; ++j) {
+                        const int column = (*previous_columns)[static_cast<std::size_t>(j)];
+                        const long double original = X(i,column);
+                        const long double removed = original - xr(i,column);
+                        out[4*j] += removed*u;
+                        out[4*j+1] += original*original;
+                        out[4*j+2] += std::abs(removed*u);
+                        out[4*j+3] += std::abs(removed)*formation;
+                    }
+                    out[4*p] += static_cast<long double>(y[i])*y[i];
+                }
+            }
+            if (options.parallel_observer) options.parallel_observer->end_region();
+            std::vector<long double> total(width, 0.0L);
+            for (int chunk = 0; chunk < blocks; ++chunk)
+                for (int j = 0; j < width; ++j)
+                    total[j] += partials[static_cast<std::size_t>(chunk)*width+j];
+            const long double unit = std::numeric_limits<double>::epsilon()/2;
+            const long double mu = (block + blocks + 4)*unit;
+            const long double gamma = mu/(1-mu);
+            const long double formation_gamma = detail::N1NormalEvidence::gamma(2*xr.cols()+2);
+            const long double normal_target = std::max(8.0*std::max(0.0,target),
+                64.0*std::numeric_limits<double>::epsilon());
+            bool ready = true;
+            long double worst_normal = 0.0L;
+            for (int j = 0; j < p; ++j) {
+                const long double scale = std::sqrt(total[4*j+1])*std::sqrt(total[4*p]);
+                const long double arithmetic = gamma*(total[4*j+2]+normal_target*scale) +
+                                               formation_gamma*total[4*j+3];
+                const long double defect = std::abs(total[4*j]);
+                if (scale > 0.0L) worst_normal = std::max(worst_normal, defect/scale);
+                if (!(defect <= normal_target*scale + arithmetic)) ready = false;
+            }
+            if (read_env_bool("XHDFE_ORIGINAL_NORMAL_DIAG").value_or(false))
+                std::cerr << "xhdfe n1_continuation_normal relative=" << static_cast<double>(worst_normal)
+                          << " target=" << static_cast<double>(normal_target) << " pass=" << ready << '\n';
+            return ready;
+        };
+    }
+    detail::ScopedN1Continuation continuation_scope(necessary_moments ? &necessary_moments : nullptr);
     detail::AbsorptionResult next = gi
         ? detail::absorb_fixed_effects_group_individual(
               previous.y_tilde, previous.X_tilde, fes, *gi, weights, continuation, method)
-        : detail::absorb_fixed_effects_v6(
-              previous.y_tilde, previous.X_tilde, fes, weights, continuation, method, slopes);
+        : (three_fe_cg && necessary_moments)
+            ? detail::absorb_fixed_effects_v6(y, X, fes, weights, continuation, method, slopes)
+            : detail::absorb_fixed_effects_v6(
+                  previous.y_tilde, previous.X_tilde, fes, weights, continuation, method, slopes);
     if (next.gpu_used != previous.gpu_used ||
         next.schwarz_used != previous.schwarz_used ||
         next.mlsmr_used != previous.mlsmr_used)
@@ -11033,6 +11848,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
+        cpu_profile_log_elapsed("collinearity_scales", collinearity_t0);
         Eigen::MatrixXd xtx_used;
         Eigen::VectorXd xty_used;
         bool have_precomputed = false;
@@ -12076,6 +12892,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     }
                 }
             }
+            cpu_profile_log_elapsed("post_dof_nested", post_phase_t0);
 
             FeDofInfo dof;
             const bool can_skip_full_dof =
@@ -12110,7 +12927,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     const FeDofInfo dof_nonnested =
                         compute_fe_dof_for_intercept_dims(
                             fes_nonnested, levels_nonnested, mobility_method,
-                            slopes_nonnested, nullptr, tuned.num_threads);
+                            slopes_nonnested, nullptr, tuned.num_threads,
+                            nullptr, nullptr, tuned.num_threads_explicit);
                     for (std::size_t pos = 0; pos < map_nonnested.size(); ++pos) {
                         const int orig = map_nonnested[pos];
                         dof.redundant[static_cast<std::size_t>(orig)] =
@@ -12121,7 +12939,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 dof = compute_fe_dof_for_intercept_dims(
                     fes_use, absorption.fe_levels, mobility_method,
                     slope_only_flags, groupvar_ptr, tuned.num_threads,
-                    first_pair_stats_ptr, w_ptr);
+                    first_pair_stats_ptr, w_ptr, tuned.num_threads_explicit);
 
                 // If some fixed effects are nested within the clustering variable, reghdfe does not
                 // use them to compute mobility-group redundancies for the remaining dimensions.
@@ -12147,7 +12965,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         const FeDofInfo dof_nonnested =
                             compute_fe_dof_for_intercept_dims(
                                 fes_nonnested, levels_nonnested, mobility_method,
-                                slopes_nonnested, nullptr, tuned.num_threads);
+                                slopes_nonnested, nullptr, tuned.num_threads,
+                                nullptr, nullptr, tuned.num_threads_explicit);
                         for (std::size_t pos = 0; pos < map_nonnested.size(); ++pos) {
                             const int orig = map_nonnested[pos];
                             dof.redundant[static_cast<std::size_t>(orig)] =
@@ -12446,11 +13265,24 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 results_.std_errors[intercept]=std::sqrt(std::max(0.0,variance));
                 intercept_cov_updated=true;
             } else {
+                const bool corrected_three_fe_cuda = n1_budget.used &&
+                    absorption.gpu_used && fes_use.size() == 3 &&
+                    (method_used_ == AbsorptionMethod::GaussSeidel ||
+                     method_used_ == AbsorptionMethod::SymmetricGaussSeidel) &&
+                    !wants_iv && !w_ptr && slope_terms.empty() &&
+                    !tuned.retain_fixed_effects &&
+                    tuned.tolerance_mode == ToleranceMode::ReghdfeComparable;
+                const bool cluster_residual_sums_zero = corrected_three_fe_cuda &&
+                    tuned.se_type == StandardErrorType::Cluster && c_ptr && c_ptr->size() == 1 &&
+                    (nested_dof_levels > 0 ||
+                     std::any_of(fes_use.begin(), fes_use.end(), [&](const Eigen::VectorXi& fe) {
+                        return fe_nested_within_cluster(fe, c_ptr->front());
+                    }));
                 intercept_cov_updated = update_intercept_covariance(
                     results_, X_use, score_X_tilde_used, ols_result.residuals, w_ptr,
                     kept_slope_cols, ols_result, tuned.se_type, c_ptr, tuned.ssc_g_df,
                     tuned.ssc_g_adj, results_.sigma2, robust_scale, cluster_ratio,
-                    tuned.weights_are_frequencies);
+                    tuned.weights_are_frequencies, cluster_residual_sums_zero);
             }
             cpu_profile_log_elapsed("post_intercept_cov", post_phase_t0);
 
@@ -12516,7 +13348,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             // reghdfe (reghdfe_fix_psd with report_constant): clamp negative
             // eigenvalues on the FULL matrix (including the recovered _cons
             // row/col), then re-fix the slope block separately so slope
-            // inference matches the constant-free correction. reghdfe runs the
+            // inference matches the constant-free correction. Repair the
+            // intercept's range/Schur condition after replacing that block.
+            // reghdfe runs the
             // clamp on STANDARDIZED data (each regressor divided by its raw
             // sample stdev), and the clamp does not commute with per-column
             // rescaling, so the same metric is used here (the congruence
@@ -12544,43 +13378,83 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             const bool full_psd_ready = options_.fit_intercept && cov_cols > 0 &&
                                         intercept_cov_updated &&
                                         hdfe::detail::ieee_all_finite(results_.covariance);
-            if (full_psd_ready && iv_covariance_wide.values.size()) {
-                // The wide IV solve already computed this augmented covariance.
-                // Do not round it before deciding whether a PSD correction is
-                // necessary: conversion back to wide cannot recover lost bits.
-                using WideMatrix = detail::OlsWideCovariance::Matrix;
-                const int active = static_cast<int>(kept_slope_cols.size());
-                WideMatrix cov_full = WideMatrix::Zero(cov_cols, cov_cols);
-                for (int i = 0; i <= active; ++i) {
-                    const int row = i == active ? cov_cols-1 : kept_slope_cols[i];
-                    for (int j = 0; j <= active; ++j) {
-                        const int col = j == active ? cov_cols-1 : kept_slope_cols[j];
-                        cov_full(row,col) = iv_covariance_wide.values(i,j) *
-                                            detail::OlsWide(cluster_ratio);
+            if (full_psd_ready) {
+                // Equal counts for every non-empty cluster intersection prove
+                // identical partitions up to relabelling. In IV, their CGM
+                // sandwich is a single PSD sandwich: clipping roundoff in an
+                // ill-conditioned slope block can corrupt the small constant
+                // variance. Preserve the existing slope correction and the
+                // already accurate intercept row in this exact special case.
+                const auto& combinations = results_.cluster_combo_counts;
+                const bool iv_single_partition = wants_iv &&
+                    !combinations.empty() && combinations.front() > 1 &&
+                    std::all_of(combinations.begin(), combinations.end(),
+                        [&](int count) { return count == combinations.front(); });
+                // Distinct partitions can also have positive CGM meat. The
+                // wide solve classifies its augmented score matrix before the
+                // weak-design bread and binary64 rounding. Preserve that
+                // accurate intercept row while retaining the slope policy.
+                const bool preserve_iv_intercept = iv_single_partition ||
+                    (wants_iv && iv_intercept_covariance.size() == cov_cols &&
+                     ols_result.augmented_meat_positive_definite);
+                // The wide IV solve may have retained the augmented covariance
+                // (cluster-influence outer products, no bread*meat*bread
+                // cancellation) in OlsWide. Clip and repair that matrix under
+                // the same rule before any binary64 rounding: conversion back
+                // to wide cannot recover lost bits. Ordinary fits keep the
+                // double path.
+                const bool have_wide = wants_iv && iv_covariance_wide.values.size() > 0 &&
+                    iv_covariance_wide.values.rows() ==
+                        static_cast<Eigen::Index>(kept_slope_cols.size()) + 1 &&
+                    iv_covariance_wide.values.cols() == iv_covariance_wide.values.rows();
+                if (have_wide) {
+                    using WideMatrix = detail::OlsWideCovariance::Matrix;
+                    const int active = static_cast<int>(kept_slope_cols.size());
+                    WideMatrix cov_full = WideMatrix::Zero(cov_cols, cov_cols);
+                    for (int i = 0; i <= active; ++i) {
+                        const int row = i == active ? cov_cols - 1
+                            : kept_slope_cols[static_cast<std::size_t>(i)];
+                        for (int j = 0; j <= active; ++j) {
+                            const int col = j == active ? cov_cols - 1
+                                : kept_slope_cols[static_cast<std::size_t>(j)];
+                            cov_full(row, col) = iv_covariance_wide.values(i, j) *
+                                                 detail::OlsWide(cluster_ratio);
+                        }
                     }
-                }
-                WideMatrix cov_block = cov_full.topLeftCorner(slope_cols,slope_cols);
-                const bool full_fixed = detail::fix_wide_covariance_psd(cov_full,psd_scale);
-                const bool slopes_fixed = detail::fix_wide_covariance_psd(
-                    cov_block,psd_scale.head(slope_cols));
-                cov_full.topLeftCorner(slope_cols,slope_cols) = cov_block;
-                results_.covariance = cov_full.cast<double>();
-                if (!hdfe::detail::ieee_all_finite(results_.covariance))
-                    throw std::runtime_error("Multiway covariance exceeded its numerical range; no estimates returned");
-                results_.std_errors = results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
-                results_.vcv_psd_fixed = full_fixed || slopes_fixed;
-            } else if (full_psd_ready) {
-                Eigen::MatrixXd cov_full = results_.covariance;
-                Eigen::MatrixXd cov_block =
-                    cov_full.topLeftCorner(slope_cols, slope_cols);
-                const bool full_fixed = fix_psd_scaled(cov_full, psd_scale);
-                const bool slopes_fixed = slope_cols > 0 &&
-                    fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
-                if (full_fixed || slopes_fixed) {
-                    cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
-                    results_.covariance = cov_full;
-                    results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
-                    results_.vcv_psd_fixed = true;
+                    const WideMatrix original_slopes =
+                        cov_full.topLeftCorner(slope_cols, slope_cols);
+                    WideMatrix cov_block = original_slopes;
+                    const bool full_fixed = !preserve_iv_intercept &&
+                        detail::fix_wide_covariance_psd(cov_full, psd_scale);
+                    const bool slopes_fixed = slope_cols > 0 &&
+                        detail::fix_wide_covariance_psd(cov_block, psd_scale.head(slope_cols));
+                    if (full_fixed || slopes_fixed) {
+                        cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
+                        if (!preserve_iv_intercept)
+                            repair_intercept_covariance_wide(cov_full, original_slopes, psd_scale);
+                        results_.vcv_psd_fixed = true;
+                    }
+                    results_.covariance = cov_full.cast<double>();
+                    if (!hdfe::detail::ieee_all_finite(results_.covariance))
+                        throw std::runtime_error("Multiway covariance exceeded its numerical range; no estimates returned");
+                    results_.std_errors = results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
+                } else {
+                    Eigen::MatrixXd cov_full = results_.covariance;
+                    Eigen::MatrixXd cov_block =
+                        cov_full.topLeftCorner(slope_cols, slope_cols);
+                    const bool full_fixed = !preserve_iv_intercept &&
+                        fix_psd_scaled(cov_full, psd_scale);
+                    const bool slopes_fixed = slope_cols > 0 &&
+                        fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
+                    if (full_fixed || slopes_fixed) {
+                        cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
+                        if (!preserve_iv_intercept)
+                            repair_intercept_covariance(cov_full,
+                                results_.covariance.topLeftCorner(slope_cols, slope_cols), psd_scale);
+                        results_.covariance = cov_full;
+                        results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
+                        results_.vcv_psd_fixed = true;
+                    }
                 }
             } else if (slope_cols > 0) {
                 Eigen::MatrixXd cov_block =
@@ -12595,6 +13469,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
 
         post_phase_t0 = std::chrono::steady_clock::now();
+        if (tuned.dkraay_bandwidth >= 0) {
+            detail::apply_dkraay_covariance(results_, ols_result, score_X_tilde_used,
+                X_use, w_ptr, c_ptr, kept_slope_cols, drop_intercept, tuned,
+                wants_iv && iv_score_low_storage.size() ? &iv_score_low_storage : nullptr);
+        }
         recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
                             results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
         normalize_nonfrequency_weighted_fit_stats(
@@ -12627,13 +13506,20 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             Eigen::MatrixXd original_design = drop_intercept ? Eigen::MatrixXd(X_use)
                 : maybe_add_intercept(X_use, options_.fit_intercept);
             if (inst_use && inst_use->cols()) original_design = append_matrix(original_design, inst_use);
+            const bool standard_gpu_moments = absorption.gpu_used && !wants_iv &&
+                !has_slopes_use && w_ptr == nullptr && !tuned.retain_fixed_effects &&
+                tuned.tolerance_mode == ToleranceMode::ReghdfeComparable;
             absorption = refine_n1_absorption(y_use, original_design, fes_use, w_ptr,
-                tuned, method_used_, slope_terms, nullptr, absorption, remaining);
+                tuned, method_used_, slope_terms, nullptr, absorption, remaining,
+                standard_gpu_moments ? &ols_result.coefficients : nullptr,
+                standard_gpu_moments ? &kept_slope_cols : nullptr);
             continue;
         }
         if (detail::ordinary_audit_enabled()) {
             detail::OrdinaryAuditReceipt audit("fit",tuned,absorption,cache_hit,n1_budget.used ? 1 : 0);
-            if (has_slopes_use) {
+            if (tuned.dkraay_bandwidth >= 0) {
+                audit.unsupported("driscoll_kraay_covariance_use_offline_battery");
+            } else if (has_slopes_use) {
                 audit.unsupported("heterogeneous_slopes");
             } else {
                 Eigen::MatrixXd audit_design=drop_intercept ? Eigen::MatrixXd(X_use)
@@ -12769,44 +13655,47 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         if (singletons_dropped_rows > 0) {
             const auto filter_t0 = std::chrono::steady_clock::now();
-            kept_idx = build_keep_indices(keep);
-            y_work = filter_vector(y, kept_idx);
-            X_work = filter_rows(X, kept_idx);
+            {
+                const RowFilterTeam team{preprocessing_thread_resolution.effective,
+                                         options_.num_threads > 0};
+                ScopedParallelRuntime filter_runtime(
+                    team.threads, preprocessing_thread_resolution.capacity);
+                kept_idx = build_keep_indices(keep, team);
+                y_work = filter_vector(y, kept_idx, team);
+                X_work = filter_rows(X, kept_idx, team);
 
-            std::vector<Eigen::VectorXi> fes_tmp;
-            fes_tmp.reserve(fes.size());
-            for (const auto& fe : fes) {
-                fes_tmp.push_back(filter_vector(fe, kept_idx));
-            }
-            fes_work = std::move(fes_tmp);
-
-            const Eigen::VectorXd* w_ptr = nullptr;
-            if (weights) {
-                weights_work = filter_vector(*weights, kept_idx);
-                w_ptr = &(*weights_work);
-            }
-
-            const std::vector<Eigen::VectorXi>* c_ptr = clusters;
-            if (clusters && !clusters->empty()) {
-                std::vector<Eigen::VectorXi> clusters_tmp;
-                clusters_tmp.reserve(clusters->size());
-                for (const auto& c : *clusters) {
-                    clusters_tmp.push_back(filter_vector(c, kept_idx));
+                std::vector<Eigen::VectorXi> fes_tmp;
+                fes_tmp.reserve(fes.size());
+                for (const auto& fe : fes) {
+                    fes_tmp.push_back(filter_vector(fe, kept_idx, team));
                 }
-                clusters_work = std::move(clusters_tmp);
-                c_ptr = &(*clusters_work);
-            }
+                fes_work = std::move(fes_tmp);
 
-            const Eigen::MatrixXd* inst_use = inst_ptr;
-            if (inst_ptr) {
-                instruments_work = filter_rows(*inst_ptr, kept_idx);
-                inst_use = &(*instruments_work);
+                if (weights) {
+                    weights_work = filter_vector(*weights, kept_idx, team);
+                }
+                if (clusters && !clusters->empty()) {
+                    std::vector<Eigen::VectorXi> clusters_tmp;
+                    clusters_tmp.reserve(clusters->size());
+                    for (const auto& c : *clusters) {
+                        clusters_tmp.push_back(filter_vector(c, kept_idx, team));
+                    }
+                    clusters_work = std::move(clusters_tmp);
+                }
+                if (inst_ptr) {
+                    instruments_work = filter_rows(*inst_ptr, kept_idx, team);
+                }
+                if (has_slopes) {
+                    slopes_work = filter_slope_terms(*slopes_in, kept_idx, team);
+                }
             }
-            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use = slopes_in;
-            if (has_slopes) {
-                slopes_work = filter_slope_terms(*slopes_in, kept_idx);
-                slopes_use = &(*slopes_work);
-            }
+            const Eigen::VectorXd* w_ptr = weights ? &(*weights_work) : nullptr;
+            const std::vector<Eigen::VectorXi>* c_ptr =
+                (clusters && !clusters->empty()) ? &(*clusters_work) : clusters;
+            const Eigen::MatrixXd* inst_use =
+                inst_ptr ? &(*instruments_work) : inst_ptr;
+            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use =
+                has_slopes ? &(*slopes_work) : slopes_in;
             cpu_profile_log_elapsed("singleton_filter", filter_t0);
 
             run_fit(*y_work, *X_work, *fes_work, w_ptr, c_ptr, inst_use, slopes_use);
@@ -12861,13 +13750,20 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     results_.num_singletons = singletons_dropped_rows;
     const auto sample_index_t0 = std::chrono::steady_clock::now();
     results_.sample_index.resize(results_.nobs);
-    if (!kept_idx.empty()) {
-        for (int i = 0; i < results_.nobs; ++i) {
-            results_.sample_index(i) = kept_idx[static_cast<std::size_t>(i)];
-        }
-    } else {
-        for (int i = 0; i < results_.nobs; ++i) {
-            results_.sample_index(i) = i;
+    {
+        const RowFilterTeam team{preprocessing_thread_resolution.effective,
+                                 options_.num_threads > 0};
+        ScopedParallelRuntime index_runtime(
+            team.threads, preprocessing_thread_resolution.capacity);
+        const int rows = results_.nobs;
+        int* const sample = results_.sample_index.data();
+        const int* const kept = kept_idx.empty() ? nullptr : kept_idx.data();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team.threads) \
+    if(team.shares(static_cast<std::size_t>(std::max(0, rows))))
+#endif
+        for (int i = 0; i < rows; ++i) {
+            sample[i] = kept ? kept[i] : i;
         }
     }
     cpu_profile_log_elapsed("sample_index", sample_index_t0);
@@ -13579,7 +14475,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 compute_fe_dof_for_intercept_dims(
                     fes_use, absorption.fe_levels, mobility_method,
                     slope_only_flags, groupvar_ptr, tuned.num_threads,
-                    first_pair_stats_ptr, w_ptr);
+                    first_pair_stats_ptr, w_ptr, tuned.num_threads_explicit);
             std::vector<uint8_t> nested_flags(dof.levels.size(), 0);
             if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
                 !c_ptr->empty()) {
@@ -13627,7 +14523,8 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                         const FeDofInfo dof_nonnested =
                             compute_fe_dof_for_intercept_dims(
                                 fes_nonnested, levels_nonnested, mobility_method,
-                                slopes_nonnested, nullptr, tuned.num_threads);
+                                slopes_nonnested, nullptr, tuned.num_threads,
+                                nullptr, nullptr, tuned.num_threads_explicit);
                         for (std::size_t pos = 0; pos < map_nonnested.size(); ++pos) {
                             const int orig = map_nonnested[pos];
                             dof.redundant[static_cast<std::size_t>(orig)] =
@@ -13843,39 +14740,42 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             preprocessing_threads_used > 1 ||
             preprocessing_parallel_workers_active > 1;
         if (singletons_dropped_rows > 0) {
-            kept_idx = build_keep_indices(keep);
-            y_work = filter_vector(y, kept_idx);
-            X_work = filter_rows(X, kept_idx);
+            {
+                const RowFilterTeam team{preprocessing_thread_resolution.effective,
+                                         options_.num_threads > 0};
+                ScopedParallelRuntime filter_runtime(
+                    team.threads, preprocessing_thread_resolution.capacity);
+                kept_idx = build_keep_indices(keep, team);
+                y_work = filter_vector(y, kept_idx, team);
+                X_work = filter_rows(X, kept_idx, team);
 
-            std::vector<Eigen::VectorXi> fes_tmp;
-            fes_tmp.reserve(fes.size());
-            for (const auto& fe : fes) {
-                fes_tmp.push_back(filter_vector(fe, kept_idx));
-            }
-            fes_work = std::move(fes_tmp);
-
-            const Eigen::VectorXd* w_ptr = nullptr;
-            if (weights) {
-                weights_work = filter_vector(*weights, kept_idx);
-                w_ptr = &(*weights_work);
-            }
-
-            const std::vector<Eigen::VectorXi>* c_ptr = clusters;
-            if (clusters && !clusters->empty()) {
-                std::vector<Eigen::VectorXi> clusters_tmp;
-                clusters_tmp.reserve(clusters->size());
-                for (const auto& c : *clusters) {
-                    clusters_tmp.push_back(filter_vector(c, kept_idx));
+                std::vector<Eigen::VectorXi> fes_tmp;
+                fes_tmp.reserve(fes.size());
+                for (const auto& fe : fes) {
+                    fes_tmp.push_back(filter_vector(fe, kept_idx, team));
                 }
-                clusters_work = std::move(clusters_tmp);
-                c_ptr = &(*clusters_work);
-            }
+                fes_work = std::move(fes_tmp);
 
-            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use = slopes_in;
-            if (has_slopes) {
-                slopes_work = filter_slope_terms(*slopes_in, kept_idx);
-                slopes_use = &(*slopes_work);
+                if (weights) {
+                    weights_work = filter_vector(*weights, kept_idx, team);
+                }
+                if (clusters && !clusters->empty()) {
+                    std::vector<Eigen::VectorXi> clusters_tmp;
+                    clusters_tmp.reserve(clusters->size());
+                    for (const auto& c : *clusters) {
+                        clusters_tmp.push_back(filter_vector(c, kept_idx, team));
+                    }
+                    clusters_work = std::move(clusters_tmp);
+                }
+                if (has_slopes) {
+                    slopes_work = filter_slope_terms(*slopes_in, kept_idx, team);
+                }
             }
+            const Eigen::VectorXd* w_ptr = weights ? &(*weights_work) : nullptr;
+            const std::vector<Eigen::VectorXi>* c_ptr =
+                (clusters && !clusters->empty()) ? &(*clusters_work) : clusters;
+            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use =
+                has_slopes ? &(*slopes_work) : slopes_in;
             absorption = run_partial(*y_work, *X_work, *fes_work, w_ptr, c_ptr, slopes_use);
         } else {
             absorption = run_partial(y, X, fes, weights, clusters, slopes_in);
@@ -14039,6 +14939,9 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
 
     const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
     const std::vector<Eigen::VectorXi>* c_ptr = collapsed.clusters ? &(*collapsed.clusters) : nullptr;
+    if (collapsed.y.size() == 0) {
+        throw std::runtime_error("no observations remain for estimation");
+    }
     const std::int64_t nobs_frequency =
         (options_.weights_are_frequencies && w_ptr)
             ? checked_frequency_weight_sum(*w_ptr)
@@ -14252,11 +15155,25 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             standard_fes_work, gi_work, w_ptr, tuned, absorption.gpu_used);
         constant_in_span = residual_rel <= 1e-9;
     }
-    results_.model_has_constant = constant_in_span;
+    // An explicit nonzero constant regressor centres fit statistics even if
+    // the individual FE span alone does not contain the constant. Keep this
+    // separate from constant_in_span: that flag also governs FE collinearity
+    // and recovery and must not discard the explicit regressor.
+    bool constant_in_model = constant_in_span;
+    if (!constant_in_model) {
+        for (Eigen::Index j = 0; j < X_work.cols(); ++j) {
+            const double first = X_work(0, j);
+            if (first != 0.0 && (X_work.col(j).array() == first).all()) {
+                constant_in_model = true;
+                break;
+            }
+        }
+    }
+    results_.model_has_constant = constant_in_model;
 
     double sum_weights_for_stats = static_cast<double>(y_work.size());
     double total_tss = 0.0;
-    if (constant_in_span) {
+    if (constant_in_model) {
         total_tss = compute_total_sum_of_squares(y_work, w_ptr, &sum_weights_for_stats);
     } else {
         // No constant anywhere in the model: uncentered total sum of squares,
@@ -14767,7 +15684,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         FeDofInfo dof =
             compute_fe_dof_reghdfe(
                 standard_fes_work, standard_levels, mobility_method,
-                groupvar_ptr, tuned.num_threads, first_pair_stats_ptr, w_ptr);
+                groupvar_ptr, tuned.num_threads, first_pair_stats_ptr, w_ptr,
+                tuned.num_threads_explicit);
         std::vector<uint8_t> nested_flags(dof.levels.size(), 0);
         if (adjust_group_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
             !c_ptr->empty()) {
@@ -14811,7 +15729,9 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (!fes_nonnested.empty()) {
                     const FeDofInfo dof_nonnested =
                         compute_fe_dof_reghdfe(fes_nonnested, levels_nonnested,
-                                               mobility_method, nullptr, tuned.num_threads);
+                                               mobility_method, nullptr,
+                                               tuned.num_threads, nullptr, nullptr,
+                                               tuned.num_threads_explicit);
                     for (std::size_t pos = 0; pos < map_nonnested.size(); ++pos) {
                         const int orig = map_nonnested[pos];
                         dof.redundant[static_cast<std::size_t>(orig)] =
@@ -15194,7 +16114,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             (options_.fit_intercept && cov_cols > 0) ? (cov_cols - 1) : cov_cols;
 
         // Same Cameron-Gelbach-Miller PSD handling as the standard path (see
-        // reghdfe_fix_psd): full-matrix clamp plus slope-block override, in
+        // reghdfe_fix_psd): full-matrix clamp plus slope-block override and
+        // the intercept range/Schur repair, in
         // reghdfe's standardized metric.
         Eigen::VectorXd psd_scale = Eigen::VectorXd::Ones(std::max(cov_cols, 0));
         if (cov_cols > 0 &&
@@ -15228,6 +16149,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 fix_psd_scaled(cov_block, psd_scale.head(slope_cols));
             if (full_fixed || slopes_fixed) {
                 cov_full.topLeftCorner(slope_cols, slope_cols) = cov_block;
+                repair_intercept_covariance(cov_full,
+                    results_.covariance.topLeftCorner(slope_cols, slope_cols), psd_scale);
                 results_.covariance = cov_full;
                 results_.std_errors = cov_full.diagonal().cwiseMax(0.0).cwiseSqrt();
                 results_.vcv_psd_fixed = true;
@@ -15244,6 +16167,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
     }
 
+    if (tuned.dkraay_bandwidth >= 0) {
+        detail::apply_dkraay_covariance(results_, ols_result, transformed_X_used,
+            X_work, w_ptr, c_ptr, kept_slope_cols, drop_intercept, tuned);
+    }
     recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
                         results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
     normalize_nonfrequency_weighted_fit_stats(

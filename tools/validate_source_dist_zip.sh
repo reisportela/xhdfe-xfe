@@ -77,6 +77,7 @@ required_entries=(
   "xhdfe-src/tools/validate_corresponding_source_bundle.py"
   "xhdfe-src/tools/windows_stata_linkage.py"
   "xhdfe-src/tests/ieee_bits_liveness.cpp"
+  "xhdfe-src/tests/fma_liveness.cpp"
   "xhdfe-src/tests/fail_closed_entrypoints.cpp"
   "xhdfe-src/tests/audit_20260804_contracts.py"
   "xhdfe-src/tests/test_corresponding_source_bundle.py"

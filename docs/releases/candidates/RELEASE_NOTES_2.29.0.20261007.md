@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.0.20261007 — development candidate
 
 This feature branch is unissued and has not been submitted as a pull request.
@@ -36,7 +39,7 @@ fits. The test covers multiple endogenous variables, weights, missing data,
 singletons, redundant instruments, weak instruments, and postestimation state.
 Execution evidence is recorded separately in the candidate validation report.
 
-The [7 October validation](../certification/iv-firststage-20261007.md) passed
+The [7 October validation](../../certification/iv-firststage-20261007.md) passed
 27 CPU and 24 CUDA first-stage comparisons. An existing CUDA IV limitation with
 proportional duplicate instruments or repeated included controls was reproduced
 on unchanged 2.28.1 code and is documented separately; this candidate does not

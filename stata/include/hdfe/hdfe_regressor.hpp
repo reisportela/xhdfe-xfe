@@ -100,6 +100,7 @@ struct HdfeOptions {
     double ssc_t_df = -1.0;                                //!< Override t df (fixest t.df); <=0 disables.
     StatsStyle stats_style = StatsStyle::Reghdfe;          //!< Fit-statistics style (reghdfe default).
     std::vector<int> collinear_priority;                   //!< Column priority when dropping collinear regressors (higher = keep).
+    int dkraay_bandwidth = -1;                            //!< -1: ordinary VCE; 0: automatic DK bandwidth; >0: Bartlett bandwidth. Requires one chronologically ordered cluster ID.
 };
 
 /**

@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.1.20261007 — development candidate
 
 This unissued candidate includes the first-stage diagnostics introduced in
@@ -17,4 +20,4 @@ instruments under different variable names remain a separate CUDA limitation.
 The permanent CPU/CUDA guard is
 `tests/analytic_precision/iv_repeated_control_contract.do`, with additional
 first-stage checks in `tests/stata/iv_firststage_contract.do`.
-See the [validation report](../certification/iv-repeated-controls-20261007.md).
+See the [validation report](../../certification/iv-repeated-controls-20261007.md).

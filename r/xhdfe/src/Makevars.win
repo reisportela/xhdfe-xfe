@@ -13,7 +13,9 @@ XHDFE_CUDA_REQUESTED := $(filter ON 1 TRUE YES AUTO,$(XHDFE_ENABLE_CUDA_CANON))
 
 XHDFE_OPTFLAGS = -O3 -Wall $(XHDFE_MARCH_FLAG) \
     -ffast-math -fno-finite-math-only -funroll-loops -ftree-vectorize -fomit-frame-pointer \
-    -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math
+    -fno-signed-zeros -fno-trapping-math -fassociative-math -freciprocal-math \
+    $(XHDFE_CLANG_FP_FLAG)
+XHDFE_CLANG_FP_FLAG = $(shell $(CXX17) -dM -E -x c++ /dev/null 2>/dev/null | grep -q '^\#define __clang__ ' && echo '-ffp-contract=off -DXHDFE_FP_CONTRACT_OFF=1')
 
 override CXX17FLAGS += $(XHDFE_OPTFLAGS)
 
@@ -52,8 +54,24 @@ xhdfe_openmp_gate:
 	    || { echo "OpenMP compile gate failed: HDFE_USE_OPENMP requires _OPENMP" >&2; exit 1; }; \
 	fi
 
-$(OBJECTS): | xhdfe_openmp_gate
-.PHONY: xhdfe_openmp_gate
+# Run on native Rtools; a cross-build that cannot execute this target cannot
+# use this Makevars as release evidence.
+xhdfe_fma_gate:
+	@probe_dir="$$(mktemp -d)" || exit 1; \
+	  trap 'rm -f "$$probe_dir/xhdfe_fma_gate.exe"; rmdir "$$probe_dir"' EXIT; \
+	  printf '%s\n' \
+	    '#include "include/hdfe/deterministic_parallel.hpp"' \
+	    '#include <cmath>' \
+	    '#include <cstdio>' \
+	    'XHDFE_EXACT_FP __attribute__((noinline)) double split(double a,double b,double c){XHDFE_EXACT_FP_BODY const double p=a*b;return p+c;}' \
+	    '__attribute__((noinline)) double plain(double a,double b,double c){return a*b+c;}' \
+	    'int main(){volatile double e=std::ldexp(1.0,-27);volatile double a=1.0+e,b=1.0-e,c=-1.0;double f=std::fma(a,b,c),s=split(a,b,c),t=hdfe::detail::target_mul_add(a,b,c),p=plain(a,b,c);if(f!=-std::ldexp(1.0,-54)||s!=0.0||t!=p){std::fprintf(stderr,"FAIL: xhdfe R FMA contract f=%a split=%a target=%a plain=%a\n",f,s,t,p);return 1;}return 0;}' \
+	    | $(CXX17) $(CXX17STD) $(CXX17FLAGS) $(PKG_CPPFLAGS) $(PKG_CXXFLAGS) -x c++ - -o "$$probe_dir/xhdfe_fma_gate.exe" \
+	  && "$$probe_dir/xhdfe_fma_gate.exe" \
+	  || { echo "FMA liveness gate failed for the R target" >&2; exit 1; }
+
+$(OBJECTS): | xhdfe_openmp_gate xhdfe_fma_gate
+.PHONY: xhdfe_openmp_gate xhdfe_fma_gate
 
 ifneq ($(strip $(XHDFE_CUDA_REQUESTED)),)
 $(error XHDFE_ENABLE_CUDA=$(XHDFE_ENABLE_CUDA) is not supported by the Windows R Makevars yet; install a CPU build)

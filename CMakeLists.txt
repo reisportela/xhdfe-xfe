@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.29.5.20261009 LANGUAGES CXX)
+project(xhdfe VERSION 2.29.0.20261014 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -256,6 +256,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -fassociative-math
         -freciprocal-math
     )
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(xhdfe PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>")
+        target_compile_definitions(xhdfe PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:XHDFE_FP_CONTRACT_OFF=1>")
+    endif()
 
     # Non-finite guards in the fast-math translation units must remain live
     # in the exact production compilation mode. The portable source gate
@@ -263,6 +269,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # a code-generation probe; cross builds retain the source gate without
     # attempting to execute a foreign binary.
     if(CMAKE_CROSSCOMPILING)
+        message(WARNING "FMA liveness NOT_RUN: the cross-compiled target cannot be executed here")
+        if(XHDFE_RELEASE_BUILD OR "$ENV{XHDFE_RELEASE_BUILD}" STREQUAL "1")
+            message(FATAL_ERROR "A release cannot skip FMA liveness on a cross-compiled target")
+        endif()
         add_custom_target(xhdfe_nonfinite_guard
             COMMAND ${CMAKE_COMMAND} -P
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake
@@ -286,22 +296,62 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
             -fassociative-math
             -freciprocal-math
         )
+        # The exact kernels assume std::fma rounds once and that
+        # target_mul_add() rounds a * b + c as a plain loop of this build
+        # does (tests/fma_liveness.cpp); a toolchain or target where either
+        # fails is not the arithmetic that was validated.
+        add_executable(xhdfe_fma_liveness EXCLUDE_FROM_ALL
+            tests/fma_liveness.cpp)
+        target_include_directories(xhdfe_fma_liveness PRIVATE include)
+        xhdfe_enable_native_tuning(xhdfe_fma_liveness)
+        target_compile_options(xhdfe_fma_liveness PRIVATE
+            -O3
+            -ffast-math
+            -fno-finite-math-only
+            -funroll-loops
+            -ftree-vectorize
+            -fomit-frame-pointer
+            -fno-signed-zeros
+            -fno-trapping-math
+            -fassociative-math
+            -freciprocal-math
+        )
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(xhdfe_fma_liveness PRIVATE -ffp-contract=off)
+            target_compile_definitions(xhdfe_fma_liveness PRIVATE XHDFE_FP_CONTRACT_OFF=1)
+        endif()
         add_custom_target(xhdfe_nonfinite_guard
             COMMAND ${CMAKE_COMMAND} -P
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake
             COMMAND $<TARGET_FILE:xhdfe_ieee_bits_liveness>
-            DEPENDS xhdfe_ieee_bits_liveness
-            COMMENT "fast-math non-finite guard liveness gate"
+            COMMAND $<TARGET_FILE:xhdfe_fma_liveness>
+            DEPENDS xhdfe_ieee_bits_liveness xhdfe_fma_liveness
+            COMMENT "fast-math non-finite guard and fused multiply-add liveness gate"
             VERBATIM)
         if(BUILD_TESTING)
             add_test(NAME xhdfe_ieee_bits_liveness
                      COMMAND $<TARGET_FILE:xhdfe_ieee_bits_liveness>)
+            add_test(NAME xhdfe_fma_liveness
+                     COMMAND $<TARGET_FILE:xhdfe_fma_liveness>)
         endif()
     endif()
     add_dependencies(xhdfe xhdfe_nonfinite_guard)
+else()
+    message(WARNING "FMA liveness NOT_RUN: unsupported C++ compiler ${CMAKE_CXX_COMPILER_ID}")
+    if(XHDFE_RELEASE_BUILD OR "$ENV{XHDFE_RELEASE_BUILD}" STREQUAL "1")
+        message(FATAL_ERROR "A release requires an executable FMA liveness gate")
+    endif()
 endif()
 
 if(BUILD_TESTING)
+    add_executable(xhdfe_lockstep_memory_plan_contract tests/lockstep_memory_plan_contract.cpp)
+    target_include_directories(xhdfe_lockstep_memory_plan_contract PRIVATE src include)
+    add_test(NAME xhdfe_lockstep_memory_plan_contract
+             COMMAND $<TARGET_FILE:xhdfe_lockstep_memory_plan_contract>)
+    add_executable(xhdfe_ac_arena_storage_contract tests/ac_arena_storage_contract.cpp)
+    target_include_directories(xhdfe_ac_arena_storage_contract PRIVATE src)
+    add_test(NAME xhdfe_ac_arena_storage_contract
+             COMMAND $<TARGET_FILE:xhdfe_ac_arena_storage_contract>)
     add_test(NAME xhdfe_no_raw_nonfinite_guards
              COMMAND ${CMAKE_COMMAND} -P
                      ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake)

@@ -272,12 +272,13 @@ program define xcert_parity_check, rclass
     version 16
     syntax, Name(string) [BTOL(real 1e-10) BFLOOR(real .01) ///
         SETOL(real 1e-8) SCALTOL(real 1e-8) SCALFLOOR(real 1) SKIPF ///
-        EXCEPT(string) KNOWN(string) KNOWNSE(real 0)]
+        EXCEPT(string) KNOWN(string) KNOWNSE(real 0) KNOWNCOEF(string)]
 
     * EXCEPT = a divergence that is correct and justified at the call site.
     * KNOWN  = a real, open divergence from the canonical package: reported on
     *          every run so it cannot be forgotten, but not failed, so that a
     *          NEW divergence is what turns this suite red.
+    * KNOWNCOEF = coefficients to which knownse() applies (default: all).
     local fails 0
     local known_hits 0
 
@@ -390,7 +391,8 @@ program define xcert_parity_check, rclass
         if (!missing(`xse') & !missing(`rse') & `rse' > 0) {
             local sedev = abs(`xse' - `rse') / `rse'
             if (`sedev' > `setol') {
-                if (`knownse' > 0 & `sedev' <= `knownse') {
+                local known_coef = ("`knowncoef'" == "" | strpos(" `knowncoef' ", " `c' ") > 0)
+                if (`knownse' > 0 & `sedev' <= `knownse' & `known_coef') {
                     di as text "XHDFE_KNOWN_OPEN|`name'|se[`c']|reldiff=" %9.2e `sedev'
                     local known_hits = `known_hits' + 1
                 }
@@ -434,7 +436,7 @@ program define xcert_parity_spec, rclass
     syntax anything(everything) [aweight fweight pweight iweight], ///
         Name(string) [XOPTS(string) ROPTS(string) ///
         BTOL(real 1e-10) SETOL(real 1e-8) SKIPF EXCEPT(string) ///
-        KNOWN(string) KNOWNSE(real 0)]
+        KNOWN(string) KNOWNSE(real 0) KNOWNCOEF(string)]
 
     quietly xhdfe `anything' [`weight'`exp'], ///
         tolerancemode(reghdfe-comparable) tolerance(1e-12) ///
@@ -447,7 +449,7 @@ program define xcert_parity_spec, rclass
         scalars(N rmse tss rss mss r2 r2_a F df_r df_m df_a N_clust rank)
 
     xcert_parity_check, name("`name'") btol(`btol') setol(`setol') `skipf' ///
-        except(`except') known(`known') knownse(`knownse')
+        except(`except') known(`known') knownse(`knownse') knowncoef(`knowncoef')
     return scalar fails = r(fails)
 end
 

@@ -1,3 +1,6 @@
+> Development candidate on the PR #13 branch; never published. The first public 2.29 release is
+> 2.29.0.<release date>; see `../RELEASE_NOTES_2.29.0.20261013.md` (candidate) and the release index.
+
 # xhdfe 2.29.4.20261008 — development candidate
 
 This unissued candidate retains the covariance precision repair from
@@ -23,4 +26,4 @@ retained in the report.
 
 This candidate has not been pushed, issued or promoted through the
 full release matrix. See the
-[validation report](../certification/iv-covariance-optimization-20261008.md).
+[validation report](../../certification/iv-covariance-optimization-20261008.md).

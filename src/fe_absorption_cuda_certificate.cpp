@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "hdfe/deterministic_parallel.hpp"
+#include "hdfe/audit_environment.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 
 #ifdef HDFE_USE_OPENMP
@@ -212,6 +213,13 @@ inline bool certificate_profile_enabled() {
     return enabled;
 }
 
+// XHDFE_CERTIFICATE_TEAM=0 keeps the level sums of every dimension in the
+// owner-by-group loop below.
+inline bool certificate_team_enabled() {
+    bool found = false;
+    return audit_flag("XHDFE_CERTIFICATE_TEAM", true, &found);
+}
+
 inline std::size_t certificate_dense_bytes(int groups,
                                            int values_per_group) {
     if (groups <= 0 || values_per_group <= 0) {
@@ -325,6 +333,7 @@ void certify_cuda_absorption_result(
     const std::vector<HeterogeneousSlopeTerm>& slopes,
     const std::vector<GpuFeCertificateView>& fe_views,
     AbsorptionResult& result) {
+    ScopedAuditEnvironment audit_environment;
     result.abs_residual = 0.0;
     result.abs_residual_rel = 0.0;
     result.precision_certified = result.converged;
@@ -446,11 +455,24 @@ void certify_cuda_absorption_result(
             static_cast<std::size_t>(chunk_count),
             std::vector<double>(
                 static_cast<std::size_t>(moment_count), 0.0));
+        // Without weights and slopes every row adds one, and a sum of ones
+        // is its count whatever the loop.
+        const bool counted_operator =
+            unit_weights && slope == nullptr && certificate_team_enabled();
+        if (counted_operator) {
+            for (int chunk = 0; chunk < chunk_count; ++chunk) {
+                operator_partials[static_cast<std::size_t>(chunk)][0] =
+                    static_cast<double>(
+                        deterministic_chunk_end(n, chunk, chunk_count) -
+                        deterministic_chunk_begin(n, chunk, chunk_count));
+            }
+        }
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(dynamic, 1) \
-    num_threads(std::min(threads, chunk_count))
+    num_threads(std::min(threads, chunk_count)) if(!counted_operator)
 #endif
-        for (int chunk = 0; chunk < chunk_count; ++chunk) {
+        for (int chunk = counted_operator ? chunk_count : 0; chunk < chunk_count;
+             ++chunk) {
             std::vector<double>& local_operator =
                 operator_partials[static_cast<std::size_t>(chunk)];
             const int begin =
@@ -482,6 +504,24 @@ void certify_cuda_absorption_result(
             }
         }
 
+        CertificateMatrix sums(input.num_groups, values_per_group);
+        // Level sums alone, the usual case: the same sums on the whole
+        // team, without the inverse order of the rows.
+        const bool plain_sums = slope == nullptr && !result.n1_fe &&
+                                values_per_group == rhs_count &&
+                                certificate_team_enabled();
+        if (plain_sums) {
+            std::vector<const double*> columns(static_cast<std::size_t>(rhs_count));
+            columns[0] = result.y_tilde.data();
+            for (int rhs = 1; rhs < rhs_count; ++rhs) {
+                columns[static_cast<std::size_t>(rhs)] =
+                    result.X_tilde.col(rhs - 1).data();
+            }
+            certificate_level_sums(
+                n, input.num_groups, group_ids,
+                groups_contiguous ? input.group_ptr : nullptr, columns.data(),
+                rhs_count, weight_ptr, chunk_count, threads, sums.data(), nullptr);
+        } else {
         StableCertificateGroupOrder stable_order;
         const int* group_ptr = input.group_ptr;
         const int* obs_index = nullptr;
@@ -491,7 +531,6 @@ void certify_cuda_absorption_result(
             obs_index = stable_order.obs_index.data();
         }
 
-        CertificateMatrix sums(input.num_groups, values_per_group);
         // §10.8 minimal correction, applied because the regression was
         // measured before WP6 replaces this path: the previous task layout
         // (group × value_index) walked every group's rows once PER VALUE —
@@ -610,6 +649,7 @@ void certify_cuda_absorption_result(
 #endif
         if (region_observer) {
             region_observer->end_region();
+        }
         }
         for (int moment = 0; moment < moment_count; ++moment) {
             const int base = moment * rhs_count;

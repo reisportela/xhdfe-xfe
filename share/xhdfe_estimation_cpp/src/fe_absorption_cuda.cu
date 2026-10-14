@@ -1,5 +1,7 @@
+#include "n1_graph_preconditioner.hpp"
 #include "fe_absorption_cuda.hpp"
 #include "group_refinement.hpp"
+#include "n1_continuation.hpp"
 
 #include <cuda_runtime.h>
 #include "weighted_two_by_two.hpp"
@@ -2362,6 +2364,29 @@ __global__ __launch_bounds__(BLOCK, 1) void gi_lsmr_sumsq_finish_kernel(
     }
 }
 
+__global__ void n1_graph_gather_kernel(
+    const double* coefficients, int levels, const int* g0, const int* g1,
+    const int* g2, int o1, int o2, int n, int ld, double* y, double* X) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    const int lane = blockIdx.y;
+    if (row >= n) return;
+    const double* c = coefficients + static_cast<std::size_t>(lane) * levels;
+    const double value = (c[g0[row]] + c[o1 + g1[row]]) + c[o2 + g2[row]];
+    if (lane == 0) y[row] = value;
+    else X[static_cast<std::size_t>(lane - 1) * ld + row] = value;
+}
+
+__global__ void n1_graph_pack_sums_kernel(
+    const double* y, const double* X, const double* counts, int groups,
+    int offset, int levels, double* out) {
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    const int lane = blockIdx.y;
+    if (g >= groups) return;
+    const double mean = lane == 0 ? y[g] :
+        X[static_cast<std::size_t>(lane - 1) * groups + g];
+    out[static_cast<std::size_t>(lane) * levels + offset + g] = mean * counts[g];
+}
+
 struct CudaFeDevice {
     int num_groups = 0;
     int num_levels_present = 0;
@@ -3471,7 +3496,11 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     const bool ill_conditioned_graph_gpu =
         fe_inputs.size() >= 2 && min_fe_occupancy_gpu >= 0.0 &&
         min_fe_occupancy_gpu <= accel_occ_threshold_gpu;
-    bool use_reghdfe_cg =
+    const bool n1_graph_correction = n1_continuation_predicate() != nullptr &&
+        fe_inputs.size() == 3 && !any_slope && weights == nullptr &&
+        !store_alphas && !options.retain_fixed_effects &&
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable;
+    bool use_reghdfe_cg = n1_graph_correction ||
         should_use_cuda_reghdfe_cg(fe_inputs, n, weights, options, store_alphas);
     if (!use_reghdfe_cg) {
         // GPU-CG adaptive gate: hand ill-conditioned high-iteration comparable jobs to the
@@ -3585,6 +3614,34 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
 
     try {
+        const auto* necessary_continuation = n1_continuation_predicate();
+        int next_necessary_check = 0;
+        auto necessary_candidate_ready = [&](const double* device_y,
+                                              const double* device_X, int iteration,
+                                              const std::vector<double>* restore = nullptr) {
+            if (!necessary_continuation) return true;
+            if (iteration < next_necessary_check) return false;
+            // Graph-preconditioned corrections need only tens of steps; do
+            // not force 64 additional steps after a failed necessary check.
+            const int kNecessaryCheckInterval = n1_graph_correction ? 1 : 64;
+            next_necessary_check = iteration + kNecessaryCheckInterval;
+            // These buffers also receive the final D2H result; do not allocate
+            // another N-by-p matrix merely to check a failed fit's continuation.
+            result.y_tilde.resize(n);
+            result.X_tilde.resize(n, cols);
+            cuda_check(cudaMemcpy(result.y_tilde.data(), device_y, sizeof(double) * n,
+                                  cudaMemcpyDeviceToHost), "N1 continuation y copy failed");
+            if (cols > 0)
+                cuda_check(cudaMemcpy(result.X_tilde.data(), device_X,
+                    sizeof(double) * static_cast<std::size_t>(n) * cols,
+                    cudaMemcpyDeviceToHost), "N1 continuation X copy failed");
+            if (restore) {
+                result.y_tilde *= (*restore)[0];
+                for (int j = 0; j < cols; ++j)
+                    result.X_tilde.col(j) *= (*restore)[static_cast<std::size_t>(j + 1)];
+            }
+            return (*necessary_continuation)(result.y_tilde, result.X_tilde);
+        };
         // Consume any stale, sticky CUDA error left by a prior failed or
         // non-converged call in this process. CUDA runtime errors are sticky and
         // are otherwise surfaced by the next CUDA API call (here the first
@@ -4486,7 +4543,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	                    copy_update_snapshot(d_y.data(), d_x.data());
 	                    const double norm_error = rel_change / static_cast<double>(step);
 	                    if (step > 0 &&
-	                        convergence_reached(options, norm_error, update_error, convergence_tol)) {
+	                        convergence_reached(options, norm_error, update_error, convergence_tol) &&
+                            necessary_candidate_ready(d_y.data(), d_x.data(), iter)) {
 	                        result.iterations = iter + 1;
                         converged = true;
                         break;
@@ -4722,6 +4780,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                            int max_iter,
                                            int& iter_used) -> bool {
                     iter_used = 0;
+                    next_necessary_check = 0;
                     if (max_iter <= 0 || order.empty()) {
                         return false;
 	                    }
@@ -4797,7 +4856,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                            iter);
                         if (honest_mode && !mixed_update_criterion &&
                             std::sqrt(stats_host[2]) <=
-                                honest_tol * std::max(1.0, prev_norm)) {
+                                honest_tol * std::max(1.0, prev_norm) &&
+                            necessary_candidate_ready(d_y_ggx.data(), d_x_ggx.data(), iter)) {
                             // One full sweep moved the iterate by less than
                             // tol: return ggx, the closest available iterate.
                             cuda_check(cudaMemcpy(d_y.data(), d_y_ggx.data(),
@@ -4835,7 +4895,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 copy_alpha_state(alpha_state_ptrs, alpha_gx_ptrs);
                             }
                             iter_used = iter + 1;
-                            return true;
+                            return necessary_candidate_ready(d_y.data(), d_x.data(),
+                                std::max(iter, next_necessary_check));
                         }
 
                         double coef = vprod / ssq;
@@ -4930,7 +4991,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 compute_update_error(d_y_gx.data(), d_x_gx.data(),
                                                      update_error);
                                 copy_update_snapshot(d_y_gx.data(), d_x_gx.data());
-                                if (update_error <= options.tol) {
+                                if (update_error <= options.tol &&
+                                    necessary_candidate_ready(d_y_gx.data(), d_x_gx.data(), iter)) {
                                     cuda_check(cudaMemcpy(d_y.data(), d_y_gx.data(),
                                                           sizeof(double) * n,
                                                           cudaMemcpyDeviceToDevice),
@@ -4950,7 +5012,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 }
                             }
                             if (!honest_mode && step > 0 &&
-                                (rel_change / static_cast<double>(step)) < convergence_tol) {
+                                (rel_change / static_cast<double>(step)) < convergence_tol &&
+                                necessary_candidate_ready(d_y_gx.data(), d_x_gx.data(), iter)) {
                                 cuda_check(cudaMemcpy(d_y.data(), d_y_gx.data(),
                                                       sizeof(double) * n,
                                                       cudaMemcpyDeviceToDevice),
@@ -5127,7 +5190,11 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 // reused both as the explicit reghdfe CG accelerator (gate below)
                 // and as the IT divergence fallback. CG re-derives its residual
                 // from d_y/d_x, so it is safe to run on any handed-off iterate.
-                auto run_cuda_cg = [&](const std::vector<std::size_t>& cg_order) {
+                auto run_cuda_cg = [&](const std::vector<std::size_t>& cg_order,
+                                       int preceding_iterations) {
+                    next_necessary_check = 0;
+                    const int counted_before = necessary_continuation ? preceding_iterations : 0;
+                    const int cg_budget = std::max(0, options.max_iter - counted_before);
                     // CG needs the symmetric (forward+backward) sweep so that
                     // (I - G) is self-adjoint. The gate path already forces this
                     // (use_reghdfe_cg => use_symmetric=true at setup); for the
@@ -5251,6 +5318,103 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         cuda_check(cudaGetLastError(), "CG direction update kernel failed");
                     };
 
+                    if (n1_graph_correction) {
+                        const std::int64_t total_levels =
+                            static_cast<std::int64_t>(fe_inputs[0].num_groups) +
+                            fe_inputs[1].num_groups + fe_inputs[2].num_groups;
+                        if (total_levels > std::numeric_limits<int>::max())
+                            throw std::runtime_error("N1 graph index range exceeded; no estimates returned");
+                        const int o1 = fe_inputs[0].num_groups;
+                        const int o2 = o1 + fe_inputs[1].num_groups;
+                        const int levels = static_cast<int>(total_levels);
+                        auto precondition = make_n1_graph_preconditioner(fe_inputs, n, options);
+                        Eigen::MatrixXd r(levels, cg_width), z, p;
+                        DeviceBuffer<double> device_levels;
+                        const std::size_t level_count =
+                            static_cast<std::size_t>(levels) * cg_width;
+                        device_levels.allocate(level_count);
+                        auto transpose_residual = [&]() {
+                            int offset = 0;
+                            for (std::size_t d = 0; d < fe_inputs.size(); ++d) {
+                                auto& fe = fe_dev[d];
+                                compute_means_only(fe, d_y.data(), d_x.data(), 0.0, nullptr, nullptr);
+                                const dim3 grid((fe.num_groups + kBlockSize - 1) / kBlockSize,
+                                                cg_width);
+                                n1_graph_pack_sums_kernel<<<grid, kBlockSize>>>(
+                                    fe.sum_y.data(), fe.sum_x.data(), fe.weight_sums.data(),
+                                    fe.num_groups, offset, levels, device_levels.data());
+                                cuda_check(cudaGetLastError(), "N1 graph transpose packing failed");
+                                offset += fe.num_groups;
+                            }
+                            cuda_check(cudaMemcpy(r.data(), device_levels.data(),
+                                sizeof(double) * level_count, cudaMemcpyDeviceToHost),
+                                "N1 graph transpose copy failed");
+                        };
+                        auto products = [&]() {
+                            std::vector<double> rz(cg_width, 0.0);
+                            for (int k = 0; k < cg_width; ++k) {
+                                long double sum = 0.0L;
+                                for (int g = 0; g < levels; ++g)
+                                    sum += static_cast<long double>(r(g,k)) * z(g,k);
+                                rz[k] = static_cast<double>(sum);
+                            }
+                            return rz;
+                        };
+                        transpose_residual();
+                        precondition(r, z);
+                        p = z;
+                        auto rz = products();
+                        std::vector<double> steps(cg_width), beta(cg_width), denominator, state;
+                        int iterations = 0;
+                        for (int iter = 1; iter <= cg_budget; ++iter) {
+                            cuda_check(cudaMemcpy(device_levels.data(), p.data(),
+                                sizeof(double) * level_count, cudaMemcpyHostToDevice),
+                                "N1 graph direction copy failed");
+                            n1_graph_gather_kernel<<<dim3(blocks_n, cg_width), kBlockSize>>>(
+                                device_levels.data(), levels, fe_dev[0].gid.data(),
+                                fe_dev[1].gid.data(), fe_dev[2].gid.data(), o1, o2,
+                                n, ld, d_y_acc_a.data(), d_x_acc_a.data());
+                            cuda_check(cudaGetLastError(), "N1 graph gather failed");
+                            compute_component_sumsq(d_y_acc_a.data(), d_x_acc_a.data(), denominator);
+                            for (int k = 0; k < cg_width; ++k) {
+                                if (!finite_double_bits(rz[k]) || rz[k] < 0.0 ||
+                                    !finite_double_bits(denominator[k]) || denominator[k] < 0.0 ||
+                                    (rz[k] > 0.0 && denominator[k] == 0.0))
+                                    throw std::runtime_error("N1 graph CG breakdown; no estimates returned");
+                                steps[k] = rz[k] > 0.0 ? rz[k] / denominator[k] : 0.0;
+                            }
+                            subtract_columns(d_y.data(), d_x.data(),
+                                d_y_acc_a.data(), d_x_acc_a.data(), steps);
+                            compute_component_sumsq(d_y.data(), d_x.data(), state);
+                            double step_error = 0.0;
+                            for (int k = 0; k < cg_width; ++k) {
+                                const double step = std::abs(steps[k]) * std::sqrt(denominator[k]);
+                                const double scale = std::sqrt(state[k]);
+                                step_error = std::max(step_error, scale > 0.0 ? step/scale :
+                                    (step == 0.0 ? 0.0 : std::numeric_limits<double>::infinity()));
+                            }
+                            iterations = iter;
+                            if (std::getenv("XHDFE_ACCEL_DEBUG") != nullptr)
+                                std::fprintf(stderr, "[ACCEL cuda N1 graph iter=%d step=%.9g]\n", iter, step_error);
+                            if (step_error <= options.tol &&
+                                necessary_candidate_ready(d_y.data(), d_x.data(), iter)) {
+                                converged = true;
+                                break;
+                            }
+                            const auto old_rz = rz;
+                            transpose_residual();
+                            precondition(r, z);
+                            rz = products();
+                            for (int k = 0; k < cg_width; ++k) {
+                                beta[k] = old_rz[k] > 0.0 ? rz[k]/old_rz[k] : 0.0;
+                                p.col(k) = z.col(k) + beta[k] * p.col(k);
+                            }
+                        }
+                        result.iterations = counted_before + iterations;
+                        have_cg_iteration_count = true;
+                        return;
+                    }
+
                     std::vector<double> improvement;
                     std::vector<double> ssr;
                     std::vector<double> ssr_old;
@@ -5330,7 +5494,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         };
 
                     int cg_iters = 0;
-                    for (int iter = 1; iter <= options.max_iter; ++iter) {
+                    for (int iter = 1; iter <= cg_budget; ++iter) {
                         projection_sweep(d_y_ggx.data(), d_x_ggx.data(),
                                          d_y_acc_a.data(), d_x_acc_a.data());
                         compute_component_dot(d_y_ggx.data(), d_y_acc_a.data(),
@@ -5506,12 +5670,14 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (cg_breakdown) {
                             break;
                         }
-                        if (update_error <= options.tol) {
+                        if (update_error <= options.tol &&
+                            necessary_candidate_ready(d_y.data(), d_x.data(), iter,
+                                normalized_small_cg ? &restore_scale : nullptr)) {
                             converged = true;
                             break;
                         }
                     }
-                    result.iterations = cg_iters;
+                    result.iterations = counted_before + cg_iters;
                     have_cg_iteration_count = true;
                     if (normalized_small_cg) {
                         cuda_check(
@@ -5537,12 +5703,12 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                 const bool cg_fallback_possible =
                     cuda_cg_fallback_ok && !sweep_order.empty();
                 if (use_reghdfe_cg && !sweep_order.empty()) {
-                    run_cuda_cg(sweep_order);
+                    run_cuda_cg(sweep_order, 0);
                 } else if (!enable_two_stage) {
                     int phase_iters = 0;
                     converged = run_accel_phase(sweep_order, accel_iter_budget, phase_iters);
                     if (!converged && accel_diverged && cg_fallback_possible) {
-                        run_cuda_cg(sweep_order);
+                        run_cuda_cg(sweep_order, phase_iters);
                     } else if (converged) {
                         result.iterations = phase_iters;
                     }
@@ -5573,7 +5739,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         remaining -= phase_iters;
                     }
                     if (!converged && accel_diverged && cg_fallback_possible) {
-                        run_cuda_cg(sweep_order);
+                        run_cuda_cg(sweep_order, total_iters);
                     } else if (converged) {
                         result.iterations = total_iters;
                     }
@@ -5583,6 +5749,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                             int max_iter,
                                             int& iter_used) -> bool {
                     iter_used = 0;
+                    next_necessary_check = 0;
                     if (max_iter <= 0 || order.empty()) {
                         return false;
 	                    }
@@ -5608,7 +5775,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
 	                            const double norm_error = rel_change / static_cast<double>(step);
 	                            if (step > 0 &&
 	                                convergence_reached(options, norm_error, update_error,
-	                                                    convergence_tol)) {
+	                                                    convergence_tol) &&
+                                    necessary_candidate_ready(d_y.data(), d_x.data(), iter)) {
 	                                iter_used = iter + 1;
                                 return true;
                             }

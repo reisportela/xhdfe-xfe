@@ -57,6 +57,15 @@ coverage must remain explicit. Names must come from the supported catalogue;
 unknown/duplicate cases, interfaces or backends are rejected before outputs
 are created. Preparation always includes CPU; `--backends cpu` omits CUDA.
 
+At execution, a filter/backend selecting no jobs is an error. The runner
+reports selected, completed and pending counts; `ALREADY_COMPLETE` means a
+valid selection needs no new attempts, while `PARTIAL` records a bounded run
+with pending work. Neither state replaces `report` as the campaign verdict.
+An interrupted attempt directory is preserved and requires a new campaign.
+`runner_selection_contract.py --module PATH --output NEW_DIRECTORY` exercises
+these behaviours through the real CLI with the synthetic OLS fixture,
+including refusal of an empty selection and preservation of prior receipts.
+
 `report` creates a new report JSON, includes every planned row (unexecuted
 rows are `NOT_RUN`), and returns nonzero unless all scoped xhdfe positive and
 negative contracts pass with unchanged custody. It also reports the default
@@ -125,6 +134,26 @@ The proportional-instrument repair has separate permanent guards:
 - `n1_iv_cache_contract.py` crosses its independent IV score and saved-FE
   recovery fixtures with and without proportional columns. Its existing OLS
   persistent-cache checks are unchanged.
+- `iv_cache_contract.py --module MODULE --out NEW.json` (CPU only, 13oct2026)
+  exercises the persistent absorption cache on an IV fit: the identical read
+  must hit (`cache_hit=1` from the `XHDFE_DEBUG_SOLVER` stderr line) and be
+  bit-identical to the writing fit; one-ULP changes in an instrument, the
+  response or a regressor, a 256-row sample change and the other tolerance
+  mode must miss and still match explicit 2SLS with FE dummies; the cache file
+  is unchanged after reads.
+- `iv_wide_omitted_contract.py --module MODULE --out NEW.json --mode
+  xhdfe-fast|reghdfe-comparable` (13oct2026) adds an exogenous Walsh regressor
+  and its exact multiple to the known-score IV design, so one column is
+  omitted on the retained wide covariance path: 92 cases per mode (robust,
+  cluster, multiway with equivalent and positive-definite distinct partitions,
+  analytic and frequency weights, both column orders) grade the identified
+  4x4 block against an MP90 reference and require exact zeros for the omitted
+  row and column.
+- `supplemental/weak_iv_dkraay_20261013/weak_iv_dk_oracle.py NEW_DIR
+  [--backend cuda]` reuses the 11oct2026 Driscoll-Kraay oracle on a panel with
+  a weak excluded instrument and grades `e(first)` (partial R2, F, df, df_r,
+  p) against an explicit first-stage DK Wald oracle; allowances are
+  predeclared from the 2SLS score Gram condition number.
 
 These tests do not certify arbitrary multicolumn dependencies, FE-induced
 redundancy, cross-platform packages, or runtime performance.
@@ -142,7 +171,8 @@ The multiway IV covariance repair has two complementary independent guards:
   equivalent partitions must preserve the positive sandwich. The MP90 and
   MP120 references independently construct the cluster scores and sandwich,
   then apply the documented standardized full-matrix and separate slope-block
-  rule. At least 12 controls must detect an implementation that skips the
+  rule, followed by the D-C constant repair (policy of 10oct2026, applied to
+  the reference on 13oct2026; see `docs/LICOES_INTEGRACAO_PR13_20261012.md`). At least 12 controls must detect an implementation that skips the
   projection. Every coefficient/covariance limit remains 1e-9/1e-8.
 - For Stata, first run `iv_covariance_psd_stata_fixtures.py NEW_DIRECTORY`, then
   `do iv_covariance_psd_contract.do cpu|cuda NEW_DIRECTORY` from a scratch
@@ -207,6 +237,27 @@ under the broader false-convergence label. It writes separate evidence and
 does not overwrite the original campaign or change any numerical threshold.
 
 ## T01 Fast/Comparable adjudication
+
+`pf3fe_covariance_contract.py` exercises the confidential PF three-FE input
+in place, using a pinned independent aggregate Schur oracle. It grades the
+complete covariance at the original diagonal-scaled `1e-8` limit and the
+coefficients at `1e-9`, checks sample/backend/iteration accounting, and keeps
+failed-refit cleanup and recovery separate from numerical passes. Pass the
+exact module, data, oracle/hash and a new JSON output path. Non-nested
+clusters, relabelled clusters, reversed FE order and the cluster-DoF toggle
+require their matching independently constructed oracle. Short budgets may
+require refusal (`--expect-refusal`) or allow a clean refusal while grading
+any returned result (`--allow-refusal`). No observations or residual arrays
+are written. This regression test is independent of the synthetic campaign
+and is not a performance certificate.
+
+`--phase-proof` also captures the CUDA correction's host preconditioner
+trace. Each independent level pass must expose at least as many work units
+as requested threads, form the real requested team and observe useful work
+on multiple workers when more than one is requested. Active-worker counts
+are recorded separately; dynamic scheduling need not give every worker a
+task in every pass. The triangular solve reports its structural RHS width
+separately. An aggregate `threads_used` value alone is insufficient.
 
 `evaluate.py` retains the historical verdict and thresholds. T01 adds a
 separate `t01` object through `evaluate_t01.py`; it never converts a historical
@@ -273,6 +324,168 @@ separately and do not overturn a correct default fit; audit harness/coverage
 gaps and wrong returned estimates remain failures. The aggregate always leaves
 `full_G1_claim=false` while IV/X-hat normal-defect coverage, formal covariance
 interval gaps, core24 x 8 and the group/individual 3M gate remain outstanding.
+
+## Approx-Cholesky adjacency ownership and factor equality
+
+`ac_factor_storage_contract.py` copies the exact builder source bodies into
+an isolated, synthetic-only harness. It checks every factor field against
+`build_reference`, including 441 graph/seed/split cases, three graphs above
+the public arena dispatch boundary and a rejected single-bit corruption.
+It also compares complete factor archives against an explicitly selected
+frozen arena source. It never serialises real-data graphs or changes sources.
+
+For a permanent current-builder versus reference guard, run from the checkout:
+
+```sh
+python3 tests/analytic_precision/ac_factor_storage_contract.py \
+  --output Verifications/ac_factor_storage_check \
+  --frozen-source src/fe_absorption.cpp
+```
+
+Use a new output directory for each run. Passing a separately frozen
+`fe_absorption.cpp` additionally checks historical arena equality; using the
+current source checks reference equality without establishing historical
+parity. `--compiler clang++ --sanitizers` enables ASan/UBSan and leak checks
+where the local runtime supports them. The short `xhdfe_ac_arena_storage_contract`
+CTest target independently checks allocation failure, relocation and slab
+ownership. These are offline storage/factor gates, not estimator or runtime
+certification. The main campaign manifest also pins `src/ac_arena_storage.hpp`.
+
+## Shared Krylov scatter storage
+
+`shared_scatter_storage_contract.py` extracts the exact common-store
+preparation lambda from `fe_absorption.cpp`. It checks delayed allocation,
+the unchanged group/chunk shape and zeros, owner-traversal exclusions,
+idempotence and allocation failure before publishing the ready flag.
+Negative controls reject premature publication and a missing consumer call.
+
+```sh
+python3 tests/analytic_precision/shared_scatter_storage_contract.py \
+  --output Verifications/shared_scatter_storage_check
+```
+
+Use a new output directory. `--compiler clang++` checks the same body with
+clang. This offline allocation guard uses a failure probe in place of Eigen;
+actual estimator/oracle, cache, recovery, backend and memory receipts remain
+separate requirements. It is not a numerical or performance certification.
+
+## Portable lockstep memory routing and useful phase workers
+
+The `xhdfe_lockstep_memory_plan_contract` CTest target checks a fixed-48,
+data-only decision at simulated capacities 48/64/96. Scatter, contiguous
+carries and row partials obey both `B=max(1 GiB,2R)` and `3R-Q`, where
+`R=8*n*RHS` and `Q=56*levels*RHS`. The executor uses the same joint cap.
+The decision prices its actual fixed-48 partition, not a hypothetical full
+budget. Overflow or insufficient space has no executable partition.
+
+At capacities up to 48, retained lockstep must keep the historical row
+partition. The 266000-row/250-RHS counterexample that changed 48 to 47 chunks
+is diverted. At larger capacities a memory-limited partition can differ;
+trace fields declare that arithmetic class, and simulated capacities do not
+certify numerical execution on 64/96-processor hardware. The general
+deterministic header has no new fixed cap.
+
+`lockstep_workspace_allocation_contract.py --output NEW_DIRECTORY` extracts
+the actual core allocate/assign/row-partial expressions and records their
+element requests. Bulk storage is intercepted: this tests sizes, not physical
+RSS or the complete solver. Omitting carries in the model must be rejected.
+Omitting the persistent row-partial term is also rejected. The separate
+startup reduction partial, row vector, allocator overhead and other workspace
+families are outside this selected model and still need physical receipts.
+`lockstep_partition_boundary_oracle.py --module MODULE --output NEW_DIRECTORY`
+checks the diverted boundary against independent sparse dummies and explicit
+OLS, preserving the estimator's tolerances and separate offline reference.
+It requires explicit dispatch (47 versus 48 historical chunks), batch-lanes
+and useful-worker trace lines; absent evidence cannot pass by default.
+
+`mlsmr_phase_trace_contract.py` compiles the exact opt-in phase trace class,
+checks independent useful-worker slots and rejects team size reported as
+active work. `XHDFE_MLSMR_TRACE=1` reports each phase's own units, team and
+useful workers. The aggregate command diagnostic is not proof that every
+solver phase used that team.
+The observer test measures actual teams independently of requests; a runtime
+limited to two workers remains testable. A strictly serial runtime leaves the
+team-as-workers negative control explicitly `NOT_RUN`, not PASS.
+
+These guards test structure and reporting. Physical memory, independent
+projection/team-domain oracles, every changed core path, and the performance
+matrix remain separate gates. A previously rejected routing trial is not
+approved by these tests; current composite candidates require fresh receipts.
+
+## Review closure contracts (10 October 2026)
+
+`intercept_psd_contract.py --output NEW_DIRECTORY --captured SYNTHETIC_DTA`
+checks the actual intercept covariance repair against independent spectral,
+range and Schur-complement conditions. The optional input is the 40-seed
+synthetic covariance capture, never confidential records. Slope blocks must
+remain bit-identical; positive, singular, zero and rescaled cases are included.
+
+`group_column_moment_contract.cpp` distinguishes a passing aggregate RMS from
+a failing individual FE moment using analytic residuals. Link it against the
+explicit CPU core under test. Both standard/individual dimension orders and
+the unchanged Fast mode are covered.
+
+`n1_continuation_context.cpp` checks thread isolation and restoration of the
+private CUDA continuation predicate, including nested scopes and exceptions.
+Compile with the repository `src` and Eigen include directories and `-pthread`.
+Checks remain active with `-DNDEBUG`. The same executable must return 1 with
+`--inject-context-error`, which corrupts the live scoped pointer; both builds
+must reject that negative control. It is a lifetime contract; numerical CUDA
+continuation is covered separately by the independent PF3FE tests and their
+11 October receipts, not by this context test.
+
+`n1_context_build_contract.py --include SOURCE_DIR --eigen EIGEN_DIR
+--output NEW_DIRECTORY` compiles both configurations and exercises the positive
+and injected-failure cases in each executable.
+
+`stata_walsh_residual_contract.py --package PACKAGE --fixture SYNTHETIC_DTA
+--backend cpu|cuda --output NEW_DIRECTORY` reproduces the 3,145,728-row Walsh
+fixture in fresh Stata sessions (threads 1/2/8/16/24/48 by default). The package
+must contain `stata/xhdfe.ado` and its matching plugin. `--version` selects the
+expected package stamp when checking the frozen 2.26.2 baseline. CUDA needs a
+GPU-visible context. `walsh_fixture_oracle.py` verifies the fixture's dyadic
+construction, connected FE rank, exact coefficients and covariance independently.
+The contract checks b, full V, FE moments, normal equations, sample/df and real
+backend use. The older absolute pointwise diagnostic at 1e-7 is retained as a
+separate value/pass flag: it fails for both the final 2.29 and frozen 2.26.2
+CUDA fits, while their published contracts pass. It is not a universal solver
+target. Injected FE and regressor residual errors must fail the moment checks.
+
+`schur_gauge_contract.py --output NEW_JSON` checks the independent offline
+three-FE oracle against dense synthetic OLS, including a structural null
+direction missed by a two-anchor implementation and power-of-two rescaling.
+
+`worker_allocation_contract.py --module MODULE --output NEW_DIRECTORY` is a
+Linux/glibc synthetic fault-injection test. It builds a process-local malloc
+shim, disables core dumps in its own children, verifies failure sites,
+requires a propagated MemoryError and a non-converged state, and repeats the
+fit in the same object. Coefficients, covariance, residuals and iterations must
+match an uninjected run. It does not modify system settings or inject into
+other processes. This test is separate from native Windows/macOS validation.
+
+`strict_cuda_continuation_contract.py --module MODULE --fixture LAPLACIAN_DIR
+--output NEW_JSON` checks the synthetic `laplacian_sum` strict oracle with
+real CUDA use and unchanged tolerance, plus iteration budgets 1, 1128 and 1500.
+All limited cases must refuse with empty estimates; the latter two also check
+clearing a previous fit and subsequent recovery of the same object. The 1500
+case verifies that refusal diagnostics describe the original model, rather
+than an unaccepted auxiliary correction. Expected
+budget refusals are lifecycle controls, separate from the positive numerical
+strict result. The complete campaign supplies default/Fast controls.
+
+`equivalent_cluster_partition_contract.py --module MODULE --backend cpu|cuda
+--output NEW_JSON` tests the exact IV partition identity with independent
+MP90/MP120 covariance. Distinct partitions with equal marginal counts guard
+against an overbroad shortcut. Two unweighted distinct-partition cases per
+backend have indefinite raw CGM covariance and instead check the authorised
+PSD policy; they are not positive-covariance oracle passes.
+
+`stata_iv_intercept_covariance_contract.py --package STATA_DIRECTORY
+--stata STATA_EXECUTABLE --expected-version VERSION --output NEW_DIRECTORY`
+checks twelve synthetic IV fits: unweighted/analytic/frequency weights,
+Fast/Comparable and CPU/CUDA. It pins the loaded ado/plugin, requires real GPU
+use and compares the full covariance, including the constant, against the
+existing MP90/MP120 oracle. It does not install or modify a package.
 
 
 ## Wide cluster covariance storage reuse (2026-10-08)

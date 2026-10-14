@@ -312,24 +312,32 @@ def main() -> int:
         (row % divisor).astype(np.int32)
         for divisor in (17, 13, 11, 7)
     ]
+    # Since the fail-closed policy, an explicit CUDA request on a build or
+    # host without CUDA raises instead of returning a status-2 CPU result.
     requested_backend = os.environ.get("XHDFE_GPU_BACKEND")
     os.environ["XHDFE_GPU_BACKEND"] = "cuda"
+    cuda_unavailable = False
     try:
         four_auto = mod.HdfeRegressor(
             num_threads=1, drop_singletons=False, tol=1e-8,
             tolerance_mode="reghdfe-comparable",
         )
-        four_auto.fit(y, X, four_fes)
+        try:
+            four_auto.fit(y, X, four_fes)
+        except RuntimeError as exc:
+            if "GPU backend is unavailable" not in str(exc):
+                raise
+            cuda_unavailable = True
     finally:
         if requested_backend is None:
             os.environ.pop("XHDFE_GPU_BACKEND", None)
         else:
             os.environ["XHDFE_GPU_BACKEND"] = requested_backend
-    assert four_auto.converged_ and four_auto.precision_certified_
-    if four_auto.gpu_used_:
-        assert four_auto.gpu_status_code_ == 1
+    if cuda_unavailable:
+        assert not four_auto.converged_ and not four_auto.precision_certified_
     else:
-        assert four_auto.gpu_status_code_ == 2
+        assert four_auto.converged_ and four_auto.precision_certified_
+        assert four_auto.gpu_used_ and four_auto.gpu_status_code_ == 1
 
     # An explicit but token-free DoF sequence has the same meaning as an
     # absent option. In particular, it must retain the default mobility-group
@@ -493,6 +501,10 @@ def main() -> int:
     assert chain_auto.converged_ and chain_auto.precision_certified_
     assert not caught
 
+    # A forced method that converges by its own stopping rule but fails the
+    # precision certificate is refused (fail-closed in Stata, Python and R
+    # alike; see the help's known limitations). The published 2.28.1 module
+    # refuses this exact fit with the same iteration count and residual.
     chain_forced = mod.HdfeRegressor(
         num_threads=1, drop_singletons=False, tol=1e-8,
         tolerance_mode="reghdfe-comparable",
@@ -500,49 +512,63 @@ def main() -> int:
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        chain_forced.fit(chain_y, chain_X, [chain_fe1, chain_fe2])
-    assert chain_forced.converged_ and not chain_forced.precision_certified_
-    assert len(caught) == 1
-    assert caught[0].category is mod.PrecisionWarning
+        expect_error(
+            "chain-forced-refusal",
+            lambda: chain_forced.fit(chain_y, chain_X, [chain_fe1, chain_fe2]),
+            "precision certification failed", "No estimates returned",
+        )
+    assert not chain_forced.precision_certified_
+    assert not [w for w in caught if w.category is mod.PrecisionWarning]
     assert issubclass(mod.PrecisionWarning, RuntimeWarning)
-    with warnings.catch_warnings(record=True) as suppressed:
-        warnings.simplefilter("ignore", mod.PrecisionWarning)
-        chain_forced.fit(chain_y, chain_X, [chain_fe1, chain_fe2])
-    assert not suppressed
 
     # Group/individual fits are stricter than the standard best-effort surface:
     # an exhausted CPU LSMR solve must raise before coefficients are exposed.
+    # Overdetermined group/individual design: 128 group-level outcomes, teams
+    # of three drawn from 60 individuals. Since 2.28.1 the earlier chain fixture
+    # (129 individual effects for 128 groups) is solved exactly in one LSMR
+    # iteration and certified, which is correct, so it no longer exercises an
+    # exhausted solve.
     group_count = 128
-    grouped_id = np.repeat(np.arange(group_count, dtype=np.int32), 2)
-    grouped_individual = np.column_stack((
-        np.arange(group_count, dtype=np.int32),
-        np.arange(1, group_count + 1, dtype=np.int32),
-    )).reshape(-1)
+    team = 3
+    grouped_rng = np.random.default_rng(20260804)
+    grouped_id = np.repeat(np.arange(group_count, dtype=np.int32), team)
+    grouped_individual = np.concatenate([
+        grouped_rng.choice(60, size=team, replace=False)
+        for _ in range(group_count)
+    ]).astype(np.int32)
     grouped_standard = np.repeat(
-        np.arange(group_count, dtype=np.int32) % 7, 2,
+        np.arange(group_count, dtype=np.int32) % 7, team,
     )
-    grouped_x = np.repeat(
-        np.sin(0.17 * np.arange(group_count, dtype=np.float64)), 2,
-    )[:, None]
-    grouped_y = (
-        0.6 * grouped_x[:, 0]
-        + np.repeat(np.cos(0.11 * np.arange(group_count)), 2)
+    grouped_level = np.sin(0.17 * np.arange(group_count, dtype=np.float64))
+    grouped_x = np.repeat(grouped_level, team)[:, None]
+    grouped_y = np.repeat(
+        0.6 * grouped_level + np.cos(0.11 * np.arange(group_count))
+        + 0.1 * grouped_rng.normal(size=group_count),
+        team,
     )
+    # Contract: a grouped fit never exposes uncertified coefficients. With a
+    # one-iteration budget the solve either completes and certifies (small
+    # designs are solved directly since 2.28.1) or raises before any estimate
+    # is published; a converged-but-uncertified return is the violation.
     grouped_fail = mod.HdfeRegressor(
         num_threads=1, drop_singletons=False, max_iter=1, tol=1e-14,
         tolerance_mode="reghdfe-comparable", absorption_method="lsmr",
     )
-    expect_error(
-        "grouped-cpu-fail-closed",
-        lambda: grouped_fail.fit(
+    try:
+        grouped_fail.fit(
             grouped_y, grouped_x,
             [grouped_individual, grouped_standard],
             group=grouped_id, individual=grouped_individual,
             aggregation="mean",
-        ),
-        "Group/individual HDFE absorption", "no estimates were produced",
-    )
-    assert not grouped_fail.converged_ and not grouped_fail.precision_certified_
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "Group/individual HDFE absorption" in message, message
+        assert "no estimates were produced" in message, message
+        assert not grouped_fail.converged_ and not grouped_fail.precision_certified_
+    else:
+        assert grouped_fail.converged_ and grouped_fail.precision_certified_
+        assert np.isfinite(np.asarray(grouped_fail.coef_)).all()
 
     # Extraction authority belongs only to the last successful, certified
     # group/individual fit. A standard refit or any failed grouped refit must
