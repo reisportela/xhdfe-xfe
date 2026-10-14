@@ -1,6 +1,9 @@
 name: Exact wide arithmetic release diagnostic
 
 on:
+  push:
+    branches: [codex/release-2291-windows-diagnostic]
+    paths: [.github/workflows/wide-arithmetic-diagnostic.yml]
   workflow_dispatch:
 
 permissions:
