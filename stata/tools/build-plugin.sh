@@ -332,7 +332,7 @@ if [[ "${TARGET}" == "windows" ]]; then
 fi
 echo "Checking fused multiply-add liveness..."
 "${CXX}" "${common_compile_flags[@]}" "${pthread_flag[@]}" \
-  "${fma_source}" "${fma_link_flags[@]}" -o "${fma_bin}"
+  "${fma_source}" ${fma_link_flags[@]+"${fma_link_flags[@]}"} -o "${fma_bin}"
 if [[ "${TARGET}" == "windows" && ! "${UNAME_S}" =~ ^(MINGW|MSYS|CYGWIN) ]]; then
   echo "FMA liveness NOT_RUN: Windows target is not executable on ${UNAME_S}; .github/workflows/windows-stata-loader.yml native-loader must run this probe" >&2
 elif [[ "${UNAME_S}" == "Darwin" ]]; then
