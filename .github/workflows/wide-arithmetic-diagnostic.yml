@@ -1,0 +1,89 @@
+name: Exact wide arithmetic release diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-products:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-gcc
+            runner: ubuntu-24.04
+            compiler: g++
+            architecture: x86_64
+          - name: linux-clang
+            runner: ubuntu-24.04
+            compiler: clang++
+            architecture: x86_64
+          - name: windows-mingw
+            runner: windows-latest
+            compiler: C:\Strawberry\c\bin\g++.exe
+            architecture: AMD64
+          - name: macos-intel
+            runner: macos-15-intel
+            compiler: clang++
+            architecture: x86_64
+          - name: macos-arm
+            runner: macos-15
+            compiler: clang++
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Exact product sources of the r3 release preflight. This diagnostic
+          # workflow stays on its branch and is not part of the release cut.
+          ref: 1c6b173f4e056811cade3831a663e8bed06b9f5e
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and exercise exact-rational product controls
+        shell: python
+        env:
+          WIDE_COMPILER: ${{ matrix.compiler }}
+          WIDE_ARCH: ${{ matrix.architecture }}
+        run: |
+          import hashlib, json, os, pathlib, platform, subprocess
+          root = pathlib.Path.cwd()
+          out = root/'wide-receipt'
+          out.mkdir()
+          assert platform.machine() == os.environ['WIDE_ARCH']
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == '1c6b173f4e056811cade3831a663e8bed06b9f5e'
+          compiler = os.environ['WIDE_COMPILER']
+          executable = out/('wide_probe.exe' if os.name=='nt' else 'wide_probe')
+          flags = ['-std=c++17','-O3','-ffast-math','-fno-finite-math-only']
+          if 'clang' in compiler:
+              flags += ['-ffp-contract=off']
+          if os.name == 'nt':
+              flags += ['-static','-static-libgcc','-static-libstdc++']
+          command = [compiler,*flags,'-Ithird_party/eigen-3.4.0','-Iinclude','-Isrc',
+                     'tests/wide_product_probe.cpp','-o',str(executable)]
+          with (out/'compile.log').open('w') as log:
+              subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True)
+          run = subprocess.run(['python','-B','tests/analytic_precision/wide_product_contract.py',
+                                '--probe',str(executable)],text=True,capture_output=True)
+          (out/'run.log').write_text(run.stdout+run.stderr)
+          sources = ['src/wide_float.hpp','tests/wide_product_probe.cpp',
+                     'tests/analytic_precision/wide_product_contract.py']
+          receipt = dict(status='PASS' if run.returncode==0 else 'FAIL',
+              architecture=platform.machine(),system=platform.system(),
+              source_commit='1c6b173f4e056811cade3831a663e8bed06b9f5e',command=command,
+              compiler=subprocess.check_output([compiler,'--version'],text=True),
+              hashes={p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in sources},
+              executable_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+              stdout=run.stdout,stderr=run.stderr,returncode=run.returncode)
+          (out/'RESULT.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(run.stdout+run.stderr)
+          run.check_returncode()
+          assert run.stdout.strip()=='WIDE_PRODUCT_RATIONAL_CONTRACT_PASS 37632'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wide-arithmetic-${{ matrix.name }}
+          path: wide-receipt/
+          if-no-files-found: error
