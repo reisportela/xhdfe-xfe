@@ -68,15 +68,15 @@ struct OlsWide {
     }
     OlsWide operator-(const OlsWide& b) const {return *this+(-b);}
     OlsWide operator*(const OlsWide& b) const {
-#if defined(__clang__)
-        // Clang 18 does not apply the surrounding precise scope to this
-        // in-class FMA. Set the operation's semantics in the function body.
-#pragma float_control(precise, on)
-#pragma clang fp contract(off)
-#endif
         const double p=mul(hi,b.hi);
-#if defined(__MINGW32__) && defined(__SIZEOF_INT128__)
+#if defined(__MINGW32__) && defined(__SIZEOF_INT128__) && !defined(__FMA__) && !defined(__ARM_FEATURE_FMA) && !defined(__FP_FAST_FMA)
         volatile double product_error=exact_product_error(hi,b.hi,p);
+#elif defined(__clang__) && !defined(__FMA__) && !defined(__ARM_FEATURE_FMA) && !defined(__FP_FAST_FMA)
+        // Without a target FMA instruction, older Clang can lower even a
+        // precise builtin to an unfused product/add. Keep the intended
+        // library call explicit; hardware-FMA targets retain their intrinsic.
+        static double (*volatile library_fma)(double,double,double)=std::fma;
+        volatile double product_error=library_fma(hi,b.hi,-p);
 #else
         volatile double product_error=std::fma(hi,b.hi,-p);
 #endif
