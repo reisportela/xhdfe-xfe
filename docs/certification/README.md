@@ -1,7 +1,8 @@
 # Certification records
 
 These documents preserve the substantive validation conclusions for released
-AKM and Gelbach functionality. Raw logs, telemetry, serialized snapshots, and
+AKM and Gelbach functionality and scoped development candidates. Raw logs,
+telemetry, serialized snapshots, and
 temporary remediation prompts are retained in Git history or release assets,
 not in the maintained source tree.
 
@@ -14,3 +15,4 @@ artifacts; the corresponding Git tag preserves the exact certified tree.
 - [Gelbach v2.20 post-audit report, 23 July 2026](gelbach-v2.20-postaudit-20260723.md)
 - [Gelbach functional closure, 25 July 2026](gelbach-functional-closure-20260725.md)
 - [Gelbach release certification, 25 July 2026](gelbach-release-certification-20260725.md)
+- [IV first-stage CPU/CUDA candidate validation, 7 October 2026](iv-firststage-20261007.md)

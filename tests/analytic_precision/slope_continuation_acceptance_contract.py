@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 FIXTURE = r'''
 namespace hdfe { namespace detail {
-struct Solve { int iterations; bool converged; bool certified; double block; };
+struct Solve { int iterations; bool converged; bool certified; double block;
+    double aggregate = 4.5348549629472517e-13; };
 std::vector<Solve> script;
 std::vector<HdfeOptions> calls;
 bool gpu = false;
@@ -29,7 +30,7 @@ AbsorptionResult absorb_fixed_effects_v6_mixed(
     result.iterations = spec.iterations;
     result.converged = spec.converged;
     result.slope_block_residual_rel = spec.block;
-    result.abs_residual_rel = 4.5348549629472517e-13;
+    result.abs_residual_rel = spec.aggregate;
     result.y_tilde = Eigen::VectorXd::Constant(y.size(), calls.size() + 0.125);
     result.X_tilde = Eigen::MatrixXd::Constant(X.rows(), X.cols(), calls.size() + 0.25);
     result.fe_alpha_y = {Eigen::VectorXd::Constant(2, calls.size() + 0.5)};
@@ -46,9 +47,13 @@ void certify_absorption_result(
     const Eigen::Ref<const Eigen::VectorXd>&,
     const Eigen::Ref<const Eigen::MatrixXd>&,
     const std::vector<Eigen::VectorXi>&, const Eigen::VectorXd*,
-    const HdfeOptions&, const std::vector<HeterogeneousSlopeTerm>&,
+    const HdfeOptions& options, const std::vector<HeterogeneousSlopeTerm>&,
     AbsorptionResult& result, const GroupIndividualStructure*) {
-    result.precision_certified = script.at(calls.size()-1).certified;
+    result.slope_block_checked = options.tolerance_mode != ToleranceMode::XhdfeFast;
+    result.precision_certified = result.slope_block_checked
+        ? script.at(calls.size()-1).certified
+        : (result.converged && std::isfinite(result.abs_residual_rel) &&
+           result.abs_residual_rel <= 8*options.tol);
 }
 }}
 '''
@@ -113,7 +118,11 @@ void exercise(const std::string& name, HdfeOptions options,
     check(result.X_tilde.array().isConstant(states.size()+0.25, 0), name+" X unchanged");
     check(result.fe_alpha_y[0].array().isConstant(states.size()+0.5, 0), name+" alphas unchanged");
     check(result.sweep_order_used == std::vector<int>({1,0}), name+" sweep order");
-    check(result.abs_residual_rel == 4.5348549629472517e-13, name+" residual diagnostic");
+    check(result.abs_residual_rel == states.back().aggregate ||
+          (std::isnan(result.abs_residual_rel) && std::isnan(states.back().aggregate)),
+          name+" residual diagnostic");
+    check(result.slope_block_checked == (options.tolerance_mode != ToleranceMode::XhdfeFast),
+          name+" certificate scope");
     if (accepted) {
         check(result.converged && result.precision_certified, name+" real final flags");
         check(result.gpu_used == device, name+" backend retained");
@@ -136,45 +145,64 @@ int main() {
     fast.tol=1e-8; fast.max_iter=100000; fast.from_auto=true;
     fast.tolerance_mode=ToleranceMode::XhdfeFast;
     fast.convergence_criterion=ConvergenceCriterion::Auto;
-    const std::vector<Solve> akm={{30,true,false,1.3525671445292131e-5},
-        {62,true,false,2.4754871466158074e-6},
-        {122,true,false,1.5704318747310904e-7},
-        {146,true,false,9.655684038217385e-8},
-        {183,true,true,3.683493605810405e-8}};
-    const std::vector<double> ftol={1e-8,1e-10,1e-12,1e-13,1e-15};
-    exercise("AKM2 saved states",fast,akm,ftol,true);
-    exercise("device state retention",fast,akm,ftol,true,true);
+    const std::vector<Solve> primary={{30,true,false,1.3525671445292131e-5}};
+    exercise("Fast accepts historical aggregate",fast,primary,{1e-8},true);
+    exercise("Fast retains CUDA state",fast,primary,{1e-8},true,true);
     auto save=fast; save.retain_fixed_effects=true;
-    exercise("retained FE state",save,akm,ftol,true);
-    for (auto flags : {std::pair<bool,bool>{true,false},{false,true},{false,false}}) {
-        auto bad=akm; bad.back().converged=flags.first; bad.back().certified=flags.second;
-        if (!flags.second) bad.back().block=9e-8;
-        exercise("invalid final flags",fast,bad,ftol,false);
-        exercise("invalid device flags",fast,bad,ftol,false,true);
+    exercise("Fast retained FE state",save,primary,{1e-8},true);
+    for (auto criterion : {ConvergenceCriterion::NormChange,
+                           ConvergenceCriterion::Reghdfe, ConvergenceCriterion::Both}) {
+        auto explicit_rule=fast; explicit_rule.convergence_criterion=criterion;
+        exercise("Fast explicit criterion no block retry",explicit_rule,primary,{1e-8},true);
     }
-    auto nonfinite=akm;
-    nonfinite.back().block=std::numeric_limits<double>::quiet_NaN();
-    nonfinite.back().certified=false;
-    exercise("uncertified nonfinite",fast,nonfinite,ftol,false);
-    exercise("primary already accepted",fast,{{30,true,true,5e-9}},{1e-8},true);
     auto explicit_method=fast; explicit_method.from_auto=false;
-    exercise("explicit method unchanged",explicit_method,{{30,true,true,3.68e-8}},
-             {1e-8},true);
-    auto limited=fast; limited.max_iter=543;
-    exercise("certified at budget boundary",limited,akm,ftol,true);
-    auto bad_budget=akm; bad_budget.back().certified=false;
-    exercise("uncertified at budget boundary",limited,bad_budget,ftol,false);
+    exercise("Fast explicit method",explicit_method,primary,{1e-8},true);
     auto no_budget=fast; no_budget.max_iter=30;
-    exercise("no remaining budget",no_budget,{{30,true,false,1e-5}},{1e-8},false);
+    exercise("Fast accepted at budget boundary",no_budget,primary,{1e-8},true);
+    for (double aggregate : {9e-8, std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+        exercise("Fast aggregate failure refuses",no_budget,
+                 {{30,true,false,0.0,aggregate}},{1e-8},false);
+        exercise("Fast CUDA aggregate failure refuses",no_budget,
+                 {{30,true,false,0.0,aggregate}},{1e-8},false,true);
+    }
+    exercise("Fast nonconvergence refuses",fast,{{30,false,false,0.0}},{1e-8},false);
+    exercise("Fast repairs failed aggregate without block polishing",fast,
+             {{30,true,false,1e-5,9e-8},{40,true,false,1e-5,1e-9}},
+             {1e-8,1e-10},true);
+    exercise("Fast CUDA repairs failed aggregate",fast,
+             {{30,true,false,1e-5,9e-8},{40,true,false,1e-5,1e-9}},
+             {1e-8,1e-10},true,true);
+    std::vector<Solve> exhausted(5, {30,true,false,1e-5,9e-8});
+    exercise("Fast exhausted aggregate repair refuses",fast,exhausted,
+             {1e-8,1e-10,1e-12,1e-13,1e-15},false);
+
     auto comparable=fast; comparable.tolerance_mode=ToleranceMode::ReghdfeComparable;
     const std::vector<Solve> comp={{30,true,false,1e-5},{62,true,false,2e-6},
         {122,true,false,1e-7},{146,true,false,9e-8},
         {183,true,false,9e-9},{200,true,true,3.68e-9}};
     const std::vector<double> ctol={1e-8,1e-10,1e-11,1e-13,1e-14,1e-15};
     exercise("Comparable own certificate",comparable,comp,ctol,true);
+    exercise("Comparable CUDA state retention",comparable,comp,ctol,true,true);
+    auto comparable_save=comparable; comparable_save.retain_fixed_effects=true;
+    exercise("Comparable retained FE state",comparable_save,comp,ctol,true);
+    for (auto flags : {std::pair<bool,bool>{true,false},{false,true},{false,false}}) {
+        auto bad=comp; bad.back().converged=flags.first; bad.back().certified=flags.second;
+        if (!flags.second) bad.back().block=9e-8;
+        exercise("Comparable invalid final flags",comparable,bad,ctol,false);
+        exercise("Comparable invalid device flags",comparable,bad,ctol,false,true);
+    }
     auto wrong_mode=comp; wrong_mode.back().block=3.68e-8;
     wrong_mode.back().certified=false;
-    exercise("Fast certificate cannot pass Comparable",comparable,wrong_mode,ctol,false);
+    exercise("Fast limit cannot pass Comparable",comparable,wrong_mode,ctol,false);
+    auto limited=comparable; limited.max_iter=743;
+    exercise("Comparable certified at budget boundary",limited,comp,ctol,true);
+    auto short_budget=comparable; short_budget.max_iter=30;
+    exercise("Comparable no remaining budget",short_budget,primary,{1e-8},false);
+    exercise("Comparable already accepted",comparable,{{30,true,true,5e-10}},{1e-8},true);
+    auto explicit_rule=comparable; explicit_rule.convergence_criterion=ConvergenceCriterion::NormChange;
+    exercise("Comparable explicit first certified stage",explicit_rule,
+             {{30,true,false,1e-5},{62,true,true,3.68e-9}},{1e-8,1e-10},true);
     std::cout << "cases=" << cases << " failures=" << failures << '\n';
     return failures != 0;
 }

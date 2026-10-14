@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.28.1). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.29.5). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.28.1) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.29.5) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.28.1.
+#' effects regression via a C++ backend." Version 2.29.5.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -429,6 +429,11 @@ NULL
 #'   \code{"both"} (requires both criteria). Note that
 #'   \code{tolerance_mode = "strict-residual"} is not supported with
 #'   heterogeneous slopes.
+#'   In fast mode, slope absorption uses the historical aggregate residual
+#'   check; block checks and block-driven refinement are skipped. Aggregate
+#'   failures can still trigger refinement or refusal. Comparable mode keeps
+#'   its block checks. The result field \code{slope_block_checked} is false
+#'   when block diagnostics were not computed (their values are placeholders).
 #' @param check_interval number of absorber iterations between convergence
 #'   checks; default \code{1} (check every iteration).
 #' @param absorption_method the fixed-effect absorption method
@@ -1205,7 +1210,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.28.1.
+#' effects regression via a C++ backend." Version 2.29.5.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

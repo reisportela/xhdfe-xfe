@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.6.1  29sep2026}{...}
+{* *! version 1.6.1  09oct2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
@@ -12,7 +12,7 @@
 {p2colreset}{...}
 
 {pstd}
-{bf:Version 1.6.1 (29sep2026), distributed with shared package}
+{bf:Version 1.6.1 (09oct2026), distributed with shared package}
 {bf:2.28.1.20260929.} The shared package includes common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}

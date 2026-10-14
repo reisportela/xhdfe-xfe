@@ -88,6 +88,72 @@ macOS/Windows execution, and full-data performance. This battery supplements
 the existing inference, feature, release and benchmark suites; it does not
 replace them or certify every possible dataset/platform configuration.
 
+A separate Stata IV guard, `iv_repeated_control_contract.do`, covers exact
+variable-name overlap between included controls and `instruments()`. From a
+scratch directory run `stata-mp -b do /path/to/iv_repeated_control_contract.do cpu`
+(or `cuda`) with `XHDFE_STATA_ADOPATH` selecting the candidate. It compares
+the clean and repeated-control specifications, coefficients against independent
+explicit-dummy `ivregress 2sls` and `ivreghdfe`, repeated estimates and covariance,
+sample/DoF/RSS, backend use, and failed-fit state. Require the
+`IV_REPEATED_CONTROL_CONTRACT_PASS` marker. This focused IV test is separate from
+the analytic campaign above; proportional duplicates and general numerical-rank
+decisions remain outside its coverage. The special self-instrumentation case
+uses explicit-dummy OLS and reghdfe because ivreghdfe rejects that syntax.
+
+The proportional-instrument repair has separate permanent guards:
+
+- `iv_exact_proportional_contract.cpp` reads represented binary64 inputs and
+  checks the production filter. Compile it with the candidate's flags and
+  `-Iinclude -Isrc -I/path/to/Eigen`; use `-fopenmp -DHDFE_USE_OPENMP` for
+  explicit-team coverage. Run `iv_exact_proportional_contract.py --probe BIN
+  --out NEW.json --threads 1,2,8,16,24,48`. Its independent `Fraction` oracle
+  covers 4,396 cases per team, including subnormals, extreme exponents, signed
+  zeros and one-bit differences. A 6,000-row check verifies that a distinction
+  in a late row survives and every requested worker actually performs work.
+- `iv_proportional_instrument_contract.py --module MODULE --backend cpu|cuda
+  --out NEW.json` runs 28 cases per backend against the conditioning contract's
+  independent Walsh scores. It combines exactly proportional columns with tiny
+  genuine directions, two endogenous regressors, weights, robust/clustered
+  covariance, both tolerance modes, positive-weight sample selection, and
+  underidentification. The multiple-endogenous weighted fixture explicitly
+  checks the score-space and FE orthogonality assumptions before evaluating a fit.
+- `iv_proportional_instrument_contract.do cpu|cuda`, with
+  `XHDFE_STATA_ADOPATH`, checks 210 CPU / 180 CUDA fits against the clean
+  specification, independent explicit-dummy 2SLS/OLS and ivreghdfe/reghdfe.
+  Require `IV_PROPORTIONAL_INSTRUMENT_CONTRACT_PASS`. The original first-stage
+  contract now also runs the proportional case on CUDA.
+- `n1_iv_cache_contract.py` crosses its independent IV score and saved-FE
+  recovery fixtures with and without proportional columns. Its existing OLS
+  persistent-cache checks are unchanged.
+
+These tests do not certify arbitrary multicolumn dependencies, FE-induced
+redundancy, cross-platform packages, or runtime performance.
+
+The multiway IV covariance repair has two complementary independent guards:
+
+- The unchanged `iv_intercept_covariance_contract.py --module MODULE --out
+  NEW.json --mode xhdfe-fast|reghdfe-comparable` covers 46 full covariance cases
+  per mode. `iv_intercept_covariance_cuda_contract.py` runs the same references
+  and requires real CUDA use. It includes equivalent cluster partitions, raw
+  regressor means, analytic/frequency weights, SSC choices and perfect fits.
+- `iv_covariance_psd_contract.py --module MODULE --backend cpu|cuda --mode
+  xhdfe-fast|reghdfe-comparable --out NEW.json` adds 44 cases per backend/mode.
+  Fixed partitions (seeds 2/102 and 11/111) require actual eigenvalue correction;
+  equivalent partitions must preserve the positive sandwich. The MP90 and
+  MP120 references independently construct the cluster scores and sandwich,
+  then apply the documented standardized full-matrix and separate slope-block
+  rule. At least 12 controls must detect an implementation that skips the
+  projection. Every coefficient/covariance limit remains 1e-9/1e-8.
+- For Stata, first run `iv_covariance_psd_stata_fixtures.py NEW_DIRECTORY`, then
+  `do iv_covariance_psd_contract.do cpu|cuda NEW_DIRECTORY` from a scratch
+  directory with the candidate selected by `XHDFE_STATA_ADOPATH`. This tests
+  88 fits per backend, including `e(vcv_psd_fixed)` and real CUDA diagnostics,
+  against the same independent MP120 oracle. Require the
+  `IV_COVARIANCE_PSD_CONTRACT_PASS` marker. A wrapper do-file avoids ambiguity
+  in the log filename chosen by Stata batch mode for multiple arguments.
+
+These covariance tests do not substitute for full release performance gates.
+
 The scope, source hashes, fixtures and complete per-row results must accompany
 any certification claim. Preserve failed evidence, investigate oracle or
 interface-contract mistakes separately from product failures, and prepare a
@@ -207,3 +273,47 @@ separately and do not overturn a correct default fit; audit harness/coverage
 gaps and wrong returned estimates remain failures. The aggregate always leaves
 `full_G1_claim=false` while IV/X-hat normal-defect coverage, formal covariance
 interval gaps, core24 x 8 and the group/individual 3M gate remain outstanding.
+
+
+## Wide cluster covariance storage reuse (2026-10-08)
+
+`wide_cluster_covariance_reuse.cpp` exercises the retained wide multiway
+covariance path directly, including 2/3/5 regressors, explicit constants in
+first/last position, no explicit constant, weights, response scales 2^-80,
+1 and 2^80, and minimum/conventional cluster adjustments. All 84 cases require
+this path to have been entered and expose both the retained and returned full
+covariance. This covers buffer sizing/reset and the original-units transform.
+
+Compile the driver against each frozen baseline/candidate `libxhdfe.a`, using
+that build's Eigen headers and OpenMP/CUDA link dependencies. Run the two
+executables into separate JSONL files, then grade outside the estimator:
+
+```bash
+python tests/analytic_precision/wide_cluster_covariance_reuse_contract.py \
+  --baseline baseline.jsonl --candidate candidate.jsonl --out reuse_validation.json
+```
+
+The grader constructs an independent MP90/MP120 augmented sandwich reference,
+checks the unchanged 1e-8 scaled covariance and 1e-9 coefficient/RSS limits,
+and requires exact baseline/candidate output equality for these fixtures.
+Existing IV intercept/PSD contracts cover the full Python/Stata estimation
+and PSD postprocessing; this test supplies additional native-path coverage.
+
+## Fast heterogeneous-slope acceptance policy
+
+`fast_slope_policy_contract.cpp` calls the real certificate on an approximate
+projection whose historical aggregate residual passes while the comparable
+block residual fails. It also checks the exact projection, weighted cases,
+slope-unit changes, recertification scope, non-convergence, non-finite values,
+and an aggregate residual that must still be rejected in fast mode. Link it
+against the matching native archive with that build's include/compile/link flags.
+
+`fast_slope_fit_contract.py --module MODULE --backend cpu|cuda --out OUTPUT`
+records real weighted/unweighted fits with and without retained effects, both
+modes, explicit-dummy OLS coefficient references, full covariance and residuals.
+Run baseline and candidate separately and compare comparable outputs. The
+acceptance-wrapper contract additionally verifies fast mode never performs a
+block-driven retry, and comparable mode retains its continuation/refusal rules.
+The new `slope_block_checked_` diagnostic (Stata: `e(slope_block_checked)`, R:
+`slope_block_checked`) distinguishes skipped checks from zero residuals. The
+five existing block metrics are zero placeholders when it is false.

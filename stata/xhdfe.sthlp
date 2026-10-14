@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.28.1 29sep2026}{...}
+{* *! version 2.29.5 09oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -114,6 +114,8 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 {syntab:IV/2SLS {help xhdfe##opt_iv:[+]}}
 {synopt : {opth endog:enous(varlist)}}endogenous regressors (subset of slopes){p_end}
 {synopt : {opth instr:uments(varlist)}}instruments for IV/2SLS{p_end}
+{synopt : {opt first}}display first-stage regressions and excluded-instrument tests{p_end}
+{synopt : {opt ffirst}}display only the first-stage diagnostic summary{p_end}
 
 {syntab:Degrees-of-Freedom Adjustments {help xhdfe##opt_dof:[+]}}
 {synopt :{opt dof:adjustments(list)}}select absorbed-DoF adjustment rules; default is {cmd:all}{p_end}
@@ -526,6 +528,39 @@ Factor-variable operators are not supported with IV, and IV is not supported in 
 {pmore}
 Redundant instrument columns are accepted when their retained span identifies the declared endogenous regressors.
 An effective zero instrument span or an underidentified model returns an error.
+Included exogenous regressors enter the instrument set automatically. If their
+variable names also appear in {cmd:instruments()}, the extra entries are removed
+before absorption on both CPU and CUDA; they do not count as excluded instruments.
+Exactly proportional nonzero instruments are removed before absorption on both
+CPU and CUDA, including columns with different variable names. Distinct, nearly
+proportional instruments are retained. More general linear dependencies, or
+those created only by absorption, can still trigger rank-deficiency errors on CUDA.
+
+{phang}
+{opt first} displays the regression of each endogenous variable on the included
+exogenous regressors, excluded instruments, and absorbed fixed effects, followed
+by the first-stage diagnostic summary. {opt ffirst} displays just the summary.
+Both store {cmd:e(first)}, with one column per endogenous regressor and rows
+{cmd:pr2}, {cmd:F}, {cmd:df}, {cmd:df_r}, and {cmd:pvalue}. The F-test jointly tests
+the excluded-instrument coefficients; redundant restrictions are omitted.
+Partial R-squared is {it:1 - RSS_unrestricted/RSS_restricted}, where the restricted
+first stage includes the exogenous controls and fixed effects only.
+
+{pmore}
+The auxiliary regressions use the final IV estimation sample, weights, fixed
+effects, covariance estimator, DoF/SSC settings, and selected CPU/CUDA backend.
+They run only when requested, and preserve the structural coefficients,
+covariance matrix, estimation sample, and other {cmd:e()} results. These options
+perform additional xhdfe regressions and therefore add computation time.
+
+{pmore}
+F-statistics follow the same small-sample conventions as a direct xhdfe or
+reghdfe first-stage regression followed by {cmd:test}. When fixed effects are
+nested within clusters, reghdfe charges an additional intercept degree of
+freedom relative to ivreghdfe; the resulting F-statistics can differ by that
+known finite-sample factor. With multiple endogenous regressors, these are
+per-equation relevance tests, not Sanderson-Windmeijer conditional tests or
+Kleibergen-Paap weak-identification statistics. They do not test instrument validity.
 
 {pmore}
 With absorbed fixed effects, the reported {cmd:_cons} is the finite
@@ -669,8 +704,13 @@ previous versions. It can cut runtime by an order of magnitude on such designs (
 {cmd:tolerancemode()}). {cmd:auto} (default) follows {cmd:tolerancemode()}: under
 {it:reghdfe-comparable} the slope absorber stops on the reghdfe-style update criterion at the nominal
 {cmd:tolerance()}, and under {it:xhdfe-fast} it uses the historical norm-change trigger. For Auto
-requests this trigger produces a candidate only: the independent per-block certificate governs
-acceptance and may add visible same-method continuation sweeps.
+requests in {it:reghdfe-comparable}, this trigger produces a candidate only: the independent
+per-block certificate governs acceptance and may add visible same-method continuation sweeps.
+In {it:xhdfe-fast}, the historical aggregate residual certificate governs acceptance; block checks
+and block-driven continuation are skipped, including with an explicit {cmd:convergence()} rule.
+An aggregate failure can still trigger same-method refinement or refusal.
+The estimator, public tolerance and numerical failure guards are retained. Fast mode can therefore
+return less accurate absorption than comparable mode on difficult slope designs.
 {cmd:tolerancemode(strict-residual)} is not supported with heterogeneous slopes and exits with an
 error before estimation; use {cmd:tolerancemode(reghdfe-comparable)} or {cmd:tolerancemode(xhdfe-fast)}
 for those designs. Within supported tolerance modes, explicit values override the auto mapping:
@@ -879,7 +919,17 @@ residuals for compatibility.
 
 {pstd}
 Implemented {cmd:estat} subcommands are {cmd:estat summarize}, {cmd:estat vce}, and
-{cmd:estat ic}.
+{cmd:estat ic}, plus {cmd:estat firststage} after IV estimation.
+
+{pstd}
+{cmd:estat firststage} reports the first-stage summary and returns its matrix in
+{cmd:r(first)} without replacing the IV estimates. It reuses {cmd:e(first)} when
+available, or estimates the auxiliary regressions on {cmd:e(sample)} otherwise.
+{cmd:r(first_gpu_used)} reports GPU use in the unrestricted and restricted first stages.
+{cmd:estat firststage, first} also displays the full first-stage regressions.
+With {cmd:nosample}, request {cmd:first} or {cmd:ffirst} during estimation to retain
+the summary for later use; re-estimating full first stages requires the sample.
+Replay with {cmd:xhdfe, ffirst} or {cmd:xhdfe, first} is also supported.
 
 {pstd}
 The syntax of {it:predict} is:
@@ -927,7 +977,7 @@ you estimated the model with {cmd:residuals(newvar)}.{p_end}
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
 precision certificate returns no estimates (r(498)) in Stata, Python and R alike.
-Ill-conditioned specifications can still require a refusal. Heterogeneous slopes under
+Ill-conditioned specifications can still require a refusal. In {it:reghdfe-comparable}, heterogeneous slopes under
 an explicit {cmd:convergence(reghdfe)} used to: the reghdfe stopping rule leaves the slope block
 above the certificate; the explicit rule is now continued once at tighter internal tolerances
 and the first certified stage is returned ({cmd:e(slope_accuracy_retry_stages)} counts them),
@@ -1006,6 +1056,9 @@ other redundancies are not detected by default and the footnote marks the count 
 
 {pstd}Two-stage least squares after absorbing FEs{p_end}
 {phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south)}{p_end}
+{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south) vce(cluster idcode) ffirst}{p_end}
+{phang2}{cmd:. matrix list e(first)}{p_end}
+{phang2}{cmd:. estat firststage}{p_end}
 
 {pstd}Side-by-side comparison with reghdfe (user example){p_end}
 {phang2}{cmd:. webuse nlswork, clear}{p_end}
@@ -1107,7 +1160,8 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(auto_retry_iterations)}}cold MLSMR retry iterations{p_end}
 {synopt:{cmd:e(auto_retry_abs_res_rel)}}retry canonical certificate metric{p_end}
 {synopt:{cmd:e(auto_retry_elapsed_seconds)}}retry wall time in seconds{p_end}
-{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate{p_end}
+{synopt:{cmd:e(slope_block_checked)}}1 if the heterogeneous-slope block check ran; 0 in fast mode or without slopes{p_end}
+{synopt:{cmd:e(slope_block_residual_rel)}}heterogeneous slopes: maximum undiluted per-block/RHS certificate; only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise contain zero placeholders){p_end}
 {synopt:{cmd:e(slope_block_frobenius_rel)}}heterogeneous slopes: maximum Frobenius-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_rms_rel)}}heterogeneous slopes: maximum RMS diagonal-scaled block moment{p_end}
 {synopt:{cmd:e(slope_block_max_rel)}}heterogeneous slopes: maximum worst-group block moment{p_end}
@@ -1117,7 +1171,7 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(slope_accuracy_retry_stages)}}number of adaptive same-method slope continuation stages{p_end}
 {synopt:{cmd:e(slope_accuracy_retry_iterations)}}slope continuation iterations beyond the primary candidate{p_end}
 {synopt:{cmd:e(slope_internal_tolerance)}}last internal slope continuation tolerance; public {cmd:tolerance()} is unchanged{p_end}
-{synopt:{cmd:e(precision_certified)}}1 if the explicit residual check meets its numerical limit{p_end}
+{synopt:{cmd:e(precision_certified)}}1 if the selected mode's residual check meets its limit; fast slope fits use the aggregate check{p_end}
 {synopt:{cmd:e(fe_recovery_converged)}}(only with {cmd:savefe}/{cmd:savefes}) 1 if fixed-effect recovery converged, 0 otherwise{p_end}
 {synopt:{cmd:e(fe_recovery_iterations)}}(only with {cmd:savefe}/{cmd:savefes}) iterations used to recover the fixed effects{p_end}
 {synopt:{cmd:e(fe_recovery_max_delta)}}(only with {cmd:savefe}/{cmd:savefes}) maximum change in the final FE recovery sweep{p_end}
@@ -1181,6 +1235,9 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(title2)}}secondary title reporting the number of absorbed FE groups{p_end}
 {synopt:{cmd:e(depvar)}}name of dependent variable{p_end}
 {synopt:{cmd:e(indepvars)}}names of independent variables{p_end}
+{synopt:{cmd:e(endogenous)}}endogenous regressor list after IV estimation{p_end}
+{synopt:{cmd:e(exogenous)}}included exogenous regressor list after IV estimation{p_end}
+{synopt:{cmd:e(instruments)}}excluded instrument list after IV estimation{p_end}
 {synopt:{cmd:e(absorb)}}absorbed FE list{p_end}
 {synopt:{cmd:e(absvars)}}alias for absorbed FE list (reghdfe compatibility){p_end}
 {synopt:{cmd:e(extended_absvars)}}extended absorbed FE list (reghdfe compatibility){p_end}
@@ -1212,6 +1269,8 @@ or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end
 
 {synoptset 24 tabbed}{...}
 {syntab:Matrices}
+{synopt:{cmd:e(first)}}first-stage partial R-squared, excluded-instrument F, numerator/denominator df, and p-value; with {cmd:first} or {cmd:ffirst}{p_end}
+{synopt:{cmd:e(first_gpu_used)}}GPU use for unrestricted and restricted first stages, one column per endogenous regressor{p_end}
 {synopt:{cmd:e(b)}}coefficient vector{p_end}
 {synopt:{cmd:e(V)}}variance-covariance matrix of the estimators{p_end}
 {synopt:{cmd:e(dof_table)}}absorbed DoF table by FE dimension (if any){p_end}
@@ -1287,7 +1346,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.28.1.
+regression via a C++ backend." Version 2.29.5.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -49,13 +50,14 @@ for weighted in (False, True):
             else:
                 meat = score.T @ (((wn * u) ** 2)[:, None] * score)
                 reference_v = (i.size / (i.size - rank)) * bread @ meat @ bread
-            for retain in (False, True):
-                row = dict(kind='iv', weighted=weighted, mode=mode, vce=vce, retain=retain)
+            for retain, duplicate in itertools.product((False, True), repeat=2):
+                row = dict(kind='iv', weighted=weighted, mode=mode, vce=vce, retain=retain, duplicate=duplicate)
                 model = cpp.HdfeRegressor(num_threads=2, max_iter=1000, tol=1e-8,
                     tolerance_mode=mode, drop_singletons=False, retain_fes=retain, se_type=vce)
                 try:
                     model.fit(y, X, fes=[worker, firm], weights=w if weighted else None,
-                              instruments=Z, endogenous_idx=[0])
+                              instruments=np.column_stack((Z, 2*Z, -.5*Z)) if duplicate else Z,
+                              endogenous_idx=[0])
                     residual = np.asarray(model.residuals_)
                     covariance = np.asarray(model.covariance_)[:2, :2]
                     vscale = np.sqrt(np.outer(np.diag(reference_v), np.diag(reference_v)))

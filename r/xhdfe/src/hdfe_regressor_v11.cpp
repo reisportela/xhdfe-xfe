@@ -43,6 +43,7 @@
 #include "group_forward_certificate.hpp"
 #include "cache_digest.hpp"
 #include "wide_float.hpp"
+#include "wide_covariance.hpp"
 #include "fe_recovery_scale.hpp"
 #include "n1_checks.hpp"
 #include "hdfe/deterministic_parallel.hpp"
@@ -50,6 +51,7 @@
 #include "hdfe/parallel_work_observer.hpp"
 #include "hdfe/student_t_detail.hpp"
 #include "iv.hpp"
+#include "iv_input.hpp"
 #include "ols.hpp"
 #include "ols_precision.hpp"
 #include "additive_cell_projection.hpp"
@@ -1941,11 +1943,17 @@ void require_accepted_absorption(const HdfeOptions& options,
             options.tolerance_mode == ToleranceMode::ReghdfeComparable
                 ? std::min(options.tol, 1.0e-9) : options.tol;
         const double arithmetic_floor = 64.0 * std::numeric_limits<double>::epsilon();
-        message << "; slope block residual=" << result.slope_block_residual_rel
-                << "; block certificate limit="
-                << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
-                << "; continuation target=" << std::max(effective_tol, arithmetic_floor)
-                << "; continuation stages=" << result.slope_accuracy_retry_stages
+        if (options.tolerance_mode == ToleranceMode::XhdfeFast) {
+            message << "; aggregate certificate limit="
+                    << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
+                    << "; slope block check=not performed";
+        } else {
+            message << "; slope block residual=" << result.slope_block_residual_rel
+                    << "; block certificate limit="
+                    << std::max(8.0 * std::max(0.0, effective_tol), arithmetic_floor)
+                    << "; continuation target=" << std::max(effective_tol, arithmetic_floor);
+        }
+        message << "; continuation stages=" << result.slope_accuracy_retry_stages
                 << "; last internal tolerance=" << result.slope_internal_tolerance;
     }
     message << ". No estimates returned.";
@@ -9284,6 +9292,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         tuned.parallel_observer = parallel_observer_.get();
         const std::optional<bool> env_krylov = read_env_bool("XHDFE_USE_KRYLOV");
         tuned.num_threads = threads;
+        // Preserve exact instrument proportionality before independent FE
+        // transformations can turn it into numerical rank. Test the original
+        // retained sample, after singleton and positive-weight filtering.
+        std::optional<Eigen::MatrixXd> distinct_instruments;
+        if (wants_iv && inst_use) {
+            distinct_instruments = detail::remove_exact_proportional_instruments(
+                *inst_use, threads, tuned.parallel_observer);
+            if (distinct_instruments) inst_use = &*distinct_instruments;
+        }
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
         const bool has_slopes_use = !slope_terms.empty();
@@ -11168,6 +11185,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         Eigen::MatrixXd iv_score_X_storage;
         Eigen::MatrixXd iv_score_low_storage;
         Eigen::VectorXd iv_intercept_covariance;
+        detail::OlsWideCovariance iv_covariance_wide;
         const auto ols_t0 = std::chrono::steady_clock::now();
         if (!wants_iv) {
             if (transformed_X_used.cols() == 0) {
@@ -11342,7 +11360,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                          tuned.se_type, total_tss, within_tss,
                                                          tuned.ssc_g_df, tuned.ssc_g_adj, nobs_effective,
                                                          &iv_actual_X, tuned.num_threads_explicit,
-                                                         tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
+                                                         tuned.parallel_observer, score_low, means_ptr, intercept_ptr,
+                                                         intercept_ptr ? &iv_covariance_wide : nullptr);
                 }
             } else {
                 ols_result = detail::run_ols_with_score_low(absorption.y_tilde, second_stage, w_ptr, nullptr, tuned.se_type,
@@ -11403,6 +11422,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             absorption.auto_routing_retry_abs_residual_rel;
         results_.auto_routing_retry_elapsed_seconds =
             absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_checked = absorption.slope_block_checked;
         results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
         results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
         results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
@@ -12524,7 +12544,32 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             const bool full_psd_ready = options_.fit_intercept && cov_cols > 0 &&
                                         intercept_cov_updated &&
                                         hdfe::detail::ieee_all_finite(results_.covariance);
-            if (full_psd_ready) {
+            if (full_psd_ready && iv_covariance_wide.values.size()) {
+                // The wide IV solve already computed this augmented covariance.
+                // Do not round it before deciding whether a PSD correction is
+                // necessary: conversion back to wide cannot recover lost bits.
+                using WideMatrix = detail::OlsWideCovariance::Matrix;
+                const int active = static_cast<int>(kept_slope_cols.size());
+                WideMatrix cov_full = WideMatrix::Zero(cov_cols, cov_cols);
+                for (int i = 0; i <= active; ++i) {
+                    const int row = i == active ? cov_cols-1 : kept_slope_cols[i];
+                    for (int j = 0; j <= active; ++j) {
+                        const int col = j == active ? cov_cols-1 : kept_slope_cols[j];
+                        cov_full(row,col) = iv_covariance_wide.values(i,j) *
+                                            detail::OlsWide(cluster_ratio);
+                    }
+                }
+                WideMatrix cov_block = cov_full.topLeftCorner(slope_cols,slope_cols);
+                const bool full_fixed = detail::fix_wide_covariance_psd(cov_full,psd_scale);
+                const bool slopes_fixed = detail::fix_wide_covariance_psd(
+                    cov_block,psd_scale.head(slope_cols));
+                cov_full.topLeftCorner(slope_cols,slope_cols) = cov_block;
+                results_.covariance = cov_full.cast<double>();
+                if (!hdfe::detail::ieee_all_finite(results_.covariance))
+                    throw std::runtime_error("Multiway covariance exceeded its numerical range; no estimates returned");
+                results_.std_errors = results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
+                results_.vcv_psd_fixed = full_fixed || slopes_fixed;
+            } else if (full_psd_ready) {
                 Eigen::MatrixXd cov_full = results_.covariance;
                 Eigen::MatrixXd cov_block =
                     cov_full.topLeftCorner(slope_cols, slope_cols);
@@ -13484,6 +13529,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             absorption.auto_routing_retry_abs_residual_rel;
         results_.auto_routing_retry_elapsed_seconds =
             absorption.auto_routing_retry_elapsed_seconds;
+        results_.slope_block_checked = absorption.slope_block_checked;
         results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
         results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
         results_.slope_block_rms_rel = absorption.slope_block_rms_rel;
@@ -14522,6 +14568,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         absorption.auto_routing_retry_abs_residual_rel;
     results_.auto_routing_retry_elapsed_seconds =
         absorption.auto_routing_retry_elapsed_seconds;
+    results_.slope_block_checked = absorption.slope_block_checked;
     results_.slope_block_residual_rel = absorption.slope_block_residual_rel;
     results_.slope_block_frobenius_rel = absorption.slope_block_frobenius_rel;
     results_.slope_block_rms_rel = absorption.slope_block_rms_rel;

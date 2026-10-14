@@ -153,6 +153,7 @@ struct HdfeResults {
     bool converged = true;         //!< Flag indicating whether the absorber reached tolerance.
     double abs_residual = 0.0;     //!< Verified absolute normal-equation residual after absorption.
     double abs_residual_rel = 0.0; //!< Verified relative normal-equation residual after absorption.
+    bool slope_block_checked = false; //!< Whether block diagnostics were computed; false in fast mode.
     double slope_block_residual_rel = 0.0; //!< Undiluted max per-block/RHS slope certificate.
     double slope_block_frobenius_rel = 0.0; //!< Max per-block Frobenius-scaled moment.
     double slope_block_rms_rel = 0.0; //!< Max RMS diagonal-scaled group moment.

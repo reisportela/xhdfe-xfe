@@ -2798,6 +2798,8 @@ STDLL stata_call(int argc, char* argv[]) {
             args.get_optional("s_auto_routing_retry_abs_residual_rel");
         const std::optional<std::string> s_auto_routing_retry_elapsed_seconds =
             args.get_optional("s_auto_routing_retry_elapsed_seconds");
+        const std::optional<std::string> s_slope_block_checked =
+            args.get_optional("s_slope_block_checked");
         const std::optional<std::string> s_slope_block_residual_rel =
             args.get_optional("s_slope_block_residual_rel");
         const std::optional<std::string> s_slope_block_frobenius_rel =
@@ -3040,6 +3042,7 @@ STDLL stata_call(int argc, char* argv[]) {
                                   stata_krylov_diagnostic(
                                       r.krylov_max_condition_times_backward_error));
                 save_auto_routing_retry(r);
+                maybe_save_scalar(s_slope_block_checked, r.slope_block_checked ? 1.0 : 0.0);
                 maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
                 maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
                 maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
@@ -3187,6 +3190,7 @@ STDLL stata_call(int argc, char* argv[]) {
                               stata_krylov_diagnostic(
                                   r.krylov_max_condition_times_backward_error));
             save_auto_routing_retry(r);
+            maybe_save_scalar(s_slope_block_checked, r.slope_block_checked ? 1.0 : 0.0);
             maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
             maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
             maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
@@ -3301,6 +3305,7 @@ STDLL stata_call(int argc, char* argv[]) {
                           stata_krylov_diagnostic(
                               r.krylov_max_condition_times_backward_error));
         save_auto_routing_retry(r);
+        maybe_save_scalar(s_slope_block_checked, r.slope_block_checked ? 1.0 : 0.0);
         maybe_save_scalar(s_slope_block_residual_rel, r.slope_block_residual_rel);
         maybe_save_scalar(s_slope_block_frobenius_rel, r.slope_block_frobenius_rel);
         maybe_save_scalar(s_slope_block_rms_rel, r.slope_block_rms_rel);
