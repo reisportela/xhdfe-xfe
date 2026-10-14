@@ -33,6 +33,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -480,8 +481,11 @@ double run_dkraay_iv(Call call, int threads, const char* mode) {
     const double beta[] = {0.5, -0.25, 3};
     for (int j = 0; j < 3; ++j) {
         const double actual = state.matrices.at("probe_b").values[j];
+        std::ostringstream message;
+        message << std::setprecision(17) << "DK IV coefficient " << j << " actual=" << actual
+                << " expected=" << beta[j] << " threads=" << threads << " mode=" << mode;
         require(std::isfinite(actual) && std::abs(actual-beta[j]) <= 1e-9,
-                "DK IV coefficient disagrees with the analytic reference");
+                message.str());
     }
     double maximum = 0;
     for (int j = 0; j < 3; ++j) for (int k = 0; k < 3; ++k) {
