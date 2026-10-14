@@ -107,7 +107,9 @@ def main():
         json.dump(receipt, stream, indent=2, allow_nan=False)
         stream.write('\n')
     print(json.dumps(dict(status=receipt['status'], result=str(output / 'RESULT.json'),
-                         plugin_sha256=receipt['plugin_sha256'])))
+                         plugin_sha256=receipt['plugin_sha256'],
+                         reason=receipt.get('reason', ''),
+                         native_reason=receipt.get('native', {}).get('reason', ''))))
     return 0 if receipt['status'] in ('PASS', 'EXPECTED_SERIAL_REJECTION') else 1
 
 

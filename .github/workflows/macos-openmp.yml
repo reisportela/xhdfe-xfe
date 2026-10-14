@@ -88,6 +88,18 @@ jobs:
             cp "serial-$kind/RESULT.json" "slice/serial-$kind.json"
           done
           tar -C slice -cf 'macos-slice-${{ matrix.arch }}.tar' .
+      - name: Preserve failed native gate diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-failed-gate-${{ matrix.arch }}
+          path: |
+            thin-*/RESULT.json
+            thin-*/stdout.log
+            thin-*/stderr.log
+            serial-*/RESULT.json
+            slice/*-build.log
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: macos-slice-${{ matrix.arch }}

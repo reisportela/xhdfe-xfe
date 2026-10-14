@@ -18,6 +18,37 @@ struct OlsWide {
     static double sub(double a,double b) {volatile double v=a-b;return v;}
     static double mul(double a,double b) {volatile double v=a*b;return v;}
     static double div(double a,double b) {volatile double v=a/b;return v;}
+#if defined(__SIZEOF_INT128__)
+    // MinGW's software fma loses bits in the product residual. Form that
+    // residual from the exact binary64 significands instead. This replaces
+    // one arithmetic operation; it adds no precision check or solve work.
+    static double exact_product_error(double a,double b,double p) {
+        const auto ab=ieee_bits_detail::bits(a), bb=ieee_bits_detail::bits(b);
+        const auto pb=ieee_bits_detail::bits(p);
+        const int ap=static_cast<int>((ab>>52)&0x7ff), bp=static_cast<int>((bb>>52)&0x7ff);
+        const int pp=static_cast<int>((pb>>52)&0x7ff);
+        if(pp==0x7ff) return std::fma(a,b,-p);
+        // A correctly rounded subnormal product has a residual of at most
+        // half the smallest subnormal, which rounds to zero in binary64.
+        if(pp==0) return 0.0;
+        const int ae=ap ? ap-1075 : -1074, be=bp ? bp-1075 : -1074;
+        const int shift=pp-1075-ae-be;
+        if(shift<=0) return 0.0; // the exact product fits in 53 bits
+        constexpr std::uint64_t mask=UINT64_C(0x000fffffffffffff);
+        constexpr std::uint64_t hidden=UINT64_C(1)<<52;
+        const std::uint64_t am=(ab&mask)|(ap ? hidden : 0);
+        const std::uint64_t bm=(bb&mask)|(bp ? hidden : 0);
+        using Integer=unsigned __int128;
+        const Integer product=Integer(am)*bm;
+        const Integer rounded=Integer((pb&mask)|hidden)<<shift;
+        // For a finite normal p=a*b, shift<=53 and the difference has at
+        // most 53 bits, so its binary64 conversion is exact.
+        double error=product>=rounded ? static_cast<double>(static_cast<std::uint64_t>(product-rounded))
+                                     : -static_cast<double>(static_cast<std::uint64_t>(rounded-product));
+        if((ab^bb)>>63) error=-error;
+        return std::ldexp(error,ae+be);
+    }
+#endif
     static OlsWide pair(double a,double b) {
         OlsWide r;r.hi=add(a,b);const double v=sub(r.hi,a);
         r.lo=add(sub(a,sub(r.hi,v)),sub(b,v));return r;
@@ -32,7 +63,11 @@ struct OlsWide {
     OlsWide operator-(const OlsWide& b) const {return *this+(-b);}
     OlsWide operator*(const OlsWide& b) const {
         const double p=mul(hi,b.hi);
+#if defined(__MINGW32__) && defined(__SIZEOF_INT128__)
+        volatile double product_error=exact_product_error(hi,b.hi,p);
+#else
         volatile double product_error=std::fma(hi,b.hi,-p);
+#endif
         double e=add(product_error,add(mul(hi,b.lo),mul(lo,b.hi)));
         return pair(p,add(e,mul(lo,b.lo)));
     }

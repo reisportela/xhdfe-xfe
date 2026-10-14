@@ -344,6 +344,13 @@ else()
 endif()
 
 if(BUILD_TESTING)
+    add_executable(xhdfe_wide_product_probe tests/wide_product_probe.cpp)
+    target_include_directories(xhdfe_wide_product_probe PRIVATE src include)
+    target_link_libraries(xhdfe_wide_product_probe PRIVATE Eigen3::Eigen)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(xhdfe_wide_product_probe PRIVATE
+            -O3 -ffast-math -fno-finite-math-only)
+    endif()
     add_executable(xhdfe_lockstep_memory_plan_contract tests/lockstep_memory_plan_contract.cpp)
     target_include_directories(xhdfe_lockstep_memory_plan_contract PRIVATE src include)
     add_test(NAME xhdfe_lockstep_memory_plan_contract
@@ -400,6 +407,10 @@ if(BUILD_TESTING)
     if(NOT CMAKE_CROSSCOMPILING)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
+            add_test(NAME xhdfe_wide_product_rational_contract
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/analytic_precision/wide_product_contract.py
+                        --probe $<TARGET_FILE:xhdfe_wide_product_probe>)
             if(XHDFE_BUILD_PYTHON)
                 add_test(
                     NAME xhdfe_public_inference_subnormal
