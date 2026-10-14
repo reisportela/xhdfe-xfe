@@ -20,9 +20,11 @@ int main() {
         const double error=std::fma(a,b,-rounded);
 #endif
         const double p=rounded;
-        std::uint64_t pb, eb;
+        const auto wide=hdfe::detail::OlsWide(a)*hdfe::detail::OlsWide(b);
+        std::uint64_t pb, eb, wh, wl;
         std::memcpy(&pb,&p,sizeof(p)); std::memcpy(&eb,&error,sizeof(error));
-        std::cout << std::hex << pb << ' ' << eb << '\n';
+        std::memcpy(&wh,&wide.hi,sizeof(wh)); std::memcpy(&wl,&wide.lo,sizeof(wl));
+        std::cout << std::hex << pb << ' ' << eb << ' ' << wh << ' ' << wl << '\n';
     }
     return std::cin.eof() ? 0 : 1;
 }

@@ -39,10 +39,15 @@ run = subprocess.run([a.probe],input=payload,text=True,capture_output=True,check
 rows = run.stdout.splitlines()
 assert len(rows)==len(cases)
 for row,(x,y) in zip(rows,cases):
-    actual_p, actual_error = [number(int(v,16)) for v in row.split()]
+    actual_p, actual_error, wide_hi, wide_lo = [number(int(v,16)) for v in row.split()]
     rounded = x*y
     expected = float(Fraction(x)*Fraction(y)-Fraction(rounded))
-    assert actual_p==rounded and actual_error==expected, dict(
+    # Near subnormal roundoff, renormalising the pair can change its two
+    # words at a halfway case. Grade the represented sum, not a unique layout.
+    wide_value = Fraction(wide_hi)+Fraction(wide_lo)
+    expected_value = Fraction(rounded)+Fraction(expected)
+    assert actual_p==rounded and actual_error==expected and wide_value==expected_value, dict(
         x=x.hex(),y=y.hex(),p=actual_p.hex(),expected_p=rounded.hex(),
-        error=actual_error.hex(),expected_error=expected.hex())
+        error=actual_error.hex(),expected_error=expected.hex(),
+        wide_hi=wide_hi.hex(),wide_lo=wide_lo.hex())
 print(f'WIDE_PRODUCT_RATIONAL_CONTRACT_PASS {len(cases)}')

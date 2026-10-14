@@ -492,8 +492,12 @@ double run_dkraay_iv(Call call, int threads, const char* mode) {
         const double actual = state.matrices.at("probe_V").values[3*j+k];
         const double scale = std::sqrt(reference[3*j+j]*reference[3*k+k]);
         const double error = std::abs(actual-reference[3*j+k])/scale;
+        std::ostringstream message;
+        message << std::setprecision(17) << "DK IV covariance (" << j << ',' << k
+                << ") actual=" << actual << " expected=" << reference[3*j+k]
+                << " scaled_error=" << error << " threads=" << threads << " mode=" << mode;
         require(std::isfinite(actual) && error <= 1e-8,
-                "DK IV full covariance disagrees with the independent reference");
+                message.str());
         maximum = std::max(maximum, error);
     }
     return maximum;

@@ -99,6 +99,9 @@ jobs:
             thin-*/stderr.log
             serial-*/RESULT.json
             slice/*-build.log
+            slice/*.plugin
+            slice/xhdfe_libomp.dylib
+            slice/stplugin.h
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:

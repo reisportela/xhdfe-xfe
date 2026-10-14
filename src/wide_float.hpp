@@ -8,6 +8,12 @@
 namespace hdfe {
 namespace detail {
 
+#if defined(__clang__)
+// Clang may discard the low product under fast-math even with volatile
+// intermediates. Keep error-free transforms precise, including when inlined.
+#pragma float_control(precise, on, push)
+#endif
+
 // Protected error-free transforms retain about 106 significand bits without
 // a platform-specific quadmath dependency. Volatile operations prevent the
 // target's fast-math flags from cancelling the compensation terms.
@@ -122,6 +128,10 @@ inline OlsWide sqrt(const OlsWide& value) {
     result.lo = std::ldexp(root.lo, exponent / 2);
     return result;
 }
+
+#if defined(__clang__)
+#pragma float_control(pop)
+#endif
 
 } // namespace detail
 } // namespace hdfe

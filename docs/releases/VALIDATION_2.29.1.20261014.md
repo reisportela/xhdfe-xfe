@@ -1,10 +1,11 @@
-# Local validation — xhdfe 2.29.1.20261014
+# Validation — xhdfe 2.29.1.20261014
 
-14 October 2026. **Local corrections validated; not published.** The private
-and public canonical working trees contain the same production source/help
-changes. Their Git HEADs remain `a332096e67db877b612bfa16a2b6146e2a6fda4f`
-and `78b1d2966cfec7b956cd3460e86aaea69d107018`; no commit, push or release was made.
-The published version remains 2.29.0.20261014.
+14 October 2026. The initial local correction checkpoint was validated before
+publication, from private/public base commits
+`a332096e67db877b612bfa16a2b6146e2a6fda4f` and
+`78b1d2966cfec7b956cd3460e86aaea69d107018`. The tables below identify that local
+checkpoint; the additional platform work is recorded at the end. Release
+publication is gated on fresh native builds and exact-asset validation.
 
 Evidence is retained in the private repository under
 `Verifications/remediacao_main_2291_20261014/`. The earlier adversarial audit and
@@ -118,15 +119,44 @@ not a claim to have visually inspected the GUI.
   `hdfe_regressor_v11.cpp` compiled. `PUBLIC_NATIVE_FRESH_RESULT.json`
   supersedes those initial native build steps; no cache cleaning was needed.
 
-## Remaining release gates
+## Additional platform corrections and release gates
 
-**NOT_RUN in this task:** fresh native Windows/macOS validation, R numerical
-package installation/checks, sanitizers and a new complete core24 × 8 timing
-campaign. No universal numerical or performance certification is claimed.
-The Windows R build-configuration stamp remains a separately scoped follow-up.
+The new native DK IV gate exposed two further errors. MinGW's software FMA
+gave a coefficient of `0.50000003803288495` instead of exactly `0.5`; the
+same value was independently reproduced with the upstream runtime's arithmetic
+sequence. Clang fast-math discarded a wide product's compensation term, giving
+`0.30298477495325127` on macOS Intel and in an independent Linux/Clang build.
+The ordinary one/two-worker fixtures had passed in both cases.
+
+The MinGW correction replaces only the wide product's required roundoff
+operation. The Clang correction scopes precise arithmetic to the wide-number
+definitions. Neither adds a fit-time verifier, changes tolerances or increases
+the solver's iteration target. The GCC Linux/CUDA route retains its existing
+arithmetic. The Windows native gate passed the correction; the corrected local
+Clang plugin passed all four DK IV mode/thread cases. Final macOS/version-tag
+gates remain required before publication.
+
+Permanent exact-rational tests cover 37,632 product/range cases and the complete
+wide-pair value. GCC, Clang and Clang UBSan pass; an uncorrected Clang negative
+control fails. At subnormal halfway cases, the grader compares the exact sum
+of the high/low words because the pair's representation is not unique.
+
+An isolated R source build/check passed its audit and 1,181 testthat assertions
+with zero failures, six test warnings and seven skips (five unavailable AKM
+data cases and two CUDA cases in a CPU build). `R CMD check` reports one WARNING
+for source header filenames and one NOTE for C++ console symbols. The installed
+package passed the independent one/two-worker analytic gate. This is not a
+claim of clean CRAN validation or native Windows/macOS R execution.
+
+The maintainer explicitly waived **only a new core24 × 8 timing campaign** for
+this corrective release on 14 October. Numerical, multiplatform, CUDA and
+fresh-install gates remain mandatory. Fresh synthetic artifact smokes do not
+establish a new core24 performance claim. The Windows R build-configuration
+stamp remains a separately scoped follow-up.
 
 The existing active-checkout manifest was already locally modified before this
 task and still seals the published 2.29.0 state. It was preserved; expected
 candidate/source/version mismatches must not be hidden by refreshing its hashes.
-The new candidate's provenance lives in the separate remediation receipts.
-Publication requires its own reviewed gates and authorisation.
+The new candidate's provenance lives in the separate remediation and release
+receipts. The final seal is made only after exact-asset validation and public
+installation readback.
