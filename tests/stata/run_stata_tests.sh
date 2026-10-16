@@ -118,6 +118,16 @@ fi
 
 (
   cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/absorb_interaction_contract.do" cpu
+)
+if ! grep -Fxq "ABSORB_INTERACTION_CONTRACT_PASS cpu" "${OUT_DIR}/absorb_interaction_contract.log"; then
+  echo "Stata categorical absorb interaction contract failed" >&2
+  tail -n 80 "${OUT_DIR}/absorb_interaction_contract.log" >&2
+  exit 1
+fi
+
+(
+  cd "${OUT_DIR}"
   "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/iv_firststage_contract.do" cpu
 )
 FIRSTSTAGE_LOG="${OUT_DIR}/iv_firststage_contract.log"

@@ -434,15 +434,22 @@ program define _xhdfe_estimate, eclass
                         local part_is_cont "`part_is_cont' `is_cont'"
                     }
                     local nparts : word count `parts'
-                    if (`nparts' != 2) {
-                        di as err "absorb() interactions must have exactly two components"
+                    if (`nparts' < 2) {
+                        di as err "absorb() interactions must have at least two components"
+                        exit 198
+                    }
+                    local ncont 0
+                    foreach is_cont of local part_is_cont {
+                        local ncont = `ncont' + `is_cont'
+                    }
+                    if (`ncont' > 0 & `nparts' != 2) {
+                        di as err "absorb() heterogeneous slope terms must have one categorical and one continuous component"
                         exit 198
                     }
                     local v1 : word 1 of `parts'
                     local v2 : word 2 of `parts'
                     local c1 : word 1 of `part_is_cont'
                     local c2 : word 2 of `part_is_cont'
-                    local ncont = `c1' + `c2'
 
                     if (`ncont' == 1) {
                         if (`c1') {
@@ -491,32 +498,23 @@ program define _xhdfe_estimate, eclass
                         exit 198
                     }
 
-                    local pos : list posof "`v1'" in absorb_markvars
-                    if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v1'"
-                    local pos : list posof "`v2'" in absorb_markvars
-                    if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v2'"
-
-                    if (`include_main') {
-                        local pos : list posof "`v1'" in absorb_ordered
-                        if (`pos' == 0) {
-                            local absorb_ordered "`absorb_ordered' `v1'"
-                            local absorb_labels "`absorb_labels' `v1'"
-                            local absorb_aliases "`absorb_aliases' ."
-                            local absorb_kinds "`absorb_kinds' cat"
-                            local absorb_slopevars "`absorb_slopevars' ."
-                            local absorb_slopeintercepts "`absorb_slopeintercepts' ."
-                        }
-                        local pos : list posof "`v2'" in absorb_ordered
-                        if (`pos' == 0) {
-                            local absorb_ordered "`absorb_ordered' `v2'"
-                            local absorb_labels "`absorb_labels' `v2'"
-                            local absorb_aliases "`absorb_aliases' ."
-                            local absorb_kinds "`absorb_kinds' cat"
-                            local absorb_slopevars "`absorb_slopevars' ."
-                            local absorb_slopeintercepts "`absorb_slopeintercepts' ."
+                    foreach component of local parts {
+                        local pos : list posof "`component'" in absorb_markvars
+                        if (`pos' == 0) local absorb_markvars "`absorb_markvars' `component'"
+                        if (`include_main') {
+                            local pos : list posof "`component'" in absorb_ordered
+                            if (`pos' == 0) {
+                                local absorb_ordered "`absorb_ordered' `component'"
+                                local absorb_labels "`absorb_labels' `component'"
+                                local absorb_aliases "`absorb_aliases' ."
+                                local absorb_kinds "`absorb_kinds' cat"
+                                local absorb_slopevars "`absorb_slopevars' ."
+                                local absorb_slopeintercepts "`absorb_slopeintercepts' ."
+                            }
                         }
                     }
-                    local inter_token "`v1'#`v2'"
+                    local parts = strtrim("`parts'")
+                    local inter_token : subinstr local parts " " "#", all
                     local inter_label "`inter_token'"
                     if ("`alias'" != "") local inter_label "`alias'"
                     local pos : list posof "`inter_token'" in absorb_ordered
@@ -1028,16 +1026,10 @@ program define _xhdfe_estimate, eclass
                 local absorb_display "`absorb_display' `label'"
             }
             else if (strpos("`entry'", "#") > 0) {
-                local pair "`entry'"
-                gettoken v1 rest : pair, parse("#")
-                gettoken hash v2 : rest, parse("#")
-                if ("`v1'" == "" | "`v2'" == "") {
-                    di as err "absorb() interactions must have exactly two components"
-                    exit 198
-                }
+                local components : subinstr local entry "#" " ", all
                 if ("`alias_name'" != "") confirm new variable `alias_name'
                 tempvar feint
-                quietly egen long `feint' = group(`v1' `v2') if `touse'
+                quietly egen long `feint' = group(`components') if `touse'
                 local absorb_list "`absorb_list' `feint'"
                 local absorb_display "`absorb_display' `label'"
             }
