@@ -108,6 +108,16 @@ echo "Stata Gelbach bootstrap log: ${BOOTSTRAP_LOG}"
 
 (
   cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/version_contract.do" cpu
+)
+if ! grep -Fxq "VERSION_CONTRACT_PASS cpu" "${OUT_DIR}/version_contract.log"; then
+  echo "Stata stored/displayed version contract failed" >&2
+  tail -n 80 "${OUT_DIR}/version_contract.log" >&2
+  exit 1
+fi
+
+(
+  cd "${OUT_DIR}"
   "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/iv_firststage_contract.do" cpu
 )
 FIRSTSTAGE_LOG="${OUT_DIR}/iv_firststage_contract.log"

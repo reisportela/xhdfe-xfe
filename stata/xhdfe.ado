@@ -4,7 +4,8 @@ program define xhdfe, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.1 14oct2026"
+        quietly _xhdfe_package_version
+        local version "`r(package_version)'"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -29,6 +30,11 @@ program define xhdfe, eclass sortpreserve
         ereturn clear
         exit `rc'
     }
+end
+
+program define _xhdfe_package_version, rclass
+    version 16.0
+    return local package_version "2.29.1 14oct2026"
 end
 
 program define _xhdfe_estimate, eclass
@@ -2551,7 +2557,8 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.29.0 14oct2026"
+    quietly _xhdfe_package_version
+    ereturn local version "`r(package_version)'"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
