@@ -17,6 +17,7 @@ esac
   echo "LLVM source must include openmp/ and cmake/ from the pinned release." >&2; exit 1;
 }
 prefix="${sdk_root}/${arch}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
 [[ ! -e "$prefix" ]] || { echo "SDK output already exists: $prefix" >&2; exit 1; }
 mkdir -p "$prefix"
 cmake -S "$source_root/openmp" -B "$prefix/build" \
@@ -24,6 +25,7 @@ cmake -S "$source_root/openmp" -B "$prefix/build" \
   -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
   -DOPENMP_INSTALL_LIBDIR=lib -DCMAKE_OSX_ARCHITECTURES="$arch" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment" -DCMAKE_MACOSX_RPATH=ON \
+  "-DLIBOMP_LDFLAGS=-Wl,-exported_symbols_list,\"${script_dir}/macos_openmp.exports\"" \
   -DLIBOMP_ENABLE_SHARED=ON -DLIBOMP_ENABLE_ASSERTIONS=OFF \
   -DOPENMP_ENABLE_LIBOMPTARGET=OFF -DOPENMP_ENABLE_OMPT_TOOLS=OFF
 cmake --build "$prefix/build" --parallel 2
@@ -34,3 +36,5 @@ codesign --force --sign - --timestamp=none --identifier xhdfe_libomp "$prefix/li
 cp "$source_root/openmp/LICENSE.TXT" "$prefix/LLVM-OpenMP-LICENSE.txt"
 python3 "$(dirname "$0")/validate_macos_openmp.py" inspect \
   --file "$prefix/lib/xhdfe_libomp.dylib" --arch "$arch" --kind runtime
+python3 "${script_dir}/check_macos_openmp_exports.py" \
+  --runtime "$prefix/lib/xhdfe_libomp.dylib" --arch "$arch"

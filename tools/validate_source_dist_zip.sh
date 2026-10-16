@@ -71,6 +71,8 @@ required_entries=(
   "xhdfe-src/tools/validate_python_release_artifacts.py"
   "xhdfe-src/tools/validate_release_metadata.py"
   "xhdfe-src/tools/build_macos_openmp_runtime.sh"
+  "xhdfe-src/tools/macos_openmp.exports"
+  "xhdfe-src/tools/check_macos_openmp_exports.py"
   "xhdfe-src/tools/validate_macos_openmp.py"
   "xhdfe-src/tools/build_corresponding_source_bundle.py"
   "xhdfe-src/tools/record_linux_release_provenance.py"

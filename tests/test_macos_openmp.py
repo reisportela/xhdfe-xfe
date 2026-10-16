@@ -351,12 +351,23 @@ def mock_tool(name, args):
             command = [sys.executable, str(Path(__file__).resolve()), "--mock-tool", "executed", str(output)]
             write_new(output, "#!/bin/sh\nexec " + shlex.join(command) + "\n", executable=True)
     elif name == "lipo":
+        if args[0] == "-archs":
+            # The FMA liveness executable is a mock script, not a Mach-O.
+            print(os.environ["MACOS_CONTROL_ARCH"])
+            return 0
         index = args.index("-output")
         output = Path(args[index + 1])
         inputs = [Path(value) for i, value in enumerate(args)
                   if i not in (index, index + 1) and value != "-create"]
         data = [path.read_bytes() for path in inputs]
         write_new(output, data[0] if len(data) == 1 else fat(data))
+    elif name == "arch":
+        if args[1:] == ["/usr/bin/true"]:
+            return 0
+        executable = Path(args[1]).resolve()
+        if not executable.is_relative_to(OUT.resolve()):
+            raise ValueError(f"Mock execution escaped its directory: {executable}")
+        return subprocess.run([str(executable), *args[2:]], check=False).returncode
     elif name not in ("codesign", "strip", "executed"):
         raise RuntimeError(f"Unknown mock tool: {name}")
     return 0
@@ -376,7 +387,7 @@ def builder_case(name, kind, *, arches="x86_64 arm64", mode="--openmp", release=
         write_new(fixture / "sdk" / arch / "include/omp.h", "SYNTHETIC HEADER\n")
         write_new(fixture / "sdk" / arch / "lib" / RUNTIME, thin(arch, "runtime"))
     bindir = directory / "mockbin"
-    for tool in ("uname", "cxx", "lipo", "codesign", "strip", "curl", "wget", "tar"):
+    for tool in ("uname", "cxx", "lipo", "arch", "codesign", "strip", "curl", "wget", "tar"):
         command = [sys.executable, str(Path(__file__).resolve()), "--mock-tool", tool]
         write_new(bindir / tool, "#!/bin/sh\nexec " + shlex.join(command) + ' "$@"\n', executable=True)
     trace = write_new(directory / "calls.jsonl", "")
@@ -455,7 +466,7 @@ class BuilderControls(unittest.TestCase):
                     compiles = [c["args"] for c in calls if c["tool"] == "cxx" and "-bundle" in c["args"]]
                     self.assertEqual(len(compiles), int(failure == "plugin"))
                     self.assertTrue(all("-fopenmp" in args for args in compiles))
-                    self.assertFalse(any(c["tool"] == "lipo" for c in calls))
+                    self.assertFalse(any(c["tool"] == "lipo" and "-create" in c["args"] for c in calls))
                     self.assertFalse((fixture / "stata" / (kind + ".plugin")).exists())
 
     def test_release_rejects_serial_before_compilation(self):
@@ -473,7 +484,7 @@ class BuilderControls(unittest.TestCase):
                 fixture, result, calls = builder_case(kind + "_partial_sdk", kind, sdk_arches=("x86_64",))
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("missing macOS OpenMP header/runtime for arm64", result.stderr)
-                self.assertFalse(any(c["tool"] == "lipo" for c in calls))
+                self.assertFalse(any(c["tool"] == "lipo" and "-create" in c["args"] for c in calls))
                 self.assertFalse((fixture / "stata" / (kind + ".plugin")).exists())
 
     def test_serial_diagnostic_stays_outside_release_gate(self):
