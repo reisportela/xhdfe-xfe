@@ -152,6 +152,16 @@ if ! grep -Fxq "IV_FIRSTSTAGE_ALIAS_CONTRACT_PASS cpu" "${ALIAS_LOG}"; then
   exit 1
 fi
 
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/cg_near_redundant_contract.do" cpu 1
+)
+CG_LOG="${OUT_DIR}/cg_near_redundant_contract.log"
+if ! grep -Fxq "CG_NEAR_REDUNDANT_CONTRACT_PASS cpu" "${CG_LOG}"; then
+  tail -n 80 "${CG_LOG}" >&2
+  exit 1
+fi
+
 DK_OUTPUT="${OUT_DIR}/dk_iv_$(date -u +%Y%m%dT%H%M%SZ)_$$"
 python3 -B "${SCRIPT_DIR}/../analytic_precision/dkraay_iv_influence_contract.py" \
   --extended --backend cpu --package "${XHDFE_STATA_ADOPATH}" --output "${DK_OUTPUT}"

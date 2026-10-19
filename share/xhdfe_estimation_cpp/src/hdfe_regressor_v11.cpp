@@ -2692,7 +2692,8 @@ FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::Vec
 constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
-constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414433ULL;
+// Invalidate transforms certified before the CG null-space drift safeguard.
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414434ULL;
 constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
 
 struct AbsorptionCacheKey {
@@ -10782,6 +10783,23 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         y_use, design, fes_use, w_ptr, tuned,
                         requested_method, slope_terms);
                 }
+            }
+
+            if (primary.cg_restart_required) {
+                // FE orthogonality alone cannot detect null-space drift from
+                // a broken CG recurrence. Reabsorbing its residual preserves
+                // that damage, so restart from the original RHS instead.
+                HdfeOptions repair_options = tuned;
+                repair_options.absorption_method = AbsorptionMethod::Mlsmr;
+                repair_options.from_auto = false;
+                detail::AbsorptionResult repaired = detail::absorb_fixed_effects_v6(
+                    y_use, design, fes_use, w_ptr, repair_options,
+                    AbsorptionMethod::Mlsmr, slope_terms);
+                repaired.iterations += primary.iterations;
+                certify_public_contract(repaired);
+                repaired.mlsmr_used = true;
+                method_used_ = AbsorptionMethod::Mlsmr;
+                return finalize_backend_status(std::move(repaired));
             }
 
             // PF3_CANDIDATE2_PROTOTYPE_BEGIN

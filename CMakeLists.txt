@@ -479,6 +479,12 @@ if(XHDFE_BUILD_PYTHON)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
             add_test(
+                NAME xhdfe_cg_breakdown
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cg_breakdown.py)
+            set_tests_properties(xhdfe_cg_breakdown PROPERTIES
+                ENVIRONMENT "XHDFE_GPU_BACKEND=cpu;XHDFE_TEST_BUILD_DIR=$<TARGET_FILE_DIR:py_hdfe_v11>")
+            add_test(
                 NAME xhdfe_audit_20260804_contracts
                 COMMAND ${Python3_EXECUTABLE}
                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/audit_20260804_contracts.py
