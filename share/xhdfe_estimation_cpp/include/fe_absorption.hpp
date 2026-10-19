@@ -53,6 +53,9 @@ struct AbsorptionResult {
     std::vector<int> sweep_order_used;
     int iterations = 0;
     bool converged = true;
+    // A failed CG recurrence can lose components outside the FE span.
+    // Its output must never seed a precision repair.
+    bool cg_restart_required = false;
     double abs_residual = 0.0;      // verified ||D' W v_tilde||_2, max over RHS columns
     double abs_residual_rel = 0.0;  // max ||D' W v_tilde||_2 / (||D' W||_F ||v||_2)
     bool slope_block_checked = false;  // false in fast mode; block metrics then not applicable

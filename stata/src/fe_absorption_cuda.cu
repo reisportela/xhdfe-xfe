@@ -3386,7 +3386,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                       options, method, result, 0.0);
 }
 
-bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const Eigen::Ref<const Eigen::MatrixXd>& X,
                                const std::vector<GpuFeInput>& fe_inputs,
                                const Eigen::VectorXd* weights,
@@ -3394,7 +3394,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const HdfeOptions& options,
                                AbsorptionMethod method,
                                AbsorptionResult& result,
-                               double solver_fe_tolerance) {
+                               double solver_fe_tolerance,
+                               bool allow_cg) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const int ld = static_cast<int>(X.rows());
@@ -3500,9 +3501,9 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         fe_inputs.size() == 3 && !any_slope && weights == nullptr &&
         !store_alphas && !options.retain_fixed_effects &&
         options.tolerance_mode == ToleranceMode::ReghdfeComparable;
-    bool use_reghdfe_cg = n1_graph_correction ||
-        should_use_cuda_reghdfe_cg(fe_inputs, n, weights, options, store_alphas);
-    if (!use_reghdfe_cg) {
+    bool use_reghdfe_cg = allow_cg && (n1_graph_correction ||
+        should_use_cuda_reghdfe_cg(fe_inputs, n, weights, options, store_alphas));
+    if (allow_cg && !use_reghdfe_cg) {
         // GPU-CG adaptive gate: hand ill-conditioned high-iteration comparable jobs to the
         // existing block-PCG. On these graphs the IT-MAP comparable path stalls ~2e-7 off
         // reghdfe in ~530 sweeps; the PCG matches reghdfe to ~1e-9 in fewer iterations. Only
@@ -3601,7 +3602,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         return !(e != nullptr && e[0] == '0');
     }();
     const bool cuda_cg_fallback_ok =
-        cuda_cg_capable &&
+        allow_cg && cuda_cg_capable &&
         (honest_mode ||
          (accel_guard_always_enabled() && cuda_guard_cg_bail_enabled));
     bool accel_diverged = false;
@@ -5426,6 +5427,8 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         static_cast<std::size_t>(cg_width), 0.0);
                     std::vector<uint8_t> lane_solved(
                         static_cast<std::size_t>(cg_width), 0);
+                    const double max_cg_step =
+                        1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
                     std::vector<double> restore_scale(
                         static_cast<std::size_t>(cg_width), 1.0);
                     bool normalized_small_cg = false;
@@ -5551,6 +5554,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 improvement[lane] - recent[lane];
                             if (!finite_double_bits(alpha[lane]) ||
                                 alpha[lane] <= 0.0 ||
+                                alpha[lane] > max_cg_step ||
                                 !finite_double_bits(recent[lane]) ||
                                 recent[lane] <= 0.0 ||
                                 !finite_double_bits(next_improvement[lane])) {
@@ -5631,9 +5635,7 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (cg_breakdown) {
                             break;
                         }
-                        update_direction(d_y_ggx.data(), d_x_ggx.data(),
-                                         d_y_gx.data(), d_x_gx.data(), beta);
-
+                        bool newly_solved = false;
                         double update_error = 0.0;
                         for (int k = 0; k < cg_width; ++k) {
                             const std::size_t lane = static_cast<std::size_t>(k);
@@ -5666,18 +5668,45 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 break;
                             }
                             update_error = std::max(update_error, err);
+                            if (err <= options.tol) {
+                                lane_solved[lane] = 1;
+                                ssr[lane] = 0.0;
+                                newly_solved = true;
+                            }
                         }
                         if (cg_breakdown) {
                             break;
                         }
-                        if (update_error <= options.tol &&
-                            necessary_candidate_ready(d_y.data(), d_x.data(), iter,
-                                normalized_small_cg ? &restore_scale : nullptr)) {
-                            converged = true;
+                        if (update_error <= options.tol) {
+                            converged = necessary_candidate_ready(
+                                d_y.data(), d_x.data(), iter,
+                                normalized_small_cg ? &restore_scale : nullptr);
+                            // A rejected candidate must be recomputed from
+                            // original inputs, never kept alive with zero or
+                            // roundoff-sized search directions.
                             break;
                         }
+                        if (newly_solved) {
+                            for (int k = 0; k < cg_width; ++k) {
+                                alpha[static_cast<std::size_t>(k)] =
+                                    lane_solved[static_cast<std::size_t>(k)] ? 0.0 : 1.0;
+                            }
+                            cuda_check(cudaMemcpy(d_cg_alpha.data(), alpha.data(),
+                                sizeof(double) * static_cast<std::size_t>(cg_width),
+                                cudaMemcpyHostToDevice), "cudaMemcpy CG freeze mask failed");
+                            scale_columns_kernel<<<blocks_values, kBlockSize>>>(
+                                d_y_gx.data(), d_x_gx.data(), d_cg_alpha.data(),
+                                total_values, n, ld);
+                            scale_columns_kernel<<<blocks_values, kBlockSize>>>(
+                                d_y_ggx.data(), d_x_ggx.data(), d_cg_alpha.data(),
+                                total_values, n, ld);
+                            cuda_check(cudaGetLastError(), "CG freeze kernel launch failed");
+                        }
+                        update_direction(d_y_ggx.data(), d_x_ggx.data(),
+                                         d_y_gx.data(), d_x_gx.data(), beta);
                     }
                     result.iterations = counted_before + cg_iters;
+                    result.cg_restart_required = !converged;
                     have_cg_iteration_count = true;
                     if (normalized_small_cg) {
                         cuda_check(
@@ -6364,6 +6393,36 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         cudaGetLastError();
         return false;
     }
+}
+
+bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
+                               const Eigen::Ref<const Eigen::MatrixXd>& X,
+                               const std::vector<GpuFeInput>& fe_inputs,
+                               const Eigen::VectorXd* weights,
+                               const std::vector<std::size_t>& sweep_order,
+                               const HdfeOptions& options,
+                               AbsorptionMethod method,
+                               AbsorptionResult& result,
+                               double solver_fe_tolerance) {
+    const bool ok = absorb_fixed_effects_cuda_impl(
+        y, X, fe_inputs, weights, sweep_order, options, method, result,
+        solver_fe_tolerance, true);
+    if (!ok || !result.cg_restart_required) return ok;
+
+    // The first invocation has released its device buffers. Retry on the
+    // GPU from the original RHS with norm-change MAP and CG disabled; an
+    // orthogonality certificate cannot repair CG null-space drift.
+    const int cg_iterations = result.iterations;
+    HdfeOptions retry_options = options;
+    retry_options.tolerance_mode = ToleranceMode::ReghdfeComparable;
+    retry_options.convergence_criterion = ConvergenceCriterion::NormChange;
+    AbsorptionResult repaired;
+    const bool repaired_ok = absorb_fixed_effects_cuda_impl(
+        y, X, fe_inputs, weights, sweep_order, retry_options, method, repaired,
+        solver_fe_tolerance, false);
+    repaired.iterations += cg_iterations;
+    result = std::move(repaired);
+    return repaired_ok;
 }
 
 bool valid_group_individual_lsmr_structure(

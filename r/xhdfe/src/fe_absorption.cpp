@@ -7581,6 +7581,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 Eigen::VectorXd alpha = Eigen::VectorXd::Zero(Sp);
                 Eigen::VectorXd beta = Eigen::VectorXd::Zero(Sp);
                 Eigen::VectorXd next_improvement(Sp);
+                // The symmetric sweep has spectrum in [0, 1]. A step this
+                // large can amplify sweep roundoff beyond sqrt(epsilon),
+                // even when the recursive residual reports convergence.
+                // Reject it before changing any RHS; repair must start cold.
+                const double max_cg_step =
+                    1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
                 std::vector<uint8_t> lane_solved(
                     static_cast<std::size_t>(Sp), 0);
 
@@ -7623,6 +7629,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         recent[k] = alpha[k] * ssr[k];
                         next_improvement[k] = improvement[k] - recent[k];
                         if (!hdfe::detail::ieee_finite(alpha[k]) || alpha[k] <= 0.0 ||
+                            alpha[k] > max_cg_step ||
                             !hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
                             !hdfe::detail::ieee_finite(next_improvement[k])) {
                             cg_breakdown = true;
@@ -7678,19 +7685,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         break;
                     }
 
-#ifdef HDFE_USE_OPENMP
-#pragma omp parallel for schedule(static) num_threads(threads)
-#endif
-                    for (Eigen::Index i = 0; i < n; ++i) {
-                        const std::size_t off =
-                            static_cast<std::size_t>(i) * static_cast<std::size_t>(Sp);
-                        for (int k = 0; k < Sp; ++k) {
-                            u[off + static_cast<std::size_t>(k)] =
-                                r[off + static_cast<std::size_t>(k)] +
-                                beta[k] * u[off + static_cast<std::size_t>(k)];
-                        }
-                    }
-
+                    bool newly_solved = false;
                     double update_error = 0.0;
                     for (int k = 0; k < Sp; ++k) {
                         if (lane_solved[static_cast<std::size_t>(k)]) {
@@ -7713,6 +7708,14 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             break;
                         }
                         update_error = std::max(update_error, err);
+                        if (err <= options.tol) {
+                            // Each RHS has its own CG recurrence. Continuing
+                            // an already solved lane can amplify roundoff in
+                            // the null space while the other lanes finish.
+                            lane_solved[static_cast<std::size_t>(k)] = 1;
+                            ssr[k] = 0.0;
+                            newly_solved = true;
+                        }
                     }
                     if (cg_breakdown) {
                         break;
@@ -7721,8 +7724,37 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         converged = true;
                         break;
                     }
+                    // Zero only when a lane first freezes. Keep the normal
+                    // direction update branch-free and vectorizable.
+                    if (newly_solved) {
+                        for (int k = 0; k < Sp; ++k) {
+                            if (!lane_solved[static_cast<std::size_t>(k)]) continue;
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+                            for (Eigen::Index i = 0; i < n; ++i) {
+                                const std::size_t pos = static_cast<std::size_t>(i) *
+                                    static_cast<std::size_t>(Sp) + static_cast<std::size_t>(k);
+                                r[pos] = 0.0;
+                                u[pos] = 0.0;
+                            }
+                        }
+                    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+                    for (Eigen::Index i = 0; i < n; ++i) {
+                        const std::size_t off =
+                            static_cast<std::size_t>(i) * static_cast<std::size_t>(Sp);
+                        for (int k = 0; k < Sp; ++k) {
+                            u[off + static_cast<std::size_t>(k)] =
+                                r[off + static_cast<std::size_t>(k)] +
+                                beta[k] * u[off + static_cast<std::size_t>(k)];
+                        }
+                    }
                 }
                 result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
+                result.cg_restart_required = !converged;
                 if (xhdfe_accel_debug()) {
                     std::fprintf(stderr, "[ACCEL packed CG iters=%d converged=%d]\n",
                                  result.iterations, converged ? 1 : 0);
@@ -8313,6 +8345,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             Eigen::VectorXd alpha = Eigen::VectorXd::Zero(ssr.size());
             Eigen::VectorXd beta = Eigen::VectorXd::Zero(ssr.size());
             Eigen::VectorXd next_improvement(ssr.size());
+            const double max_cg_step =
+                1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
             std::vector<uint8_t> lane_solved(
                 static_cast<std::size_t>(ssr.size()), 0);
 
@@ -8355,6 +8389,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     recent[k] = alpha[k] * ssr[k];
                     next_improvement[k] = improvement[k] - recent[k];
                     if (!hdfe::detail::ieee_finite(alpha[k]) || alpha[k] <= 0.0 ||
+                        alpha[k] > max_cg_step ||
                         !hdfe::detail::ieee_finite(recent[k]) || recent[k] <= 0.0 ||
                         !hdfe::detail::ieee_finite(next_improvement[k])) {
                         cg_breakdown = true;
@@ -8414,11 +8449,6 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     break;
                 }
 
-                u_y = r_y + beta[0] * u_y;
-                for (int j = 0; j < u_X.cols(); ++j) {
-                    u_X.col(j) = r_X.col(j) + beta[1 + j] * u_X.col(j);
-                }
-
                 double update_error = 0.0;
                 for (Eigen::Index k = 0; k < recent.size(); ++k) {
                     if (lane_solved[static_cast<std::size_t>(k)]) {
@@ -8441,6 +8471,10 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         break;
                     }
                     update_error = std::max(update_error, err);
+                    if (err <= options.tol) {
+                        lane_solved[static_cast<std::size_t>(k)] = 1;
+                        ssr[k] = 0.0;
+                    }
                 }
                 if (cg_breakdown) {
                     break;
@@ -8449,10 +8483,25 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     cg_converged = true;
                     break;
                 }
+                if (lane_solved[0]) {
+                    r_y.setZero();
+                    u_y.setZero();
+                } else {
+                    u_y = r_y + beta[0] * u_y;
+                }
+                for (int j = 0; j < u_X.cols(); ++j) {
+                    if (lane_solved[static_cast<std::size_t>(1 + j)]) {
+                        r_X.col(j).setZero();
+                        u_X.col(j).setZero();
+                    } else {
+                        u_X.col(j) = r_X.col(j) + beta[1 + j] * u_X.col(j);
+                    }
+                }
             }
 
             result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
             result.converged = cg_converged;
+            result.cg_restart_required = !cg_converged;
             result.sweep_order_used.clear();
             result.sweep_order_used.reserve(cg_order.size());
             for (const std::size_t dim : cg_order) {
@@ -8807,7 +8856,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
     cpu_profile_log_elapsed("abs_solve", solve_t0);
 
     if (!converged) {
-        result.iterations = options.max_iter;
+        if (!result.cg_restart_required) {
+            result.iterations = options.max_iter;
+        }
         result.converged = false;
     } else {
         result.converged = true;
