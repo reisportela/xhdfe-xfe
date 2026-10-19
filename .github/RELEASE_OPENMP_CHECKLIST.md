@@ -1,5 +1,38 @@
 # OpenMP release checklist — 2.29.1.20261014
 
+## Issue 14 follow-up: Stata host coexistence
+
+The historical native SPI gates below use a host without OpenMP. They do not
+exercise coexistence with Stata MP's own runtime. Issue #14 reproduced an Intel
+Stata MP crash despite those gates passing. See
+[`ISSUE_14_STATA_FIXES_20261016.md`](../docs/releases/candidates/ISSUE_14_STATA_FIXES_20261016.md)
+for the candidate fix, negative controls and current coverage.
+
+For the next macOS release:
+
+- [ ] Build with `tools/macos_openmp.exports`; reject private exports with
+  `tools/check_macos_openmp_exports.py` on both final runtime slices.
+- [ ] Retain all existing native SPI, runtime-identity and serial-negative gates.
+- [ ] Run `tools/run_stata_openmp_host.py` on each final packaged artifact in
+  licensed native Apple Silicon and Intel Stata MP, with `--threads 1 2 4 0`.
+  This checks OLS, IV/first-stage diagnostics and `xfepout`, useful workers,
+  numerical agreement and repeated calls in the real host.
+- [ ] Record Stata version/edition and check Stata SE when available. A missing
+  edition is a coverage limitation, not a passing result.
+
+Example (use a fresh output directory):
+
+```sh
+python3 tools/run_stata_openmp_host.py \
+  --stata /path/to/StataMP --adopath /path/to/installed/x \
+  --arch arm64 --threads 1 2 4 0 --out /path/to/new/host-receipt
+```
+
+The supplementary runner can select Intel Stata through Rosetta and records
+that translation explicitly. Rosetta results do not satisfy the native Intel
+release gate. The issue-14 work used only the maintainer's Mac and Athena;
+it is not full release certification.
+
 The 2.29.1 release repeated every gate below with fresh version-tag artifacts
 and was published on 14 October 2026 after exact H100 validation and public
 installation readback. The historical 2.28.1 record remains below.

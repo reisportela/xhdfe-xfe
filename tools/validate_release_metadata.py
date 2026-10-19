@@ -257,6 +257,12 @@ def validate(expected_version: str) -> None:
         "Stata LICENSE/NOTICE copies are not byte-identical to the project files",
     )
 
+    _require(
+        _capture("stata/xhdfe.ado", r'^\s*return local package_version\s+"([^"]+)"')
+        == f"{base_version} {stata_date}",
+        "xhdfe's shared estimation/version-query identity is stale",
+    )
+
     for relative in (
         "stata/xhdfe.ado",
         "stata/xhdfe_p.ado",

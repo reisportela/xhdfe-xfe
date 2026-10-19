@@ -83,7 +83,7 @@
 {synopthdr}
 {synoptline}
 {syntab:Standard FEs {help xhdfe##opt_absorb:[+]}}
-{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labeled absorbs, two-way interactions, and heterogeneous slopes{p_end}
+{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labeled absorbs, categorical interactions, and heterogeneous slopes{p_end}
 {synopt: {cmdab:a:bsorb(}{it:label}{cmd:=}{it:absvar}{cmd:)}}label an absorbed effect and use {it:label} as the saved-FE base name{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:#c.}{it:x}{cmd:)}}absorb group-specific slopes without a level FE{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:##c.}{it:x}{cmd:)}}absorb a level FE plus group-specific slopes{p_end}
@@ -370,12 +370,12 @@ is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-se
 {synoptline}
 {synopt:{it:varname}}categorical variable to be absorbed{p_end}
 {synopt:{it:label}={it:varname}}label the absorbed effect and use {it:label} as the saved-FE base name{p_end}
-{synopt:{it:var1#var2}}two-way categorical interaction FE; {cmd:var1##var2} is accepted as the same joint FE{p_end}
+{synopt:{it:var1#var2#...}}categorical interaction FE with two or more components; categorical-only {cmd:##} is accepted as the same joint FE{p_end}
 {synopt:{it:fe#c.var}}group-specific slope without a level FE{p_end}
 {synopt:{it:fe##c.var}}level FE plus group-specific slope{p_end}
 {synoptline}
 {p2colreset}{...}
-{p 4 6 2}- Two-way categorical interactions are supported via {cmd:#} or {cmd:##}. For reghdfe
+{p 4 6 2}- Categorical interactions with two or more components are supported via {cmd:#} or {cmd:##}. For reghdfe
 compatibility, categorical-only {cmd:##} terms are treated as one joint absorbed FE, not expanded into
 main effects plus the interaction. Specify {cmd:var1 var2 var1#var2} explicitly if all three absorbed
 components are intended.
@@ -410,10 +410,17 @@ pre-create them (e.g., {cmd:egen label = group(var)}) and use that variable in {
 This is equivalent to including an indicator/dummy for each category of each absvar.
 
 {pmore}
-Two-way categorical interactions can be specified with {cmd:#} or {cmd:##}; categorical-only {cmd:##}
+Categorical interactions with two or more components can be specified with {cmd:#} or {cmd:##}; categorical-only {cmd:##}
 is canonicalized to the same joint FE as {cmd:#}, matching reghdfe's absorbed-DoF presentation.
 Interaction FEs are materialized with {cmd:egen group()} after the estimation sample is defined.
 Plain numeric FE identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
+
+{pmore}
+For example, {cmd:absorb(a#b#c)} absorbs one effect for each observed joint category,
+equivalent to precomputing {cmd:egen abc = group(a b c)} and using {cmd:absorb(abc)}
+on the same estimation sample. {cmd:absorb(a b c)} instead absorbs three separate
+additive effects; grouping them changes that model. Named effects such as
+{cmd:absorb(effect=a#b#c)} are also supported.
 
 {pmore}
 Heterogeneous slopes can be specified as {cmd:fe#c.x} or {cmd:fe##c.x}. The first absorbs

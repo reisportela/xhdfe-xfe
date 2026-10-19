@@ -1,0 +1,16 @@
+# Darwin's leading underscore is part of these linker patterns.
+# Keep the public OpenMP/compiler ABI, following LLVM's exports_so.txt.
+# In particular, do NOT export C++ weak template definitions or internal
+# __kmp_* state/functions: dyld can coalesce them with Stata MP's libomp.
+_omp_*
+_OMP_*
+_ompc_*
+_kmp_*
+_kmpc_*
+___kmpc_*
+_GOMP_*
+# These optional interfaces need wildcard entries so ld does not require
+# definitions when LLVM builds them out on a particular platform.
+_ompt_start_tool*
+_ompt_libomp_connect*
+__You_must_link_with_*
