@@ -11,14 +11,16 @@ versus 2.29.1 and continues to defer the full core24 performance campaign.
 - [x] Final local functional core: 664 xhdfe numerical passes, 223 expected unsupported cases, adapted reghdfe CPU/CUDA contracts and independent covariance/budget controls.
 - [x] Twenty cache migration checks; Python 97 CPU tests and 16 independent CUDA formula cases; R 1,229 passes with the documented warnings and no skips.
 - [x] Complete sequential Stata suite and candidate-only core24 CUDA execution, 48/48; final large CPU/CUDA artifact checks retain sample, independent b/V, convergence and actual workers.
-- [ ] Fresh Linux, Windows, native macOS ARM/Intel version-tag artifacts, exact runtime/worker receipts and archive checks.
-- [ ] Exact downloaded H100/CPU runtime gates and isolated installation.
-- [ ] Final licensed native Mac ARM and Intel Stata/MP host checks: **NOT_RUN** at this stage; retain the distinction from native SPI and Rosetta evidence.
-- [ ] Public release/net-install readback and both canonical `main` checkouts, builds and active artifacts reconciled.
+- [x] [Fresh version-tag artifacts](https://github.com/reisportela/xhdfe-xfe/actions/runs/39502104954): 13 authenticated assets, ten plugin/platform receipts, two installed-wheel checks and four macOS serial negative controls.
+- [x] Exact downloaded H100/CPU runtime gates, full Stata suites, new covariance/budget/partial-out checks and independent full-ready checks.
+- [ ] Final licensed native Mac ARM and Intel Stata/MP host checks: **NOT_RUN; the previously authorised publication limit continues**. The OpenMP runtime bytes and relevant build/isolation/host-test source are unchanged.
+- [x] [Publication](https://github.com/reisportela/xhdfe-xfe/actions/runs/39509326324), fresh public installation and byte readback: 49 site files and 37 installed/ancillary files. Both canonical `main` checkouts, builds and active artifacts are reconciled.
 
 Current evidence: [2.30.1 validation](../docs/releases/VALIDATION_2.30.1.20261020.md).
-The historical 2.30.0 publication exception below is not a passing host test
-for a newly rebuilt artifact.
+The existing maintainer authorisation to publish with this known limit,
+followed by the explicit instruction to make this corrected release, is
+continued without claiming a new approval response or a native Stata host
+test. The exact assets and reviewed notes are bound in the release evidence.
 
 ## 2.30.0 release gates
 
@@ -57,7 +59,7 @@ For 2.30.0 and subsequent macOS follow-up:
   licensed native Apple Silicon and Intel Stata MP, with `--threads 1 2 4 0`.
   This checks OLS, IV/first-stage diagnostics and `xfepout`, useful workers,
   numerical agreement and repeated calls in the real host. **NOT_RUN on the
-  final 2.30.0 assets; publication exception above.**
+  final 2.30.1 assets; continuing publication exception above.**
 - [ ] Record Stata version/edition and check Stata SE when available. A missing
   edition is a coverage limitation, not a passing result.
 

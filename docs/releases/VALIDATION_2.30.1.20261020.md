@@ -1,7 +1,11 @@
 # Validation record — xhdfe 2.30.1.20261020
 
-Status: local candidate validation completed in the scopes recorded below.
-Exact release assets, installation and publication remain separate gates.
+Status: **published with documented coverage limits** at 22:36:48 UTC on
+20 October 2026. The [release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.1.20261020)
+uses public source `6118b955b72ca259482cb24966f23ee880e2d6fe`.
+The existing maintainer permission to publish with the native Mac Stata/MP
+coverage gap is continued for the same unchanged runtime and scope; it is
+not a claim that those licensed host tests passed.
 
 The timing reference is frozen **2.29.1.20261014**. The historical precision
 contract remains unchanged; public tolerances and oracle thresholds were
@@ -101,15 +105,44 @@ evidence.
 
 ## Final release gates
 
-Pending: Linux, Windows and macOS ARM/Intel release artifacts; exact
-downloaded-artifact H100/runtime validation; isolated installation and
-private/public local/online alignment.
+- [Version-tag workflow](https://github.com/reisportela/xhdfe-xfe/actions/runs/39502104954):
+  all required Linux, Windows and native macOS ARM/Intel jobs passed.
+  Thirteen assets match GitHub digests and the checksum manifest.
+- Exact native receipts bind ten plugin/platform cases, two installed
+  Python wheels and four macOS serial negative controls to the final bytes.
+  Native workers, numerical agreement and runtime isolation passed.
+- Downloaded Linux CPU/CUDA artifacts passed the full Stata suites, CG,
+  covariance, iteration-budget, cache, recovery and partial-out controls on
+  Athena/H100. The installed CPU wheel passed 97 frontend tests and the
+  new independent contracts.
+- The exact portable packages passed full-ready independent checks with
+  16 useful workers: 46.041 s for baseline CPU, 47.950 s for candidate CPU
+  and 19.255 s for candidate CUDA. These are artifact checks, not a new
+  performance campaign. Candidate CUDA covariance error was `1.27e-11`.
+- [Publication](https://github.com/reisportela/xhdfe-xfe/actions/runs/39509326324)
+  published the tested draft and exact net-install snapshot. A new isolated
+  public installation passed; all 49 site files and 37 installed/ancillary
+  files match the authenticated snapshot, and the 13 assets retain their
+  verified IDs and digests.
+- Both canonical `main` checkouts have matching common production sources,
+  reconciled CPU/CUDA builds and validated fresh Stata/Python entry points.
+  Requests for 1, 2, 8, 16, 24 and 48 useful workers passed. Pre-existing
+  local work was preserved.
 
-The source fixes for issue #14 are included. Final licensed Stata/MP host
-execution on native Mac ARM and Intel remains **NOT_RUN** at this stage.
-Tiago's native ARM and Intel/Rosetta source-candidate tests, and native
-SPI/runtime probes, are distinct evidence. The prior 2.30.0 publication
-exception is not recorded here as a test pass for new artifacts.
+**Native Mac Stata host limit:** final licensed Stata/MP execution on native
+ARM and Intel remains **NOT_RUN**. Tiago's native ARM and Intel/Rosetta
+source-candidate tests, and native SPI/runtime probes, are distinct evidence.
+The maintainer previously authorised “Publicar com os limites documentados”
+in this task and subsequently requested this corrected bump/commit/push/release.
+That permission is continued for the same known limit: the OpenMP runtime is
+byte-identical to 2.30.0, and 15 relevant build, isolation, host-test and CPU
+absorption source inputs are unchanged. No new user response or new native
+Stata host execution is represented by this continuation.
+
+The three reported issue-14 fixes are implemented and shipped. The issue
+was closed after verified public installation; refreshed public/private
+issue lists contain no open issues. Closure records the delivered fixes,
+not a passing native licensed Mac host test. Issue #16 was already closed.
 
 Private evidence is under
 `Verifications/ready_covariance_review_20261020/factor_performance_20261020/`
