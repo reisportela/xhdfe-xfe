@@ -2,9 +2,9 @@
   "schema": "xhdfe-macos-openmp-v1",
   "status": "NATIVE_VALIDATED",
   "files": {
-    "xhdfe.plugin": "f4967cb8000bf62a73a35db7f3d9d109194388c865b94b8546966f4cf92ab151",
-    "xfepout.plugin": "87e41792106cb355530488394aef8a1874a753edd547d2a9e7072dbc9f1728a2",
-    "xhdfe_libomp.dylib": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+    "xhdfe.plugin": "0ce2dd4b5a2c2ce9d8363c10b7fd521b3f82cb9f80d15c622affb449cf9808b5",
+    "xfepout.plugin": "386188032a9dc1091a996af644bd6b361379abf4e92ae550baf498741d5ac1ea",
+    "xhdfe_libomp.dylib": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
     "LLVM-OpenMP-LICENSE.txt": "fdad1758a9e1f9d5a81e18879b3406772115edc92c24bfa36b70c654f325e8e4"
   },
   "inspection": {
@@ -25,7 +25,8 @@
           10,
           12,
           0
-        ]
+        ],
+        "weak_defines": true
       },
       "arm64": {
         "arch": "arm64",
@@ -43,7 +44,8 @@
           11,
           0,
           0
-        ]
+        ],
+        "weak_defines": true
       }
     },
     "xfepout.plugin": {
@@ -63,7 +65,8 @@
           10,
           12,
           0
-        ]
+        ],
+        "weak_defines": true
       },
       "arm64": {
         "arch": "arm64",
@@ -81,7 +84,8 @@
           11,
           0,
           0
-        ]
+        ],
+        "weak_defines": true
       }
     },
     "xhdfe_libomp.dylib": {
@@ -99,7 +103,8 @@
           10,
           12,
           0
-        ]
+        ],
+        "weak_defines": false
       },
       "arm64": {
         "arch": "arm64",
@@ -115,7 +120,8 @@
           11,
           0,
           0
-        ]
+        ],
+        "weak_defines": false
       }
     }
   },
@@ -127,14 +133,14 @@
       "status": "PASS",
       "plugin_kind": "xhdfe",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe.plugin",
-      "plugin_sha256": "f4967cb8000bf62a73a35db7f3d9d109194388c865b94b8546966f4cf92ab151",
+      "plugin_sha256": "0ce2dd4b5a2c2ce9d8363c10b7fd521b3f82cb9f80d15c622affb449cf9808b5",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "e5956746aecc50cc7940d2bf0040e0d26d25cac2d798117812d03b088455eb25",
       "expected_arch": "arm64",
       "stage": "final",
       "expect_serial": false,
       "expected_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "expected_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "expected_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "controller_platform": "darwin",
       "controller_arch": "arm64",
       "runner_sha256": "91a260c635e53aa555b01c88e4aed0d34d8edc921c5dd5a50a8deaa7654ba885",
@@ -233,7 +239,7 @@
         "scope": "Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification"
       },
       "loaded_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "loaded_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "loaded_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "runtime_identity_pass": true,
       "plugin_unchanged": true,
       "scope": "Exact native plugin SPI/workers/numerical fixture only. Does not certify Stata ado parsing, all numerical features, performance, or publication."
@@ -243,7 +249,7 @@
       "status": "EXPECTED_SERIAL_REJECTION",
       "plugin_kind": "xhdfe",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/stata/xhdfe.plugin",
-      "plugin_sha256": "bcf87c289252740f16db86f5804c2bbfae5fcd427e2955511317ee187f00dc74",
+      "plugin_sha256": "4e388fb233fa4808a05675b827a1f7b0acd86ce3c75efaad1770b1418ed23f92",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "e5956746aecc50cc7940d2bf0040e0d26d25cac2d798117812d03b088455eb25",
       "expected_arch": "arm64",
@@ -340,14 +346,14 @@
       "status": "PASS",
       "plugin_kind": "xfepout",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xfepout.plugin",
-      "plugin_sha256": "87e41792106cb355530488394aef8a1874a753edd547d2a9e7072dbc9f1728a2",
+      "plugin_sha256": "386188032a9dc1091a996af644bd6b361379abf4e92ae550baf498741d5ac1ea",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "e5956746aecc50cc7940d2bf0040e0d26d25cac2d798117812d03b088455eb25",
       "expected_arch": "arm64",
       "stage": "final",
       "expect_serial": false,
       "expected_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "expected_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "expected_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "controller_platform": "darwin",
       "controller_arch": "arm64",
       "runner_sha256": "91a260c635e53aa555b01c88e4aed0d34d8edc921c5dd5a50a8deaa7654ba885",
@@ -440,7 +446,7 @@
         "scope": "Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification"
       },
       "loaded_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "loaded_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "loaded_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "runtime_identity_pass": true,
       "plugin_unchanged": true,
       "scope": "Exact native plugin SPI/workers/numerical fixture only. Does not certify Stata ado parsing, all numerical features, performance, or publication."
@@ -450,7 +456,7 @@
       "status": "EXPECTED_SERIAL_REJECTION",
       "plugin_kind": "xfepout",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/stata/xfepout.plugin",
-      "plugin_sha256": "25a1fcce4a2d54c26a05aa4343eced6c1123f0b45de9763649dc2c6118dd2589",
+      "plugin_sha256": "b426b2cbe1c2928e71ca3a45771ea015288fbafbdad650523696838f73c6f748",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "e5956746aecc50cc7940d2bf0040e0d26d25cac2d798117812d03b088455eb25",
       "expected_arch": "arm64",
@@ -544,14 +550,14 @@
       "status": "PASS",
       "plugin_kind": "xhdfe",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe.plugin",
-      "plugin_sha256": "f4967cb8000bf62a73a35db7f3d9d109194388c865b94b8546966f4cf92ab151",
+      "plugin_sha256": "0ce2dd4b5a2c2ce9d8363c10b7fd521b3f82cb9f80d15c622affb449cf9808b5",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "0ec8c543bfb37b93a56ac9df2c3aaa3d0c2672d5041198004afd6c282dcbb73b",
       "expected_arch": "x86_64",
       "stage": "final",
       "expect_serial": false,
       "expected_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "expected_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "expected_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "controller_platform": "darwin",
       "controller_arch": "x86_64",
       "runner_sha256": "91a260c635e53aa555b01c88e4aed0d34d8edc921c5dd5a50a8deaa7654ba885",
@@ -650,7 +656,7 @@
         "scope": "Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification"
       },
       "loaded_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "loaded_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "loaded_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "runtime_identity_pass": true,
       "plugin_unchanged": true,
       "scope": "Exact native plugin SPI/workers/numerical fixture only. Does not certify Stata ado parsing, all numerical features, performance, or publication."
@@ -660,7 +666,7 @@
       "status": "EXPECTED_SERIAL_REJECTION",
       "plugin_kind": "xhdfe",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/stata/xhdfe.plugin",
-      "plugin_sha256": "d7808518084b0ac976e294a02dc9619f560c6d84c86b76242843fc0c9a8e837c",
+      "plugin_sha256": "2fafa7b7a368de8ffc6996bfb80c604b20dfcada139f1bfd01d048ea3150812d",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "0ec8c543bfb37b93a56ac9df2c3aaa3d0c2672d5041198004afd6c282dcbb73b",
       "expected_arch": "x86_64",
@@ -757,14 +763,14 @@
       "status": "PASS",
       "plugin_kind": "xfepout",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xfepout.plugin",
-      "plugin_sha256": "87e41792106cb355530488394aef8a1874a753edd547d2a9e7072dbc9f1728a2",
+      "plugin_sha256": "386188032a9dc1091a996af644bd6b361379abf4e92ae550baf498741d5ac1ea",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "0ec8c543bfb37b93a56ac9df2c3aaa3d0c2672d5041198004afd6c282dcbb73b",
       "expected_arch": "x86_64",
       "stage": "final",
       "expect_serial": false,
       "expected_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "expected_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "expected_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "controller_platform": "darwin",
       "controller_arch": "x86_64",
       "runner_sha256": "91a260c635e53aa555b01c88e4aed0d34d8edc921c5dd5a50a8deaa7654ba885",
@@ -857,7 +863,7 @@
         "scope": "Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification"
       },
       "loaded_runtime_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/installed/x/xhdfe_libomp.dylib",
-      "loaded_runtime_sha256": "d6fb91df5faa9f99c236d40741c86aa6c749fcefe498b24672c1cf632b6cefe7",
+      "loaded_runtime_sha256": "6e81244ddbd219378fedefc12b8e0f1f817b8f38222597e8487d1283fd5fe6eb",
       "runtime_identity_pass": true,
       "plugin_unchanged": true,
       "scope": "Exact native plugin SPI/workers/numerical fixture only. Does not certify Stata ado parsing, all numerical features, performance, or publication."
@@ -867,7 +873,7 @@
       "status": "EXPECTED_SERIAL_REJECTION",
       "plugin_kind": "xfepout",
       "plugin_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/stata/xfepout.plugin",
-      "plugin_sha256": "04c39dcb99d642dab5f26f0cdbda3c93e595b53d89b3c46e5a43fa4c2c96f403",
+      "plugin_sha256": "44152140eed3324e488d224185199f4482b8b5ba5834a75088597527e522b9ce",
       "probe_path": "/Users/runner/work/xhdfe-xfe/xhdfe-xfe/plugin_openmp_probe",
       "probe_sha256": "0ec8c543bfb37b93a56ac9df2c3aaa3d0c2672d5041198004afd6c282dcbb73b",
       "expected_arch": "x86_64",

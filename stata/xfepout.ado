@@ -1,4 +1,4 @@
-*! version 1.13.3 14oct2026
+*! version 1.13.4 20oct2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -9,7 +9,8 @@ program define xfepout, eclass sortpreserve
 
     capture syntax, version
     if (!_rc) {
-        local version "1.13.3 14oct2026"
+        quietly _xfepout_package_version
+        local version "`r(package_version)'"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -429,8 +430,8 @@ program define xfepout, eclass sortpreserve
                     if (substr("`clean'", 1, 2) == "i.") local clean = substr("`clean'", 3, .)
                     else if (substr("`clean'", 1, 4) == "ibn.") local clean = substr("`clean'", 5, .)
                     else if (substr("`clean'", 1, 3) == "bn.") local clean = substr("`clean'", 4, .)
-                    else if (regexm("`clean'", "^ib[0-9]+\\.")) local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
-                    else if (regexm("`clean'", "^b[0-9]+\\.")) local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^ib[0-9]+[.]")) local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
+                    else if (regexm("`clean'", "^b[0-9]+[.]")) local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                     unab clean_list : `clean'
                     local clean_count : word count `clean_list'
                     if (`clean_count' != 1) {
@@ -441,26 +442,22 @@ program define xfepout, eclass sortpreserve
                     local parts "`parts' `clean'"
                 }
                 local nparts : word count `parts'
-                if (`nparts' != 2) {
-                    di as err "absorb() interactions must have exactly two components"
+                if (`nparts' < 2) {
+                    di as err "absorb() interactions must have at least two components"
                     exit 198
                 }
-                local v1 : word 1 of `parts'
-                local v2 : word 2 of `parts'
 
-                local pos : list posof "`v1'" in absorb_markvars
-                if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v1'"
-                local pos : list posof "`v2'" in absorb_markvars
-                if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v2'"
-
-                if (`include_main') {
-                    local pos : list posof "`v1'" in absorb_ordered
-                    if (`pos' == 0) local absorb_ordered "`absorb_ordered' `v1'"
-                    local pos : list posof "`v2'" in absorb_ordered
-                    if (`pos' == 0) local absorb_ordered "`absorb_ordered' `v2'"
+                foreach component of local parts {
+                    local pos : list posof "`component'" in absorb_markvars
+                    if (`pos' == 0) local absorb_markvars "`absorb_markvars' `component'"
+                    if (`include_main') {
+                        local pos : list posof "`component'" in absorb_ordered
+                        if (`pos' == 0) local absorb_ordered "`absorb_ordered' `component'"
+                    }
                 }
 
-                local inter_token "`v1'#`v2'"
+                local parts = strtrim("`parts'")
+                local inter_token : subinstr local parts " " "#", all
                 local pos : list posof "`inter_token'" in absorb_ordered
                 if (`pos' == 0) local absorb_ordered "`absorb_ordered' `inter_token'"
             }
@@ -473,8 +470,8 @@ program define xfepout, eclass sortpreserve
                 if (substr("`clean'", 1, 2) == "i.") local clean = substr("`clean'", 3, .)
                 else if (substr("`clean'", 1, 4) == "ibn.") local clean = substr("`clean'", 5, .)
                 else if (substr("`clean'", 1, 3) == "bn.") local clean = substr("`clean'", 4, .)
-                else if (regexm("`clean'", "^ib[0-9]+\\.")) local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
-                else if (regexm("`clean'", "^b[0-9]+\\.")) local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                else if (regexm("`clean'", "^ib[0-9]+[.]")) local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
+                else if (regexm("`clean'", "^b[0-9]+[.]")) local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                 unab clean_list : `clean'
                 local clean_count : word count `clean_list'
                 if (`clean_count' != 1) {
@@ -519,8 +516,8 @@ program define xfepout, eclass sortpreserve
                     if (substr("`clean'", 1, 2) == "i.") local clean = substr("`clean'", 3, .)
                     else if (substr("`clean'", 1, 4) == "ibn.") local clean = substr("`clean'", 5, .)
                     else if (substr("`clean'", 1, 3) == "bn.") local clean = substr("`clean'", 4, .)
-                    else if (regexm("`clean'", "^ib[0-9]+\\.")) local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
-                    else if (regexm("`clean'", "^b[0-9]+\\.")) local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^ib[0-9]+[.]")) local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
+                    else if (regexm("`clean'", "^b[0-9]+[.]")) local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                     unab clean_list : `clean'
                     local clean_count : word count `clean_list'
                     if (`clean_count' != 1) {
@@ -531,26 +528,26 @@ program define xfepout, eclass sortpreserve
                     local parts "`parts' `clean'"
                 }
                 local nparts : word count `parts'
-                if (`nparts' != 2) {
-                    di as err "clustervars() interactions must have exactly two components"
+                if (`nparts' < 2) {
+                    di as err "clustervars() interactions must have at least two components"
                     exit 198
                 }
-                local v1 : word 1 of `parts'
-                local v2 : word 2 of `parts'
-
-                local pos : list posof "`v1'" in cluster_markvars
-                if (`pos' == 0) local cluster_markvars "`cluster_markvars' `v1'"
-                local pos : list posof "`v2'" in cluster_markvars
-                if (`pos' == 0) local cluster_markvars "`cluster_markvars' `v2'"
-
-                if (`include_main') {
-                    local pos : list posof "`v1'" in cluster_ordered
-                    if (`pos' == 0) local cluster_ordered "`cluster_ordered' `v1'"
-                    local pos : list posof "`v2'" in cluster_ordered
-                    if (`pos' == 0) local cluster_ordered "`cluster_ordered' `v2'"
+                if (`include_main' & `nparts' > 2) {
+                    di as err "clustervars() ## interactions with more than two components are not supported; list the cluster dimensions explicitly"
+                    exit 198
                 }
 
-                local inter_token "`v1'#`v2'"
+                foreach component of local parts {
+                    local pos : list posof "`component'" in cluster_markvars
+                    if (`pos' == 0) local cluster_markvars "`cluster_markvars' `component'"
+                    if (`include_main') {
+                        local pos : list posof "`component'" in cluster_ordered
+                        if (`pos' == 0) local cluster_ordered "`cluster_ordered' `component'"
+                    }
+                }
+
+                local parts = strtrim("`parts'")
+                local inter_token : subinstr local parts " " "#", all
                 local pos : list posof "`inter_token'" in cluster_ordered
                 if (`pos' == 0) local cluster_ordered "`cluster_ordered' `inter_token'"
             }
@@ -563,8 +560,8 @@ program define xfepout, eclass sortpreserve
                 if (substr("`clean'", 1, 2) == "i.") local clean = substr("`clean'", 3, .)
                 else if (substr("`clean'", 1, 4) == "ibn.") local clean = substr("`clean'", 5, .)
                 else if (substr("`clean'", 1, 3) == "bn.") local clean = substr("`clean'", 4, .)
-                else if (regexm("`clean'", "^ib[0-9]+\\.")) local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
-                else if (regexm("`clean'", "^b[0-9]+\\.")) local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                else if (regexm("`clean'", "^ib[0-9]+[.]")) local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
+                else if (regexm("`clean'", "^b[0-9]+[.]")) local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                 unab clean_list : `clean'
                 local clean_count : word count `clean_list'
                 if (`clean_count' != 1) {
@@ -614,15 +611,9 @@ program define xfepout, eclass sortpreserve
     if ("`absorb_ordered'" != "") {
         foreach entry of local absorb_ordered {
             if (strpos("`entry'", "#") > 0) {
-                local pair "`entry'"
-                gettoken v1 rest : pair, parse("#")
-                gettoken hash v2 : rest, parse("#")
-                if ("`v1'" == "" | "`v2'" == "") {
-                    di as err "absorb() interactions must have exactly two components"
-                    exit 198
-                }
+                local components : subinstr local entry "#" " ", all
                 tempvar feint
-                quietly egen long `feint' = group(`v1' `v2') if `touse'
+                quietly egen long `feint' = group(`components') if `touse'
                 local absorb_list "`absorb_list' `feint'"
             }
             else {
@@ -636,15 +627,9 @@ program define xfepout, eclass sortpreserve
     if ("`cluster_ordered'" != "") {
         foreach entry of local cluster_ordered {
             if (strpos("`entry'", "#") > 0) {
-                local pair "`entry'"
-                gettoken v1 rest : pair, parse("#")
-                gettoken hash v2 : rest, parse("#")
-                if ("`v1'" == "" | "`v2'" == "") {
-                    di as err "clustervars() interactions must have exactly two components"
-                    exit 198
-                }
+                local components : subinstr local entry "#" " ", all
                 tempvar clint
-                quietly egen long `clint' = group(`v1' `v2') if `touse'
+                quietly egen long `clint' = group(`components') if `touse'
                 local cluster_list "`cluster_list' `clint'"
             }
             else {
@@ -1075,7 +1060,8 @@ program define xfepout, eclass sortpreserve
         if (e(gpu_used) > 0.5) ereturn local gpu_backend "`gpu_backend'"
         else ereturn local gpu_backend "cpu"
     }
-    ereturn local version "1.13.3 14oct2026"
+    quietly _xfepout_package_version
+    ereturn local version "`r(package_version)'"
     ereturn local cmd "xfepout"
     ereturn local cmdline `"`cmdline'"'
     if (`__xfe_profile') {
@@ -1084,4 +1070,9 @@ program define xfepout, eclass sortpreserve
         di as txt "ado_profile label=xfepout_post_plugin ms=" %12.3f (1000 * r(t99))
         timer clear 99
     }
+end
+
+program define _xfepout_package_version, rclass
+    version 16.0
+    return local package_version "1.13.4 20oct2026"
 end

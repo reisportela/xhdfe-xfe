@@ -1,10 +1,11 @@
-*! version 2.29.1 14oct2026
+*! version 2.30.0 20oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
     capture syntax, version
     if (!_rc) {
-        local version "2.29.1 14oct2026"
+        quietly _xhdfe_package_version
+        local version "`r(package_version)'"
         ereturn clear
         di as txt "`version'"
         ereturn local version "`version'"
@@ -29,6 +30,11 @@ program define xhdfe, eclass sortpreserve
         ereturn clear
         exit `rc'
     }
+end
+
+program define _xhdfe_package_version, rclass
+    version 16.0
+    return local package_version "2.30.0 20oct2026"
 end
 
 program define _xhdfe_estimate, eclass
@@ -68,6 +74,9 @@ program define _xhdfe_estimate, eclass
     local optline : subinstr local optline ",a(" ", absorb(", all
     local optline : subinstr local optline ", a(" ", absorb(", all
     local optline : subinstr local optline " a(" " absorb(", all
+    local optline : subinstr local optline ",ab(" ", absorb(", all
+    local optline : subinstr local optline ", ab(" ", absorb(", all
+    local optline : subinstr local optline " ab(" " absorb(", all
     local optline : subinstr local optline ",abs(" ", absorb(", all
     local optline : subinstr local optline ", abs(" ", absorb(", all
     local optline : subinstr local optline " abs(" " absorb(", all
@@ -394,11 +403,11 @@ program define _xhdfe_estimate, eclass
                         else if (substr("`clean'", 1, 3) == "bn.") {
                             local clean = substr("`clean'", 4, .)
                         }
-                        else if (regexm("`clean'", "^ib[0-9]+\\.")) {
-                            local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
+                        else if (regexm("`clean'", "^ib[0-9]+[.]")) {
+                            local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
                         }
-                        else if (regexm("`clean'", "^b[0-9]+\\.")) {
-                            local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                        else if (regexm("`clean'", "^b[0-9]+[.]")) {
+                            local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                         }
                         local part_label
                         if (`is_cont' & strpos("`clean'", ".")) {
@@ -428,15 +437,22 @@ program define _xhdfe_estimate, eclass
                         local part_is_cont "`part_is_cont' `is_cont'"
                     }
                     local nparts : word count `parts'
-                    if (`nparts' != 2) {
-                        di as err "absorb() interactions must have exactly two components"
+                    if (`nparts' < 2) {
+                        di as err "absorb() interactions must have at least two components"
+                        exit 198
+                    }
+                    local ncont 0
+                    foreach is_cont of local part_is_cont {
+                        local ncont = `ncont' + `is_cont'
+                    }
+                    if (`ncont' > 0 & `nparts' != 2) {
+                        di as err "absorb() heterogeneous slope terms must have one categorical and one continuous component"
                         exit 198
                     }
                     local v1 : word 1 of `parts'
                     local v2 : word 2 of `parts'
                     local c1 : word 1 of `part_is_cont'
                     local c2 : word 2 of `part_is_cont'
-                    local ncont = `c1' + `c2'
 
                     if (`ncont' == 1) {
                         if (`c1') {
@@ -485,32 +501,23 @@ program define _xhdfe_estimate, eclass
                         exit 198
                     }
 
-                    local pos : list posof "`v1'" in absorb_markvars
-                    if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v1'"
-                    local pos : list posof "`v2'" in absorb_markvars
-                    if (`pos' == 0) local absorb_markvars "`absorb_markvars' `v2'"
-
-                    if (`include_main') {
-                        local pos : list posof "`v1'" in absorb_ordered
-                        if (`pos' == 0) {
-                            local absorb_ordered "`absorb_ordered' `v1'"
-                            local absorb_labels "`absorb_labels' `v1'"
-                            local absorb_aliases "`absorb_aliases' ."
-                            local absorb_kinds "`absorb_kinds' cat"
-                            local absorb_slopevars "`absorb_slopevars' ."
-                            local absorb_slopeintercepts "`absorb_slopeintercepts' ."
-                        }
-                        local pos : list posof "`v2'" in absorb_ordered
-                        if (`pos' == 0) {
-                            local absorb_ordered "`absorb_ordered' `v2'"
-                            local absorb_labels "`absorb_labels' `v2'"
-                            local absorb_aliases "`absorb_aliases' ."
-                            local absorb_kinds "`absorb_kinds' cat"
-                            local absorb_slopevars "`absorb_slopevars' ."
-                            local absorb_slopeintercepts "`absorb_slopeintercepts' ."
+                    foreach component of local parts {
+                        local pos : list posof "`component'" in absorb_markvars
+                        if (`pos' == 0) local absorb_markvars "`absorb_markvars' `component'"
+                        if (`include_main') {
+                            local pos : list posof "`component'" in absorb_ordered
+                            if (`pos' == 0) {
+                                local absorb_ordered "`absorb_ordered' `component'"
+                                local absorb_labels "`absorb_labels' `component'"
+                                local absorb_aliases "`absorb_aliases' ."
+                                local absorb_kinds "`absorb_kinds' cat"
+                                local absorb_slopevars "`absorb_slopevars' ."
+                                local absorb_slopeintercepts "`absorb_slopeintercepts' ."
+                            }
                         }
                     }
-                    local inter_token "`v1'#`v2'"
+                    local parts = strtrim("`parts'")
+                    local inter_token : subinstr local parts " " "#", all
                     local inter_label "`inter_token'"
                     if ("`alias'" != "") local inter_label "`alias'"
                     local pos : list posof "`inter_token'" in absorb_ordered
@@ -547,11 +554,11 @@ program define _xhdfe_estimate, eclass
                     else if (substr("`clean'", 1, 3) == "bn.") {
                         local clean = substr("`clean'", 4, .)
                     }
-                    else if (regexm("`clean'", "^ib[0-9]+\\.")) {
-                        local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^ib[0-9]+[.]")) {
+                        local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
                     }
-                    else if (regexm("`clean'", "^b[0-9]+\\.")) {
-                        local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^b[0-9]+[.]")) {
+                        local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                     }
                     unab clean_list : `clean'
                     local clean_count : word count `clean_list'
@@ -836,11 +843,11 @@ program define _xhdfe_estimate, eclass
                     else if (substr("`clean'", 1, 3) == "bn.") {
                         local clean = substr("`clean'", 4, .)
                     }
-                    else if (regexm("`clean'", "^ib[0-9]+\\.")) {
-                        local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^ib[0-9]+[.]")) {
+                        local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
                     }
-                    else if (regexm("`clean'", "^b[0-9]+\\.")) {
-                        local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                    else if (regexm("`clean'", "^b[0-9]+[.]")) {
+                        local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                     }
                     unab clean_list : `clean'
                     local clean_count : word count `clean_list'
@@ -852,32 +859,29 @@ program define _xhdfe_estimate, eclass
                     local parts "`parts' `clean'"
                 }
                 local nparts : word count `parts'
-                if (`nparts' != 2) {
-                    di as err "cluster() interactions must have exactly two components"
+                if (`nparts' < 2) {
+                    di as err "cluster() interactions must have at least two components"
                     exit 198
                 }
-                local v1 : word 1 of `parts'
-                local v2 : word 2 of `parts'
+                if (`include_main' & `nparts' > 2) {
+                    di as err "cluster() ## interactions with more than two components are not supported; list the cluster dimensions explicitly"
+                    exit 198
+                }
 
-                local pos : list posof "`v1'" in cluster_markvars
-                if (`pos' == 0) local cluster_markvars "`cluster_markvars' `v1'"
-                local pos : list posof "`v2'" in cluster_markvars
-                if (`pos' == 0) local cluster_markvars "`cluster_markvars' `v2'"
-
-                if (`include_main') {
-                    local pos : list posof "`v1'" in cluster_ordered
-                    if (`pos' == 0) {
-                        local cluster_ordered "`cluster_ordered' `v1'"
-                        local cluster_display "`cluster_display' `v1'"
-                    }
-                    local pos : list posof "`v2'" in cluster_ordered
-                    if (`pos' == 0) {
-                        local cluster_ordered "`cluster_ordered' `v2'"
-                        local cluster_display "`cluster_display' `v2'"
+                foreach component of local parts {
+                    local pos : list posof "`component'" in cluster_markvars
+                    if (`pos' == 0) local cluster_markvars "`cluster_markvars' `component'"
+                    if (`include_main') {
+                        local pos : list posof "`component'" in cluster_ordered
+                        if (`pos' == 0) {
+                            local cluster_ordered "`cluster_ordered' `component'"
+                            local cluster_display "`cluster_display' `component'"
+                        }
                     }
                 }
 
-                local inter_token "`v1'#`v2'"
+                local parts = strtrim("`parts'")
+                local inter_token : subinstr local parts " " "#", all
                 local pos : list posof "`inter_token'" in cluster_ordered
                 if (`pos' == 0) {
                     local cluster_ordered "`cluster_ordered' `inter_token'"
@@ -899,11 +903,11 @@ program define _xhdfe_estimate, eclass
                 else if (substr("`clean'", 1, 3) == "bn.") {
                     local clean = substr("`clean'", 4, .)
                 }
-                else if (regexm("`clean'", "^ib[0-9]+\\.")) {
-                    local clean = regexr("`clean'", "^ib[0-9]+\\.", "")
+                else if (regexm("`clean'", "^ib[0-9]+[.]")) {
+                    local clean = regexr("`clean'", "^ib[0-9]+[.]", "")
                 }
-                else if (regexm("`clean'", "^b[0-9]+\\.")) {
-                    local clean = regexr("`clean'", "^b[0-9]+\\.", "")
+                else if (regexm("`clean'", "^b[0-9]+[.]")) {
+                    local clean = regexr("`clean'", "^b[0-9]+[.]", "")
                 }
                 unab clean_list : `clean'
                 local clean_count : word count `clean_list'
@@ -1022,16 +1026,10 @@ program define _xhdfe_estimate, eclass
                 local absorb_display "`absorb_display' `label'"
             }
             else if (strpos("`entry'", "#") > 0) {
-                local pair "`entry'"
-                gettoken v1 rest : pair, parse("#")
-                gettoken hash v2 : rest, parse("#")
-                if ("`v1'" == "" | "`v2'" == "") {
-                    di as err "absorb() interactions must have exactly two components"
-                    exit 198
-                }
+                local components : subinstr local entry "#" " ", all
                 if ("`alias_name'" != "") confirm new variable `alias_name'
                 tempvar feint
-                quietly egen long `feint' = group(`v1' `v2') if `touse'
+                quietly egen long `feint' = group(`components') if `touse'
                 local absorb_list "`absorb_list' `feint'"
                 local absorb_display "`absorb_display' `label'"
             }
@@ -1048,15 +1046,9 @@ program define _xhdfe_estimate, eclass
     if ("`cluster_ordered'" != "") {
         foreach entry of local cluster_ordered {
             if (strpos("`entry'", "#") > 0) {
-                local pair "`entry'"
-                gettoken v1 rest : pair, parse("#")
-                gettoken hash v2 : rest, parse("#")
-                if ("`v1'" == "" | "`v2'" == "") {
-                    di as err "cluster() interactions must have exactly two components"
-                    exit 198
-                }
+                local components : subinstr local entry "#" " ", all
                 tempvar clint
-                quietly egen long `clint' = group(`v1' `v2') if `touse'
+                quietly egen long `clint' = group(`components') if `touse'
                 local cluster_list "`cluster_list' `clint'"
             }
             else {
@@ -2551,7 +2543,8 @@ program define _xhdfe_estimate, eclass
         ereturn local wtype "`weight'"
         ereturn local wexp "`exp'"
     }
-    ereturn local version "2.29.0 14oct2026"
+    quietly _xhdfe_package_version
+    ereturn local version "`r(package_version)'"
     if ("`nowarn'" != "") {
         ereturn local nowarn "nowarn"
     }
@@ -2838,12 +2831,18 @@ program define _xhdfe_estimate, eclass
             ereturn scalar r2_a_within = 1 - (e(rss)/`used_df_r') / ( e(tss_within) / (`used_df_r'+e(df_m)) )
         }
     }
-    else if (!missing(`used_df_r') & `used_df_r' <= 0 & ///
+    else if ("`statstyle'" == "reghdfe" & !`has_individual' & ///
+             !missing(`used_df_r') & `used_df_r' <= 0) {
+        // Residual mean square, and therefore adjusted R-squared, is undefined.
+        ereturn scalar r2_a = .
+        ereturn scalar r2_a_within = .
+    }
+    else if (("`statstyle'" == "legacy" | `has_individual') & ///
+             !missing(`used_df_r') & `used_df_r' <= 0 & ///
              !missing(e(df_r)) & e(df_r) <= 0 & ///
              !missing(e(rss)) & !missing(e(tss)) & e(tss) > 0 & ///
              e(rss) <= 1e-8 * e(tss)) {
-        // Saturated model that fits within machine precision: report Adj R-squared = 1
-        // to match reghdfe's display (mathematically, rss/df_r tends to 0 as rss -> 0).
+        // Preserve legacy and group/individual saturated-fit display conventions.
         ereturn scalar r2_a = 1
         if (!missing(e(tss_within)) & e(tss_within) > 0) {
             ereturn scalar r2_a_within = 1

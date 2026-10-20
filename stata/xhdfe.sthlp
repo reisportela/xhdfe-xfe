@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.29.1 14oct2026}{...}
+{* *! version 2.30.0 20oct2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -83,7 +83,7 @@
 {synopthdr}
 {synoptline}
 {syntab:Standard FEs {help xhdfe##opt_absorb:[+]}}
-{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labeled absorbs, two-way interactions, and heterogeneous slopes{p_end}
+{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labeled absorbs, categorical interactions, and heterogeneous slopes{p_end}
 {synopt: {cmdab:a:bsorb(}{it:label}{cmd:=}{it:absvar}{cmd:)}}label an absorbed effect and use {it:label} as the saved-FE base name{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:#c.}{it:x}{cmd:)}}absorb group-specific slopes without a level FE{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:##c.}{it:x}{cmd:)}}absorb a level FE plus group-specific slopes{p_end}
@@ -106,7 +106,9 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 {synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be
 {opt un:adjusted} (default), {opt r:obust}, {opt cl:uster} {help fvvarlist} (multiway), or {opt dk:raay} [{it:#}]{p_end}
 {synopt : {opt r:obust}}equivalent to {cmd:vce(robust)}{p_end}
-{synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)}; multiway clustering allowed; supports two-way interactions with {cmd:#}/{cmd:##}{p_end}
+{synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)};
+multiway clustering allowed; supports categorical interactions with {cmd:#}
+(two or more components) and two-component {cmd:##}{p_end}
 {synopt : {opth res:iduals(newvar)}}save regression residuals{p_end}
 {synopt : {opt res:iduals}}save regression residuals in {cmd:_reghdfe_resid}{p_end}
 {synopt : {opt keep:singletons}}do not drop singleton observations{p_end}
@@ -265,7 +267,7 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.29.1 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+{bf:Version 2.30.0 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
 The inherited 2.28.0 matrix has 188 converged cells out of 192 across 24 specifications and eight language/backend/mode combinations;
 every CPU and Fast cell converged. Four difficult CUDA Comparable cells still refuse estimation.
 Separate extreme-offset and {cmd:group()}/{cmd:individual()} CUDA cases also retain documented refusals.
@@ -370,21 +372,21 @@ is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-se
 {synoptline}
 {synopt:{it:varname}}categorical variable to be absorbed{p_end}
 {synopt:{it:label}={it:varname}}label the absorbed effect and use {it:label} as the saved-FE base name{p_end}
-{synopt:{it:var1#var2}}two-way categorical interaction FE; {cmd:var1##var2} is accepted as the same joint FE{p_end}
+{synopt:{it:var1#var2#...}}categorical interaction FE with two or more components; categorical-only {cmd:##} is accepted as the same joint FE{p_end}
 {synopt:{it:fe#c.var}}group-specific slope without a level FE{p_end}
 {synopt:{it:fe##c.var}}level FE plus group-specific slope{p_end}
 {synoptline}
 {p2colreset}{...}
-{p 4 6 2}- Two-way categorical interactions are supported via {cmd:#} or {cmd:##}. For reghdfe
+{p 4 6 2}- Categorical interactions with two or more components are supported via {cmd:#} or {cmd:##}. For reghdfe
 compatibility, categorical-only {cmd:##} terms are treated as one joint absorbed FE, not expanded into
 main effects plus the interaction. Specify {cmd:var1 var2 var1#var2} explicitly if all three absorbed
 components are intended.
-Interaction FEs are materialized with {cmd:egen group()} after the estimation sample is defined, and
-must have exactly two components. Plain numeric FE identifiers are passed directly to the plugin;
+Interaction FEs are materialized with {cmd:egen group()} over all their components after the
+estimation sample is defined. Plain numeric FE identifiers are passed directly to the plugin;
 string identifiers are encoded by Stata before the plugin call.{p_end}
 {p 4 6 2}- Heterogeneous slopes require exactly one categorical component and one continuous
 component. Use {cmd:fe#c.x} for group-specific slopes only, or {cmd:fe##c.x} for a level FE plus
-group-specific slopes. Continuous-only interactions and interactions with more than two components
+group-specific slopes. Continuous-only interactions, and slope terms with more than two components,
 are rejected.{p_end}
 {p 4 6 2}- Use {it:label}={it:var} to label absorbed effects in output and saved-FE names.
 For {cmd:##}, label the joint term as a single component or specify the components separately if you
@@ -410,10 +412,17 @@ pre-create them (e.g., {cmd:egen label = group(var)}) and use that variable in {
 This is equivalent to including an indicator/dummy for each category of each absvar.
 
 {pmore}
-Two-way categorical interactions can be specified with {cmd:#} or {cmd:##}; categorical-only {cmd:##}
+Categorical interactions with two or more components can be specified with {cmd:#} or {cmd:##}; categorical-only {cmd:##}
 is canonicalized to the same joint FE as {cmd:#}, matching reghdfe's absorbed-DoF presentation.
 Interaction FEs are materialized with {cmd:egen group()} after the estimation sample is defined.
 Plain numeric FE identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
+
+{pmore}
+For example, {cmd:absorb(a#b#c)} absorbs one effect for each observed joint category,
+equivalent to precomputing {cmd:egen abc = group(a b c)} and using {cmd:absorb(abc)}
+on the same estimation sample. {cmd:absorb(a b c)} instead absorbs three separate
+additive effects; grouping them changes that model. Named effects such as
+{cmd:absorb(effect=a#b#c)} are also supported.
 
 {pmore}
 Heterogeneous slopes can be specified as {cmd:fe#c.x} or {cmd:fe##c.x}. The first absorbs
@@ -513,7 +522,12 @@ Numerically positive IV score covariance is classified before the ill-conditione
 covariance transformation, avoiding an unnecessary repair of a valid constant.
 
 {pmore}
-Each {it:clustervar} may be a variable or a two-way interaction specified with {cmd:#}/{cmd:##}.
+Each {it:clustervar} may be a variable or a categorical interaction with two or more components
+specified with {cmd:#}. Two-component {cmd:##} expands to the two main dimensions plus their
+interaction; {cmd:##} with more than two components is rejected (list the cluster dimensions explicitly).
+Note that {cmd:reghdfe} (6.14.1) treats {cmd:a##b} in {cmd:vce(cluster)} as one joint cluster factor,
+exactly like {cmd:a#b}; {cmd:xhdfe} keeps its documented expansion, so {cmd:vce(cluster a##b)} is
+three-way clustering here and one-way clustering there. Use {cmd:a#b} for the joint factor in both.
 Interaction clusters are materialized with {cmd:egen group()} after sample marking. Plain numeric
 cluster identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
 
@@ -687,8 +701,10 @@ stops when one full sweep moves the working data by less than {cmd:tolerance()} 
 the same meaning {helpb reghdfe} attaches to its tolerance — so coefficients match reghdfe at the
 same nominal tolerance (down to the conditioning of the problem). Ordinary no-slope LSMR/MLSMR
 paths use {cmd:min(effective tolerance,1e-11)} in comparable and strict-residual modes; requested
-tolerances already at or below {cmd:1e-11} are unchanged. MAP/sweep, fast, CUDA,
-group()/individual(), heterogeneous-slope, and savefe semantics are unchanged.
+tolerances already at or below {cmd:1e-11} are unchanged. Comparable CUDA {cmd:auto}
+uses device LSMR on sparse ordinary unweighted two-FE graphs, with the same Krylov floor
+and ordinary degrees of freedom. MAP/sweep, fast, group()/individual(),
+heterogeneous-slope, and savefe retain their established stopping rules.
 {cmd:tolerancemode(xhdfe-fast)} restores the pre-2.7.0 stopping rule: typically ~1.5-3x fewer
 absorber iterations, with an effective precision that is data-dependent and can be looser than the
 nominal tolerance on ill-conditioned (e.g. sparse bipartite) designs — appropriate for exploration
@@ -804,7 +820,7 @@ forces recovery sweeps on the partial residual.
 {cmd:mlsmr}/{cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive};
 {cmd:lsmr}/{cmd:plain-lsmr}/{cmd:plain_lsmr}; and
 {cmd:auto-mlsmr}/{cmd:auto_mlsmr}/{cmd:mlsmr-auto}/{cmd:mlsmr_auto}.
-The LSMR/MLSMR family uses matrix-free Krylov absorbers and is CPU-only.
+Explicit LSMR/MLSMR requests use matrix-free Krylov absorbers and are CPU-only.
 {cmd:auto} first uses the probe-based auto-MLSMR selector on eligible CPU, standard-FE designs with up to three
 fixed-effect dimensions. It promotes
 slow-converging large designs to {cmd:mlsmr}; otherwise it resolves to a sweep fallback ({cmd:gauss-seidel} by
@@ -813,8 +829,12 @@ Schwarz/Jacobi-PCG gate after the selector has already chosen a sweep. Under {cm
 MLSMR promotion is limited to large, many-RHS, multi-way moderate-rho designs. Designs with four or more fixed
 effects stay on the full-data gate/sweep path so the 200k-sample probe cannot over-promote large, well-connected
 many-way graphs (raise the cap with {cmd:XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}; {cmd:absorptionmethod(auto-mlsmr)}
-is uncapped). GPU, savefe, and heterogeneous-slope paths resolve directly to their existing
-eligible fallback. Combined {cmd:group()}/{cmd:individual()} fits use their dedicated routing:
+is uncapped). Comparable CUDA {cmd:auto} selects device LSMR for ordinary unweighted
+two-FE graphs identified by the existing low group-occupancy detector; it reports {cmd:lsmr}
+as the method used. Fast, explicit methods/convergence, savefe and heterogeneous-slope
+paths retain their primary routing. A broken ordinary Comparable CG recurrence
+restarts with device LSMR within the remaining iteration budget.
+Combined {cmd:group()}/{cmd:individual()} fits use their dedicated routing:
 joint LSMR for CPU {cmd:auto}, the existing certified solver for CUDA {cmd:auto}, and an optional
 certified sweep fallback if automatic CPU LSMR cannot be accepted. Disable MLSMR gate
 promotions with {cmd:XHDFE_MLSMR_AUTO_GATE=0}. {cmd:absorptionmethod(mlsmr)} forces MLSMR; {cmd:auto-mlsmr}
@@ -1038,7 +1058,7 @@ Driscoll-Kraay option described under {help xhdfe##opt_vce:vce()}{p_end}
 {p2colreset}{...}
 
 {marker known_limitations}{...}
-{title:Known limitations (2.29.1)}
+{title:Known limitations (2.30.0)}
 
 {p2colset 8 12 12 2}{...}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
@@ -1417,7 +1437,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.29.1.
+regression via a C++ backend." Version 2.30.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
