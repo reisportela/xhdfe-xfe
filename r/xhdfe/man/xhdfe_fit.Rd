@@ -47,9 +47,10 @@ fixed effects (plain OLS).}
 \item{weights}{optional numeric weight vector, one entry per
 observation; interpreted according to \code{weights_type}.}
 
-\item{weights_type}{\code{"analytic"} (Stata \code{aweight}) or
-\code{"frequency"} (Stata \code{fweight}, exact replicated-rows
-semantics); see \code{\link{xhdfe}}.}
+\item{weights_type}{\code{"analytic"} (Stata \code{aweight}),
+\code{"frequency"} (Stata \code{fweight}, exact replicated-rows semantics),
+\code{"importance"} (\code{iweight}) or \code{"probability"} (\code{pweight}).
+See \code{\link{xhdfe}} for their inference conventions.}
 
 \item{cluster}{the cluster dimensions: a vector, a matrix (one dimension
 per column), a \code{data.frame}, or a list of vectors; several

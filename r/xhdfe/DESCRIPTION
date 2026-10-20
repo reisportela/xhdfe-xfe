@@ -1,7 +1,7 @@
 Package: xhdfe
 Type: Package
 Title: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend
-Version: 2.30.0.20261020
+Version: 2.30.1.20261020
 Authors@R: c(
     person("Miguel", "Portela", email = "miguel.portela@eeg.uminho.pt", role = c("aut", "cre")),
     person("Tiago", "Tavares", email = "tgstavares@eeg.uminho.pt", role = "aut"))

@@ -6,7 +6,7 @@
 \description{
 The \pkg{xhdfe} package estimates linear models with multiple
 high-dimensional fixed effects through a compiled C++ backend -- the very
-same estimator core (version 2.30.0) behind the Stata \code{xhdfe} command
+same estimator core (version 2.30.1) behind the Stata \code{xhdfe} command
 and the Python \code{xhdfe} package. CPU behavior is the reference
 implementation; the optional CUDA GPU absorber is tested against it on the
 explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -34,8 +34,8 @@ conditioning).
     \code{reghdfe}.
   \item Instrumental variables / two-stage least squares (2SLS) for
     supported standard fixed-effect designs.
-  \item Analytic and frequency weights (Stata \code{aweight} /
-    \code{fweight} semantics).
+  \item Analytic, frequency, importance and probability weights (Stata
+    \code{aweight}, \code{fweight}, \code{iweight}, \code{pweight}).
   \item \code{reghdfe}-style singleton dropping and degrees-of-freedom
     adjustments, plus \pkg{fixest}-style small-sample corrections
     (\code{ssc}).
@@ -111,7 +111,7 @@ acknowledged. The usual disclaimer applies.
 
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.30.0.
+effects regression via a C++ backend." Version 2.30.1.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear

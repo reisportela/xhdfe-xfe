@@ -2280,6 +2280,56 @@ __global__ void gi_lsmr_scale_copy_kernel(const double* source,
     }
 }
 
+// Ordinary, unweighted incidence columns contain literal ones. Large groups
+// need cooperative sums rather than a serial walk by one CUDA thread.
+__global__ void ordinary_incidence_diagonal_kernel(
+    const int* ptr, int levels, double* diagonal) {
+    const int level = blockIdx.x * blockDim.x + threadIdx.x;
+    if (level < levels) diagonal[level] = static_cast<double>(ptr[level + 1] - ptr[level]);
+}
+
+template <int BLOCK>
+__global__ void ordinary_at_block_kernel(
+    const double* input, const int* ptr, const int* observation,
+    const double* scale, int offset, int levels, double* output) {
+    const int level = blockIdx.x;
+    if (level >= levels) return;
+    using Reduce = cub::BlockReduce<double, BLOCK>;
+    __shared__ typename Reduce::TempStorage temp;
+    double sum = 0.0;
+    const int end = ptr[level + 1];
+    for (std::int64_t pos = static_cast<std::int64_t>(ptr[level]) + threadIdx.x;
+         pos < end; pos += BLOCK) {
+        const int row = observation ? observation[pos] : static_cast<int>(pos);
+        sum += input[row];
+    }
+    const double total = Reduce(temp).Sum(sum);
+    if (threadIdx.x == 0) output[offset + level] = scale[offset + level] * total;
+}
+
+template <int BLOCK>
+__global__ void ordinary_at_warp_kernel(
+    const double* input, const int* ptr, const int* observation,
+    const double* scale, int offset, int levels, double* output) {
+    constexpr int WARP = 32;
+    constexpr int WARPS = BLOCK / WARP;
+    const int warp = threadIdx.x / WARP;
+    const int lane = threadIdx.x % WARP;
+    const int level = blockIdx.x * WARPS + warp;
+    if (level >= levels) return;  // A whole warp takes this branch.
+    using Reduce = cub::WarpReduce<double, WARP>;
+    __shared__ typename Reduce::TempStorage temp[WARPS];
+    double sum = 0.0;
+    const int end = ptr[level + 1];
+    for (std::int64_t pos = static_cast<std::int64_t>(ptr[level]) + lane;
+         pos < end; pos += WARP) {
+        const int row = observation ? observation[pos] : static_cast<int>(pos);
+        sum += input[row];
+    }
+    const double total = Reduce(temp[warp]).Sum(sum);
+    if (lane == 0) output[offset + level] = scale[offset + level] * total;
+}
+
 __global__ void gi_lsmr_affine_subtract_kernel(const double* first,
                                                const double* second,
                                                double second_scale,
@@ -5824,6 +5874,35 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                         result.iterations = total_iters;
                     }
                 }
+                // Complete the unfinished FE component from the successful
+                // IT state with the existing device Krylov solve. The original
+                // ordinary tolerance and remaining iteration budget apply.
+                if (allow_cg && converged && !use_reghdfe_cg && !have_cg_iteration_count &&
+                    options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+                    fe_inputs.size() == 3 && weights == nullptr && !any_slope &&
+                    !store_alphas && !options.retain_fixed_effects && cols > 0) {
+                    const int completed = result.iterations;
+                    const int remaining = std::max(0, options.max_iter - completed);
+                    if (remaining > 0) {
+                        Eigen::VectorXd warm_y(n);
+                        Eigen::MatrixXd warm_x(ld, cols);
+                        cuda_check(cudaMemcpy(warm_y.data(), d_y.data(),
+                                              sizeof(double) * n, cudaMemcpyDeviceToHost),
+                                   "warm ordinary LSMR y copy failed");
+                        cuda_check(cudaMemcpy(warm_x.data(), d_x.data(),
+                                              sizeof(double) * x_size, cudaMemcpyDeviceToHost),
+                                   "warm ordinary LSMR X copy failed");
+                        HdfeOptions tail_options = options;
+                        tail_options.max_iter = remaining;
+                        AbsorptionResult repaired;
+                        const bool tail_ok = absorb_ordinary_lsmr_cuda(
+                            warm_y, warm_x, fe_inputs, weights, tail_options, repaired);
+                        repaired.iterations += completed;
+                        result = std::move(repaired);
+                        return tail_ok;
+                    }
+                    converged = false;
+                }
             } else {
                 auto run_simple_phase = [&](const std::vector<std::size_t>& order,
                                             int max_iter,
@@ -6756,10 +6835,15 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         const int blocks_fe = (total_fe + kBlockSize - 1) / kBlockSize;
         DeviceBuffer<double>& d_denom = workspace.gi_denom;
         d_denom.allocate(static_cast<std::size_t>(individuals));
-        gi_denom_by_individual_kernel<<<blocks_i, kBlockSize>>>(
-            d_individual_ptr.data(), d_individual_group.data(),
-            d_group_scale.data(), unit_weights ? nullptr : d_weights.data(),
-            unit_weights, n, individuals, d_denom.data());
+        if (ordinary_projection && unit_weights) {
+            ordinary_incidence_diagonal_kernel<<<blocks_i, kBlockSize>>>(
+                d_individual_ptr.data(), individuals, d_denom.data());
+        } else {
+            gi_denom_by_individual_kernel<<<blocks_i, kBlockSize>>>(
+                d_individual_ptr.data(), d_individual_group.data(),
+                d_group_scale.data(), unit_weights ? nullptr : d_weights.data(),
+                unit_weights, n, individuals, d_denom.data());
+        }
         cuda_check(cudaGetLastError(),
                    "GI LSMR individual diagonal kernel launch failed");
 
@@ -6843,27 +6927,56 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         };
 
         auto apply_at = [&](const double* input, double* output) {
+            auto cooperative = [&](const int* ptr, const int* observation,
+                                   int levels, int offset) {
+                if (!ordinary_projection || !unit_weights) return false;
+                const std::int64_t rows = n;
+                if (rows >= static_cast<std::int64_t>(levels) * kBlockSize) {
+                    ordinary_at_block_kernel<kBlockSize><<<levels, kBlockSize>>>(
+                        input, ptr, observation, d_column_scale.data(),
+                        offset, levels, output);
+                    return true;
+                }
+                constexpr int warp_size = 32;
+                if (rows >= static_cast<std::int64_t>(levels) * warp_size) {
+                    constexpr int warps = kBlockSize / warp_size;
+                    const int blocks = (levels + warps - 1) / warps;
+                    ordinary_at_warp_kernel<kBlockSize><<<blocks, kBlockSize>>>(
+                        input, ptr, observation, d_column_scale.data(),
+                        offset, levels, output);
+                    return true;
+                }
+                return false;
+            };
             for (int dim = 0; dim < dims; ++dim) {
                 const CudaFeDevice& dev = fe_dev[static_cast<std::size_t>(dim)];
                 const int blocks =
                     (dev.num_groups + kBlockSize - 1) / kBlockSize;
-                gi_lsmr_apply_at_standard_kernel<<<blocks, kBlockSize>>>(
-                    input,
-                    lsmr.standard_group_ptr[static_cast<std::size_t>(dim)].data(),
-                    lsmr.standard_observation_index[
-                        static_cast<std::size_t>(dim)].data(),
-                    unit_weights ? nullptr : d_weights.data(), unit_weights,
-                    d_column_scale.data(),
-                    offsets[static_cast<std::size_t>(dim)], dev.num_groups,
-                    output);
+                if (!cooperative(
+                        lsmr.standard_group_ptr[static_cast<std::size_t>(dim)].data(),
+                        lsmr.standard_observation_index[static_cast<std::size_t>(dim)].data(),
+                        dev.num_groups, offsets[static_cast<std::size_t>(dim)])) {
+                    gi_lsmr_apply_at_standard_kernel<<<blocks, kBlockSize>>>(
+                        input,
+                        lsmr.standard_group_ptr[static_cast<std::size_t>(dim)].data(),
+                        lsmr.standard_observation_index[
+                            static_cast<std::size_t>(dim)].data(),
+                        unit_weights ? nullptr : d_weights.data(), unit_weights,
+                        d_column_scale.data(),
+                        offsets[static_cast<std::size_t>(dim)], dev.num_groups,
+                        output);
+                }
                 cuda_check(cudaGetLastError(),
                            "GI LSMR standard A-transpose kernel launch failed");
             }
-            gi_lsmr_apply_at_individual_kernel<<<blocks_i, kBlockSize>>>(
-                input, d_individual_ptr.data(), d_individual_group.data(),
-                d_group_scale.data(),
-                unit_weights ? nullptr : d_weights.data(), unit_weights,
-                d_column_scale.data(), individual_offset, individuals, output);
+            if (!cooperative(d_individual_ptr.data(), d_individual_group.data(),
+                             individuals, individual_offset)) {
+                gi_lsmr_apply_at_individual_kernel<<<blocks_i, kBlockSize>>>(
+                    input, d_individual_ptr.data(), d_individual_group.data(),
+                    d_group_scale.data(),
+                    unit_weights ? nullptr : d_weights.data(), unit_weights,
+                    d_column_scale.data(), individual_offset, individuals, output);
+            }
             cuda_check(cudaGetLastError(),
                        "GI LSMR individual A-transpose kernel launch failed");
         };

@@ -1,4 +1,24 @@
-# OpenMP release checklist — 2.30.0.20261020
+# OpenMP release checklist — 2.30.1.20261020
+
+## 2.30.1 release gates
+
+The candidate corrects the inherited three-effect CUDA covariance error and
+GPU repair accounting, with cooperative GPU reductions and cache generation
+`0x22624841443a`. The maintainer accepts the measured ready runtime cost
+versus 2.29.1 and continues to defer the full core24 performance campaign.
+
+- [x] Fresh local CPU/CUDA native builds: 16/16 CTests each; both Stata plugins built with OpenMP and native CPU tuning, CUDA `sm_90`.
+- [x] Final local functional core: 664 xhdfe numerical passes, 223 expected unsupported cases, adapted reghdfe CPU/CUDA contracts and independent covariance/budget controls.
+- [x] Twenty cache migration checks; Python 97 CPU tests and 16 independent CUDA formula cases; R 1,229 passes with the documented warnings and no skips.
+- [x] Complete sequential Stata suite and candidate-only core24 CUDA execution, 48/48; final large CPU/CUDA artifact checks retain sample, independent b/V, convergence and actual workers.
+- [ ] Fresh Linux, Windows, native macOS ARM/Intel version-tag artifacts, exact runtime/worker receipts and archive checks.
+- [ ] Exact downloaded H100/CPU runtime gates and isolated installation.
+- [ ] Final licensed native Mac ARM and Intel Stata/MP host checks: **NOT_RUN** at this stage; retain the distinction from native SPI and Rosetta evidence.
+- [ ] Public release/net-install readback and both canonical `main` checkouts, builds and active artifacts reconciled.
+
+Current evidence: [2.30.1 validation](../docs/releases/VALIDATION_2.30.1.20261020.md).
+The historical 2.30.0 publication exception below is not a passing host test
+for a newly rebuilt artifact.
 
 ## 2.30.0 release gates
 

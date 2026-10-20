@@ -2,14 +2,16 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.30.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.30.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-[Version 2.30.0.20261020](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.0.20261020)
-integrates Tiago Tavares's macOS OpenMP isolation and CG precision fixes,
-corrects bounded CPU/CUDA restarts and sparse two-effect CUDA absorption,
-and preserves the separate Fast stopping contract. It also fixes stored
-version reporting and extends categorical interaction syntax. See the
-[release notes and validation](docs/releases/RELEASE_NOTES_2.30.0.20261020.md)
+[Version 2.30.1.20261020](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.1.20261020)
+corrects an inherited CUDA Comparable covariance error in ordinary models
+with three fixed effects. Cooperative GPU reductions reduce the cost of the
+correction; the measured residual cost versus 2.29.1 is documented and accepted.
+It also fixes GPU repair iteration accounting and retains Tiago Tavares's
+macOS OpenMP isolation, CG precision, stored-version and categorical-interaction fixes.
+Fast and Comparable keep their distinct contracts. See the
+[release notes and validation](docs/releases/RELEASE_NOTES_2.30.1.20261020.md)
 for the exact tests and platform coverage.
 
 ---
@@ -54,7 +56,7 @@ numerical checks, recovery coverage, performance comparisons and remaining
 CUDA limitations. Its timings and platform receipts identify the artifacts
 tested. The [2.29.1 validation record](docs/releases/VALIDATION_2.29.1.20261014.md)
 separately records the corrective release's tests and coverage, and the
-[2.30.0 validation record](docs/releases/VALIDATION_2.30.0.20261020.md) records
+[2.30.1 validation record](docs/releases/VALIDATION_2.30.1.20261020.md) records
 the integrated fixes and the ready-only performance scope for this release.
 GPU execution alone does not certify every output.
 
@@ -489,7 +491,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.30.0.
+> effects regression via a C++ backend.* Version 2.30.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

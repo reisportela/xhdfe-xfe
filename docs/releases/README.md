@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.30.1 | 20 October 2026 | [CUDA covariance correction, cooperative projection and GPU repair accounting](RELEASE_NOTES_2.30.1.20261020.md); [validation and scope](VALIDATION_2.30.1.20261020.md) |
 | 2.30.0 | 20 October 2026 | [PR #15/#17 integration, CUDA precision and bounded CG recovery, preserved Fast policy, unified test core](RELEASE_NOTES_2.30.0.20261020.md); [validation and scope](VALIDATION_2.30.0.20261020.md) |
 | 2.30.0 | 16 October 2026 (cut, pre-publication) | [Issue #14: macOS Stata/MP OpenMP isolation, e(version), categorical interactions with three or more components](RELEASE_NOTES_2.30.0.20261016.md); development report: [candidates/ISSUE_14_STATA_FIXES_20261016.md](candidates/ISSUE_14_STATA_FIXES_20261016.md) |
 | 2.29.1 | 14 October 2026 | [DK IV covariance, first-stage aliases and complete-parameter validation](RELEASE_NOTES_2.29.1.20261014.md) |

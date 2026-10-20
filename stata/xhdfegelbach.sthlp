@@ -13,7 +13,7 @@
 
 {pstd}
 {bf:Version 1.6.1 (20oct2026), distributed with shared package}
-{bf:2.30.0.20261020.} The shared package includes common HDFE, selectable connectivity
+{bf:2.30.1.20261020.} The shared package includes common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 

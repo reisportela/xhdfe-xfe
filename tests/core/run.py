@@ -52,14 +52,19 @@ def prepare(args):
         registry=str(args.registry.resolve()) if args.registry else None,
         scratch=str(args.scratch.resolve()) if args.scratch else None)
     artifacts = [module(candidate, b) for b in ('cpu', 'cuda')]
-    artifacts += [candidate / 'stata/xhdfe.ado', candidate / 'stata/xhdfe.plugin']
+    artifacts += [candidate / 'stata/xhdfe.ado', candidate / 'stata/xhdfe.plugin',
+                  candidate / 'stata/xfepout.ado', candidate / 'stata/xfepout.plugin']
     artifacts += [candidate / 'tests/analytic_precision/cuda_ordinary_weak_graph_contract.py']
     artifacts += [candidate / 'tests/analytic_precision' / name for name in
                   ('fast_cg_mode_contract.py', 'cg_final_step_contract.py',
+                   'cuda_three_fe_covariance_contract.py', 'cuda_warm_budget_contract.py',
+                   'covariance_cache_generation_contract.py',
                    'fixtures/github_fast_aggregate_reference.json',
                    'fixtures/cg_seed1_2017.csv', 'fixtures/cg_seed1_2017_oracle.json')]
     artifacts += [candidate / 'tests/stata' / name for name in
-                  ('cuda_ordinary_weak_graph_contract.do', 'cg_cold_restart_floor.do')]
+                  ('cuda_ordinary_weak_graph_contract.do', 'cg_cold_restart_floor.do',
+                   'cuda_three_fe_covariance.do', 'cuda_warm_budget.do',
+                   'xfepout_three_fe_covariance.do')]
     artifacts += [p for p in HERE.rglob('*') if p.is_file() and '__pycache__' not in p.parts]
     artifacts += [p for p in dependencies.rglob('*') if p.is_file()]
     args.output.mkdir(parents=True, exist_ok=False)
@@ -137,6 +142,14 @@ def run(args):
                 commands.append([sys.executable, '-B', ROOT / 'tests/analytic_precision/cg_final_step_contract.py',
                     '--module', module(ROOT, backend), '--backend', backend,
                     '--output', output / ('cg02_' + backend + '.json')])
+                commands.append([sys.executable, '-B',
+                    ROOT / 'tests/analytic_precision/cuda_three_fe_covariance_contract.py',
+                    '--module', module(ROOT, backend), '--backend', backend,
+                    '--output', output / ('three_fe_' + backend + '.json')])
+            commands.append([sys.executable, '-B',
+                ROOT / 'tests/analytic_precision/cuda_warm_budget_contract.py',
+                '--module', module(ROOT, 'cuda'),
+                '--output', output / 'cuda_warm_budget.json'])
         elif stage == 'performance':
             if not all(config[k] for k in ('baseline', 'registry', 'scratch')):
                 status = 'NOT_CONFIGURED'
@@ -214,6 +227,23 @@ def report(args):
                     row['cuda_stata_regressions'] = (json.loads(stata_result.read_text())['status']
                                                     if stata_result.exists() else 'NOT_RUN')
                     if row['cuda_stata_regressions'] != 'PASS':
+                        row['status'] = 'FAIL'
+                    if stata_result.exists():
+                        row['partial_out_coverage'] = [
+                            item for item in json.loads(stata_result.read_text())['rows']
+                            if item['case'].startswith('xfepout_')]
+                        if len(row['partial_out_coverage']) != 2:
+                            row['status'] = 'FAIL'
+                    row['three_fe_covariance'] = {}
+                    for backend in ('cpu', 'cuda'):
+                        test = args.output / stage / ('three_fe_' + backend + '.json')
+                        row['three_fe_covariance'][backend] = (
+                            json.loads(test.read_text())['status'] if test.exists() else 'NOT_RUN')
+                    budget = args.output / stage / 'cuda_warm_budget.json'
+                    row['warm_budget'] = (json.loads(budget.read_text())
+                                          if budget.exists() else dict(status='NOT_RUN'))
+                    if (any(status != 'PASS' for status in row['three_fe_covariance'].values())
+                            or row['warm_budget']['status'] != 'PASS_BUDGET_CONTRACT'):
                         row['status'] = 'FAIL'
                     row['fast_cg_policy'] = {}
                     row['cg02_precision'] = {}

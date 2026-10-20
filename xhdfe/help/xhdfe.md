@@ -1,7 +1,15 @@
 # xhdfe Python help
 
-Package documentation version: 2.30.0.20261020. Use `python -m xhdfe --version`
+Package documentation version: 2.30.1.20261020. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
+
+This version corrects an inherited CUDA Comparable covariance error for
+ordinary models with three fixed effects, no weights and no saved effects.
+The remaining projection is completed at the existing target and within the
+total iteration budget. GPU repair diagnostics include all attempted work,
+and old absorption caches are invalidated automatically. The release record
+documents the accepted runtime cost relative to 2.29.1; Fast retains its
+separate approximation contract.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
 exposes the same compiled estimator that older scripts imported as
@@ -521,7 +529,7 @@ Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
-## Known limitations (2.30.0)
+## Known limitations (2.30.1)
 
 - A fit that converges by the solver's stopping rule but does not pass the
   precision certificate raises an error and returns no estimates, in Python,

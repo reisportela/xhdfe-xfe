@@ -2692,8 +2692,8 @@ FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::Vec
 constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
-// Invalidate transforms certified before the final-step CG consistency check.
-constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414439ULL;
+// Invalidate transforms preceding three-FE CUDA completion and retry accounting.
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x22624841443aULL;
 constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
 
 struct AbsorptionCacheKey {
@@ -11205,7 +11205,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (!requested_backend_unavailable &&
                 cuda_backend_env_requested() &&
                 !(primary.gpu_status_code == 2 && !primary.gpu_used)) {
+                const int primary_iterations =
+                    primary.gpu_attempted ? std::max(0, primary.iterations) : 0;
+                if (primary_iterations >= tuned.max_iter) {
+                    primary.converged = false;
+                    primary.precision_certified = false;
+                    return finalize_backend_status(std::move(primary));
+                }
                 HdfeOptions repair_options = tuned;
+                repair_options.max_iter -= primary_iterations;
                 configure_native_cuda_repair(repair_options);
                 if (bounded_four_fe_cuda_precision && repair_options.tol > 0.0) {
                     repair_options.tol =
@@ -11216,21 +11224,23 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         y_use, design, fes_use, w_ptr, repair_options,
                         requested_method, slope_terms);
                 certify_public_contract(repaired);
+                repaired.iterations += primary_iterations;
+                repaired.gpu_absorption_iterations = repaired.iterations;
                 if (repaired.gpu_used && repaired.converged &&
                     repaired.precision_certified &&
                     (!primary_precision_gate_failed ||
                      repaired.abs_residual_rel <= bounded_precision_limit)) {
-                    if (primary.gpu_used) {
-                        repaired.iterations += primary.iterations;
-                        repaired.gpu_absorption_iterations = repaired.iterations;
-                    }
                     return finalize_with_forward_repair(std::move(repaired));
                 }
                 if (w_ptr != nullptr && repaired.gpu_used) {
+                    if (repaired.iterations >= tuned.max_iter) {
+                        repaired.converged = false;
+                        repaired.precision_certified = false;
+                        return finalize_backend_status(std::move(repaired));
+                    }
                     detail::AbsorptionResult strict_retry =
-                        run_strict_cuda_repair();
-                    strict_retry.iterations +=
-                        primary.iterations + repaired.iterations;
+                        run_strict_cuda_repair(tuned.max_iter - repaired.iterations);
+                    strict_retry.iterations += repaired.iterations;
                     strict_retry.gpu_absorption_iterations =
                         strict_retry.iterations;
                     if (strict_retry.gpu_used && strict_retry.converged &&

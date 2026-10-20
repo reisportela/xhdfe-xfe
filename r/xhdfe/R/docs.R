@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.30.0). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.30.1). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.30.0) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.30.1) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.30.0.
+#' effects regression via a C++ backend." Version 2.30.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -747,7 +747,15 @@ NULL
 #' bound, exact redundancy proofs, per-row N1 evidence) run only under
 #' \code{XHDFE_CERTIFY=1}.
 #'
-#' Known limitations (2.30.0). A fit that converges by the solver's rule but
+#' Version 2.30.1 corrects an inherited CUDA Comparable covariance error for
+#' ordinary models with three fixed effects, no weights and no saved effects.
+#' The remaining projection is completed at the existing target within the
+#' total iteration budget. GPU repair counters include all attempted work;
+#' old absorption caches are invalidated automatically. The release record
+#' documents the accepted runtime cost relative to 2.29.1. Fast retains its
+#' separate approximation contract.
+#'
+#' Known limitations (2.30.1). A fit that converges by the solver's rule but
 #' does not pass the precision certificate returns no estimates in R, Python
 #' and Stata alike. Ill-conditioned specifications can still require a refusal.
 #' In \code{reghdfe-comparable}, heterogeneous slopes under an explicit
@@ -1216,7 +1224,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.30.0.
+#' effects regression via a C++ backend." Version 2.30.1.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way
@@ -1401,9 +1409,10 @@ NULL
 #'   fixed effects (plain OLS).
 #' @param weights optional numeric weight vector, one entry per
 #'   observation; interpreted according to \code{weights_type}.
-#' @param weights_type \code{"analytic"} (Stata \code{aweight}) or
-#'   \code{"frequency"} (Stata \code{fweight}, exact replicated-rows
-#'   semantics); see \code{\link{xhdfe}}.
+#' @param weights_type \code{"analytic"} (Stata \code{aweight}),
+#'   \code{"frequency"} (Stata \code{fweight}, exact replicated-rows semantics),
+#'   \code{"importance"} (\code{iweight}) or \code{"probability"} (\code{pweight}).
+#'   See \code{\link{xhdfe}} for their inference conventions.
 #' @param cluster the cluster dimensions: a vector, a matrix (one dimension
 #'   per column), a \code{data.frame}, or a list of vectors; several
 #'   dimensions request multiway clustering. No formula form here (there is
