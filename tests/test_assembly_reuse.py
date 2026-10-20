@@ -40,6 +40,13 @@ class AssemblyReuseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "environment changed"):
             validate_inputs([], self.workflow, current, self.jobs)
 
+    def test_offline_helper_is_distinct_from_native_runtime_builder(self):
+        self.assertEqual(len(validate_inputs(["tools/build_macos_stata.sh"],
+                         self.workflow, self.workflow, self.jobs)), 10)
+        with self.assertRaisesRegex(ValueError, "inputs changed"):
+            validate_inputs(["tools/build_macos_openmp_runtime.sh"],
+                            self.workflow, self.workflow, self.jobs)
+
     def test_failed_or_missing_native_receipts_cannot_be_reused(self):
         for status in ("failure", "skipped", "cancelled", None):
             jobs = copy.deepcopy(self.jobs)

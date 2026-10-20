@@ -12,6 +12,9 @@ PACKAGING_ONLY = {
     ".github/workflows/release.yml",
     "tools/validate_assembly_reuse.py",
     "tools/validate_corresponding_source_bundle.py",
+    # Distributed offline entry point; native CI builds use the runtime and
+    # plugin builders directly. Version-tag builds still rebuild all assets.
+    "tools/build_macos_stata.sh",
     "tests/test_assembly_reuse.py",
     "tests/test_windows_stata_static.py",
     "docs/LICOES_RELEASE_2.28.0_20260924.md",
