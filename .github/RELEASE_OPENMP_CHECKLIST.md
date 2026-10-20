@@ -6,11 +6,17 @@ The source integrates PR #15/#17 and the bounded CPU/CUDA recovery fixes.
 The maintainer deferred the full core24 performance campaign for this release;
 ready-only timings do not waive the artifact and actual-worker checks below.
 
-- [ ] Fresh version-tag platform builds and complete native worker receipts.
-- [ ] Exact downloaded Linux CPU/CUDA artifacts validated on Athena/H100.
-- [ ] Final macOS runtime export/import isolation on both native slices.
-- [ ] Real licensed Stata/MP host checks on final native ARM and Intel artifacts.
-- [ ] Public release assets, net-install readback and canonical checkout identity.
+- [x] [Fresh version-tag builds](https://github.com/reisportela/xhdfe-xfe/actions/runs/39399375729), 13 authenticated assets, ten native plugin/platform worker receipts, two installed-wheel checks and four macOS serial negative controls.
+- [x] Exact downloaded Linux CPU/CUDA artifacts validated on Athena/H100, including full Stata suites, CG/CUDA regressions and installed-wheel tests.
+- [x] Final macOS runtime export/import isolation on both native slices.
+- [ ] Real licensed Stata/MP host checks on final native ARM and Intel artifacts: **NOT_RUN; explicit maintainer publication exception, 20 October 2026**.
+- [x] [Public release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.0.20261020), exact net-install readback (49 site files, 37 installed/ancillary files) and validated canonical runtime/source identity.
+
+The maintainer explicitly authorised "Publicar com os limites documentados"
+after reviewing the exact assets and release notes. This permits publication
+with the native Stata/MP coverage gap; it is not a passing host test. The
+inherited ready CPU/CUDA covariance review and deferred full core24 timings
+also remain documented limits.
 
 Current evidence and limitations: [2.30.0 validation](../docs/releases/VALIDATION_2.30.0.20261020.md).
 
@@ -22,15 +28,16 @@ Stata MP crash despite those gates passing. See
 [`ISSUE_14_STATA_FIXES_20261016.md`](../docs/releases/candidates/ISSUE_14_STATA_FIXES_20261016.md)
 for the candidate fix, negative controls and current coverage.
 
-For the next macOS release:
+For 2.30.0 and subsequent macOS follow-up:
 
-- [ ] Build with `tools/macos_openmp.exports`; reject private exports with
+- [x] Build with `tools/macos_openmp.exports`; reject private exports with
   `tools/check_macos_openmp_exports.py` on both final runtime slices.
-- [ ] Retain all existing native SPI, runtime-identity and serial-negative gates.
+- [x] Retain all existing native SPI, runtime-identity and serial-negative gates.
 - [ ] Run `tools/run_stata_openmp_host.py` on each final packaged artifact in
   licensed native Apple Silicon and Intel Stata MP, with `--threads 1 2 4 0`.
   This checks OLS, IV/first-stage diagnostics and `xfepout`, useful workers,
-  numerical agreement and repeated calls in the real host.
+  numerical agreement and repeated calls in the real host. **NOT_RUN on the
+  final 2.30.0 assets; publication exception above.**
 - [ ] Record Stata version/edition and check Stata SE when available. A missing
   edition is a coverage limitation, not a passing result.
 
