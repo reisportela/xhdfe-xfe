@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.13.4 20oct2026}{...}
+{* *! version 1.13.5 20oct2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -122,10 +122,16 @@ adjustments in {cmd:e(df_a)}. {cmd:xfepout} does not estimate clustered standard
 {dlgtab:Optimization}
 {marker opt_tolerance}{...}
 {phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)).
-Since version 1.9.0 the absorber stops when one full sweep moves the working data
-by less than this value in relative norm (reghdfe-comparable semantics, matching
-the default tolerancemode used by {cmd:xhdfe}).{p_end}
-{phang}{opt maxiter(#)} maximum absorption iterations (default 100000).{p_end}
+The selected method uses reghdfe-comparable semantics, matching the default mode
+of {cmd:xhdfe}, together with the required projection-precision checks.
+Version 1.13.5 completes unfinished ordinary three-effect CUDA projections at
+the existing target. {cmd:xfepout} does not expose a separate {cmd:tolerancemode()} option.{p_end}
+{phang}{opt maxiter(#)} maximum total absorption iterations (default 100000),
+including any continuation within the remaining budget.{p_end}
+{pmore}A failed necessary precision check after continuation returns no estimates.
+Some ill-conditioned three-effect CUDA partial-out cases still refuse with multiple
+workers, as in the previous release; use {cmd:gpubackend(cpu)} for these designs.
+Expected refusals are recorded separately from numerical passes in the validation record.{p_end}
 {phang}{opt transform(str)} accept hdfe-style transform names: {it:kac}, {it:cim}, {it:sym}. {it:sym}
 turns on symmetric sweeps; {it:kac} and {it:cim} only steer method choice when
 {cmd:absorptionmethod(auto)} is in effect.{p_end}

@@ -8,7 +8,7 @@
         "msvcrt.dll"
       ],
       "member": "xfepout.plugin.windows",
-      "member_sha256": "9d0447ab19bc8d2eaadd48237b77db677567bba3df94e4f57ac66971193fa9df",
+      "member_sha256": "2d01b5163b66f2d583d4f0db7890928d27335cec82bcdef6b97dd7f9ffa7121d",
       "size": 7903232
     },
     {
@@ -18,7 +18,7 @@
         "msvcrt.dll"
       ],
       "member": "xhdfe.plugin.windows",
-      "member_sha256": "aae5b36bfffc4d71ef6d1ec4ec896e171d45186c27544375866dd00e32e38b8d",
+      "member_sha256": "4f8ae30bcdaa4efc17a0026f6f9163d72955a150042b79d63ae733c77f883703",
       "size": 9419776
     }
   ],

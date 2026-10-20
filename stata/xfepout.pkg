@@ -1,4 +1,4 @@
-v 1.13.4
+v 1.13.5
 d xfepout: Partial-out variables with multiple fixed effects via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.

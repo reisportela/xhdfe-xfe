@@ -1,4 +1,4 @@
-*! version 2.30.0 20oct2026
+*! version 2.30.1 20oct2026
 program define xhdfe, eclass sortpreserve
     version 16.0
 
@@ -34,7 +34,7 @@ end
 
 program define _xhdfe_package_version, rclass
     version 16.0
-    return local package_version "2.30.0 20oct2026"
+    return local package_version "2.30.1 20oct2026"
 end
 
 program define _xhdfe_estimate, eclass
