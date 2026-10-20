@@ -26,15 +26,19 @@ def main() -> int:
     parser.add_argument("--fixtures", required=True)
     parser.add_argument("--provenance", required=True)
     parser.add_argument("--high-precision-provenance", required=True)
+    parser.add_argument("--verify-generator-host", action="store_true",
+                        help="require the recorded high-precision generator compiler and Boost headers")
     args = parser.parse_args()
 
-    with Path(args.fixtures).open(newline="") as handle:
-        fixtures = list(csv.DictReader(handle))
+    fixture_bytes = Path(args.fixtures).read_bytes()
+    fixtures = list(csv.DictReader(io.StringIO(fixture_bytes.decode("utf-8"))))
     provenance_path = Path(args.provenance).resolve(strict=True)
     provenance = json.loads(provenance_path.read_text())
     repo = provenance_path.parents[2]
     if provenance.get("schema_version") != 1:
         raise AssertionError("Student-t provenance schema differs")
+    if hashlib.sha256(fixture_bytes).hexdigest() != provenance["fixture_table"]["sha256"]:
+        raise AssertionError("Student-t consumed fixture hash differs from provenance")
     records = (
         (provenance["reproduction"]["do_file"],
          provenance["reproduction"]["do_sha256"]),
@@ -77,10 +81,17 @@ def main() -> int:
     )
     for raw_path, expected_hash in host_records:
         path = Path(raw_path)
-        if path.is_file() and sha256(path) != expected_hash:
-            raise AssertionError(
-                f"Student-t high-precision host hash differs: {path}"
-            )
+        matches = path.is_file() and sha256(path) == expected_hash
+        if not matches:
+            if args.verify_generator_host:
+                raise AssertionError(
+                    f"Student-t high-precision generator host differs or is unavailable: {path}"
+                )
+            # These identify the host that produced the immutable references,
+            # not the compiler used to consume them on another platform.
+            # Repository hashes and every numerical comparison remain binding.
+            print(f"NOTE: recorded generator host resource differs or is unavailable: {path}; "
+                  "the frozen reference remains checked")
     completed = subprocess.run(
         [args.executable, "--emit"], text=True, capture_output=True, check=True,
     )

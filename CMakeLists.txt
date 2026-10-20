@@ -428,6 +428,10 @@ if(BUILD_TESTING)
                         --fixtures ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_stata_fixtures.txt
                         --provenance ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_stata_provenance.json
                         --high-precision-provenance ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/student_t_high_precision_provenance.json)
+            add_test(
+                NAME xhdfe_student_t_provenance_contract
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_student_t_provenance_contract.py)
         endif()
     endif()
 endif()
