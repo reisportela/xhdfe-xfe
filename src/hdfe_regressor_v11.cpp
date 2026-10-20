@@ -2692,8 +2692,8 @@ FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::Vec
 constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
-// Invalidate transforms certified before the CG null-space drift safeguard.
-constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414434ULL;
+// Invalidate transforms certified before the final-step CG consistency check.
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x226248414439ULL;
 constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
 
 struct AbsorptionCacheKey {
@@ -10354,8 +10354,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         // and resolves to MLSMR only for large, slow-converging cases; otherwise it
         // resolves to the sweep fallback. Resolving the fallback here also prevents a
         // second survey by the adaptive Schwarz gate after the selector has already
-        // decided to stay on a sweep. GPU, savefe, and heterogeneous-slope cases cannot
-        // use MLSMR, so they resolve directly to the sweep fallback.
+        // decided to stay on a sweep. GPU, savefe, and heterogeneous-slope cases
+        // resolve to the sweep fallback. Preserve Comparable CUDA Auto intent
+        // only for ordinary unweighted two-FE LSMR selection (CUDA04); the
+        // other published routes do not need that replacement.
         {
             const bool explicit_auto_mlsmr =
                 (options_.absorption_method == AbsorptionMethod::AutoMlsmr);
@@ -10452,7 +10454,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 // GPU-requested or ineligible auto selector -> normal sweep selector.
                 selected_method =
                     auto_mlsmr_sweep_fallback(fes_use.size(), options_.symmetric_sweep);
-                tuned.from_auto = false;
+                tuned.from_auto = cuda_backend_env_requested() &&
+                    fes_use.size() == 2 && w_ptr == nullptr &&
+                    options_.absorption_method == AbsorptionMethod::Auto &&
+                    options_.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+                    options_.convergence_criterion == ConvergenceCriterion::Auto;
                 benchmark_methods = false;
             }
         }
@@ -10545,7 +10551,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 constexpr double kOrdinaryAutoRoutingRetryTrigger = 1.0e-11;
                 AbsorptionMethod actual_primary_method = requested_method;
                 if (candidate.mlsmr_used) {
-                    actual_primary_method = AbsorptionMethod::Mlsmr;
+                    actual_primary_method = candidate.gpu_used
+                        ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
                 } else if (candidate.schwarz_used) {
                     actual_primary_method = AbsorptionMethod::Schwarz;
                 }
@@ -10657,7 +10664,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                 : std::min(candidate.tol, 1.0e-11);
                     }
                 } else {
-                    candidate.tolerance_mode = ToleranceMode::XhdfeFast;
+                    // A cold CG restart must retain the caller's Comparable
+                    // floor even when this repair selects the update check.
+                    candidate.tolerance_mode =
+                        tuned.tolerance_mode == ToleranceMode::ReghdfeComparable
+                            ? ToleranceMode::ReghdfeComparable
+                            : ToleranceMode::XhdfeFast;
                     candidate.convergence_criterion =
                         ConvergenceCriterion::Reghdfe;
                 }
@@ -10789,7 +10801,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 // FE orthogonality alone cannot detect null-space drift from
                 // a broken CG recurrence. Reabsorbing its residual preserves
                 // that damage, so restart from the original RHS instead.
+                if (primary.iterations >= tuned.max_iter) {
+                    primary.converged = false;
+                    primary.precision_certified = false;
+                    return finalize_backend_status(std::move(primary));
+                }
                 HdfeOptions repair_options = tuned;
+                repair_options.max_iter -= primary.iterations;
                 repair_options.absorption_method = AbsorptionMethod::Mlsmr;
                 repair_options.from_auto = false;
                 detail::AbsorptionResult repaired = detail::absorb_fixed_effects_v6(
@@ -11587,7 +11605,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (absorption.schwarz_used) {
                     method_used_ = AbsorptionMethod::Schwarz;  // adaptive gate diverted to Schwarz
                 } else if (absorption.mlsmr_used) {
-                    method_used_ = AbsorptionMethod::Mlsmr;     // adaptive gate diverted to MLSMR
+                    method_used_ = absorption.gpu_used
+                        ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
                 }
             }
             if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11639,7 +11658,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (absorption.schwarz_used) {
                         method_used_ = AbsorptionMethod::Schwarz;
                     } else if (absorption.mlsmr_used) {
-                        method_used_ = AbsorptionMethod::Mlsmr;
+                        method_used_ = absorption.gpu_used
+                            ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
                     }
                 }
                 if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11694,7 +11714,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (absorption.schwarz_used) {
                             method_used_ = AbsorptionMethod::Schwarz;
                         } else if (absorption.mlsmr_used) {
-                            method_used_ = AbsorptionMethod::Mlsmr;
+                            method_used_ = absorption.gpu_used
+                                ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
                         }
                     }
                     if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11745,7 +11766,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (absorption.schwarz_used) {
                             method_used_ = AbsorptionMethod::Schwarz;
                         } else if (absorption.mlsmr_used) {
-                            method_used_ = AbsorptionMethod::Mlsmr;
+                            method_used_ = absorption.gpu_used
+                                ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
                         }
                     }
                     if (allow_cache_write && !cache_hit && absorption.converged &&

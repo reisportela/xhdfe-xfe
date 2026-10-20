@@ -75,6 +75,26 @@ not part of the CPU/default runner.
   fail-closed validation, multi-format escaped tables and
   identity-preserving waterfall filtering
 
+## Version and categorical-interaction contracts
+
+Three standalone contracts run inside `run_stata_tests.sh` and can be run alone
+in a scratch directory, each with an explicit `cpu` or `cuda` argument and a
+`..._PASS <backend>` marker:
+
+```bash
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/version_contract.do cpu
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/absorb_interaction_contract.do cuda
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/cluster_interaction_contract.do cpu
+```
+
+`version_contract.do` requires the ado header, `xhdfe, version`, and `e(version)`
+after OLS, IV, `estat firststage` and replay to agree. The two interaction
+contracts compare `absorb()`, `cluster()`, and `xfepout` `absorb()`/`clustervars()`
+terms with three or more categorical components against the manually grouped
+identifier (bit identity of samples, DoF and `e(b)`/`e(V)`) and against `reghdfe`,
+and check the negative controls (`##` with more than two components in cluster
+options, continuous components in interaction terms).
+
 ## First-stage diagnostics
 
 The standalone `iv_firststage_contract.do` uses 6,000 synthetic observations.

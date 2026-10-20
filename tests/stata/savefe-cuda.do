@@ -9,8 +9,15 @@ adopath ++ "`repo'/stata"
 discard
 
 which xhdfe
+findfile xhdfe.ado
+tempname source
+file open `source' using `"`r(fn)'"', read text
+file read `source' header
+file close `source'
+assert regexm(`"`header'"', "^[*]! version (.+)$")
+local expected = regexs(1)
 quietly xhdfe, version
-assert "`e(version)'" == "2.27.0 20sep2026"
+assert "`e(version)'" == "`expected'"
 
 local N 24000
 local fit_tol 1e-10

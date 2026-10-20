@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.29.1.20261014. Use `python -m xhdfe --version`
+Package documentation version: 2.30.0.20261020. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
@@ -516,12 +516,12 @@ it explicitly. An automatic LSMR result that cannot pass the independent
 certificate falls back to the previous certified sweep route, and
 `absorption_method_used` reports which result was retained. On CUDA, `auto`
 keeps the existing group/individual GPU solver and accepts it only when the
-authoritative certificate passes. Explicit LSMR with CUDA is rejected because
-the joint LSMR implementation is CPU-only. Explicit `gauss-seidel` and
+authoritative certificate passes. Explicit LSMR requests remain CPU-only.
+Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
-## Known limitations (2.29.1)
+## Known limitations (2.30.0)
 
 - A fit that converges by the solver's stopping rule but does not pass the
   precision certificate raises an error and returns no estimates, in Python,
@@ -595,6 +595,13 @@ After `fit`, the regressor exposes:
   `saturated_`, `num_iterations_`, `converged_`. `r2_` and `r2_within_` are
   `NaN` when the corresponding total sum of squares is zero (a constant
   outcome), matching Stata's `regress` and `reghdfe`.
+- Comparable CUDA `absorption_method="auto"` uses device LSMR for ordinary
+  unweighted two-FE graphs identified by the existing low group-occupancy detector.
+  It preserves ordinary degrees of freedom and the ordinary Krylov floor
+  `min(effective tolerance, 1e-11)`, and reports `lsmr` as the method used.
+  Fast, explicit methods/convergence, slopes and retained effects keep their
+  established primary routing. A broken ordinary Comparable CG recurrence
+  restarts with device LSMR within the remaining iteration budget.
 - Absorption certificate: `abs_residual_` is the maximum absolute
   `||D' W v_tilde||_2`, `abs_residual_rel_` is the corresponding maximum
   scale-normalized normal-equation residual

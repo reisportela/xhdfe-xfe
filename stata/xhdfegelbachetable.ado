@@ -1,4 +1,4 @@
-*! version 1.0.0  14oct2026
+*! version 1.0.0  20oct2026
 *! Multi-format reporting for the most recent xhdfegelbach result.
 
 program define xhdfegelbachetable

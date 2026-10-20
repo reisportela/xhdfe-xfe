@@ -22,6 +22,11 @@ jobs:
       - name: Install toolchain
         run: sudo apt-get update && sudo apt-get install -y cmake g++ libomp-dev
 
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
       - name: Build C++ core + Python module (CMake, CPU)
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -31,10 +36,6 @@ jobs:
       - name: Verify maintained source mirrors
         run: bash tools/check_cpp_core_alignment.sh
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: pip install (source, portable -march)
         env:
           XHDFE_ENABLE_MARCH_NATIVE: "OFF"
@@ -42,6 +43,9 @@ jobs:
           python -m pip install --upgrade pip numpy
           python -m pip install '.[test]'
           python -c "import xhdfe; print('python import OK', xhdfe.__version__)"
+
+      - name: Run C++ and numerical regression contracts
+        run: ctest --test-dir build --output-on-failure
 
       - name: Validate the installed Python formula interface
         env:

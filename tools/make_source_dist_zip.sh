@@ -73,6 +73,11 @@ cp -a "${ROOT_DIR}/stata/tools/_deps/eigen-3.4.0.tar.gz" "${PKG}/stata/tools/_de
 cp -a "${ROOT_DIR}/stata/tools/_deps/stplugin.h" "${PKG}/stata/tools/_deps/"
 cp -a "${ROOT_DIR}/stata/tools/_deps/stplugin.c" "${PKG}/stata/tools/_deps/"
 
+# One-command macOS build (isolated OpenMP runtime + both plugins + checks +
+# staging); the same script also ships under tools/ with the rest of the tools.
+cp -a "${ROOT_DIR}/tools/build_macos_stata.sh" "${PKG}/build_macos.sh"
+chmod +x "${PKG}/build_macos.sh"
+
 # Installable Stata surface. Plugins are intentionally excluded here because
 # the autonomous release bundle combines this source tree with the native
 # Linux/Windows/macOS binaries from the generated net-install site.
@@ -173,8 +178,13 @@ XHDFE_ENABLE_CUDA=auto bash stata/tools/build-xfepout-plugin.sh --linux --openmp
 Produces \`stata/xhdfe.plugin\` and \`stata/xfepout.plugin\`. Put them on the Stata
 adopath (next to \`xhdfe.ado\`). The \`xhdfegpu\` command automates the GPU case.
 
-On a native macOS host, extract the bundled source, build the SDK for that
-host's architecture, and build both plugins against its absolute SDK path:
+On a native macOS host, \`bash build_macos.sh [--stata /path/to/StataMP]\`
+performs every step below for this host's architecture, verifies the runtime's
+exports and Mach-O layout, stages an installable folder
+(\`_install_macos_<arch>\`) and, with \`--stata\`, runs the real-host OpenMP
+contract and the functional contracts. The equivalent manual steps: extract the
+bundled source, build the SDK for that host's architecture, and build both
+plugins against its absolute SDK path:
 
 \`\`\`bash
 mkdir llvm-openmp-20.1.8-source

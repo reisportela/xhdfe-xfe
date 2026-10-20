@@ -7,8 +7,15 @@ local repo "`c(pwd)'/../.."
 adopath ++ "`repo'/stata"
 discard
 which xfepout
+findfile xfepout.ado
+tempname source
+file open `source' using `"`r(fn)'"', read text
+file read `source' header
+file close `source'
+assert regexm(`"`header'"', "^[*]! version (.+)$")
+local expected = regexs(1)
 quietly xfepout, version
-assert "`e(version)'" == "1.13.1 20sep2026"
+assert "`e(version)'" == "`expected'"
 
 set seed 20260901
 set obs 6000

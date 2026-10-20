@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "columns": [
+    "y",
+    "x1",
+    "x2",
+    "id1",
+    "id2",
+    "id3"
+  ],
+  "canonical_columns_sha256": "60485b165e506ac66d66af88f6631d6bc018beb94d1da4590dfde1d44c2424a9",
+  "n_original": 548843,
+  "n_estimation": 540674,
+  "clusters": 21531,
+  "b": [
+    0.962444128549325,
+    0.9554648076109923,
+    23.854767439092424
+  ],
+  "V_no_ssc": [
+    [
+      0.01858592253013286,
+      0.0011163930110453303,
+      -0.0005115497810631195
+    ],
+    [
+      0.0011163930110453303,
+      0.23198829198237322,
+      -0.11599823969736678
+    ],
+    [
+      -0.0005115497810631195,
+      -0.11599823969736678,
+      0.058001283980184996
+    ]
+  ],
+  "reference": "Explicit sparse-dummy FWL; independent SciPy LSQR1e-14/LSMR1e-13, MP80two-columnOLS, long-double cluster sandwich.",
+  "agreement": {
+    "b_scaled": 0.0,
+    "V_scaled": 3.9224220364695564e-12
+  },
+  "interpretation": "Coefficients use the existing general Fast battery absolute1e-8 limit. Covariance deviations are diagnostics: both published2.29.1 and the restoredFast path exceed the general entrywise synthetic-fixture V comparison on this real benchmark; no global Fast forward-V target is adopted.",
+  "individual_data_included": false
+}

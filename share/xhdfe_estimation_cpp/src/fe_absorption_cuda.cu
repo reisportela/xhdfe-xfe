@@ -3374,6 +3374,14 @@ bool cuda_backend_available() {
     return count > 0;
 }
 
+static bool absorb_ordinary_lsmr_cuda(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& fe_inputs,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result);
+
 bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const Eigen::Ref<const Eigen::MatrixXd>& X,
                                const std::vector<GpuFeInput>& fe_inputs,
@@ -3497,6 +3505,17 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
     const bool ill_conditioned_graph_gpu =
         fe_inputs.size() >= 2 && min_fe_occupancy_gpu >= 0.0 &&
         min_fe_occupancy_gpu <= accel_occ_threshold_gpu;
+    // Sparse ordinary two-FE graphs can meet MAP's step test with unfinished weak
+    // directions (CUDA04). Preserve the exact shortcuts above, and otherwise
+    // select device LSMR before solving, with the ordinary Krylov contract.
+    if (fe_inputs.size() == 2 && weights == nullptr &&
+        ill_conditioned_graph_gpu && options.from_auto && !any_slope &&
+        !options.retain_fixed_effects && !options.symmetric_sweep &&
+        !options.use_sparse_solver && !options.use_krylov &&
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+        options.convergence_criterion == ConvergenceCriterion::Auto) {
+        return absorb_ordinary_lsmr_cuda(y, X, fe_inputs, weights, options, result);
+    }
     const bool n1_graph_correction = n1_continuation_predicate() != nullptr &&
         fe_inputs.size() == 3 && !any_slope && weights == nullptr &&
         !store_alphas && !options.retain_fixed_effects &&
@@ -5570,6 +5589,38 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                         if (cg_breakdown) {
                             break;
                         }
+                        bool candidate_lane = false;
+                        for (int k = 0; k < cg_width; ++k) {
+                            const std::size_t lane = static_cast<std::size_t>(k);
+                            if (!lane_solved[lane] &&
+                                std::sqrt(recent[lane] / std::abs(next_improvement[lane])) <= options.tol) {
+                                candidate_lane = true;
+                            }
+                        }
+                        // CG02 is a Comparable/Strict accuracy guard. Fast
+                        // keeps its published energy-based stopping rule.
+                        if (candidate_lane &&
+                            options.tolerance_mode != ToleranceMode::XhdfeFast) {
+                            std::vector<double> direction_sq(
+                                static_cast<std::size_t>(cg_width), 0.0);
+                            compute_component_sumsq(d_y_ggx.data(), d_x_ggx.data(), direction_sq);
+                            for (int k = 0; k < cg_width; ++k) {
+                                const std::size_t lane = static_cast<std::size_t>(k);
+                                const double scale = std::abs(next_improvement[lane]);
+                                if (!lane_solved[lane] && scale > 0.0 &&
+                                    std::sqrt(recent[lane] / scale) <= options.tol) {
+                                    const double step = std::abs(alpha[lane]) *
+                                        std::sqrt(direction_sq[lane] / scale);
+                                    if (!finite_double_bits(step) || step > options.tol) {
+                                        report_cg_breakdown("step-norm", iter, k, step,
+                                                            options.tol, alpha[lane]);
+                                        cg_breakdown = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (cg_breakdown) break;
                         improvement = next_improvement;
 
                         subtract_columns(d_y.data(), d_x.data(),
@@ -6409,11 +6460,35 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         solver_fe_tolerance, true);
     if (!ok || !result.cg_restart_required) return ok;
 
-    // The first invocation has released its device buffers. Retry on the
-    // GPU from the original RHS with norm-change MAP and CG disabled; an
-    // orthogonality certificate cannot repair CG null-space drift.
+    // Restart on the GPU from the original RHS: a broken CG recurrence can
+    // lose null-space components which a warm repair cannot recover.
     const int cg_iterations = result.iterations;
+    if (cg_iterations >= options.max_iter) {
+        result.converged = false;
+        result.precision_certified = false;
+        return ok;
+    }
     HdfeOptions retry_options = options;
+    retry_options.max_iter -= cg_iterations;
+    const bool ordinary_comparable =
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+        !options.retain_fixed_effects &&
+        std::none_of(fe_inputs.begin(), fe_inputs.end(),
+                     [](const GpuFeInput& fe) { return fe.is_slope; });
+    if (ordinary_comparable) {
+        // Cold MAP still left CUDA04's weak graph modes unfinished. Use the
+        // device counterpart of the CPU's Krylov restart, at the existing
+        // ordinary 1e-11 floor and strictly within the remaining budget.
+        AbsorptionResult repaired;
+        const bool repaired_ok = absorb_ordinary_lsmr_cuda(
+            y, X, fe_inputs, weights, retry_options, repaired);
+        repaired.iterations += cg_iterations;
+        result = std::move(repaired);
+        return repaired_ok;
+    }
+    // The accelerated cold MAP exit uses the nominal tolerance. Honour the
+    // original Comparable floor here too; Fast keeps its public tolerance.
+    retry_options.tol = effective_absorption_tolerance(options);
     retry_options.tolerance_mode = ToleranceMode::ReghdfeComparable;
     retry_options.convergence_criterion = ConvergenceCriterion::NormChange;
     AbsorptionResult repaired;
@@ -6497,7 +6572,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     const GroupIndividualStructure& gi,
     const Eigen::VectorXd* weights,
     const HdfeOptions& options,
-    AbsorptionResult& result) {
+    AbsorptionResult& result,
+    bool ordinary_projection = false) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const int ld = static_cast<int>(X.rows());
@@ -6505,8 +6581,18 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     const int individuals = gi.num_individuals;
     const bool unit_weights = weights == nullptr;
     const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
-    // Keep the affine witness for certification/refinement at every data size.
-    const bool capture_projection = true;
+    // Ordinary FEs reuse only the device operator and primary LSMR solve.
+    // Group refinement and its forward guard do not define ordinary work.
+    const bool capture_projection = !ordinary_projection;
+    const double effective_tol = effective_absorption_tolerance(options);
+    const bool ordinary_parity = ordinary_projection &&
+        options.ordinary_krylov_parity_floor && effective_tol > 0.0 &&
+        (options.tolerance_mode == ToleranceMode::ReghdfeComparable ||
+         options.tolerance_mode == ToleranceMode::StrictResidual);
+    const double solve_tolerance = ordinary_projection
+        ? (ordinary_parity ? std::min(effective_tol, 1.0e-11) : effective_tol)
+        : group_individual_absorption_tolerance(options);
+    if (ordinary_projection) result.krylov_internal_tolerance = solve_tolerance;
     const auto solve_start = std::chrono::steady_clock::now();
     if (!valid_group_individual_lsmr_structure(gi, n, weights)) {
         return false;
@@ -6893,8 +6979,7 @@ static bool absorb_group_individual_lsmr_cuda_impl(
             double norm_a = std::sqrt(norm_a_sq);
             double condition = 1.0;
             double norm_r = beta;
-            const double tolerance =
-                group_individual_absorption_tolerance(options);
+            const double tolerance = solve_tolerance;
             const double condition_limit = 1.0e12;
             const double forward_target = group_forward_tolerance(options);
             double final_test1 = std::numeric_limits<double>::infinity();
@@ -7038,7 +7123,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                 // forward target; nearly null incidence directions otherwise
                 // pass the dual test with a large projection error.
                 const bool dual_stop = final_test2 <= tolerance;
-                const bool forward_ok = condition * final_test2 <= forward_target;
+                const bool forward_ok = ordinary_projection ||
+                    condition * final_test2 <= forward_target;
                 if (final_test1 <= residual_tolerance ||
                     (dual_stop && forward_ok) || alpha == 0.0) {
                     converged = true;
@@ -7064,6 +7150,10 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                 }
             }
             iterations = k;
+            if (ordinary_projection && finite_double_bits(final_test2)) {
+                result.krylov_max_final_backward_error = std::max(
+                    result.krylov_max_final_backward_error, final_test2);
+            }
             result.krylov_max_condition =
                 std::max(result.krylov_max_condition, condition);
             result.krylov_max_condition_times_backward_error =
@@ -7172,7 +7262,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         // target of the mode leaves the projection within the contract;
         // strict-residual refines to the limit of its maximum-FE-mean gate
         // with a larger budget and keeps every stage (the gate adjudicates).
-        if (all_converged && options.tolerance_mode != ToleranceMode::XhdfeFast) {
+        if (!ordinary_projection && all_converged &&
+            options.tolerance_mode != ToleranceMode::XhdfeFast) {
             const bool strict_mode =
                 options.tolerance_mode == ToleranceMode::StrictResidual;
             const double refinement_target = strict_mode
@@ -7309,7 +7400,7 @@ static bool absorb_group_individual_lsmr_cuda_impl(
             std::fprintf(stderr,
                          "gi_lsmr_solve tol=%.3e rhs=%d iterations=%d "
                          "converged=%d seconds=%.6f\n",
-                         group_individual_absorption_tolerance(options), cols + 1,
+                         solve_tolerance, cols + 1,
                          max_iterations, all_converged ? 1 : 0, elapsed);
         }
         return true;
@@ -7334,6 +7425,53 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         result.mlsmr_used = true;
         return false;
     }
+}
+
+static bool absorb_ordinary_lsmr_cuda(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& fe_inputs,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+    if (y.size() <= 0 || y.size() > std::numeric_limits<int>::max() ||
+        X.rows() != y.size() || fe_inputs.empty() ||
+        options.retain_fixed_effects) {
+        return false;
+    }
+    const int n = static_cast<int>(y.size());
+    const GpuFeInput& last = fe_inputs.back();
+    if (last.group_ids == nullptr || last.num_groups <= 0) return false;
+
+    // An ordinary FE is a one-membership incidence operator. Express the
+    // final dimension that way, without changing observations or statistics.
+    GroupIndividualStructure gi;
+    gi.num_groups = n;
+    gi.num_individuals = last.num_groups;
+    gi.group_ptr.resize(static_cast<std::size_t>(n) + 1U);
+    std::iota(gi.group_ptr.begin(), gi.group_ptr.end(), 0);
+    gi.group_individual.assign(last.group_ids, last.group_ids + n);
+    gi.group_scale.assign(static_cast<std::size_t>(n), 1.0);
+    gi.individual_ptr.assign(static_cast<std::size_t>(last.num_groups) + 1U, 0);
+    for (const int group : gi.group_individual) {
+        if (group < 0 || group >= last.num_groups) return false;
+        ++gi.individual_ptr[static_cast<std::size_t>(group) + 1U];
+    }
+    std::partial_sum(gi.individual_ptr.begin(), gi.individual_ptr.end(),
+                     gi.individual_ptr.begin());
+    std::vector<int> cursor = gi.individual_ptr;
+    gi.individual_group.resize(static_cast<std::size_t>(n));
+    for (int row = 0; row < n; ++row) {
+        gi.individual_group[static_cast<std::size_t>(
+            cursor[static_cast<std::size_t>(last.group_ids[row])]++)] = row;
+    }
+    const std::vector<GpuFeInput> standard(fe_inputs.begin(), fe_inputs.end() - 1);
+    const bool ok = absorb_group_individual_lsmr_cuda_impl(
+        y, X, standard, gi, weights, options, result, true);
+    // The fit layer reports this device Krylov diversion as LSMR.
+    result.mlsmr_used = true;
+    if (ok) result.fe_levels.back() = last.num_levels_present;
+    return ok;
 }
 
 bool absorb_fixed_effects_group_individual_cuda(

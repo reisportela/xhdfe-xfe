@@ -62,6 +62,8 @@ required_entries=(
   "xhdfe-src/stata/tools/build-xfepout-plugin.sh"
   "xhdfe-src/stata/tools/cuda-common.sh"
   "xhdfe-src/stata/tools/macos-openmp.sh"
+  "xhdfe-src/build_macos.sh"
+  "xhdfe-src/tools/build_macos_stata.sh"
   "xhdfe-src/stata/tools/_deps/eigen-3.4.0.tar.gz"
   "xhdfe-src/stata/tools/_deps/stplugin.h"
   "xhdfe-src/stata/LICENSE"
@@ -115,7 +117,9 @@ bash -n \
   "${source_root}/stata/tools/cuda-common.sh" \
   "${source_root}/stata/tools/macos-openmp.sh" \
   "${source_root}/tools/build_macos_openmp_runtime.sh" \
-  "${source_root}/tools/check_verifier_device_fma.sh"
+  "${source_root}/tools/check_verifier_device_fma.sh" \
+  "${source_root}/build_macos.sh" \
+  "${source_root}/tools/build_macos_stata.sh"
 
 command -v python3 >/dev/null 2>&1 || {
   echo "python3 is required to validate the Python source closure" >&2
@@ -152,6 +156,8 @@ fi
   PYTHONPATH=. python3 -m unittest -v tests.test_corresponding_source_bundle
 )
 
+python3 "${source_root}/tools/check_macos_openmp_exports.py" --self-test
+
 command -v cmake >/dev/null 2>&1 || {
   echo "cmake is required to validate the autonomous source archive" >&2
   exit 1
@@ -186,6 +192,10 @@ grep -Fq "${EXPECTED_RCPP_SHA256}" "${provenance_path}" || {
 }
 grep -Fq "Rcpp_${EXPECTED_RCPP_VERSION}.tar.gz" "${offline_doc}" || {
   echo "BUILD_OFFLINE.md does not give the pinned Rcpp install path" >&2
+  exit 1
+}
+grep -Fq 'bash build_macos.sh' "${offline_doc}" || {
+  echo "BUILD_OFFLINE.md lacks the one-command macOS build instructions" >&2
   exit 1
 }
 grep -Fq 'tools/build_macos_openmp_runtime.sh' "${offline_doc}" || {

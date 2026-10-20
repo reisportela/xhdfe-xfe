@@ -43,7 +43,7 @@ def command_string(data, command, offset):
 
 def thin_info(data):
     require(len(data) >= 32 and data[:4] == b'\xcf\xfa\xed\xfe', 'Expected a little-endian 64-bit Mach-O slice')
-    _, cpu, _, filetype, count, size, _, _ = struct.unpack_from('<8I', data)
+    _, cpu, _, filetype, count, size, flags, _ = struct.unpack_from('<8I', data)
     require(cpu in ARCHES, 'Unsupported Mach-O CPU type')
     require(32 + size <= len(data) and count <= size // 8, 'Truncated Mach-O load commands')
     position = 32
@@ -70,7 +70,8 @@ def thin_info(data):
     arch = ARCHES[cpu]
     require(versions[0] <= MINIMUM[arch], f'{arch}: minimum macOS version was raised to {versions[0]}')
     return dict(arch=arch, filetype=filetype, dependencies=dependencies, rpaths=rpaths,
-                identities=identities, minimum_macos=list(versions[0]))
+                identities=identities, minimum_macos=list(versions[0]),
+                weak_defines=bool(flags & 0x8000))
 
 
 def macho(path):
@@ -118,6 +119,9 @@ def inspect(path, kind, arch=None):
             require(record['identities'] == ['@rpath/'+RUNTIME], 'OpenMP install name is not portable')
             require(not external, 'OpenMP runtime has an unpackaged dependency')
             require(all(value == '@loader_path' for value in record['rpaths']), 'Runtime contains a build-machine rpath')
+            # Exported weak C++ definitions coalesce with a host's own LLVM runtime
+            # (issue #14); the release runtime is linked with tools/macos_openmp.exports.
+            require(not record['weak_defines'], 'OpenMP runtime exports weak definitions (MH_WEAK_DEFINES)')
     return records
 
 

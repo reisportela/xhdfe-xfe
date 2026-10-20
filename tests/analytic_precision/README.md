@@ -77,6 +77,18 @@ sandbox, follow AGENTS.md's host-level GPU probe policy. The runner records
 `nvidia-smi`, and a CUDA precision row requires actual `gpu_used == 1`.
 Fresh processes, temporary files and CUDA caches stay within the campaign.
 
+The 19 October CG regression guards are separate from that matrix:
+`cg_restart_budget_contract.py`, `cg_projection_full_covariance_contract.py`
+and `cg_final_step_contract.py` accept `--module PATH --backend cpu|cuda`
+and an optional new `--output JSON`. The final-step fixture is public synthetic
+data, checked against MP120 with complete OLS/IV covariance, three row orders
+and distinct mode contracts. `cg_final_step_oracle.py` independently regenerates
+the MP80/MP120 reference. `cg_cache_generation_contract.py --baseline-module
+OLD_MODULE --module NEW_MODULE --output NEW_DIRECTORY` tests a genuinely
+incorrect old cache without changing its bytes. Its default projection fixture
+covers generation 4433; `--fixture final-step` covers generation 4434.
+The old build must fail the independent contract and the new build must pass.
+
 `prepare` runs independent-oracle assertions and negative controls against the
 grader, then hashes scripts, fixtures, active binaries and canonical reference
 files into `manifest.json`. `run` refuses changed custody, preserves raw FP64
@@ -561,3 +573,32 @@ block-driven retry, and comparable mode retains its continuation/refusal rules.
 The new `slope_block_checked_` diagnostic (Stata: `e(slope_block_checked)`, R:
 `slope_block_checked`) distinguishes skipped checks from zero residuals. The
 five existing block metrics are zero placeholders when it is false.
+
+## Ordinary CUDA weak-graph projection
+
+`cuda_ordinary_weak_graph_contract.py --module MODULE --backend cpu|cuda
+--output OUTPUT.json` checks the deterministic 200,000-row R audit design
+against explicit sparse-dummy OLS with long-double refinement and an
+independently bounded projection defect. It checks the existing coefficient
+1e-9 and full-covariance 1e-8 contracts, exact sample/DoF, actual GPU use,
+rescaled inputs, reversed FE order, explicit thread requests 1/2/8/16/24/48,
+the cold restart after an explicit CG breakdown, the existing exact tree
+shortcut, and separate iteration-budget refusals without stale estimates.
+Frozen 2.29.1 CUDA fails the coefficient test; parity with it is not an
+oracle. The unified core runs this regression alongside the analytic battery.
+
+## Fast CG stopping policy
+
+`fast_cg_mode_contract.py --module MODULE --backend cpu|cuda --output RESULT`
+checks dyadic Walsh regressions on near-nested three-FE graphs. Supplying
+`--github-data PATH` additionally checks the core24 `github` return regression
+without copying individual data into the repository. The aggregate-only
+reference pins all six numerical input columns. It uses independent sparse
+dummy FWL by SciPy LSQR/LSMR, MP80 reduced OLS and a long-double cluster
+sandwich. The two references agree to 0 in reported b and 3.93e-12 in scaled V.
+`generate_fast_cg_reference.py --data PATH --output NEW_JSON` regenerates this
+aggregate reference without exporting observations or overwriting old results.
+The optional real-data control certifies return, sample, backend and b; V
+deviations are recorded separately and do not redefine Fast's approximation.
+Run `cg_final_step_contract.py` alongside it to retain the MP120 covariance
+protection for Comparable, with the distinct existing Fast/Strict limits.

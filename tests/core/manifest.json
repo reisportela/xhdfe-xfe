@@ -1,0 +1,770 @@
+{
+  "schema": 1,
+  "performance_reference": "2.29.1.20261014",
+  "historical_precision_contract_reference": "2.28.1.20260929",
+  "core24": {
+    "registry": "benchmarks/encompassing/registry.json",
+    "datasets": [
+      "credit",
+      "credit2",
+      "directors",
+      "enron",
+      "github",
+      "patents",
+      "schools",
+      "soccer",
+      "synthetic-assortative",
+      "synthetic-complete",
+      "synthetic-uniform-easy",
+      "synthetic-uniform-hard",
+      "synthetic-uniform-harder",
+      "synthetic-zigzag",
+      "workers",
+      "main_95_21_ready",
+      "simulated_panel",
+      "akm_v02_firstreg",
+      "pf_difficult_10m_3fe",
+      "pf_simple_10m_2fe",
+      "pf_simple_10m_3fe",
+      "pf_difficult_10m_2fe",
+      "akm_v02_secondreg",
+      "marta_group_individual_3m"
+    ],
+    "cells": [
+      {
+        "interface": "native",
+        "backend": "cpu",
+        "mode": "fast"
+      },
+      {
+        "interface": "native",
+        "backend": "cpu",
+        "mode": "comparable"
+      },
+      {
+        "interface": "native",
+        "backend": "cuda",
+        "mode": "fast"
+      },
+      {
+        "interface": "native",
+        "backend": "cuda",
+        "mode": "comparable"
+      },
+      {
+        "interface": "stata",
+        "backend": "cpu",
+        "mode": "fast"
+      },
+      {
+        "interface": "stata",
+        "backend": "cpu",
+        "mode": "comparable"
+      },
+      {
+        "interface": "stata",
+        "backend": "cuda",
+        "mode": "fast"
+      },
+      {
+        "interface": "stata",
+        "backend": "cuda",
+        "mode": "comparable"
+      }
+    ],
+    "interleaved_pairs": 3,
+    "warmups": 0,
+    "source_data": "read in place; supplied private dataset registry required for performance"
+  },
+  "reghdfe": {
+    "source": "upstream/reghdfe/SOURCE.json",
+    "tests": [
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-aggregation.do",
+        "id": "reghdfe/part2/test-aggregation",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "2d06d716a25cb1e1a1ec538a6f8a9b935608aa4a9578b0ed11236335a04c2fcd"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-trivial-group.do",
+        "id": "reghdfe/part2/test-trivial-group",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "5f37657d7635f7e3df4824f77dee9c1143b997a9ca6a97cc39663fccfb8e27c0"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-simple-absorb.do",
+        "id": "reghdfe/part2/test-simple-absorb",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "4d81ae6ce27c8df0d82020a20f0e60abe64bbdd9f0c6be25a6e8038fb003abea"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-error-no-obs.do",
+        "id": "reghdfe/part2/test-error-no-obs",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "97e194119b8193409acbe4d5ba4721bf3ca3080f002aff49c46c17908a7e31c7"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-error-sample.do",
+        "id": "reghdfe/part2/test-error-sample",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "0d3216c211934c9cd4b6d55c74f1b3d8a79faffd9b4cf46f1c4dabff4f9d7227"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-error-missing-values.do",
+        "id": "reghdfe/part2/test-error-missing-values",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "d8c0b6db9b6f26a580bca7a20b227bcf8a4fefecfa50c64253f7f5d49dd9a2b5"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-bug-sort.do",
+        "id": "reghdfe/part2/test-bug-sort",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "acf81466aa088c2602cc841f001990bb060165be59d2744e7aaea82099b2ce9c"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-parallel-save-load.do",
+        "id": "reghdfe/part2/test-parallel-save-load",
+        "kind": "reference_internal",
+        "cpu": "reference_only",
+        "cuda": "not_applicable",
+        "source_sha256": "b5747711d5c87bb7abe0d922a7670cd51d16900e5b275462c369ed71c3cab231"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part2/test-alphas.do",
+        "id": "reghdfe/part2/test-alphas",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "525cb96b4bfc495d64a4e8ceb09577b21140e51f22bbf49122d8aec3d00aeb7d"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/report_constant.do",
+        "id": "reghdfe/part1/report_constant",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "625e95a275f200e7a6bd19a5f7383681d1bf8ff55ba3b6a06da9c754dcb811f6"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/alphas.do",
+        "id": "reghdfe/part1/alphas",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "230410f2df7ce42ce80d4ee1acc93d045655a042b26a3881c66c305a9778ab15"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/unadjusted.do",
+        "id": "reghdfe/part1/unadjusted",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "b752a67afab0b3c26bab7fa97561e1d41a7a593e1990c3553454a7182374a0d2"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/unadjusted-if.do",
+        "id": "reghdfe/part1/unadjusted-if",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "43e2c7c6fb4c9ea7e12b3588a9543ae3aba677f8de771d88feaf9b2af31b7cba"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/unadjusted-singular.do",
+        "id": "reghdfe/part1/unadjusted-singular",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "956cbb174e1b20354d1252441ad0f37611eded0b72a498f6548f78fd689f94e8"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/robust.do",
+        "id": "reghdfe/part1/robust",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "860fb0d160c57a01146531920d5d030c0dcbca7491c11f2e82f94e4615fb15fc"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster.do",
+        "id": "reghdfe/part1/cluster",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "c484e6b373a1a16eb340ee01562d27e5211182ad8673e5581add0a06918166c7"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-equals-robust.do",
+        "id": "reghdfe/part1/cluster-equals-robust",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "6ffaf7be8ddd64a0f828a01c09558d51e425b98b3b4c36bb1a8f8adb988946fe"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-nested.do",
+        "id": "reghdfe/part1/cluster-nested",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f6a7dbffad21609b51b7965127ef98f08672eedf7f55f6740533b9afa2958b28"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-strictly-nested.do",
+        "id": "reghdfe/part1/cluster-strictly-nested",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "e4530c70f37b7e9a92574a4ae2869f6498bf96a66921790e936083ffb9a4602f"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-string.do",
+        "id": "reghdfe/part1/cluster-string",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "4703435e65ba62cd92fd88e0ee18b3886837c256b737595c8475cc2c4926576b"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-mwc.do",
+        "id": "reghdfe/part1/cluster-mwc",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "8ca5b84459e7a33d4b01f6ae965011cc49926c71a6071fa99ccfb7c2467bc94a"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/cluster-mwc-meat.do",
+        "id": "reghdfe/part1/cluster-mwc-meat",
+        "kind": "reference_internal",
+        "cpu": "reference_only",
+        "cuda": "not_applicable",
+        "source_sha256": "841c225e4c1842a15bec1d6e8a581fb5a48b660ba1a92d687b6d11abba20adb4"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/missing-absvar.do",
+        "id": "reghdfe/part1/missing-absvar",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "898b4de2d7ab781f6db5c3e558082eb78981c50ab6d24f4fb14ea4cb9d16a484"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/options.do",
+        "id": "reghdfe/part1/options",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "7730097697aa057b30b811b981cbffddc5036d00981f50fb82cc249e74aedc8d"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/omitted.do",
+        "id": "reghdfe/part1/omitted",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "4eea8f64d5a8a0241214228accce61d4a64e511a216625d463f873dcfad2e891"
+      },
+      {
+        "expectation": "xfail",
+        "group": "official",
+        "test": "part1/cluster-after-expand.do",
+        "id": "reghdfe/part1/cluster-after-expand",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "760ae127e435a4ee91c863d5a1b905914aa5cf14ab8537e22c5ba58ef6d60ab8"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/noabsorb.do",
+        "id": "reghdfe/part1/noabsorb",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "600f232af79aab59ee8742d647fd61c0e209bab60ecf2b232b3a69fd30d26830"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/more-weights.do",
+        "id": "reghdfe/part1/more-weights",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "c0396898ef5696a400a48f8a34485cb8a511941c801eebc83c09f4f9df882352"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/fvstrip.do",
+        "id": "reghdfe/part1/fvstrip",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "45833622418f2cb7ab869ae7a76367a364b0392df62032fd485ffee472a30ddf"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/stdata1.do",
+        "id": "reghdfe/part1/stdata1",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f5e7af25b49e9924c5632653afe02272e7569541e59eef36ac3ff960b7fb2504"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/stdata2.do",
+        "id": "reghdfe/part1/stdata2",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f4b0e200934f193190c6680fef6582d9fccb16408ca382cc1eaeff0e7fc936bf"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/stdata3.do",
+        "id": "reghdfe/part1/stdata3",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "24f6478a7a7b7f883b224486c582b31883fe7961c3cc10332dfa09a78201fbf8"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/singleton-x.do",
+        "id": "reghdfe/part1/singleton-x",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "ddf0431afb9473a1db86ae49bf2ec86f92caaec398adc4b73ddd469c098d4683"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/inconsistent-r2.do",
+        "id": "reghdfe/part1/inconsistent-r2",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "d20e2c551b553cc7d4c3d780da748092d5cfe9b406040333325848468bf391f3"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/singleton-and-fweights.do",
+        "id": "reghdfe/part1/singleton-and-fweights",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "1067225bac00adf8effbdb91c2552437aa471b541621e560b313a18248c548ad"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/prune.do",
+        "id": "reghdfe/part1/prune",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "e61c7b6d7979b67c207ce58b0869a9b441ed6f6636d5a400ebaf8958b64613b7"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/memory.do",
+        "id": "reghdfe/part1/memory",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "419e822008af60c701c63e99bffa9594eaea4d145b9a5315683ca9163bb11ad0"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict.do",
+        "id": "reghdfe/part1/predict",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "dd8839da943da90790b6010b9080381207656895e7f5e6969cf32729f2b81746"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-pweight.do",
+        "id": "reghdfe/part1/predict-pweight",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f3f7e91b80cbca36cc7b3590796d84d41a8a171e13ec5649e300f0425a76a8bf"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-fweight.do",
+        "id": "reghdfe/part1/predict-fweight",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "313345bbf15fc8f0cb6a11ccfaf404143b3ce7615e281fa95f5328d938f100ca"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-aweight.do",
+        "id": "reghdfe/part1/predict-aweight",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "39206d709a8ede7496a6ee20e5fd132a36ecc63412de952d0f674ff453333bc0"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-slope.do",
+        "id": "reghdfe/part1/predict-slope",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "d310e7c3dac20c0a4ee76a91f39dc2ffe41c8456d5e66fb9142b2d3521409a76"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-slope-only.do",
+        "id": "reghdfe/part1/predict-slope-only",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "3d515a7d3ec3bbe2d52aea73765fc69f29baad9bcd9b2aa3140006d629d75702"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/predict-slope-only-nocons.do",
+        "id": "reghdfe/part1/predict-slope-only-nocons",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "220a374cebcb746432d053ac319160fb42d715092d86ceab571f6c51c3d8ecb7"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/pweight-cluster.do",
+        "id": "reghdfe/part1/pweight-cluster",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "fa5fa93a5e8b6d27a915e4737931fae42bbf5a665a6a5d32605a072867465532"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/estat-ic.do",
+        "id": "reghdfe/part1/estat-ic",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f15d0aa31db0987a5c4226bc5b3470757cb4e02a5f35aaead24090f08f6c1a9a"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/bug_cluster.do",
+        "id": "reghdfe/part1/bug_cluster",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "39af00da7c3668afd6ebca800d8d2ce9d32dc3bcadd4bd2954aed06acbbe43e5"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/extreme_values.do",
+        "id": "reghdfe/part1/extreme_values",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "02f87a4c15729f8cc79f3a95fe877770f1b9308626b16c1b5b989805ab3c27ad"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/bug_compact.do",
+        "id": "reghdfe/part1/bug_compact",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "db5d97030568481b22bd9e3b4b4a2690d6fd42e9f4429cb68c30cf41b46578aa"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/margins.do",
+        "id": "reghdfe/part1/margins",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "03523208c6bb7b1ab8789a415b8f644f7c206b66f57d143ae79dc80bd00a99e0"
+      },
+      {
+        "expectation": "pass",
+        "group": "official",
+        "test": "part1/groupvar.do",
+        "id": "reghdfe/part1/groupvar",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "c192ceda605f65fe28f319b68aa63d9ace19a8494b2266133048e17574d4eb26"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "compatibility/simple-test.do",
+        "id": "reghdfe/compatibility/simple-test",
+        "kind": "reference_internal",
+        "cpu": "reference_only",
+        "cuda": "not_applicable",
+        "source_sha256": "598c94db86b8db725da2ccae49699a70120080a4be82807137e51029244f87a3"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "part1/dkraay.do",
+        "id": "reghdfe/part1/dkraay",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "d6932ded4f41f6f1d5660b48166d1c81b24f3f37bafec87d7e43cbe9b9edd5e1"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "part1/lagged-slope.do",
+        "id": "reghdfe/part1/lagged-slope",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "6cb656eb1a164e6c1e84cb12425c8e721d555ce6c46f798d77e6da9b8188b570"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "part2/demo_groups.do",
+        "id": "reghdfe/part2/demo_groups",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "f1992a23855bf99ffeb2be9901e56cceb271ff6419339bba9da8eff2541be422"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "part2/demo_indiv_preconditioner.do",
+        "id": "reghdfe/part2/demo_indiv_preconditioner",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "1e581c76e5bd8c541b146753b90b0f503406efce36abcd0759fb21f31b6da320"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "test_dkraay.do",
+        "id": "reghdfe/test_dkraay",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "1a8edcf2b87dc775bbaac2f2bf14955b580e0c04ec5c2f8105e700b795c6aadb"
+      },
+      {
+        "expectation": "pass",
+        "group": "extra",
+        "test": "test_dkraay_unbalanced.do",
+        "id": "reghdfe/test_dkraay_unbalanced",
+        "kind": "compatibility",
+        "cpu": "required",
+        "cuda": "required_where_FE_supported; CPU-only ordinary OLS controls reported separately",
+        "source_sha256": "fee5ee97462646576cbb7602d2ab8010611fe79b45ce48a741ee9557e8cdfb47"
+      },
+      {
+        "expectation": "regenerates (overwrites) the toy-patents .dta fixtures",
+        "group": "skip",
+        "test": "part2/create_toy_patent_dataset.do",
+        "id": "reghdfe/part2/create_toy_patent_dataset",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "c33e1db33717e35e2ad52329cef81688ab3f504e6294f81999fef24d841641f1"
+      },
+      {
+        "expectation": "regenerates (overwrites) the toy-teams .dta fixtures",
+        "group": "skip",
+        "test": "part2/create_toy_team_dataset.do",
+        "id": "reghdfe/part2/create_toy_team_dataset",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "d0fe24b6fd9256130a2533720b1bd53556321a77485f243dcba77d7ff443e494"
+      },
+      {
+        "expectation": "starts with cd C:\\Git\\groupreg\\test\\ (developer machine); disabled upstream",
+        "group": "skip",
+        "test": "part2/demo_teams.do",
+        "id": "reghdfe/part2/demo_teams",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "c94c8208a60896ddcc71bec2afd0ae49cb20d7a23e85029a02617e2c63045457"
+      },
+      {
+        "expectation": "developer scratch file: stops on purpose at the undefined command asd",
+        "group": "skip",
+        "test": "part2/test-st_data_pool.do",
+        "id": "reghdfe/part2/test-st_data_pool",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "199d40532a1d2a18fc451a4a9625093cb5735cb62fdd5f25fd69d43d6e41476b"
+      },
+      {
+        "expectation": "harness file: replaced by stata/setup.do (the upstream version uninstalls and reinstalls packages in the active PLUS and runs build.py)",
+        "group": "skip",
+        "test": "setup.do",
+        "id": "reghdfe/setup",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "c127ec2c78ba11a7f1b69788a7265709ec30b264fd4dfce1eb903e17b944a83a"
+      },
+      {
+        "expectation": "installs packages from hard-coded Windows paths (C:\\Git\\...) into a redirected PLUS",
+        "group": "skip",
+        "test": "test-dependencies.do",
+        "id": "reghdfe/test-dependencies",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "644ed818032070f22a04272b8fed9760518a7426f3902a4c7efe1da184d6dffc"
+      },
+      {
+        "expectation": "harness file: the driver run by faithful mode",
+        "group": "skip",
+        "test": "testall.do",
+        "id": "reghdfe/testall",
+        "kind": "infrastructure",
+        "cpu": "not_run_infrastructure",
+        "cuda": "not_applicable",
+        "source_sha256": "cb23e31fedadc1665767d0b35babc05ec56c89442f9a6bc3530258edc4d0269d"
+      }
+    ],
+    "policy": "Every upstream do-file is accounted for. Literal reference/ports, documented adaptations, expected differences and infrastructure are distinct. No installation scripts run.",
+    "adaptation_policy": {
+      "mode": "reghdfe-comparable; Fast remains covered independently by core24 and the analytic battery",
+      "zero_absorb": "CPU-only ordinary OLS controls are labelled explicitly in CUDA campaigns; every eligible CUDA call must report actual use",
+      "cluster-after-expand": "Checks b/unscaledV invariance and independently derived finite-sample factors, while confirming the expected changes in N/RSS/SSC",
+      "DK_cross_package_V": "Original1e-12comparison retained in literal source. Adaptedpart1DK uses the existing1e-8diagonal-scaled contract and records strict differences; MP80/120 independent oracle required. No solver tolerance changes.",
+      "GPU_repeat_contract": "Adapted CUDA memory and singleton/fweight repeats use existing b1e-9 scaled, V1e-8 diagonal-scaled and scalar1e-8 floor1 contracts; strict differences retained. Half/twice-limit mutation controls required. Published2.29.1 also fails the literal repeats.",
+      "iteration_counts": "Options test checks finite positive cumulative iterations within max_iter. Strict monotonicity with tolerance is a reghdfe implementation expectation, not an xhdfe contract; record its failure and independently verify b/V at both original tolerances.",
+      "other_numeric_assertions": "Preserved; no global tolerance relaxation",
+      "reference_private_Mata": "Three files counted as reference internals, not xhdfe feature tests",
+      "infrastructure": "Seven installer/generator/driver files inventoried but never counted as numericpasses"
+    }
+  },
+  "independent_numerical_battery": {
+    "runner": "tests/analytic_precision/run.py",
+    "required_for_numerical_acceptance": true
+  },
+  "verdict_policy": "NOT_RUN, FAIL, EXPECTED_REFUSAL, EXPECTED_DIFFERENCE, REFERENCE_ONLY and PASS are separate. Partial scopes never certify the full core.",
+  "independent_contracts": [
+    {
+      "path": "tests/stata/saturated_statistics_contract.do",
+      "backends": [
+        "cpu",
+        "cuda"
+      ],
+      "oracle": "Stataareg for undefinedadjustedR2; legacyidentity and non-saturated control"
+    },
+    {
+      "path": "tests/core/dkraay_oracle.py",
+      "oracle": "MP80/120 explicitdummyprojection and documented observed-periodBartlett covariance"
+    },
+    {
+      "path": "tests/stata/cg_cold_restart_floor.do",
+      "backends": ["cpu", "cuda"],
+      "oracle": "Native explicit-dummy OLS on identical public-auto estimation sample; original Comparable tolerance1e-5 reproducer"
+    }
+  ]
+}

@@ -1,4 +1,18 @@
-# OpenMP release checklist — 2.29.1.20261014
+# OpenMP release checklist — 2.30.0.20261020
+
+## 2.30.0 release gates
+
+The source integrates PR #15/#17 and the bounded CPU/CUDA recovery fixes.
+The maintainer deferred the full core24 performance campaign for this release;
+ready-only timings do not waive the artifact and actual-worker checks below.
+
+- [ ] Fresh version-tag platform builds and complete native worker receipts.
+- [ ] Exact downloaded Linux CPU/CUDA artifacts validated on Athena/H100.
+- [ ] Final macOS runtime export/import isolation on both native slices.
+- [ ] Real licensed Stata/MP host checks on final native ARM and Intel artifacts.
+- [ ] Public release assets, net-install readback and canonical checkout identity.
+
+Current evidence and limitations: [2.30.0 validation](../docs/releases/VALIDATION_2.30.0.20261020.md).
 
 ## Issue 14 follow-up: Stata host coexistence
 

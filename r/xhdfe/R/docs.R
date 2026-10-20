@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.29.1). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.30.0). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.29.1) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.30.0) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.29.1.
+#' effects regression via a C++ backend." Version 2.30.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -453,9 +453,14 @@ NULL
 #'       gate/sweep path so that the 200,000-row sampling probe cannot
 #'       over-promote (raise the cap with the environment variable
 #'       \code{XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}; an explicit
-#'       \code{"auto-mlsmr"} is uncapped). GPU backends, \code{save_fe},
-#'       and heterogeneous-slope paths resolve to their existing eligible
-#'       fallbacks. Combined \code{group}/\code{individual} fits use joint
+#'       \code{"auto-mlsmr"} is uncapped). Comparable CUDA \code{"auto"} selects
+#'       device LSMR for ordinary unweighted two-FE graphs with low group occupancy,
+#'       using the ordinary Krylov floor \code{min(effective tolerance, 1e-11)}
+#'       and ordinary degrees of freedom. Fast, explicit methods/convergence,
+#'       \code{save_fe} and heterogeneous slopes retain their primary routing.
+#'       A broken ordinary Comparable CG recurrence restarts with device LSMR
+#'       within the remaining iteration budget.
+#'       Combined \code{group}/\code{individual} fits use joint
 #'       LSMR for CPU \code{"auto"}, the existing certified solver for CUDA
 #'       \code{"auto"}, and a certified sweep fallback if automatic CPU LSMR
 #'       cannot be accepted. Gate
@@ -742,7 +747,7 @@ NULL
 #' bound, exact redundancy proofs, per-row N1 evidence) run only under
 #' \code{XHDFE_CERTIFY=1}.
 #'
-#' Known limitations (2.29.1). A fit that converges by the solver's rule but
+#' Known limitations (2.30.0). A fit that converges by the solver's rule but
 #' does not pass the precision certificate returns no estimates in R, Python
 #' and Stata alike. Ill-conditioned specifications can still require a refusal.
 #' In \code{reghdfe-comparable}, heterogeneous slopes under an explicit
@@ -862,7 +867,7 @@ NULL
 #'   \item IV/2SLS is not supported in \code{group} mode.
 #'   \item \code{tolerance_mode = "strict-residual"} is not supported with
 #'     heterogeneous slopes (an error is raised before estimation).
-#'   \item The LSMR-family absorption methods are CPU-only and do not
+#'   \item Explicit LSMR-family absorption requests are CPU-only and do not
 #'     support \code{save_fe}; only plain LSMR is supported for combined
 #'     \code{group}/\code{individual} fits.
 #'   \item No HAC or Driscoll-Kraay standard errors (see \code{ivreghdfe}
@@ -1211,7 +1216,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.29.1.
+#' effects regression via a C++ backend." Version 2.30.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way

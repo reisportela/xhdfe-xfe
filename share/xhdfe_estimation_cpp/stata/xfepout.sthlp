@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.13.3 14oct2026}{...}
+{* *! version 1.13.4 20oct2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -82,15 +82,17 @@ package. No software tool or AI system is credited as an author or co-author.
 {marker absvar}{...}
 {title:Absvar Syntax}
 
-{pstd}{cmd:absorb()} and {cmd:clustervars()} accept categorical identifiers and two-way interactions
-with {cmd:#}/{cmd:##}. For reghdfe/xhdfe compatibility, categorical-only {cmd:##} terms in
-{cmd:absorb()} are treated as one joint absorbed FE, not expanded into main effects plus the interaction.
-In {cmd:clustervars()}, {cmd:##} expands to the two main cluster dimensions plus their interaction.
-The grammar is intentionally narrower than {cmd:xhdfe}: these options are for fixed-effect or cluster
-identifiers, not for heterogeneous slopes.{p_end}
+{pstd}{cmd:absorb()} and {cmd:clustervars()} accept categorical identifiers and categorical interactions
+with two or more components, written with {cmd:#}/{cmd:##} (for example {cmd:a#b#c}). For reghdfe/xhdfe
+compatibility, categorical-only {cmd:##} terms in {cmd:absorb()} are treated as one joint absorbed FE, not
+expanded into main effects plus the interaction. In {cmd:clustervars()}, two-component {cmd:##} expands to
+the two main cluster dimensions plus their interaction; {cmd:##} with more than two components is rejected
+(list the cluster dimensions explicitly). {cmd:reghdfe} treats {cmd:a##b} in {cmd:vce(cluster)} as one joint
+factor, like {cmd:a#b}; use {cmd:a#b} for that meaning in both commands. The grammar is intentionally narrower than {cmd:xhdfe}: these
+options are for fixed-effect or cluster identifiers, not for heterogeneous slopes.{p_end}
 
-{p 4 6 2}- Interactions must have exactly two components and are materialized with {cmd:egen group()}
-after the estimation sample is defined. Plain numeric identifiers are passed directly to the plugin;
+{p 4 6 2}- Interactions are materialized with {cmd:egen group()} over all their components after the
+estimation sample is defined. Plain numeric identifiers are passed directly to the plugin;
 string identifiers are encoded by Stata before the plugin call.{p_end}
 {p 4 6 2}- Factor-style prefixes such as {cmd:i.}, {cmd:ib#.}, {cmd:bn.}, and {cmd:ibn.} are stripped
 for compatibility before the underlying variable names are resolved.{p_end}

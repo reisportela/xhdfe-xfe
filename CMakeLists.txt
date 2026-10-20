@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.29.1.20261014 LANGUAGES CXX)
+project(xhdfe VERSION 2.30.0.20261020 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -484,6 +484,15 @@ if(XHDFE_BUILD_PYTHON)
                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cg_breakdown.py)
             set_tests_properties(xhdfe_cg_breakdown PROPERTIES
                 ENVIRONMENT "XHDFE_GPU_BACKEND=cpu;XHDFE_TEST_BUILD_DIR=$<TARGET_FILE_DIR:py_hdfe_v11>")
+            foreach(contract cg_restart_budget cg_projection_full_covariance cg_final_step)
+                add_test(
+                    NAME xhdfe_${contract}
+                    COMMAND ${Python3_EXECUTABLE} -B
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/analytic_precision/${contract}_contract.py
+                            --module $<TARGET_FILE:py_hdfe_v11> --backend cpu)
+                set_tests_properties(xhdfe_${contract} PROPERTIES
+                    ENVIRONMENT "OPENBLAS_NUM_THREADS=1")
+            endforeach()
             add_test(
                 NAME xhdfe_audit_20260804_contracts
                 COMMAND ${Python3_EXECUTABLE}

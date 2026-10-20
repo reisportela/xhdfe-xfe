@@ -7,8 +7,25 @@ if ("`backend'" == "") local backend cpu
 local adopath : env XHDFE_STATA_ADOPATH
 if (`"`adopath'"' != "") adopath ++ `"`adopath'"'
 findfile xhdfe.ado
+local found `"`r(fn)'"'
+* When a package directory is requested, the ado must have been loaded from it
+* (a wrapped log line cannot be grepped reliably, so emit one short marker).
+program define version_contract_source
+    args command found adopath
+    if (`"`adopath'"' != "") {
+        local want `"`adopath'/`command'.ado"'
+        local want : subinstr local want "//" "/", all
+        local have : subinstr local found "//" "/", all
+        if (`"`have'"' != `"`want'"') {
+            display as error "`command'.ado was loaded from `have', not from `want'"
+            exit 9
+        }
+    }
+    display "VERSION_CONTRACT_SOURCE_OK `command'"
+end
+version_contract_source xhdfe `"`found'"' `"`adopath'"'
 tempname source
-file open `source' using `"`r(fn)'"', read text
+file open `source' using `"`found'"', read text
 file read `source' header
 file close `source'
 assert regexm(`"`header'"', "^[*]! version (.+)$")
@@ -31,5 +48,20 @@ quietly estat firststage
 assert `"`e(version)'"' == `"`expected'"'
 quietly xhdfe, ffirst
 assert `"`e(version)'"' == `"`expected'"'
+* xfepout: header, query, partial-out fit and replay share one identity too.
+findfile xfepout.ado
+local found `"`r(fn)'"'
+version_contract_source xfepout `"`found'"' `"`adopath'"'
+file open `source' using `"`found'"', read text
+file read `source' header
+file close `source'
+assert regexm(`"`header'"', "^[*]! version (.+)$")
+local expected_xfepout = regexs(1)
+quietly xfepout, version
+assert `"`e(version)'"' == `"`expected_xfepout'"'
+quietly xfepout y x, absorb(firm) generate(po_) numthreads(1) gpubackend(`backend')
+assert `"`e(version)'"' == `"`expected_xfepout'"'
+quietly xfepout
+assert `"`e(version)'"' == `"`expected_xfepout'"'
 display "VERSION_CONTRACT_PASS `backend'"
 exit

@@ -1,0 +1,477 @@
+name: Candidate native artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: candidate-native-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  XHDFE_RELEASE_BUILD: '1'
+  XHDFE_CUDA_ARCHS: '75,80,86,89,90'
+  EXPECTED_VERSION: '2.30.0.20261020'
+
+jobs:
+  # Linux CPU/CUDA Stata plugins plus Linux Python and R packages.
+  build-linux:
+    name: Build Linux (CPU + CUDA fatbin, Python, R)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify exact candidate metadata
+        run: |
+          set -euo pipefail
+          ACTUAL_VERSION="$(python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))')"
+          test "$ACTUAL_VERSION" = "$EXPECTED_VERSION" || {
+            echo "ERROR: candidate version $ACTUAL_VERSION does not match $EXPECTED_VERSION" >&2
+            exit 1
+          }
+          python3 tools/validate_release_metadata.py \
+            --expected-version "$EXPECTED_VERSION"
+          bash tests/release_lint.sh
+
+      - name: Install Linux, Python and R toolchains
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential g++ binutils cmake curl ca-certificates tar gzip zip \
+            python3-dev python3-pip python3-venv python3-numpy \
+            python3-setuptools python3-wheel r-base-core r-cran-rcpp \
+            r-cran-testthat
+
+      - name: Cache build dependencies (Eigen, stplugin.h/.c)
+        uses: actions/cache@v4
+        with:
+          path: stata/tools/_deps
+          key: xhdfe-deps-${{ runner.os }}-eigen340-v1
+
+      - name: Install CUDA toolkit (nvcc + cuobjdump — no driver/GPU)
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: '12.6.3'                       # >=12.0 needed for sm_90; action default is 13.x, so pin explicitly
+          method: 'network'
+          # cuobjdump is required by the fatbin verification step below; nvcc alone
+          # does not install it.
+          sub-packages: '["nvcc", "cuobjdump"]'
+          linux-local-args: '["--toolkit"]'
+
+      - name: Verify nvcc / cuobjdump
+        run: |
+          set -euo pipefail
+          nvcc --version
+          echo "CUDA_PATH=${CUDA_PATH:-unset}"
+          command -v cuobjdump && cuobjdump --version | head -2 || echo "WARN: cuobjdump not on PATH"
+
+      - name: Prepare artifacts dir
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/release-inputs
+          curl --fail --location --retry 3 \
+            https://docs.nvidia.com/cuda/archive/12.6.0/pdf/EULA.pdf \
+            --output artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf
+          echo "7c2dc636ad47cf67a0efb97d9c11246efcc471ac9d11eb8efceae3bfd56d8649  artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf" \
+            | sha256sum --check --strict
+
+      # ---- Linux ELF artifacts: built inside manylinux_2_28 (glibc 2.28 floor) ----
+      # Release 2.21.0's Linux binaries were built directly on the Ubuntu runner
+      # and required GLIBC_2.38/GLIBCXX_3.4.32, which does not load on
+      # RHEL/AlmaLinux/Rocky 9 (glibc 2.34), Ubuntu 22.04, Debian 12 or SLES 15
+      # — the Enterprise Linux platforms the stated audience runs (finding F-01).
+      # Building in the manylinux_2_28 container (AlmaLinux 8 + gcc-toolset,
+      # whose new C++ runtime parts link statically) pins the artifact floor at
+      # GLIBC_2.28/GLIBCXX_3.4.25. The script fail-closed-gates every ELF with
+      # tools/check_binary_floor.sh before it returns.
+      - name: Build linux-cpu + linux-cuda + Python wheel/sdist (manylinux_2_28)
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e XHDFE_RELEASE_BUILD=1 \
+            -e XHDFE_CUDA_ARCHS="$XHDFE_CUDA_ARCHS" \
+            -e XHDFE_CUDA_EULA=/w/artifacts/release-inputs/NVIDIA-CUDA-12.6-EULA.pdf \
+            quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4 \
+            bash ci/build_linux_release_manylinux.sh
+
+      - name: Enforce glibc floor on Linux artifacts (fail-closed, host-side re-check)
+        run: |
+          set -euo pipefail
+          bash tools/check_binary_floor.sh \
+            artifacts/xhdfe.plugin.linux-cpu artifacts/xfepout.plugin.linux-cpu \
+            artifacts/xhdfe.plugin.linux-cuda artifacts/xfepout.plugin.linux-cuda
+          WHEELS=(artifacts/xhdfe-*.whl)
+          test "${#WHEELS[@]}" -eq 1
+          STAGE="$(mktemp -d)"
+          python3 -m zipfile -e "${WHEELS[0]}" "$STAGE"
+          find "$STAGE" -name '*.so' -print0 | xargs -0 bash tools/check_binary_floor.sh
+          rm -rf "$STAGE"
+
+      - name: Verify linux-cpu plugins (ELF + libgomp)
+        run: |
+          set -euo pipefail
+          for f in artifacts/xhdfe.plugin.linux-cpu artifacts/xfepout.plugin.linux-cpu; do
+            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
+            ls -la "$f"; file "$f"
+            file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
+            echo "-- ldd (libgomp expected) --"
+            ldd "$f" || true
+            ldd "$f" | grep -q libgomp || { echo "ERROR: libgomp not linked in $f (OpenMP missing)" >&2; exit 1; }
+          done
+
+      # Linux CUDA fatbin plugins are built by the manylinux step above
+      # (sm_75/80/86/89/90 + compute_90 PTX). Compile/link verified only — no
+      # GPU on CI. Maintainer validates on H100.
+      - name: Verify linux-cuda fatbin plugins (compile-verified only; no GPU)
+        run: |
+          set -euo pipefail
+          CUOBJDUMP=""
+          if command -v cuobjdump >/dev/null 2>&1; then
+            CUOBJDUMP="$(command -v cuobjdump)"
+          elif [ -x "${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump" ]; then
+            CUOBJDUMP="${CUDA_PATH:-/usr/local/cuda}/bin/cuobjdump"
+          fi
+          for f in artifacts/xhdfe.plugin.linux-cuda artifacts/xfepout.plugin.linux-cuda; do
+            test -f "$f" || { echo "MISSING: $f" >&2; exit 1; }
+            ls -la "$f"; file "$f"
+            file "$f" | grep -q 'ELF 64-bit' || { echo "ERROR: not an ELF object: $f" >&2; exit 1; }
+            echo "-- ldd (libgomp expected; CUDA runtime is STATICALLY linked, so libcudart will NOT appear here) --"
+            ldd "$f" || true
+            ldd "$f" | grep -q libgomp || { echo "ERROR: libgomp not linked in $f (OpenMP missing)" >&2; exit 1; }
+            # Do NOT assert libcudart via ldd: the plugin links libcudart_static (nvcc default),
+            # so it is intentionally absent from ldd. Embedded CUDA code is proven by cuobjdump below.
+            if [ -n "$CUOBJDUMP" ]; then
+              echo "-- embedded SASS arches ($CUOBJDUMP --list-elf) --"
+              "$CUOBJDUMP" --list-elf "$f" || true
+              echo "-- embedded PTX ($CUOBJDUMP --list-ptx) --"
+              "$CUOBJDUMP" --list-ptx "$f" || true
+              for arch in sm_75 sm_80 sm_86 sm_89 sm_90; do
+                "$CUOBJDUMP" --list-elf "$f" | grep -q "$arch" \
+                  || { echo "ERROR: $arch missing from fatbin in $f" >&2; exit 1; }
+              done
+              # cuobjdump --list-ptx labels the forward-compat PTX as "sm_90.ptx"
+              # (named by the SM target, though it is compute_90 virtual PTX).
+              "$CUOBJDUMP" --list-ptx "$f" | grep -qE 'sm_90|compute_90' \
+                || { echo "ERROR: sm_90/compute_90 PTX missing from fatbin in $f" >&2; exit 1; }
+              echo "OK: fatbin contains sm_75/80/86/89/90 SASS + compute_90 PTX"
+            else
+              # Do not silently pass if the fatbin cannot be inspected at all.
+              echo "ERROR: cuobjdump unavailable; cannot verify fatbin arches for $f" >&2
+              exit 1
+            fi
+          done
+
+      - name: Exercise actual OpenMP workers in all four Linux plugins
+        run: |
+          set -euo pipefail
+          EVIDENCE="$PWD/artifacts/linux-openmp-evidence"
+          PROBE="$EVIDENCE/plugin_openmp_probe"
+          mkdir -p "$EVIDENCE"
+          g++ -std=c++17 -O2 -Istata/tools/_deps \
+            tools/plugin_openmp_probe.cpp -ldl -o "$PROBE"
+          if ldd "$PROBE" | grep -q libgomp; then
+            echo "ERROR: probe host itself links OpenMP" >&2
+            exit 1
+          fi
+          for variant in cpu cuda; do
+            for kind in xhdfe xfepout; do
+              python3 tools/run_plugin_openmp_probe.py \
+                --probe "$PROBE" \
+                --plugin "$PWD/artifacts/$kind.plugin.linux-$variant" \
+                --kind "$kind" --arch x86_64 --stage final \
+                --out "$EVIDENCE/$kind-$variant"
+            done
+          done
+
+      - name: Smoke-test manylinux Python wheel and build R source package
+        run: |
+          set -euo pipefail
+          # Wheel + sdist come from the manylinux container step (glibc-2.28
+          # floor); the smoke below proves the container-built wheel loads and
+          # runs on this newer-glibc host (forward compatibility).
+          # Single source of truth for the expected version: xhdfe/_version.py.
+          python3 -c 'import re;s=open("xhdfe/_version.py").read();print(re.search(r"__version__\s*=\s*\"([^\"]+)\"",s).group(1))' > /tmp/xhdfe-expected-version
+          EXPECTED_VERSION="$(cat /tmp/xhdfe-expected-version)"
+          echo "expected version: $EXPECTED_VERSION"
+          python3 -m venv --system-site-packages /tmp/xhdfe-wheel-smoke
+          WHEELS=(artifacts/xhdfe-*.whl)
+          SDISTS=(artifacts/xhdfe-*.tar.gz)
+          test "${#WHEELS[@]}" -eq 1
+          test "${#SDISTS[@]}" -eq 1
+          python3 tools/validate_python_release_artifacts.py \
+            --wheel "${WHEELS[0]}" \
+            --sdist "${SDISTS[0]}" \
+            --expected-version "$EXPECTED_VERSION"
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install \
+            --no-deps "${WHEELS[0]}"
+          (
+            cd /tmp
+            /tmp/xhdfe-wheel-smoke/bin/python -c \
+              'import sys; import numpy as np; import xhdfe; from xhdfe import feols, gelbach; assert "formulaic" not in sys.modules; rng=np.random.default_rng(221); n=300; x=rng.normal(size=(n,1)); z=rng.normal(size=(n,2)); y=x[:,0]+z@np.array([.4,-.2])+rng.normal(size=n); out=gelbach.decompose(y,x,{"controls":z}); assert out["identity_gap"] < 1e-10; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); assert callable(feols); assert "formulaic" not in sys.modules; print("PYTHON_WHEEL_BASE_SMOKE_PASS")'
+          )
+          mkdir -p artifacts/python-openmp-evidence
+          (
+            cd /tmp
+            env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+              /tmp/xhdfe-wheel-smoke/bin/python \
+              "$GITHUB_WORKSPACE/tools/candidate_python_openmp_probe.py" \
+              --expected-prefix /tmp/xhdfe-wheel-smoke \
+              --forbid-prefix "$GITHUB_WORKSPACE" \
+              --expected-version "$EXPECTED_VERSION" \
+              --out "$GITHUB_WORKSPACE/artifacts/python-openmp-evidence/RESULT.json"
+          )
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install "${WHEELS[0]}[test]"
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'formulaic==1.2.1'
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip install 'maketables==0.1.8'
+          /tmp/xhdfe-wheel-smoke/bin/python -m pip check
+          mkdir -p /tmp/xhdfe-formula-tests/tools /tmp/xhdfe-formula-tests/tests/analytic_precision
+          cp tools/validate_formula_frontend.py /tmp/xhdfe-formula-tests/tools/
+          cp tests/test_formula_frontend.py tests/test_maketables_integration.py /tmp/xhdfe-formula-tests/tests/
+          cp tests/analytic_precision/polars_formula_contract.py /tmp/xhdfe-formula-tests/tests/analytic_precision/
+          (
+            cd /tmp/xhdfe-formula-tests
+            /tmp/xhdfe-wheel-smoke/bin/python -B tools/validate_formula_frontend.py \
+              --expected-prefix /tmp/xhdfe-wheel-smoke --forbid-prefix "$GITHUB_WORKSPACE"
+          )
+          python3 -m venv --system-site-packages /tmp/xhdfe-sdist-smoke
+          env -u XHDFE_CUDA_ARCHS XHDFE_ENABLE_CUDA=OFF \
+            /tmp/xhdfe-sdist-smoke/bin/python -m pip install \
+              --no-deps "${SDISTS[0]}"
+          (
+            cd /tmp
+            /tmp/xhdfe-sdist-smoke/bin/python -c \
+              'import xhdfe; from xhdfe import HdfeRegressor; assert xhdfe.__version__ == open("/tmp/xhdfe-expected-version").read().strip(); assert HdfeRegressor is not None; print("PYTHON_SDIST_REBUILD_SMOKE_PASS")'
+          )
+          python3 -m unittest -v tests.test_windows_runtime_packaging
+          R CMD build --no-build-vignettes --no-manual r/xhdfe
+          R_TARBALL="xhdfe_${EXPECTED_VERSION}.tar.gz"
+          test -f "$R_TARBALL"
+          R_OPENMP_LIB=/tmp/xhdfe-r-openmp-lib
+          mkdir -p "$R_OPENMP_LIB" artifacts/r-openmp-evidence
+          R CMD INSTALL --library="$R_OPENMP_LIB" "$R_TARBALL"
+          (
+            cd /tmp
+            env -u R_LIBS_USER R_ENVIRON_USER=/dev/null R_PROFILE_USER=/dev/null \
+              Rscript "$GITHUB_WORKSPACE/tools/candidate_r_openmp_probe.R" \
+              "$R_OPENMP_LIB" "$GITHUB_WORKSPACE" "$EXPECTED_VERSION" \
+              "$GITHUB_WORKSPACE/artifacts/r-openmp-evidence/RESULT.R"
+          )
+          _R_CHECK_FORCE_SUGGESTS_=false R CMD check \
+            --no-build-vignettes --no-manual "$R_TARBALL"
+          mv "$R_TARBALL" artifacts/
+          ls -la artifacts/xhdfe-*.whl artifacts/xhdfe-*.tar.gz \
+            artifacts/xhdfe_*.tar.gz
+
+      - name: Upload Linux, Python and R artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-linux            # MUST be unique per job (v4 artifacts are immutable)
+          path: |
+            artifacts/xhdfe.plugin.linux-cpu
+            artifacts/xfepout.plugin.linux-cpu
+            artifacts/xhdfe.plugin.linux-cuda
+            artifacts/xfepout.plugin.linux-cuda
+            artifacts/linux-cuda-provenance.json
+            artifacts/cuda-nvcc-invocations.jsonl
+            artifacts/cuda-nvcc-link-dryrun.log
+            artifacts/cuda-license-files
+            artifacts/linux-wheel-runtime-ledger.json
+            artifacts/linux-wheel-provider-runtime
+            artifacts/linux-wheel-packaged-runtime
+            artifacts/linux-openmp-evidence
+            artifacts/python-openmp-evidence
+            artifacts/r-openmp-evidence
+            artifacts/corresponding-source
+            artifacts/xhdfe-*.whl
+            artifacts/xhdfe-*.tar.gz
+            artifacts/xhdfe_*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Windows runner: build the Python wheel with Strawberry Perl's MinGW and
+  # prove that its compiled extension imports after the compiler directory is
+  # removed from PATH. This is the end-to-end gate for the packaged GNU runtime
+  # DLL closure needed after CPython changed its Windows DLL search in 3.8.
+  # xhdfe supports Python >=3.9. The runner toolchain is checked explicitly;
+  # machine-specific instruction tuning remains disabled.
+  # ---------------------------------------------------------------------------
+  build-windows-python:
+    name: Build/import Windows Python wheel (Strawberry MinGW)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify Strawberry Perl MinGW toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $strawberryBin = 'C:\Strawberry\c\bin'
+          if (-not (Test-Path "$strawberryBin\g++.exe")) {
+            throw "Strawberry MinGW compiler not found at $strawberryBin"
+          }
+          $package = choco list strawberryperl --exact --limit-output
+          if ($package -notmatch '(?im)^strawberryperl\|5\.42\.0\.1$') {
+            throw "Expected Strawberry Perl 5.42.0.1, found: $package"
+          }
+          $compilerVersion = (& "$strawberryBin\g++.exe" -dumpfullversion -dumpversion).Trim()
+          if ($compilerVersion -ne '13.2.0') {
+            throw "Expected Strawberry GCC 13.2.0, found: $compilerVersion"
+          }
+          $package
+          & "$strawberryBin\g++.exe" --version
+          $strawberryBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build and inspect MinGW wheel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $expected = python -c 'import re; s=open("xhdfe/_version.py").read(); print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", s).group(1))'
+          if ($expected -ne $env:EXPECTED_VERSION) {
+            throw "Candidate version mismatch: expected $env:EXPECTED_VERSION, found $expected"
+          }
+          python -m pip install --upgrade pip setuptools wheel cmake numpy
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          $env:XHDFE_ENABLE_CUDA = 'OFF'
+          $env:CMAKE_ARGS = '-G "MinGW Makefiles" -DCMAKE_CXX_COMPILER=C:/Strawberry/c/bin/g++.exe -DXHDFE_ENABLE_MARCH_NATIVE=OFF'
+          python -m pip wheel . --no-build-isolation --no-deps --wheel-dir artifacts
+          $wheel = Get-ChildItem artifacts\xhdfe-*.whl
+          if ($wheel.Count -ne 1) { throw "Expected one Windows wheel, found $($wheel.Count)" }
+          python tools/validate_python_release_artifacts.py `
+            --wheel $wheel.FullName `
+            --expected-version $expected `
+            --mingw-objdump C:\Strawberry\c\bin\objdump.exe
+          $providerDir = New-Item -ItemType Directory -Force `
+            artifacts\windows-python-provider-runtimes
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($wheel.FullName)
+          try {
+            $manifestEntries = @($archive.Entries | Where-Object {
+              $_.FullName -match '(^|/)_windows_runtime_manifest\.json$'
+            })
+            if ($manifestEntries.Count -ne 1) {
+              throw "Expected one Windows runtime manifest in wheel, found $($manifestEntries.Count)"
+            }
+            $reader = New-Object System.IO.StreamReader($manifestEntries[0].Open())
+            try { $manifestText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            $manifest = $manifestText | ConvertFrom-Json
+            [System.IO.File]::WriteAllText(
+              (Join-Path $providerDir '_windows_runtime_manifest.json'),
+              $manifestText,
+              [System.Text.UTF8Encoding]::new($false)
+            )
+            foreach ($runtime in $manifest.runtimes) {
+              $source = [string]$runtime.source_path
+              if (-not (Test-Path $source -PathType Leaf)) {
+                throw "Runtime provider source disappeared after wheel build: $source"
+              }
+              $sourceHash = (Get-FileHash $source -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($sourceHash -ne [string]$runtime.source_sha256) {
+                throw "Runtime provider hash differs from the embedded manifest: $source"
+              }
+              $destination = Join-Path $providerDir ([string]$runtime.member)
+              Copy-Item -LiteralPath $source -Destination $destination
+              $destinationHash = (Get-FileHash $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($destinationHash -ne [string]$runtime.member_sha256) {
+                throw "Exported runtime provider bytes differ from packaged bytes: $destination"
+              }
+              Write-Host "WINDOWS_RUNTIME_PROVIDER $destinationHash $source"
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
+
+      - name: Import wheel without Strawberry on PATH
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $wheel = Get-ChildItem artifacts\xhdfe-*.whl
+          python -m venv $env:RUNNER_TEMP\xhdfe-wheel-smoke
+          $python = "$env:RUNNER_TEMP\xhdfe-wheel-smoke\Scripts\python.exe"
+          & $python -m pip install --upgrade pip
+          & $python -m pip install $wheel.FullName
+          $env:PATH = (($env:PATH -split ';') | Where-Object {
+            $_ -and $_.TrimEnd('\') -ine 'C:\Strawberry\c\bin'
+          }) -join ';'
+          $probeScript = (Resolve-Path tools\candidate_python_openmp_probe.py).Path
+          $probeEvidence = New-Item -ItemType Directory -Force `
+            artifacts\windows-python-openmp-evidence
+          $probeReceipt = Join-Path $probeEvidence.FullName 'RESULT.json'
+          $expectedPrefix = (Resolve-Path "$env:RUNNER_TEMP\xhdfe-wheel-smoke").Path
+          $forbidPrefix = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          Push-Location $env:RUNNER_TEMP
+          try {
+            $packageDir = & $python -c 'import importlib.util, pathlib; s=importlib.util.find_spec("xhdfe"); print(pathlib.Path(next(iter(s.submodule_search_locations))).resolve())'
+            Write-Host "Installed package directory: $packageDir"
+            Get-ChildItem $packageDir -File | Where-Object {
+              $_.Extension -in '.pyd', '.dll'
+            } | Sort-Object Name | Format-Table Name, Length
+            Get-ChildItem $packageDir -File | Where-Object {
+              $_.Extension -in '.pyd', '.dll'
+            } | Sort-Object Name | ForEach-Object {
+              $packagedHash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              Write-Host "PACKAGED_PE_SHA256 $packagedHash $($_.Length) $($_.Name)"
+              Write-Host "PE dependencies: $($_.Name)"
+              & C:\Strawberry\c\bin\objdump.exe -p $_.FullName |
+                Select-String 'DLL Name:'
+            }
+            & $python -c 'import pathlib, numpy as np, xhdfe; p=pathlib.Path(xhdfe.__file__).resolve().parent; print(f"xhdfe package: {p}", flush=True); print(f"DLL handles: {tuple(xhdfe._PACKAGED_DLL_DIRECTORY_HANDLES)}", flush=True); from xhdfe import HdfeRegressor; x=np.arange(30., dtype=float).reshape(-1,1); y=1.5+2*x[:,0]; m=HdfeRegressor(); m.fit(y,x); assert np.allclose(m.coef_, [2.,1.5]); print("WINDOWS_WHEEL_BASE_IMPORT_PASS")'
+            & $python -c 'import py_hdfe_v11 as legacy, xhdfe; assert legacy.HdfeRegressor is xhdfe.HdfeRegressor; print("WINDOWS_WHEEL_LEGACY_IMPORT_PASS")'
+            & $python $probeScript `
+              --expected-prefix $expectedPrefix `
+              --forbid-prefix $forbidPrefix `
+              --expected-version $env:EXPECTED_VERSION `
+              --out $probeReceipt
+            & $python -m pip install "$($wheel.FullName)[formula]"
+            & $python -m pip check
+            & $python -c 'import numpy as np, pandas as pd, xhdfe; rng=np.random.default_rng(240814); n=180; d=pd.DataFrame({"x":rng.normal(size=n),"g":rng.choice(["a","b","c"],n),"firm":rng.integers(0,18,n),"year":rng.integers(0,7,n)}); d["y"]=1+2*d["x"]+(d["g"]=="b")*.4+rng.normal(scale=.1,size=n); m=xhdfe.feols("y ~ C(g)*x | firm + year",data=d); assert m.converged_ and np.isfinite(m.coef_).all(); print("WINDOWS_WHEEL_FORMULA_PASS")'
+          }
+          finally {
+            Pop-Location
+          }
+
+      - name: Upload Windows Python wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugins-windows-python
+          path: |
+            artifacts/xhdfe-*.whl
+            artifacts/windows-python-provider-runtimes
+            artifacts/windows-python-openmp-evidence
+          if-no-files-found: error
+          retention-days: 7
+
+  # Existing reusable workflow retains per-slice SDK, runtime and native probes.
+  build-macos:
+    name: Build and validate macOS OpenMP
+    uses: ./.github/workflows/macos-openmp.yml
+    permissions:
+      contents: read
+
+  # New reusable workflow is integrated separately with its portable probe.
+  build-windows-native:
+    name: Build and validate native Windows OpenMP plugins
+    uses: ./.github/workflows/windows-native.yml
+    with:
+      expected_version: '2.27.0.20260914'
+    permissions:
+      contents: read

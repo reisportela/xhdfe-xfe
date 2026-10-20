@@ -30,7 +30,7 @@ export XHDFE_REPO_ROOT="${REPO_ROOT}"
 export XHDFE_STATA_TEST_DIR="${SCRIPT_DIR}"
 export XHDFE_STATA_ADOPATH="${XHDFE_STATA_ADOPATH:-${REPO_ROOT}/stata}"
 
-OUT_DIR="${SCRIPT_DIR}/output"
+OUT_DIR="${XHDFE_STATA_TEST_OUTPUT:-${SCRIPT_DIR}/output}"
 mkdir -p "${OUT_DIR}"
 
 (
@@ -118,11 +118,39 @@ fi
 
 (
   cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/saturated_statistics_contract.do" cpu
+)
+if ! grep -Fxq "SATURATED_STATISTICS_CONTRACT_PASS cpu" "${OUT_DIR}/saturated_statistics_contract.log"; then
+  tail -n 80 "${OUT_DIR}/saturated_statistics_contract.log" >&2
+  exit 1
+fi
+
+(
+  cd "${OUT_DIR}"
   "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/absorb_interaction_contract.do" cpu
 )
 if ! grep -Fxq "ABSORB_INTERACTION_CONTRACT_PASS cpu" "${OUT_DIR}/absorb_interaction_contract.log"; then
   echo "Stata categorical absorb interaction contract failed" >&2
   tail -n 80 "${OUT_DIR}/absorb_interaction_contract.log" >&2
+  exit 1
+fi
+
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/cluster_interaction_contract.do" cpu
+)
+if ! grep -Fxq "CLUSTER_INTERACTION_CONTRACT_PASS cpu" "${OUT_DIR}/cluster_interaction_contract.log"; then
+  echo "Stata categorical cluster/xfepout interaction contract failed" >&2
+  tail -n 80 "${OUT_DIR}/cluster_interaction_contract.log" >&2
+  exit 1
+fi
+
+(
+  cd "${OUT_DIR}"
+  "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/group_interaction_contract.do" cpu
+)
+if ! grep -Fxq "GROUP_INTERACTION_CONTRACT_PASS cpu" "${OUT_DIR}/group_interaction_contract.log"; then
+  tail -n 80 "${OUT_DIR}/group_interaction_contract.log" >&2
   exit 1
 fi
 
@@ -185,3 +213,30 @@ fi
 DK_OUTPUT="${OUT_DIR}/dk_iv_$(date -u +%Y%m%dT%H%M%SZ)_$$"
 python3 -B "${SCRIPT_DIR}/../analytic_precision/dkraay_iv_influence_contract.py" \
   --extended --backend cpu --package "${XHDFE_STATA_ADOPATH}" --output "${DK_OUTPUT}"
+
+cuda04_backends=(cpu)
+if [[ "${XHDFE_TEST_CUDA:-0}" == "1" ]]; then
+  cuda04_backends+=(cuda)
+fi
+for backend in "${cuda04_backends[@]}"; do
+  contract_dir="${OUT_DIR}/cuda04_${backend}"
+  mkdir -p "${contract_dir}"
+  (
+    cd "${contract_dir}"
+    "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/cuda_ordinary_weak_graph_contract.do" "${backend}"
+  )
+  if ! grep -Fxq "CUDA_ORDINARY_WEAK_GRAPH_PASS ${backend}" "${contract_dir}/cuda_ordinary_weak_graph_contract.log"; then
+    tail -n 60 "${contract_dir}/cuda_ordinary_weak_graph_contract.log" >&2
+    exit 1
+  fi
+done
+if [[ "${XHDFE_TEST_CUDA:-0}" == "1" ]]; then
+  (
+    cd "${OUT_DIR}"
+    "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/cg_cold_restart_floor.do"
+  )
+  if ! grep -Fxq "CG_COLD_FLOOR_PASS" "${OUT_DIR}/cg_cold_restart_floor.log"; then
+    tail -n 60 "${OUT_DIR}/cg_cold_restart_floor.log" >&2
+    exit 1
+  fi
+fi

@@ -7640,6 +7640,33 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     if (cg_breakdown) {
                         break;
                     }
+                    // Comparable/Strict also guard the actual final update.
+                    // Fast retains its published energy-based CG stopping
+                    // rule; imposing this extra norm changed that contract.
+                    bool candidate_lane = false;
+                    for (int k = 0; k < Sp; ++k) {
+                        if (!lane_solved[static_cast<std::size_t>(k)] &&
+                            std::sqrt(recent[k] / std::abs(next_improvement[k])) <= options.tol) {
+                            candidate_lane = true;
+                        }
+                    }
+                    if (candidate_lane &&
+                        options.tolerance_mode != ToleranceMode::XhdfeFast) {
+                        const Eigen::VectorXd direction_sq = packed_col_sumsq(u);
+                        for (int k = 0; k < Sp; ++k) {
+                            const double scale = std::abs(next_improvement[k]);
+                            if (!lane_solved[static_cast<std::size_t>(k)] && scale > 0.0 &&
+                                std::sqrt(recent[k] / scale) <= options.tol) {
+                                const double step = std::abs(alpha[k]) *
+                                    std::sqrt(direction_sq[k] / scale);
+                                if (!hdfe::detail::ieee_finite(step) || step > options.tol) {
+                                    cg_breakdown = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (cg_breakdown) break;
                     improvement = next_improvement;
 
                     packed_axpy_columns(cur, u, alpha);
@@ -8400,6 +8427,30 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 if (cg_breakdown) {
                     break;
                 }
+                bool candidate_lane = false;
+                for (Eigen::Index k = 0; k < ssr.size(); ++k) {
+                    if (!lane_solved[static_cast<std::size_t>(k)] &&
+                        std::sqrt(recent[k] / std::abs(next_improvement[k])) <= options.tol) {
+                        candidate_lane = true;
+                    }
+                }
+                if (candidate_lane &&
+                    options.tolerance_mode != ToleranceMode::XhdfeFast) {
+                    const Eigen::VectorXd direction_sq = col_sumsq(u_y, u_X);
+                    for (Eigen::Index k = 0; k < ssr.size(); ++k) {
+                        const double scale = std::abs(next_improvement[k]);
+                        if (!lane_solved[static_cast<std::size_t>(k)] && scale > 0.0 &&
+                            std::sqrt(recent[k] / scale) <= options.tol) {
+                            const double step = std::abs(alpha[k]) *
+                                std::sqrt(direction_sq[k] / scale);
+                            if (!hdfe::detail::ieee_finite(step) || step > options.tol) {
+                                cg_breakdown = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (cg_breakdown) break;
                 improvement = next_improvement;
 
                 result.y_tilde.noalias() -= alpha[0] * u_y;

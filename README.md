@@ -2,11 +2,15 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.29.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.30.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-[Version 2.29.1.20261014](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.29.1.20261014) corrects IV Driscoll–Kraay covariance and named fixed
-effects in first-stage regressions. See the
-[release notes and validation](docs/releases/RELEASE_NOTES_2.29.1.20261014.md).
+[Version 2.30.0.20261020](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.0.20261020)
+integrates Tiago Tavares's macOS OpenMP isolation and CG precision fixes,
+corrects bounded CPU/CUDA restarts and sparse two-effect CUDA absorption,
+and preserves the separate Fast stopping contract. It also fixes stored
+version reporting and extends categorical interaction syntax. See the
+[release notes and validation](docs/releases/RELEASE_NOTES_2.30.0.20261020.md)
+for the exact tests and platform coverage.
 
 ---
 
@@ -49,12 +53,14 @@ including the four CUDA Comparable cells that 2.28.1 refused. It records
 numerical checks, recovery coverage, performance comparisons and remaining
 CUDA limitations. Its timings and platform receipts identify the artifacts
 tested. The [2.29.1 validation record](docs/releases/VALIDATION_2.29.1.20261014.md)
-separately records the corrective release's tests and coverage.
+separately records the corrective release's tests and coverage, and the
+[2.30.0 validation record](docs/releases/VALIDATION_2.30.0.20261020.md) records
+the integrated fixes and the ready-only performance scope for this release.
 GPU execution alone does not certify every output.
 
 ## Features
 
-- **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus two-way categorical interactions.
+- **Multiway HDFE** — any number of absorbed fixed-effect dimensions, plus categorical interactions with two or more components (`a#b#c`).
 - **Dual Python API** — low-overhead arrays or an optional R-style formula frontend with categories and interactions.
 - **Publication tables** — fitted Python results plug directly into `maketables.ETable` without an adapter or runtime dependency.
 - **Heterogeneous (group-specific) slopes** — `fe#c.x` and `fe##c.x` designs.
@@ -483,7 +489,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.29.1.
+> effects regression via a C++ backend.* Version 2.30.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
