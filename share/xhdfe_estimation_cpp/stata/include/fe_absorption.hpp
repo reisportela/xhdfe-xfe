@@ -38,6 +38,25 @@ struct GroupIndividualStructure {
     std::vector<double> group_scale;
 };
 
+// Codes of AbsorptionResult::cuda_tail. With three ordinary fixed effects in
+// reghdfe-comparable mode, the CUDA path completes the projection after its
+// sweeps (the "tail"): on the device with LSMR, or, when a short device probe
+// predicts a long device solve and the CPU's own route selector would use
+// MLSMR on this fit, on the host with MLSMR. kCudaTailNone when no completion
+// ran (CPU fits, other routes, cache hits). The cold restart after a broken
+// CG stage (F2-B) is probed the same way: kCudaTailHostMlsmr when the host
+// MLSMR solved it from the original data; a restart kept on the device
+// reports kCudaTailNone, as in 2.30.1.
+constexpr int kCudaTailNone = 0;
+constexpr int kCudaTailDeviceLsmr = 1;
+constexpr int kCudaTailHostMlsmr = 2;
+
+inline const char* cuda_tail_name(int code) noexcept {
+    return code == kCudaTailDeviceLsmr ? "device-lsmr"
+         : code == kCudaTailHostMlsmr  ? "host-mlsmr"
+                                       : "none";
+}
+
 struct AbsorptionResult {
     std::shared_ptr<N1FeEvidence> n1_fe;
     Eigen::VectorXd y_tilde;
@@ -83,6 +102,15 @@ struct AbsorptionResult {
     int auto_routing_retry_iterations = 0;
     double auto_routing_retry_abs_residual_rel = 0.0;
     double auto_routing_retry_elapsed_seconds = 0.0;
+    // Early routing (options.early_routing): 0 none, 1 a sweep or a gated
+    // conjugate-gradient stage left at a checkpoint (predictive rule), 2 the
+    // hand-off to a conjugate-gradient stage was not made (structural rule).
+    // A left result is unconverged and is discarded: the regressor runs the
+    // retry's MLSMR instead.
+    int early_routing_left = 0;
+    double early_routing_prediction = 0.0;  // kappa*q*tol at the leave
+    double early_routing_kappa = 0.0;       // certificate / stop quantity
+    double early_routing_rate = 0.0;        // q, decay of the stop quantity per iteration
     bool precision_certified = true;
     bool schwarz_used = false;  // true when the Schwarz/approx-Cholesky PCG path ran (forced or auto-gated)
     bool mlsmr_used = false;    // true when the MLSMR absorber ran via the auto-gate promotion
@@ -95,6 +123,34 @@ struct AbsorptionResult {
     int cuda_accuracy_retry_trigger = 0;  // 0 none, 1 residual, 2 forward
     int cuda_accuracy_retry_stage = 0;    // 0 none, 1-3 warm, 4 cold
     int cuda_accuracy_retry_iterations = 0;
+    int cuda_tail = kCudaTailNone;  // how the three-FE Comparable CUDA completion ran
+    // F2-B ledger of a CUDA CG stage entered from the IT sweeps: the sweeps
+    // before the hand-off that `iterations` does not count (2.30.1
+    // accounting), why the sweeps handed off (1 divergence, 2 iteration cap),
+    // and the wall seconds of the sweeps and of the CG stage (trace only; no
+    // decision reads them). The cold restart that follows a broken CG stage
+    // charges these sweeps to the fit's budget and to `iterations`.
+    int cuda_cg_uncounted_it_iterations = 0;
+    int cuda_it_handoff_reason = 0;
+    double cuda_it_seconds = 0.0;
+    double cuda_cg_seconds = 0.0;
+    // P3-fix: cold restarts of a broken xhdfe-fast CUDA CG stage (0 none) and
+    // whether the device LSMR completed the fit after them (fe_absorption_cuda.cu,
+    // restart_fast_cg_after_breakdown). Diagnostics and the refusal message only.
+    int cuda_fast_cg_restarts = 0;
+    bool cuda_fast_lsmr_restart = false;
+    // P3-fix (C): set by the bounded xhdfe-fast CUDA repair (hdfe_regressor_v11.cpp)
+    // when its result converged and passed the public certificate but missed the
+    // repair acceptance target, which it holds (0.5*tol); 0 otherwise. The fit is
+    // refused as before; only the message changes.
+    double fast_repair_target = 0.0;
+    // P3-fix (3'), strict scope: a stage with the strict provenance restarted its
+    // broken CG stage with the device LSMR and the strict check, or met a second
+    // breakdown after the sequence had used that restart (fe_absorption_cuda.cu,
+    // restart_strict_after_breakdown). The dispatch carries it into a "not
+    // converged" result (fe_absorption.cpp); the regressor hands it to the fit's
+    // one strict repair as HdfeOptions::strict_lsmr_consumed.
+    bool cuda_strict_lsmr_restart = false;
 };
 
 struct HeterogeneousSlopeTerm {

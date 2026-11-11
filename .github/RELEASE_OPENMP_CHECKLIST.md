@@ -1,6 +1,18 @@
-# OpenMP release checklist — 2.30.1.20261020
+# OpenMP release checklist — 2.31.0.20261111
 
-## 2.30.1 release gates
+## 2.31.0 release gates
+
+The candidate adds the Windows Student-t correction (x87 precision guard), Stata
+`residuals()` from the fit's own state, and the weighted CPU MLSMR retry. Its
+cache generation is `0x2262484144c1`.
+
+- [x] Fresh local CPU/CUDA native builds with OpenMP and native CPU tuning, CUDA `sm_90`, both Stata plugins; the seven Student-t CTests pass (x87 53-bit guard included).
+- [x] Final local functional core: controls, compatibility CPU/CUDA and scoped analytic oracles pass; the analytic battery matches the base verdict for verdict (664 xhdfe passes, 223 expected unsupported). See the [2.31.0 validation](../docs/releases/VALIDATION_2.31.0.20261111.md).
+- [ ] Fresh version-tag CI artifacts, including the Windows plugin, and a real Windows host check of the Student-t correction.
+- [ ] Final licensed native Mac ARM and Intel Stata/MP host checks.
+- [ ] Publication, fresh public installation and byte readback.
+
+## 2.30.1 release gates (history)
 
 The candidate corrects the inherited three-effect CUDA covariance error and
 GPU repair accounting, with cooperative GPU reductions and cache generation

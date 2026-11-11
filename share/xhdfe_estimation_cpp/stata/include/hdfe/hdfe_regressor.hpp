@@ -3,12 +3,21 @@
 
 #include <Eigen/Dense>
 
+#include <functional>
 #include <vector>
 
 namespace hdfe {
 
 namespace detail {
 class ParallelWorkObserver;
+
+/** \brief Internal (F2-A): the CPU automatic route selector's answer for one fit. */
+struct AutoRouteAnswer {
+    bool mlsmr = false;    //!< The selector picks MLSMR (otherwise its sweep fallback).
+    double rho = 0.0;      //!< Its sampled per-sweep contraction (NaN when not probed).
+    double seconds = 0.0;  //!< Wall time of its one evaluation in this fit (trace only).
+    int evaluations = 0;   //!< Evaluations so far in this fit (at most one).
+};
 }
 
 /** \brief Supported covariance estimators for coefficient inference. */
@@ -44,6 +53,7 @@ enum class ToleranceMode { XhdfeFast, ReghdfeComparable, StrictResidual };
 struct HdfeOptions {
     StandardErrorType se_type = StandardErrorType::Robust; //!< Covariance estimator to use after estimation.
     double level = 95.0;                                   //!< Confidence level (percent) used for confidence intervals.
+    bool inference_quantiles = true;                       //!< Internal: false skips the Student-t critical value and p-values (conf_int and pvalues are NaN; t is still computed). Only the AKM/KSS control-partialling (FWL) fit sets it: its caller uses coefficients and the convergence, certificate and omission flags only. Every public fit keeps the default.
     bool fit_intercept = true;                             //!< Whether to append an intercept column to X automatically.
     double tol = 1e-8;                                     //!< Convergence tolerance for the fixed-effect absorber.
     ToleranceMode tolerance_mode = ToleranceMode::ReghdfeComparable; //!< Absorber stopping semantics.
@@ -74,14 +84,23 @@ struct HdfeOptions {
     bool capture_first_pair_component_stats = false;       //!< Retain first-pair mobility-component counts/shares during the existing DoF pass.
     bool retain_fixed_effects = false;                     //!< When true, recover and cache observation-level fixed effects.
     bool refine_stored_residuals = false;                  //!< When true, recompute stored residuals via a final absorption of y-Xb.
+    bool stored_residuals_fit_state = false;               //!< Internal (P7, 2.31.0): set only by the Stata plugin for residuals(), together with refine_stored_residuals, which keeps recording the request (the opt-in accuracy prototypes read it). The stored residuals are then the fit's own within residuals, the vector behind rss and the covariance, and the late re-absorption of y-Xb does not run. Other callers keep the meaning of refine_stored_residuals. Not user-facing.
     int savefe_fastpath_max_cols = 8;                      //!< Max X columns to enable savefe alpha accumulation during absorption.
     bool symmetric_sweep = false;                          //!< When true, apply a forward and backward sweep per iteration for faster convergence.
     AbsorptionMethod absorption_method = AbsorptionMethod::Auto; //!< Absorption strategy selector (auto picks based on FE count and threads).
     bool from_auto = false;                                //!< Internal: set by the regressor when absorption_method was left Auto, so the adaptive Schwarz gate can fire after Auto is resolved to a concrete MAP method. Not user-facing.
+    bool auto_intent = false;                              //!< Internal: provenance only, the public absorption_method is Auto. Set once by the regressor from the original request and never changed during the fit; unlike from_auto (which route selectors clear, and which on CUDA keeps its two-FE Comparable meaning) it never enables a route by itself. Not user-facing.
+    bool fast_intent = false;                              //!< Internal (P3-fix): provenance only, the public request is tolerance_mode xhdfe-fast without saved fixed effects. Set once by the regressor from the original request and never changed during the fit, so an internal conversion (strict-residual repaired natively as xhdfe-fast, the savefe projection continuation) keeps it false; the CUDA xhdfe-fast restart of a broken CG stage applies only when it is true. Not user-facing.
+    bool comparable_intent = false;                        //!< Internal (P8): provenance only, the public request is tolerance_mode reghdfe-comparable. Set once by the regressor from the original request and never changed during the fit, so an internal conversion to Comparable (the weighted native repairs, configure_native_cuda_repair) keeps it false; the weighted CPU retry and the weighted CUDA three-FE completion apply only when it is true. Not user-facing.
+    bool strict_provenance = false;                        //!< Internal (P3-fix (3'), strict scope): provenance only, set by the regressor on the native CUDA attempt of a strict-residual fit (after configure_native_cuda_repair), on the CUDA primary of a strict-residual fit outside that branch (an explicit criterion or method), and on the strict repair of either, and nowhere else. A broken CUDA CG stage of such a stage, outside the Comparable rule, restarts cold with the device LSMR and the strict check (fe_absorption_cuda.cu, restart_strict_after_breakdown) unless strict_lsmr_consumed, never with the 2.30.1 cold MAP. It changes nothing else. Not user-facing.
+    bool strict_lsmr_consumed = false;                     //!< Internal (P3-fix (3'), strict scope): state, not provenance: the strict recovery sequence of this fit already used its one device LSMR restart (the native attempt's result reported cuda_strict_lsmr_restart); set by the regressor on the strict repair's options. A broken CG stage of that repair then ends the fit with an honest refusal. Not user-facing.
+    const std::function<detail::AutoRouteAnswer()>* cuda_tail_route = nullptr; //!< Internal (F2-A): the CPU automatic route selector of this fit, owned by the regressor for the duration of the fit and given only to the primary absorption; the CUDA three-FE Comparable completion consults it after it predicts a long tail. Not user-facing.
     double jacobi_relaxation = 0.0;                         //!< Optional relaxation factor for Jacobi (<=0 uses default 2/(J+1)).
     bool use_krylov = false;                               //!< When true, use Krylov-PCG partialling-out (v7+ only).
     bool ordinary_krylov_parity_floor = false;             //!< Internal caller contract: enable the ordinary no-slope LSMR/MLSMR parity floor.
     bool ordinary_auto_routing_retry = true;               //!< Default-on bounded CPU Auto sweep-to-MLSMR retry policy; env kill switch may disable.
+    bool ordinary_auto_early_routing = true;               //!< Default-on early routing on the retry's eligible route: the primary leaves its sweep or gated conjugate-gradient stage for the retry's MLSMR when it is predicted to end above the retry trigger, and does not hand off to a conjugate-gradient stage (status 4); env kill switch XHDFE_AUTO_EARLY_ROUTING=0.
+    bool early_routing = false;                            //!< Internal: set by the regressor on the eligible primary solve only, so that the absorber may leave early. Not user-facing.
     double krylov_lambda = 1e-6;                           //!< Ridge regularization for Krylov-PCG (v7+ only).
     int krylov_probe_iters = 0;                            //!< Internal: when >0, the Jacobi-PCG absorber caps the leading (y) solve at this many iterations and returns converged=false if it does not converge, so the adaptive Schwarz gate can fall back to the approx-Cholesky path on graphs where matrix-free PCG stalls. 0 = solve fully (no probe). Not user-facing.
     bool use_sparse_solver = false;                        //!< When true, attempt sparse direct/PCG absorption before MAP.
@@ -172,7 +191,7 @@ struct HdfeResults {
     bool auto_routing_retry_policy_enabled = false; //!< Default-on bounded Auto retry policy state.
     bool auto_routing_retry_eligible = false; //!< Whether all bounded retry eligibility gates passed.
     bool auto_routing_retry_fired = false; //!< Whether the one cold MLSMR retry ran.
-    int auto_routing_retry_status = 0; //!< 0 ineligible/disabled, 1 below trigger, 2 retry returned, 3 retry failed/primary returned.
+    int auto_routing_retry_status = 0; //!< 0 ineligible/disabled, 1 below trigger, 2 retry returned, 3 retry failed/primary returned, 4 primary left early and the retry returned.
     int auto_routing_retry_primary_method = -1; //!< Concrete primary AbsorptionMethod code.
     int auto_routing_retry_primary_iterations = 0; //!< Iterations used by the primary sweep.
     double auto_routing_retry_primary_abs_residual_rel = 0.0; //!< Existing primary canonical certificate metric.

@@ -45,15 +45,27 @@ int main() {
     const std::string akm = refused(options, result);
     check(has(akm, "heterogeneous-slope acceptance criteria not met"), "AKM2 acceptance reason");
     check(!has(akm, "did not converge"), "AKM2 does not mislabel the last solve");
-    check(has(akm, "slope block residual=3.683494e-08"), "AKM2 measured block");
-    check(has(akm, "block certificate limit=8.000000e-08"), "AKM2 certificate limit");
-    check(has(akm, "continuation target=1.000000e-08"), "AKM2 continuation target");
+    // xhdfe-fast reports the aggregate limit and performs no block check (55d46dd9, "Restore
+    // fast-mode performance for heterogeneous slopes"); revised 9 nov 2026 (P3-fix harness receipt).
+    check(has(akm, "aggregate certificate limit=8.000000e-08"), "AKM2 Fast aggregate limit");
+    check(has(akm, "slope block check=not performed"), "AKM2 Fast block check not performed");
+    check(!has(akm, "slope block residual="), "AKM2 Fast reports no block residual");
     check(has(akm, "continuation stages=4"), "AKM2 stage count");
     check(has(akm, "last internal tolerance=1.000000e-15"), "AKM2 internal tolerance");
     check(has(akm, "iteration budget remaining"), "AKM2 sequence exhaustion");
     check(!has(akm, "increase max_iter"), "AKM2 no false iteration-limit advice");
     check(has(akm, "No estimates returned."), "AKM2 remains refused");
     std::cout << "AKM2_MESSAGE " << akm << '\n';
+    // The measured block of the same state outside xhdfe-fast: strict-residual keeps the public
+    // tolerance as its effective tolerance (block limit 8e-8, continuation target 1e-8).
+    options.tolerance_mode = hdfe::ToleranceMode::StrictResidual;
+    const std::string akm_strict = refused(options, result);
+    check(has(akm_strict, "heterogeneous-slope acceptance criteria not met"), "AKM2 strict acceptance reason");
+    check(has(akm_strict, "slope block residual=3.683494e-08"), "AKM2 measured block");
+    check(has(akm_strict, "block certificate limit=8.000000e-08"), "AKM2 certificate limit");
+    check(has(akm_strict, "continuation target=1.000000e-08"), "AKM2 continuation target");
+    std::cout << "AKM2_STRICT_MESSAGE " << akm_strict << '\n';
+    options.tolerance_mode = hdfe::ToleranceMode::XhdfeFast;
 
     for (const auto mode : {hdfe::ToleranceMode::XhdfeFast,
                             hdfe::ToleranceMode::ReghdfeComparable}) {

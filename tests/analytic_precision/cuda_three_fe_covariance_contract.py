@@ -146,6 +146,7 @@ def main():
                     and bool(reg.gpu_used_) == (args.backend == 'cuda'))
                 row.update(difference, iterations=int(reg.num_iterations_),
                     threads_used=int(reg.threads_used_), gpu_used=bool(reg.gpu_used_),
+                    cuda_tail=str(getattr(reg, 'cuda_tail_', 'n/a')),
                     status='PASS' if ok else 'FAIL')
             rows.append(row)
             print(json.dumps(row), flush=True)

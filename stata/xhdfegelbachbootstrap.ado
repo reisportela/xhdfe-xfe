@@ -1,4 +1,4 @@
-*! version 1.0.1  20oct2026
+*! version 1.0.2  11nov2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve
@@ -165,6 +165,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     local point_gpu_used = r(gpu_used)
     local point_gpu_backend "`r(gpu_backend)'"
     local point_gpu_status "`r(gpu_status)'"
+    local point_cuda_tail "`r(cuda_tail)'"
     local p = colsof(`POINTB')
     local k1 = rowsof(`POINTD')
     local G = colsof(`POINTD')
@@ -419,6 +420,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return local point_vce "`point_vce'"
     return local point_gpu_backend "`point_gpu_backend'"
     return local point_gpu_status "`point_gpu_status'"
+    return local point_cuda_tail "`point_cuda_tail'"
     return local replicate_vce "unadjusted_point_functional_only"
     return local identity_status "`identity_status'"
     return local groups "`groups'"

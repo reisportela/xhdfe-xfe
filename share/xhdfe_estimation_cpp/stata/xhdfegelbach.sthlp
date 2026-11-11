@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.6.1  20oct2026}{...}
+{* *! version 1.6.2  11nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
@@ -12,8 +12,8 @@
 {p2colreset}{...}
 
 {pstd}
-{bf:Version 1.6.1 (20oct2026), distributed with shared package}
-{bf:2.30.1.20261020.} The shared package includes common HDFE, selectable connectivity
+{bf:Version 1.6.2 (11nov2026), distributed with shared package}
+{bf:2.31.0.20261111.} The shared package includes common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 
@@ -717,6 +717,8 @@ for Stata's identifier limit{p_end}
 {synopt:{cmd:r(gpu_attempted)}}1 if GPU absorption was attempted{p_end}
 {synopt:{cmd:r(gpu_absorption_converged)}}1 if attempted GPU absorption converged{p_end}
 {synopt:{cmd:r(gpu_absorption_iterations)}}iterations of attempted GPU absorption{p_end}
+{synopt:{cmd:r(cuda_tail_code)}}three-FE Comparable CUDA completion of the full-model fit: 0 none, 1 GPU LSMR,
+2 CPU MLSMR after the GPU sweeps (see {help xhdfe}){p_end}
 
 {p2col 5 20 24 2: Macros}{p_end}
 {synopt:{cmd:r(vce)}}the variance estimator used{p_end}
@@ -760,6 +762,7 @@ or {cmd:not_certified_with_common_fes}{p_end}
 {synopt:{cmd:r(gpu_backend)}}effective backend, {cmd:cuda} or {cmd:cpu}{p_end}
 {synopt:{cmd:r(gpu_status)}}{cmd:not_requested}, {cmd:used}, {cmd:unavailable},
 {cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, or {cmd:not_applicable}{p_end}
+{synopt:{cmd:r(cuda_tail)}}label of {cmd:r(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
 {synopt:{cmd:r(regular_inference_status)}}group-major status words, X1 rows then intercept within each observed block{p_end}
 {synopt:{cmd:r(regular_inference_status_order)}}ordering description for the status words{p_end}
 {synopt:{cmd:r(regular_inference_codebook)}}mapping from numeric status codes to status words{p_end}

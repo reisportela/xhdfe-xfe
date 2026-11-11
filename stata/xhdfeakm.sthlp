@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.8.1  20oct2026}{...}
+{* *! version 1.8.2  11nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -185,6 +185,16 @@ F statistic, the curvature-adjusted point estimate {it:theta_1}, the AM
 confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
 sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
+
+{pstd}{bf:Known limitation (version 1.8.2; public issue #18).} Under {cmd:leaveoutlevel(match)},
+KSS-corrected variance components depend on outcome shifts when matches have unequal length: adding a
+constant to {depvar} changes them. The standard errors and confidence intervals of {opt se} and {opt ci}
+also depend on the outcome level, under both {cmd:obs} and {cmd:match}. A correction is planned for the
+next version.{p_end}
+
+{pstd}{bf:Version 1.8.2.} With {opt controls()}, the internal control-partialling fit no longer evaluates
+Student-t quantiles, which it never reported. On Windows this removes spurious {cmd:r(198)} refusals
+("Student-t root is not bracketed"); the estimates are unchanged.{p_end}
 
 {pstd}Bias-corrected variance components can be negative and are not clipped.
 The reported worker-firm correlation is missing unless both component variances are finite and strictly positive.

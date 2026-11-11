@@ -3,7 +3,7 @@
 # This file intentionally contains NO functional code. Every topic is
 # documented through the `NULL` + `@name` pattern so that the generated
 # man/*.Rd pages mirror, section for section, the Stata help file
-# stata/xhdfe.sthlp (version 2.30.1). The NAMESPACE is maintained by hand;
+# stata/xhdfe.sthlp (version 2.31.0). The NAMESPACE is maintained by hand;
 # no @export tags appear here.
 
 # ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@
 #'
 #' The \pkg{xhdfe} package estimates linear models with multiple
 #' high-dimensional fixed effects through a compiled C++ backend -- the very
-#' same estimator core (version 2.30.1) behind the Stata \code{xhdfe} command
+#' same estimator core (version 2.31.0) behind the Stata \code{xhdfe} command
 #' and the Python \code{xhdfe} package. CPU behavior is the reference
 #' implementation; the optional CUDA GPU absorber is tested against it on the
 #' explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
@@ -109,7 +109,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.30.1.
+#' effects regression via a C++ backend." Version 2.31.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -221,7 +221,7 @@ NULL
 #'       dof = NULL, ssc = NULL, stats_style = "reghdfe",
 #'       level = 95,
 #'       threads = 0, default_threads = 0, max_threads = 0,
-#'       min_parallel_rows = 20000, target_rows_per_thread = 500000,
+#'       min_parallel_rows = 20000, target_rows_per_thread = 0,
 #'       backend = c("default", "cpu", "cuda", "metal"),
 #'       na.action = c("omit", "fail"))
 #'
@@ -595,9 +595,25 @@ NULL
 #' @param min_parallel_rows minimum number of rows before parallel
 #'   absorption is enabled; default \code{20000} (Stata
 #'   \code{minparallelrows()}).
-#' @param target_rows_per_thread heuristic target of rows per thread used to
-#'   size the thread pool; default \code{500000} (Stata
-#'   \code{targetrowsperthread()}).
+#' @param target_rows_per_thread rows per thread used to size the thread pool
+#'   under automatic threading (Stata \code{targetrowsperthread()}). The
+#'   default \code{0} is automatic: one thread per 25,000 rows when fixed
+#'   effects are absorbed with \code{save_fe = FALSE}, within the problem-size
+#'   cap (one thread below 100,000 rows, at most 8 below 250,000 and at most 16
+#'   otherwise), and one thread per 500,000 rows with \code{save_fe = TRUE} or
+#'   without fixed effects. A positive value applies that fixed number of rows
+#'   per thread on every path; \code{500000} restores the automatic rule of
+#'   version 2.30.1. Setting \code{XHDFE_AUTO_ROWS_PER_THREAD} to a positive
+#'   integer before the first fit replaces the 25,000 for the session. On Linux
+#'   and macOS the automatic teams of one user's simultaneous fits share the
+#'   machine: such a fit takes the smallest of its automatic team, the logical
+#'   processors divided by the number of fits running and the processors not
+#'   taken by the other fits' absorptions, never fewer threads than
+#'   \code{target_rows_per_thread = 500000} would give. A positive
+#'   \code{threads} is never reduced. A lowered team reports
+#'   \code{thread_limit_code} 6 and \code{thread_limit_reason}
+#'   \code{"auto_team_coordination"}. \code{XHDFE_AUTO_TEAM_COORDINATION=0}
+#'   before the first fit turns this off.
 #' @param backend the compute backend: \code{"default"} (follow the
 #'   \code{XHDFE_GPU_BACKEND} environment variable if set, otherwise CPU),
 #'   \code{"cpu"} (force the CPU path), \code{"cuda"} (request the CUDA GPU
@@ -755,7 +771,24 @@ NULL
 #' documents the accepted runtime cost relative to 2.29.1. Fast retains its
 #' separate approximation contract.
 #'
-#' Known limitations (2.30.1). A fit that converges by the solver's rule but
+#' Known limitations (2.31.0). Weighted ordinary three-fixed-effect fits on
+#' CUDA in \code{reghdfe-comparable} keep the 2.30.1 sweep exit, outside the
+#' comparable contract against reghdfe at tolerance 1e-12 (coefficients up to
+#' 4.4e-7 and standard errors up to 2.3e-5 relative on a public fixture); use
+#' the CPU backend, where weighted fits are corrected in this release.
+#' \code{retain_fes = TRUE} in \code{reghdfe-comparable} uses the
+#' effect-capturing sweep, whose exit can leave coefficients and standard
+#' errors outside that contract. CUDA \code{strict-residual} with the
+#' automatic method and criterion and no weights may pass the relative
+#' certificate without the final strict check (public fixture: coefficients
+#' 1.5e-7 and standard errors 1.7e-4 relative); inherited, present in 2.28.1.
+#' On CUDA, residuals have the accuracy of the CUDA fit. On Windows,
+#' near-perfect additive-cell fixtures returned exact coefficients and
+#' certified fits with relative covariance errors of 2.65e-9, 1.74e-4 and
+#' 1.82e+2 at relative residual noise of 2^-12, 2^-20 and 2^-30 (2.2e-16 on
+#' Linux): the exact additive-cell projection needs extended precision, which
+#' Windows hosts run at 53 bits.
+#' A fit that converges by the solver's rule but
 #' does not pass the precision certificate returns no estimates in R, Python
 #' and Stata alike. Ill-conditioned specifications can still require a refusal.
 #' In \code{reghdfe-comparable}, heterogeneous slopes under an explicit
@@ -888,6 +921,22 @@ NULL
 #' contributions. It is finite and internally consistent, but remains
 #' normalization-dependent and must not be interpreted as a structural IV
 #' parameter.
+#'
+#' With absorbed fixed effects the \code{"(Intercept)"} is the constant
+#' recovered by the FE normalisation, \eqn{\bar y-\bar x^\prime\hat\beta}.
+#' When a one-way cluster nests an absorbed intercept dimension (every
+#' cluster is a union of its levels; \code{fe[x]} keeps the levels,
+#' \code{fe[[x]]} has none), the cluster sums of the residuals are exactly
+#' zero and the intercept's row and column of the covariance matrix are
+#' exactly \eqn{\bar x^\prime V\bar x} and \eqn{-V\bar x}, with \eqn{V} the
+#' slope block; this applies on every absorption route and backend, but not
+#' with \code{tolerance_mode = "xhdfe-fast"} or instruments. That variance is
+#' zero when \eqn{\bar x = 0} or there are no regressors: the intercept's
+#' standard error is then zero and its t statistic, p-value and confidence
+#' interval are missing. This does not mean a structural parameter known
+#' without uncertainty; the constant is a normalisation of the absorbed
+#' effects. Saturated designs and fewer than two clusters keep their
+#' missing-inference convention.
 #'
 #' @section Environment variables:
 #' The C++ core reads the following runtime knobs:
@@ -1151,6 +1200,17 @@ NULL
 #'     count of the attempted GPU absorption; missing if not attempted
 #'     (\code{e(gpu_absorption_converged)},
 #'     \code{e(gpu_absorption_iterations)}).}
+#'   \item{\code{cuda_tail_code}, \code{cuda_tail}}{how the CUDA path
+#'     completed the projection of an unweighted Comparable fit with three
+#'     fixed effects: 0 \code{"none"} (no completion ran, or the restart
+#'     after a conjugate-gradient stage stayed on the GPU, as in 2.30.1), 1
+#'     \code{"device-lsmr"} (on the GPU), 2 \code{"host-mlsmr"} (on the CPU
+#'     with MLSMR, after the GPU sweeps, or from the original data when a
+#'     conjugate-gradient stage stopped without converging; \code{gpu_used}
+#'     stays 1; \code{iterations} then counts every GPU and CPU iteration
+#'     within one \code{maxiter} budget; a conjugate-gradient stage that
+#'     converges counts only its own iterations, on the CPU and the GPU)
+#'     (\code{e(cuda_tail_code)}, \code{e(cuda_tail)}).}
 #'   \item{\code{backend_requested}}{the \code{backend} argument value
 #'     (cf. \code{e(gpu_backend_requested)}).}
 #' }
@@ -1224,7 +1284,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.30.1.
+#' effects regression via a C++ backend." Version 2.31.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way
@@ -1389,7 +1449,7 @@ NULL
 #'           dof = NULL, ssc = NULL, stats_style = "reghdfe",
 #'           level = 95,
 #'           threads = 0, default_threads = 0, max_threads = 0,
-#'           min_parallel_rows = 20000, target_rows_per_thread = 500000,
+#'           min_parallel_rows = 20000, target_rows_per_thread = 0,
 #'           backend = c("default", "cpu", "cuda", "metal"))
 #'
 #' @param y numeric outcome vector (no \code{NA}s).

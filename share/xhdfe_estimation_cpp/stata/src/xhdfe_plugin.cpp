@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <cctype>
@@ -262,6 +263,20 @@ void plugin_cpu_profile_log_elapsed(
     const std::string& label,
     const std::chrono::steady_clock::time_point& start) {
     plugin_cpu_profile_log_elapsed(label.c_str(), start);
+}
+
+// P7 (2.31.0): residuals() stores the fit's own within residuals, the state behind e(b), e(V) and e(rss)
+// (the vector Python returns as residuals_ and R as residuals). Up to 2.30.1 the core re-absorbed y - Xb
+// with the fit's tuned options and method (HdfeOptions::refine_stored_residuals): on CUDA that vector was
+// less exact than the fit's own state (Fast and strict, MAP), and from 2.30.1 a Krylov fit sent it to the
+// host LSMR (ready, Comparable CUDA: about two minutes). refine_stored_residuals still records the request,
+// so every gate that reads it keeps its eligibility; stored_residuals_fit_state skips only the late
+// re-absorption. Lean 2.31.0: a strict-residual fit keeps that re-absorption, as up to 2.30.1 (its CUDA
+// acceptance is corrected first, P6). XHDFE_STATA_LEGACY_RESIDUAL_REFINE=1, read at every fit, restores
+// that re-absorption, and only it, for A/B and regression tests.
+bool legacy_stored_residual_refinement() {
+    const char* raw = std::getenv("XHDFE_STATA_LEGACY_RESIDUAL_REFINE");
+    return raw != nullptr && std::strcmp(raw, "1") == 0;
 }
 
 bool approx_equal(double a, double b) {
@@ -730,14 +745,20 @@ void maybe_save_thread_diagnostics(
     const std::optional<std::string>& s_thread_capacity,
     const std::optional<std::string>& s_openmp_enabled,
     const std::optional<std::string>& s_thread_limit_code,
-    const HdfeRegressorV11& reg) {
-    maybe_save_scalar(s_threads_used, static_cast<double>(reg.threads_used()));
+    const HdfeRegressorV11& reg,
+    int read_threads_used,
+    int read_workers_active) {
+    // The parallel input read is xhdfe parallel work as well: report the
+    // largest team and the most active workers seen in the read or the fit.
+    maybe_save_scalar(s_threads_used,
+                      static_cast<double>(std::max(reg.threads_used(), read_threads_used)));
     maybe_save_scalar(s_threads_requested,
                       static_cast<double>(reg.threads_requested()));
     maybe_save_scalar(s_threads_effective,
                       static_cast<double>(reg.threads_effective()));
     maybe_save_scalar(s_parallel_workers_active,
-                      static_cast<double>(reg.parallel_workers_active()));
+                      static_cast<double>(std::max(reg.parallel_workers_active(),
+                                                   read_workers_active)));
     maybe_save_scalar(s_thread_capacity,
                       static_cast<double>(reg.thread_capacity()));
     maybe_save_scalar(s_openmp_enabled, reg.openmp_enabled() ? 1.0 : 0.0);
@@ -990,6 +1011,651 @@ ObservationMap selected_observations() {
         out.obs.shrink_to_fit();
     }
     return out;
+}
+
+constexpr double kMaxExactIntegerId = 9007199254740992.0;  // 2^53
+
+bool exact_int32_id(double value, int& out) {
+    if (value < static_cast<double>(std::numeric_limits<int>::min()) ||
+        value > static_cast<double>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+    const int candidate = static_cast<int>(value);
+    if (static_cast<double>(candidate) != value) {
+        return false;
+    }
+    out = candidate;
+    return true;
+}
+
+// --- Fused input read -------------------------------------------------------
+// Stata stores a dataset observation by observation. Reading one variable at a
+// time walks the whole dataset once per variable; reading every variable of an
+// observation before moving to the next walks it once. The accessor, the value
+// checks and the destinations are those of the column readers in stata_call;
+// only the order of the SF_vdata calls differs, so the inputs are identical.
+//
+// The pass never reports an error. On any anomaly (failed read, missing or
+// non-finite value, invalid individual identifier) it returns false and the
+// column readers run unchanged, so every message and the order in which
+// problems are reported stay as they were. An identifier column holding a
+// value outside exact int32 is left to its column reader, which owns the dense
+// coding and its temporary storage. XHDFE_FUSED_READ=0 disables the pass.
+bool fused_read_enabled() {
+    static int cached = -1;
+    if (cached >= 0) {
+        return cached == 1;
+    }
+    const char* raw = std::getenv("XHDFE_FUSED_READ");
+    cached = (raw && raw[0] == '0' && raw[1] == '\0') ? 0 : 1;
+    return cached == 1;
+}
+
+struct FusedDoubleColumn {
+    int var_idx;
+    double* dest;
+};
+
+struct FusedIdColumn {
+    int var_idx;
+    int* dest;
+    bool validate_individual;
+    bool exact_int32;
+};
+
+bool read_columns_fused(const ObservationMap& obs,
+                        const std::vector<FusedDoubleColumn>& doubles,
+                        std::vector<FusedIdColumn>& ids) {
+    const ST_double missval = SV_missval;
+    const int n = obs.n;
+    for (int i = 0; i < n; ++i) {
+        const int obs_no = obs.obs_no(i);
+        for (const FusedDoubleColumn& column : doubles) {
+            ST_double z = 0.0;
+            if (SF_vdata(column.var_idx, obs_no, &z) || !std::isfinite(z) || !(z < missval)) {
+                return false;
+            }
+            column.dest[i] = z;
+        }
+        for (FusedIdColumn& column : ids) {
+            if (!column.exact_int32) {
+                continue;
+            }
+            ST_double z = 0.0;
+            if (SF_vdata(column.var_idx, obs_no, &z) || !std::isfinite(z) || !(z < missval)) {
+                return false;
+            }
+            if (column.validate_individual &&
+                (z < 0.0 || std::trunc(z) != z || z > kMaxExactIntegerId)) {
+                return false;
+            }
+            int id = 0;
+            if (!exact_int32_id(z, id)) {
+                column.exact_int32 = false;
+                continue;
+            }
+            column.dest[i] = id;
+        }
+    }
+    return true;
+}
+
+// --- Parallel input read ----------------------------------------------------
+// The sample selection and the fused pass, split into row blocks that several
+// threads read at once. StataCorp does not document that the plugin interface
+// may be called from several threads, so this path runs only on a host where
+// it was qualified empirically (parallel_read_host_qualified) or when
+// XHDFE_PARALLEL_READ=1 forces it, which exists for qualification runs only;
+// XHDFE_PARALLEL_READ=0 keeps the serial readers everywhere. Each switch below
+// is read once per process.
+//
+// Inside a parallel region the only interface function any thread calls is the
+// checked accessor SF_vdata: no display, no error, no macro or scalar access.
+// A thread that meets a bad value records it and stops. The decision is taken
+// after the region, on the calling thread: a failed selection is redone with
+// SF_ifobs, and a failed read is discarded and redone by read_columns_fused,
+// which in turn falls back to the column readers, so every message and the
+// order of the messages stay those of the serial path.
+constexpr int kParallelReadBlockRows = 16384;
+constexpr int kParallelReadAutoMaxThreads = 16;
+// A pass that reads fewer values than this (rows times variables) stays
+// serial: the whole read then costs under 20 ms. XHDFE_PARALLEL_READ_MIN_VALUES
+// replaces it; it is a test hook that lets the contract exercise the parallel
+// reader on small data.
+constexpr long long kParallelReadMinValues = 2000000;
+
+// -1 when unset or neither 0 nor 1 (the host table decides), 0 off, 1 forced.
+int parallel_read_switch() {
+    static int cached = -2;
+    if (cached != -2) {
+        return cached;
+    }
+    const char* raw = std::getenv("XHDFE_PARALLEL_READ");
+    cached = -1;
+    if (raw && (raw[0] == '0' || raw[0] == '1') && raw[1] == '\0') {
+        cached = raw[0] - '0';
+    }
+    return cached;
+}
+
+long long parallel_read_min_values() {
+    static long long cached = -1;
+    if (cached >= 0) {
+        return cached;
+    }
+    cached = kParallelReadMinValues;
+    const char* raw = std::getenv("XHDFE_PARALLEL_READ_MIN_VALUES");
+    if (raw && *raw != '\0') {
+        char* end = nullptr;
+        errno = 0;
+        const long long value = std::strtoll(raw, &end, 10);
+        if (errno == 0 && *end == '\0' && value >= 0) {
+            cached = value;
+        }
+    }
+    return cached;
+}
+
+// 1 (default): the calling thread touches every destination page before the
+// parallel pass, so the pages sit where the serial reader places them. 0: the
+// workers touch them first. Internal switch for the end-to-end comparison of
+// the two policies.
+bool parallel_read_pretouch() {
+    static int cached = -1;
+    if (cached >= 0) {
+        return cached == 1;
+    }
+    const char* raw = std::getenv("XHDFE_PARALLEL_READ_PRETOUCH");
+    cached = (raw && raw[0] == '0' && raw[1] == '\0') ? 0 : 1;
+    return cached == 1;
+}
+
+// Hosts on which concurrent SF_vdata calls were qualified: every byte equal to
+// the serial read in every comparison of prototypes/stata_read_direct. The
+// table has one entry, the only one testable here: Linux x86-64, Stata 19 MP.
+// The platform is the plugin's compile target; the rest are facts the ado
+// passes from c(os), c(machine_type), c(edition_real) and c(stata_version)
+// (19 and its point releases, StataNow 19.5 included). Anything missing or
+// different keeps the serial readers.
+bool parallel_read_host_qualified(const ParsedArgs& args) {
+#if defined(__linux__) && defined(__x86_64__)
+    const std::optional<std::string> os = args.get_optional("host_os");
+    const std::optional<std::string> machine = args.get_optional("host_machine");
+    const std::optional<std::string> edition = args.get_optional("host_edition");
+    const std::optional<std::string> version = args.get_optional("host_stata_version");
+    if (!os || !machine || !edition || !version) {
+        return false;
+    }
+    const bool stata19 = *version == "19" || version->rfind("19.", 0) == 0;
+    return *os == "Unix" && *machine == "PC (64-bit x86-64)" && *edition == "MP" && stata19;
+#else
+    (void)args;
+    return false;
+#endif
+}
+
+// Variables the fused pass reads: y, the regressors, each absorb() variable
+// that is not a repeat of an earlier one (fe_dup_map), the slope variables, the
+// weight, each cluster variable that is not one of the fixed effects
+// (cluster_fe_map) and the instruments. A map that cannot be read counts every
+// variable; the fused pass then does not run, and the stages report the map.
+long long fused_read_variable_count(const ParsedArgs& args, int p, int nfe, int nslope,
+                                    int nclust, bool has_weight, int ninst) {
+    long long fe_read = nfe;
+    long long cluster_read = nclust;
+    try {
+        const std::optional<std::string> dup_arg = args.get_optional("fe_dup_map");
+        if (dup_arg && !dup_arg->empty()) {
+            const std::vector<int> dup_map = parse_csv_ints_ordered(*dup_arg, "fe_dup_map");
+            if (static_cast<int>(dup_map.size()) == nfe) {
+                fe_read = std::count_if(dup_map.begin(), dup_map.end(),
+                                        [](int dup) { return dup < 0; });
+            }
+        }
+        const std::optional<std::string> cluster_arg = args.get_optional("cluster_fe_map");
+        if (nclust > 0 && cluster_arg && !cluster_arg->empty()) {
+            const std::vector<int> cluster_map =
+                parse_csv_ints_ordered(*cluster_arg, "cluster_fe_map");
+            if (static_cast<int>(cluster_map.size()) == nclust) {
+                cluster_read = std::count_if(cluster_map.begin(), cluster_map.end(),
+                                             [](int mapped) { return mapped < 0; });
+            }
+        }
+    } catch (const std::exception&) {
+        fe_read = nfe;
+        cluster_read = nclust;
+    }
+    return 1LL + p + fe_read + nslope + (has_weight ? 1 : 0) + cluster_read + ninst;
+}
+
+// What one stata_call decides about the parallel read, then what happened.
+struct ParallelReadPlan {
+    bool allowed = false;  // every condition except the size and team of a pass
+    const char* reason = "";
+    int marker_var = 0;
+    int requested_threads = 0;
+    // A regressor built from the fit's own options and threading resolves the
+    // team of each pass (see parallel_read_team).
+    const HdfeRegressorV11* core = nullptr;
+    int num_fes = 0;
+    long long variables = 0;  // read by the fused pass
+    long long min_values = kParallelReadMinValues;
+    bool pretouch = true;
+    bool select_parallel = false;  // the parallel selection ran, kept or not
+    int select_team = 1;           // team observed in the selection; 1 when serial
+    int select_workers = 0;        // threads of that team that scanned a block
+    bool select_fallback = false;
+    long long read_values = 0;
+    long long read_blocks = 0;
+    int read_core_threads = 0;  // the fit's team for the selected rows
+    int read_team = 1;          // team observed in the read; 1 when serial
+    int read_workers = 0;       // threads of that team that read a block
+    bool read_used = false;
+    bool read_fallback = false;
+};
+
+ParallelReadPlan plan_parallel_read(const ParsedArgs& args, int marker_var,
+                                    int requested_threads, int num_fes,
+                                    long long variables) {
+    ParallelReadPlan plan;
+    plan.marker_var = marker_var;
+    plan.requested_threads = requested_threads;
+    plan.num_fes = num_fes;
+    plan.variables = variables;
+    plan.min_values = parallel_read_min_values();
+    plan.pretouch = parallel_read_pretouch();
+    const int forced = parallel_read_switch();
+    const std::optional<std::string> alias = args.get_optional("alias_vars");
+    if (!fused_read_enabled()) {
+        plan.reason = "fused_read_off";
+    } else if (forced == 0) {
+        plan.reason = "switch_off";
+    } else if (marker_var <= 0) {
+        plan.reason = "no_marker";
+    } else if (!alias) {
+        plan.reason = "alias_unknown";
+    } else if (*alias != "0") {
+        // An alias variable (fralias) resolves through another frame.
+        plan.reason = "alias_variables";
+    } else if (forced != 1 && !parallel_read_host_qualified(args)) {
+        plan.reason = "host_not_qualified";
+    } else {
+#ifdef _OPENMP
+        plan.allowed = true;
+        plan.reason = forced == 1 ? "switch_on" : "qualified_host";
+#else
+        plan.reason = "openmp_unavailable";
+#endif
+    }
+    return plan;
+}
+
+// Team for a pass over `rows` rows in `blocks` blocks; 1 keeps the pass serial.
+// The fit's regressor resolves the team for those rows, so every threading
+// switch governs the read as it governs the fit (numthreads(), defaultthreads(),
+// maxthreads(), minparallelrows(), targetrowsperthread(), the OpenMP default,
+// the capacity clamp and an active OpenMP region); numthreads(1) therefore
+// keeps the serial reader. The pass then uses at most one thread per block, and
+// at most 16 in automatic mode. A resolution that throws keeps the pass serial;
+// the fit reports the problem where it does today. `core_threads` receives the
+// resolved team (0 when none was resolved).
+int parallel_read_team(const ParallelReadPlan& plan, long long rows, long long blocks,
+                       int& core_threads) {
+    core_threads = 0;
+    if (!plan.allowed || plan.core == nullptr || rows < 1 || blocks < 1 ||
+        rows > std::numeric_limits<int>::max()) {
+        return 1;
+    }
+    try {
+        core_threads = plan.core->resolved_thread_count(static_cast<int>(rows), plan.num_fes);
+    } catch (const std::exception&) {
+        core_threads = 0;
+        return 1;
+    }
+    long long team = std::min<long long>(core_threads, blocks);
+    if (plan.requested_threads <= 0) {
+        team = std::min<long long>(team, kParallelReadAutoMaxThreads);
+    }
+    return static_cast<int>(std::max<long long>(1, team));
+}
+
+// One store per 4 KiB page, and one in the last element.
+template <class T>
+void touch_destination_pages(T* data, int count) {
+    if (count <= 0) {
+        return;
+    }
+    constexpr std::size_t kStride = 4096 / sizeof(T);
+    volatile T* const p = data;
+    for (std::size_t k = 0; k < static_cast<std::size_t>(count); k += kStride) {
+        p[k] = T();
+    }
+    p[static_cast<std::size_t>(count) - 1] = T();
+}
+
+// Sample selection from the marker read as data over SF_in1()..SF_in2(): count
+// the selected rows of each block, prefix sums, then fill. A row is selected
+// when its marker is not zero, which is what `if marker` evaluates, so a
+// missing marker counts as selected (a defensive rule: the ado's marker is
+// never missing). The map equals the one selected_observations() builds,
+// `contiguous` included (true only when every row of the range is selected).
+// False when a read fails; the caller then uses selected_observations().
+// `workers_active` receives the number of threads that scanned at least one
+// block of the range.
+bool selected_by_marker_parallel(int marker_var, int threads, ObservationMap& out,
+                                 int& team_observed, int& workers_active) {
+    const int in1 = SF_in1();
+    const int in2 = SF_in2();
+    out = ObservationMap{};
+    out.in1 = in1;
+    team_observed = 1;
+    workers_active = 0;
+    if (in2 < in1) {
+        return true;
+    }
+    const long long total = static_cast<long long>(in2) - in1 + 1;
+    const long long blocks = (total + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    std::vector<long long> counts(static_cast<std::size_t>(blocks), 0);
+    std::atomic<int> failed{0};
+    std::atomic<int> active{0};
+    int team = 1;
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#else
+    (void)threads;
+#endif
+    {
+#ifdef _OPENMP
+#pragma omp single
+        team = omp_get_num_threads();
+#endif
+        int blocks_scanned = 0;
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (long long b = 0; b < blocks; ++b) {
+            if (failed.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            ++blocks_scanned;
+            const long long lo = b * kParallelReadBlockRows;
+            const long long hi = std::min(total, lo + kParallelReadBlockRows);
+            long long count = 0;
+            for (long long r = lo; r < hi; ++r) {
+                ST_double z = 0.0;
+                if (SF_vdata(marker_var, in1 + static_cast<int>(r), &z)) {
+                    failed.store(1, std::memory_order_relaxed);
+                    break;
+                }
+                count += z != 0.0 ? 1 : 0;
+            }
+            counts[static_cast<std::size_t>(b)] = count;
+        }
+        if (blocks_scanned > 0) {
+            active.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    team_observed = team;
+    workers_active = active.load();
+    if (failed.load()) {
+        return false;
+    }
+    std::vector<long long> offset(static_cast<std::size_t>(blocks) + 1, 0);
+    for (long long b = 0; b < blocks; ++b) {
+        offset[static_cast<std::size_t>(b) + 1] =
+            offset[static_cast<std::size_t>(b)] + counts[static_cast<std::size_t>(b)];
+    }
+    const long long selected = offset[static_cast<std::size_t>(blocks)];
+    out.n = static_cast<int>(selected);
+    if (selected == total) {
+        out.contiguous = true;
+        return true;
+    }
+    if (selected == 0) {
+        return true;
+    }
+    out.obs.resize(static_cast<std::size_t>(selected));
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#endif
+    for (long long b = 0; b < blocks; ++b) {
+        if (failed.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        const long long lo = b * kParallelReadBlockRows;
+        const long long hi = std::min(total, lo + kParallelReadBlockRows);
+        long long cursor = offset[static_cast<std::size_t>(b)];
+        const long long end = offset[static_cast<std::size_t>(b) + 1];
+        for (long long r = lo; r < hi; ++r) {
+            ST_double z = 0.0;
+            if (SF_vdata(marker_var, in1 + static_cast<int>(r), &z)) {
+                failed.store(1, std::memory_order_relaxed);
+                break;
+            }
+            if (z != 0.0) {
+                if (cursor == end) {
+                    // The marker changed between the passes: never write
+                    // into the slots of another block.
+                    failed.store(1, std::memory_order_relaxed);
+                    break;
+                }
+                out.obs[static_cast<std::size_t>(cursor++)] = in1 + static_cast<int>(r);
+            }
+        }
+        if (cursor != end) {
+            failed.store(1, std::memory_order_relaxed);
+        }
+    }
+    return !failed.load();
+}
+
+// The fused pass in blocks of kParallelReadBlockRows rows, schedule(static):
+// each thread reads every variable of its rows into the final destinations
+// (disjoint writes), with the value checks of read_columns_fused. An
+// identifier column holding a value outside exact int32 is flagged and, as in
+// the serial pass, left to its column reader. The flags reach `ids` only when
+// the whole pass succeeds, so a failed pass leaves `ids` as it found it.
+// `workers_active` receives the number of threads that read at least one block.
+bool read_columns_fused_parallel(const ObservationMap& obs,
+                                 const std::vector<FusedDoubleColumn>& doubles,
+                                 std::vector<FusedIdColumn>& ids, int threads, bool pretouch,
+                                 int& team_observed, int& workers_active) {
+    const ST_double missval = SV_missval;
+    const int n = obs.n;
+    const long long blocks =
+        (static_cast<long long>(n) + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    const std::size_t nd = doubles.size();
+    const std::size_t ni = ids.size();
+    if (pretouch) {
+        for (const FusedDoubleColumn& column : doubles) {
+            touch_destination_pages(column.dest, n);
+        }
+        for (const FusedIdColumn& column : ids) {
+            touch_destination_pages(column.dest, n);
+        }
+    }
+    std::vector<std::atomic<int>> wide(ni);
+    for (std::atomic<int>& flag : wide) {
+        flag.store(0, std::memory_order_relaxed);
+    }
+    std::atomic<int> anomaly{0};
+    std::atomic<int> active{0};
+    int team = 1;
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#else
+    (void)threads;
+#endif
+    {
+#ifdef _OPENMP
+#pragma omp single
+        team = omp_get_num_threads();
+#endif
+        int blocks_read = 0;
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (long long b = 0; b < blocks; ++b) {
+            if (anomaly.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            ++blocks_read;
+            const int lo = static_cast<int>(b * kParallelReadBlockRows);
+            const int hi = static_cast<int>(
+                std::min<long long>(n, static_cast<long long>(lo) + kParallelReadBlockRows));
+            bool bad = false;
+            for (int i = lo; i < hi && !bad; ++i) {
+                const int obs_no = obs.obs_no(i);
+                for (std::size_t j = 0; j < nd; ++j) {
+                    ST_double z = 0.0;
+                    if (SF_vdata(doubles[j].var_idx, obs_no, &z) || !std::isfinite(z) ||
+                        !(z < missval)) {
+                        bad = true;
+                        break;
+                    }
+                    doubles[j].dest[i] = z;
+                }
+                for (std::size_t k = 0; k < ni && !bad; ++k) {
+                    const FusedIdColumn& column = ids[k];
+                    ST_double z = 0.0;
+                    if (SF_vdata(column.var_idx, obs_no, &z) || !std::isfinite(z) ||
+                        !(z < missval)) {
+                        bad = true;
+                        break;
+                    }
+                    if (column.validate_individual &&
+                        (z < 0.0 || std::trunc(z) != z || z > kMaxExactIntegerId)) {
+                        bad = true;
+                        break;
+                    }
+                    int id = 0;
+                    if (exact_int32_id(z, id)) {
+                        column.dest[i] = id;
+                    } else if (!wide[k].load(std::memory_order_relaxed)) {
+                        wide[k].store(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+            if (bad) {
+                anomaly.store(1, std::memory_order_relaxed);
+            }
+        }
+        if (blocks_read > 0) {
+            active.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    team_observed = team;
+    workers_active = active.load();
+    if (anomaly.load()) {
+        return false;
+    }
+    for (std::size_t k = 0; k < ni; ++k) {
+        if (wide[k].load()) {
+            ids[k].exact_int32 = false;
+        }
+    }
+    return true;
+}
+
+// Sample selection for stata_call: the marker read in parallel when the plan
+// allows it and the range times the variables the fused pass reads reaches the
+// threshold (so that selection and read normally switch together), otherwise
+// (or when that read fails) SF_ifobs as before.
+ObservationMap select_observations_for_read(ParallelReadPlan& plan) {
+    if (plan.allowed) {
+        const long long range_rows =
+            std::max(0LL, static_cast<long long>(SF_in2()) - SF_in1() + 1);
+        const long long blocks =
+            (range_rows + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+        int core_threads = 0;
+        const int team = parallel_read_team(plan, range_rows, blocks, core_threads);
+        if (team > 1 && range_rows * plan.variables >= plan.min_values) {
+            ObservationMap selected;
+            int observed = 1;
+            int workers = 0;
+            bool done = false;
+            try {
+                done = selected_by_marker_parallel(plan.marker_var, team, selected, observed,
+                                                   workers);
+            } catch (const std::exception&) {
+                done = false;
+            }
+            plan.select_parallel = true;
+            plan.select_team = observed;
+            plan.select_workers = workers;
+            if (done) {
+                return selected;
+            }
+            plan.select_fallback = true;
+        }
+    }
+    return selected_observations();
+}
+
+// The parallel read of the fused stage when the plan allows it and the read
+// has enough values. True only when it completed; otherwise the caller runs
+// read_columns_fused as before.
+bool read_inputs_parallel(ParallelReadPlan& plan, const ObservationMap& obs,
+                          const std::vector<FusedDoubleColumn>& doubles,
+                          std::vector<FusedIdColumn>& ids) {
+    if (!plan.allowed) {
+        return false;
+    }
+    const long long rows = obs.n;
+    plan.read_values = rows * static_cast<long long>(doubles.size() + ids.size());
+    plan.read_blocks = (rows + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    const int team = parallel_read_team(plan, rows, plan.read_blocks, plan.read_core_threads);
+    if (team <= 1 || plan.read_values < plan.min_values) {
+        return false;
+    }
+    int observed = 1;
+    int workers = 0;
+    bool done = false;
+    try {
+        done = read_columns_fused_parallel(obs, doubles, ids, team, plan.pretouch, observed,
+                                           workers);
+    } catch (const std::exception&) {
+        done = false;
+    }
+    plan.read_team = observed;
+    plan.read_workers = workers;
+    plan.read_used = done;
+    plan.read_fallback = !done;
+    return done;
+}
+
+// The team and the workers the parallel input read reports to e(threads_used)
+// and e(parallel_workers_active): the largest of the parallel passes that ran,
+// the selection over the whole range and the read of the selected rows, kept
+// or discarded; 0 when both were serial.
+int parallel_read_threads_used(const ParallelReadPlan& plan) {
+    int used = plan.select_parallel ? plan.select_team : 0;
+    if (plan.read_used || plan.read_fallback) {
+        used = std::max(used, plan.read_team);
+    }
+    return used;
+}
+
+int parallel_read_workers_active(const ParallelReadPlan& plan) {
+    int active = plan.select_parallel ? plan.select_workers : 0;
+    if (plan.read_used || plan.read_fallback) {
+        active = std::max(active, plan.read_workers);
+    }
+    return active;
+}
+
+void log_parallel_read_mode(const ParallelReadPlan& plan) {
+    std::cerr << "plugin_profile label=read_parallel_mode allowed=" << (plan.allowed ? 1 : 0)
+              << " reason=" << plan.reason << " select_team=" << plan.select_team
+              << " select_fallback=" << (plan.select_fallback ? 1 : 0)
+              << " read=" << (plan.read_used ? 1 : 0) << " team=" << plan.read_team
+              << " fallback=" << (plan.read_fallback ? 1 : 0)
+              << " workers=" << plan.read_workers
+              << " core_threads=" << plan.read_core_threads << " blocks=" << plan.read_blocks
+              << " values=" << plan.read_values << " min_values=" << plan.min_values
+              << " pretouch=" << (plan.pretouch ? 1 : 0)
+              << " select_workers=" << plan.select_workers
+              << " requested=" << plan.requested_threads << '\n';
 }
 
 // Helpers for group/individual singleton dropping (mirrors v11 core logic).
@@ -2191,6 +2857,8 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
                     res.gpu_absorption_converged ? 1.0 : 0.0);
     akm_save_scalar("__xgel_gpu_absorption_iterations",
                     static_cast<double>(res.gpu_absorption_iterations));
+    akm_save_scalar("__xgel_cuda_tail_code",
+                    static_cast<double>(res.cuda_tail_code));
     SF_macro_save(const_cast<char*>("_xgel_fe_split_status"),
                   const_cast<char*>(res.fe_split_status.c_str()));
     SF_macro_save(const_cast<char*>("_xgel_connectivity_pair_status"),
@@ -2315,6 +2983,9 @@ STDLL stata_call(int argc, char* argv[]) {
         if (auto val = args.get_optional("tolerance_mode")) {
             opts.tolerance_mode = parse_tolerance_mode(*val);
         }
+        // P7 (lean 2.31.0): after the tolerance mode is known; strict-residual keeps the re-absorption.
+        opts.stored_residuals_fit_state = store_resid && !legacy_stored_residual_refinement() &&
+                                          opts.tolerance_mode != ToleranceMode::StrictResidual;
 
         const ParsedDofAdjustments dof = parse_dofadjustments(args.get_optional("dofadjustments"));
         opts.dof_method = dof.method;
@@ -2425,9 +3096,12 @@ STDLL stata_call(int argc, char* argv[]) {
             }
         }
         const int nout = (store_resid ? 1 : 0) + (store_groupvar ? 1 : 0) + out_fes + 1;  // +1 esample
+        // With sample_marker the ado appends the estimation-sample marker after
+        // every other variable; only the parallel input read uses it.
+        const bool has_sample_marker = args.has("sample_marker");
 
         const int expected_vars = 1 + p + nfe + nslope + nclust + (has_weight ? 1 : 0) + (group_mode ? 1 : 0) +
-                                  (has_individual ? 1 : 0) + ninst + nout;
+                                  (has_individual ? 1 : 0) + ninst + nout + (has_sample_marker ? 1 : 0);
         const int have_vars = SF_nvars();
         if (have_vars != expected_vars) {
             throw_with_prefix(
@@ -2456,9 +3130,30 @@ STDLL stata_call(int argc, char* argv[]) {
             out_cursor += out_fes;
         }
         const int idx_esample_out = out_cursor;
+        const int idx_sample_marker = has_sample_marker ? idx_esample_out + 1 : 0;
+        if (has_sample_marker &&
+            parse_int(args.get_required("sample_marker"), "sample_marker") != idx_sample_marker) {
+            throw_with_prefix("xhdfe plugin: ", "sample_marker must index the last variable");
+        }
 
+        ParallelReadPlan parallel_read = plan_parallel_read(
+            args, idx_sample_marker, opts.num_threads, nfe,
+            fused_read_variable_count(args, p, nfe, nslope, nclust, has_weight, ninst));
+        // A regressor with the fit's options and threading, which are complete
+        // here, answers how many threads each pass of the read gets. Building it
+        // allocates nothing large and touches no data; if it fails the read
+        // stays serial and the fit reports any problem where it does today.
+        std::optional<HdfeRegressorV11> read_thread_query;
+        if (parallel_read.allowed) {
+            try {
+                read_thread_query.emplace(opts, threading);
+                parallel_read.core = &*read_thread_query;
+            } catch (const std::exception&) {
+                parallel_read.core = nullptr;
+            }
+        }
         const auto select_t0 = std::chrono::steady_clock::now();
-        const ObservationMap obs = selected_observations();
+        const ObservationMap obs = select_observations_for_read(parallel_read);
         plugin_cpu_profile_log_elapsed("select_observations", select_t0);
         if (plugin_cpu_profile_enabled()) {
             std::cerr << "plugin_profile label=select_observations_mode contiguous="
@@ -2467,6 +3162,9 @@ STDLL stata_call(int argc, char* argv[]) {
         }
         const int n = obs.n;
         if (n <= 0) {
+            if (plugin_cpu_profile_enabled() && fused_read_enabled()) {
+                log_parallel_read_mode(parallel_read);
+            }
             return static_cast<ST_retcode>(2000);  // no observations
         }
 
@@ -2482,19 +3180,6 @@ STDLL stata_call(int argc, char* argv[]) {
             }
             return z;
         };
-        auto exact_int32_id = [](double value, int& out) {
-            if (value < static_cast<double>(std::numeric_limits<int>::min()) ||
-                value > static_cast<double>(std::numeric_limits<int>::max())) {
-                return false;
-            }
-            const int candidate = static_cast<int>(value);
-            if (static_cast<double>(candidate) != value) {
-                return false;
-            }
-            out = candidate;
-            return true;
-        };
-        constexpr double kMaxExactIntegerId = 9007199254740992.0;  // 2^53
         auto read_categorical_numeric = [&](int var_idx, const char* what,
                                             bool validate_individual_id = false) {
             Eigen::VectorXi ids(n);
@@ -2581,16 +3266,170 @@ STDLL stata_call(int argc, char* argv[]) {
         };
 
         const auto read_total_t0 = std::chrono::steady_clock::now();
-        const auto read_yx_t0 = std::chrono::steady_clock::now();
         Eigen::VectorXd y(n);
         Eigen::MatrixXd X(n, p);
-        for (int i = 0; i < n; ++i) {
-            y(i) = read_numeric(idx_y, obs.obs_no(i));
+
+        // One pass over the observations for every numeric input (see
+        // read_columns_fused). When it completes, the stages below take their
+        // columns from here; otherwise they read as before and report.
+        struct FusedInputs {
+            bool done = false;
+            std::vector<Eigen::VectorXi> fes;
+            std::vector<char> fe_ready;
+            std::vector<Eigen::VectorXd> slopes;
+            Eigen::VectorXd weights;
+            std::vector<Eigen::VectorXi> clusters;
+            std::vector<char> cluster_ready;
+            Eigen::MatrixXd instruments;
+        } fused;
+        if (fused_read_enabled()) {
+            const auto read_fused_t0 = std::chrono::steady_clock::now();
+            int fused_id_columns = 0;
+            int fused_id_columns_left = 0;
+            try {
+                fused.done = [&]() {
+                    // The maps decide which identifier columns are read at
+                    // all. A malformed map is reported by its own stage.
+                    std::vector<int> dup_map;
+                    const std::optional<std::string> dup_arg = args.get_optional("fe_dup_map");
+                    if (dup_arg && !dup_arg->empty()) {
+                        dup_map = parse_csv_ints_ordered(*dup_arg, "fe_dup_map");
+                        if (static_cast<int>(dup_map.size()) != nfe) {
+                            return false;
+                        }
+                    }
+                    int individual_index = individual_fe_pos - 1;
+                    if (has_individual) {
+                        if (individual_index < 0 || individual_index >= nfe) {
+                            return false;
+                        }
+                        while (!dup_map.empty() &&
+                               dup_map[static_cast<std::size_t>(individual_index)] >= 0) {
+                            const int dup = dup_map[static_cast<std::size_t>(individual_index)];
+                            if (dup >= individual_index) {
+                                return false;
+                            }
+                            individual_index = dup;
+                        }
+                    }
+                    std::vector<int> cluster_map;
+                    if (nclust > 0) {
+                        const std::optional<std::string> cluster_arg =
+                            args.get_optional("cluster_fe_map");
+                        if (cluster_arg && !cluster_arg->empty()) {
+                            cluster_map = parse_csv_ints_ordered(*cluster_arg, "cluster_fe_map");
+                            if (static_cast<int>(cluster_map.size()) != nclust) {
+                                return false;
+                            }
+                        }
+                    }
+
+                    const std::size_t rows = static_cast<std::size_t>(n);
+                    std::vector<FusedDoubleColumn> doubles;
+                    std::vector<FusedIdColumn> ids;
+                    std::vector<Eigen::VectorXi*> id_storage;
+                    std::vector<char*> id_ready;
+                    doubles.push_back({idx_y, y.data()});
+                    for (int j = 0; j < p; ++j) {
+                        doubles.push_back(
+                            {idx_x_start + j, X.data() + static_cast<std::size_t>(j) * rows});
+                    }
+                    fused.fes.resize(static_cast<std::size_t>(nfe));
+                    fused.fe_ready.assign(static_cast<std::size_t>(nfe), 0);
+                    for (int d = 0; d < nfe; ++d) {
+                        const int dup = dup_map.empty() ? -1 : dup_map[static_cast<std::size_t>(d)];
+                        if (dup >= 0) {
+                            if (dup >= d) {
+                                return false;
+                            }
+                            continue;
+                        }
+                        Eigen::VectorXi& column = fused.fes[static_cast<std::size_t>(d)];
+                        column.resize(n);
+                        ids.push_back({idx_fe_start + d, column.data(),
+                                       has_individual && d == individual_index, true});
+                        id_storage.push_back(&column);
+                        id_ready.push_back(&fused.fe_ready[static_cast<std::size_t>(d)]);
+                    }
+                    fused.slopes.resize(static_cast<std::size_t>(nslope));
+                    for (int d = 0; d < nslope; ++d) {
+                        Eigen::VectorXd& column = fused.slopes[static_cast<std::size_t>(d)];
+                        column.resize(n);
+                        doubles.push_back({idx_slope_start + d, column.data()});
+                    }
+                    if (has_weight) {
+                        fused.weights.resize(n);
+                        doubles.push_back({idx_weight, fused.weights.data()});
+                    }
+                    fused.clusters.resize(static_cast<std::size_t>(nclust));
+                    fused.cluster_ready.assign(static_cast<std::size_t>(nclust), 0);
+                    for (int d = 0; d < nclust; ++d) {
+                        const int mapped =
+                            cluster_map.empty() ? -1 : cluster_map[static_cast<std::size_t>(d)];
+                        if (mapped >= 0) {
+                            if (mapped >= nfe) {
+                                return false;
+                            }
+                            continue;
+                        }
+                        Eigen::VectorXi& column = fused.clusters[static_cast<std::size_t>(d)];
+                        column.resize(n);
+                        ids.push_back({idx_clust_start + d, column.data(), false, true});
+                        id_storage.push_back(&column);
+                        id_ready.push_back(&fused.cluster_ready[static_cast<std::size_t>(d)]);
+                    }
+                    if (ninst > 0) {
+                        fused.instruments.resize(n, ninst);
+                        for (int j = 0; j < ninst; ++j) {
+                            doubles.push_back({idx_inst_start + j,
+                                               fused.instruments.data() +
+                                                   static_cast<std::size_t>(j) * rows});
+                        }
+                    }
+
+                    // The parallel pass when allowed; on any anomaly it is
+                    // discarded and the serial pass reads everything again.
+                    if (!read_inputs_parallel(parallel_read, obs, doubles, ids) &&
+                        !read_columns_fused(obs, doubles, ids)) {
+                        return false;
+                    }
+                    fused_id_columns = static_cast<int>(ids.size());
+                    for (std::size_t k = 0; k < ids.size(); ++k) {
+                        if (ids[k].exact_int32) {
+                            *id_ready[k] = 1;
+                        } else {
+                            // Its column reader allocates what it needs.
+                            *id_storage[k] = Eigen::VectorXi();
+                            ++fused_id_columns_left;
+                        }
+                    }
+                    return true;
+                }();
+            } catch (const std::exception&) {
+                fused.done = false;
+            }
+            if (!fused.done) {
+                fused = FusedInputs{};
+            }
+            plugin_cpu_profile_log_elapsed("read_fused", read_fused_t0);
+            if (plugin_cpu_profile_enabled()) {
+                std::cerr << "plugin_profile label=read_fused_mode done=" << (fused.done ? 1 : 0)
+                          << " id_columns=" << fused_id_columns
+                          << " id_columns_left_to_column_reader=" << fused_id_columns_left << '\n';
+                log_parallel_read_mode(parallel_read);
+            }
         }
-        for (int j = 0; j < p; ++j) {
-            const int var_idx = idx_x_start + j;
+
+        const auto read_yx_t0 = std::chrono::steady_clock::now();
+        if (!fused.done) {
             for (int i = 0; i < n; ++i) {
-                X(i, j) = read_numeric(var_idx, obs.obs_no(i));
+                y(i) = read_numeric(idx_y, obs.obs_no(i));
+            }
+            for (int j = 0; j < p; ++j) {
+                const int var_idx = idx_x_start + j;
+                for (int i = 0; i < n; ++i) {
+                    X(i, j) = read_numeric(var_idx, obs.obs_no(i));
+                }
             }
         }
         plugin_cpu_profile_log_elapsed("read_yx", read_yx_t0);
@@ -2629,8 +3468,11 @@ STDLL stata_call(int argc, char* argv[]) {
                 continue;
             }
             const int var_idx = idx_fe_start + d;
-            Eigen::VectorXi v = read_categorical_numeric(
-                var_idx, "fes", has_individual && d == individual_fe_read_index);
+            Eigen::VectorXi v =
+                fused.done && fused.fe_ready[static_cast<std::size_t>(d)]
+                    ? std::move(fused.fes[static_cast<std::size_t>(d)])
+                    : read_categorical_numeric(
+                          var_idx, "fes", has_individual && d == individual_fe_read_index);
             fes.push_back(std::move(v));
         }
         plugin_cpu_profile_log_elapsed("read_fes", read_fes_t0);
@@ -2662,10 +3504,15 @@ STDLL stata_call(int argc, char* argv[]) {
                     throw_with_prefix("xhdfe plugin: ",
                                       "slope_intercepts entries must be 0 or 1");
                 }
-                Eigen::VectorXd values(n);
+                Eigen::VectorXd values;
                 const int var_idx = idx_slope_start + d;
-                for (int i = 0; i < n; ++i) {
-                    values(i) = read_numeric(var_idx, obs.obs_no(i));
+                if (fused.done) {
+                    values = std::move(fused.slopes[static_cast<std::size_t>(d)]);
+                } else {
+                    values.resize(n);
+                    for (int i = 0; i < n; ++i) {
+                        values(i) = read_numeric(var_idx, obs.obs_no(i));
+                    }
                 }
                 HeterogeneousSlopeTerm term;
                 term.fe_index = mapped_fe;
@@ -2679,9 +3526,14 @@ STDLL stata_call(int argc, char* argv[]) {
         std::optional<Eigen::VectorXd> weights;
         if (has_weight) {
             const auto read_weights_t0 = std::chrono::steady_clock::now();
-            Eigen::VectorXd w(n);
-            for (int i = 0; i < n; ++i) {
-                w(i) = read_numeric(idx_weight, obs.obs_no(i));
+            Eigen::VectorXd w;
+            if (fused.done) {
+                w = std::move(fused.weights);
+            } else {
+                w.resize(n);
+                for (int i = 0; i < n; ++i) {
+                    w(i) = read_numeric(idx_weight, obs.obs_no(i));
+                }
             }
             weights = std::move(w);
             plugin_cpu_profile_log_elapsed("read_weights", read_weights_t0);
@@ -2716,7 +3568,10 @@ STDLL stata_call(int argc, char* argv[]) {
                     continue;
                 }
                 const int var_idx = idx_clust_start + d;
-                Eigen::VectorXi v = read_categorical_numeric(var_idx, "clusters");
+                Eigen::VectorXi v =
+                    fused.done && fused.cluster_ready[static_cast<std::size_t>(d)]
+                        ? std::move(fused.clusters[static_cast<std::size_t>(d)])
+                        : read_categorical_numeric(var_idx, "clusters");
                 c.push_back(std::move(v));
             }
             clusters = std::move(c);
@@ -2727,11 +3582,16 @@ STDLL stata_call(int argc, char* argv[]) {
         std::optional<Eigen::MatrixXd> instruments;
         if (ninst > 0) {
             const auto read_instruments_t0 = std::chrono::steady_clock::now();
-            Eigen::MatrixXd Z(n, ninst);
-            for (int j = 0; j < ninst; ++j) {
-                const int var_idx = idx_inst_start + j;
-                for (int i = 0; i < n; ++i) {
-                    Z(i, j) = read_numeric(var_idx, obs.obs_no(i));
+            Eigen::MatrixXd Z;
+            if (fused.done) {
+                Z = std::move(fused.instruments);
+            } else {
+                Z.resize(n, ninst);
+                for (int j = 0; j < ninst; ++j) {
+                    const int var_idx = idx_inst_start + j;
+                    for (int i = 0; i < n; ++i) {
+                        Z(i, j) = read_numeric(var_idx, obs.obs_no(i));
+                    }
                 }
             }
             instruments = std::move(Z);
@@ -2739,6 +3599,49 @@ STDLL stata_call(int argc, char* argv[]) {
         }
         const Eigen::MatrixXd* inst_ptr = instruments ? &(*instruments) : nullptr;
         plugin_cpu_profile_log_elapsed("read_total", read_total_t0);
+        if (plugin_cpu_profile_enabled()) {
+            // Order-sensitive fingerprint of every input as read, so that the
+            // fused pass and the column readers can be compared on real data
+            // without exporting a single value.
+            std::uint64_t digest = 0x243F6A8885A308D3ULL;
+            const auto mix = [&digest](std::uint64_t bits) {
+                digest = (digest ^ bits) * 0x9E3779B97F4A7C15ULL;
+                digest ^= digest >> 29;
+            };
+            const auto mix_doubles = [&mix](const double* data, Eigen::Index count) {
+                for (Eigen::Index k = 0; k < count; ++k) {
+                    std::uint64_t bits = 0;
+                    std::memcpy(&bits, data + k, sizeof(bits));
+                    mix(bits);
+                }
+            };
+            const auto mix_ints = [&mix](const int* data, Eigen::Index count) {
+                for (Eigen::Index k = 0; k < count; ++k) {
+                    mix(static_cast<std::uint64_t>(static_cast<std::uint32_t>(data[k])));
+                }
+            };
+            mix_doubles(y.data(), y.size());
+            mix_doubles(X.data(), X.size());
+            for (const Eigen::VectorXi& ids : fes) {
+                mix_ints(ids.data(), ids.size());
+            }
+            for (const HeterogeneousSlopeTerm& term : slopes) {
+                mix_doubles(term.values.data(), term.values.size());
+            }
+            if (weights) {
+                mix_doubles(weights->data(), weights->size());
+            }
+            if (clusters) {
+                for (const Eigen::VectorXi& ids : *clusters) {
+                    mix_ints(ids.data(), ids.size());
+                }
+            }
+            if (instruments) {
+                mix_doubles(instruments->data(), instruments->size());
+            }
+            std::cerr << "plugin_profile label=input_digest value=" << digest
+                      << " fused=" << (fused.done ? 1 : 0) << '\n';
+        }
 
         std::vector<int> endogenous_idx;
         if (args.has("endogenous_idx")) {
@@ -2854,6 +3757,8 @@ STDLL stata_call(int argc, char* argv[]) {
             args.get_optional("s_gpu_absorption_converged");
         const std::optional<std::string> s_gpu_absorption_iterations =
             args.get_optional("s_gpu_absorption_iterations");
+        const std::optional<std::string> s_cuda_tail_code =
+            args.get_optional("s_cuda_tail_code");
         const std::optional<std::string> s_method_used = args.get_optional("s_method_used");
         const std::optional<std::string> s_num_clusters = args.get_optional("s_num_clusters");
         const std::optional<std::string> s_cluster_scale = args.get_optional("s_cluster_scale");
@@ -3075,11 +3980,14 @@ STDLL stata_call(int argc, char* argv[]) {
                 maybe_save_thread_diagnostics(
                     s_threads_used, s_threads_requested, s_threads_effective,
                     s_parallel_workers_active, s_thread_capacity,
-                    s_openmp_enabled, s_thread_limit_code, reg);
+                    s_openmp_enabled, s_thread_limit_code, reg,
+                    parallel_read_threads_used(parallel_read),
+                    parallel_read_workers_active(parallel_read));
                 maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
                 maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                            s_gpu_absorption_converged,
                                            s_gpu_absorption_iterations, reg);
+                maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
                 maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
                 maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
                 maybe_save_scalar(s_cluster_scale, r.cluster_scale);
@@ -3225,11 +4133,14 @@ STDLL stata_call(int argc, char* argv[]) {
             maybe_save_thread_diagnostics(
                 s_threads_used, s_threads_requested, s_threads_effective,
                 s_parallel_workers_active, s_thread_capacity,
-                s_openmp_enabled, s_thread_limit_code, reg);
+                s_openmp_enabled, s_thread_limit_code, reg,
+                parallel_read_threads_used(parallel_read),
+                parallel_read_workers_active(parallel_read));
             maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
             maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                        s_gpu_absorption_converged,
                                        s_gpu_absorption_iterations, reg);
+            maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
             maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
             maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
             maybe_save_scalar(s_cluster_scale, r.cluster_scale);
@@ -3342,11 +4253,14 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_thread_diagnostics(
             s_threads_used, s_threads_requested, s_threads_effective,
             s_parallel_workers_active, s_thread_capacity,
-            s_openmp_enabled, s_thread_limit_code, reg);
+            s_openmp_enabled, s_thread_limit_code, reg,
+            parallel_read_threads_used(parallel_read),
+            parallel_read_workers_active(parallel_read));
         maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
         maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                    s_gpu_absorption_converged,
                                    s_gpu_absorption_iterations, reg);
+        maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
         maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
         maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
         maybe_save_scalar(s_cluster_scale, r.cluster_scale);

@@ -16,7 +16,7 @@ xhdfe <- function(fml, data = NULL,
                   dof = NULL, ssc = NULL, stats_style = "reghdfe",
                   level = 95,
                   threads = 0, default_threads = 0, max_threads = 0,
-                  min_parallel_rows = 20000, target_rows_per_thread = 500000,
+                  min_parallel_rows = 20000, target_rows_per_thread = 0,
                   backend = c("default", "cpu", "cuda", "metal"),
                   na.action = c("omit", "fail")) {
   cl <- match.call()

@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ libomp-dev
+        run: bash .github/scripts/apt_mirror_fallback.sh && sudo apt-get update && sudo apt-get install -y cmake g++ libomp-dev
 
       - name: Set up Python
         uses: actions/setup-python@v6

@@ -39,6 +39,7 @@ local tests ///
     "part1/group-individual.do" ///
     "part1/group-sum-constant.do" ///
     "part1/lifecycle.do" ///
+    "part1/sort-order.do" ///
     "part1/sample-missing.do" ///
     "part1/dof-ssc.do" ///
     "part1/harness-mutation.do" ///

@@ -22,14 +22,46 @@ for path in SITE_PATHS:
 import numpy as np
 import pandas as pd
 
+TWO = ("x1", "x2")
 DATASETS = {
     "credit2": (
         "/home/mangelo/Documents/BigData/Sergio/all-dta/credit2.parquet",
         "6f5fc748e7dcaf751d671331150f772d42c19893ba1ce350ddd26eae7eaa4d52",
+        ("id1", "id2"), TWO,
     ),
     "credit": (
         "/home/mangelo/Documents/BigData/Sergio/all-dta/credit.parquet",
         "bbf5ddee09e67fc320ce8607a9ab0dc10d9969639363e1afd5ab6adabd50dd93",
+        ("id1", "id2"), TWO,
+    ),
+    # Early routing (kappa read at each checkpoint, M = 30). In the wider D1
+    # trace (16 threads), pf_bench_difficult_n100k_3fe predicted 21.9e-11 at
+    # checkpoint 8 and 77.0e-11 at 16, so it leaves its accelerated sweep at
+    # 16 (predictive rule); github, whose conjugate-gradient stage starts at
+    # the automatic gate, predicted 25.5e-11 at stage iteration 32 and
+    # 32.6e-11 at 64, so it leaves at 64. patents, with the accelerator
+    # capped at 10 iterations, reaches the hand-off to a conjugate-gradient
+    # stage (structural rule). synthetic-uniform-hard reaches checkpoints with a
+    # prediction below 1e-11, so it stays.
+    "pf_bench_difficult_n100k_3fe": (
+        "/srv/projetos/P008/dataset/pyfixest/benchmark_difficult_n100000_k10.parquet",
+        "9b38df80176c3e89b7812ddc3022c3fdf08aa2fe3d0054a9be31a5e75cdf7489",
+        ("indiv_id", "firm_id", "year"), tuple(f"x{j}" for j in range(1, 11)),
+    ),
+    "patents": (
+        "/home/mangelo/Documents/BigData/Sergio/all-dta/patents.parquet",
+        "e2eb0c3f2fca6fa9d610bc4ee12ee02a90aebcf15edab1f3a4fb37607d75d5d8",
+        ("id1", "id2"), TWO,
+    ),
+    "github": (
+        "/home/mangelo/Documents/BigData/Sergio/all-dta/github.parquet",
+        "958d890ccffc999f669fb1a4cc85e6d68f2e9e14a1d71c48481dcc8dc53ef63b",
+        ("id1", "id2", "id3"), TWO,
+    ),
+    "synthetic-uniform-hard": (
+        "/home/mangelo/Documents/BigData/Sergio/all-dta/synthetic-uniform-hard.parquet",
+        "4d696a3fe5b29a3b313a6e0db8377b664ee62df32d3e3c27d8a2589dba7a75ff",
+        ("id1", "id2"), TWO,
     ),
 }
 
@@ -61,15 +93,16 @@ def child(args) -> int:
         y = 0.7 * x1 - 0.2 * x2 + (row % 17) * 0.01 + (row % 29) * 0.002
         clusters = None
     else:
-        dataset_path = Path(DATASETS[args.dataset][0])
-        if sha256(dataset_path) != DATASETS[args.dataset][1]:
+        raw_path, digest, fe_columns, x_columns = DATASETS[args.dataset]
+        dataset_path = Path(raw_path)
+        if sha256(dataset_path) != digest:
             raise AssertionError("dataset hash differs")
         frame = pd.read_parquet(
-            dataset_path, columns=["y", "x1", "x2", "id1", "id2"])
+            dataset_path, columns=["y", *x_columns, *fe_columns])
         y = frame["y"].to_numpy(np.float64, copy=False)
         X = np.asfortranarray(
-            frame[["x1", "x2"]].to_numpy(np.float64, copy=False))
-        fes = [factorize(frame[name]) for name in ("id1", "id2")]
+            frame[list(x_columns)].to_numpy(np.float64, copy=False))
+        fes = [factorize(frame[name]) for name in fe_columns]
         clusters = fes[0]
     while len(fes) < args.fe_count:
         fes.append(fes[(len(fes) - 2) % 2].copy())
@@ -201,9 +234,60 @@ def parent(args) -> int:
         failed, failed_arrays = run_child(
             script, root, "failed", args.module, args.module_sha256,
             environment={"XHDFE_TEST_AUTO_ROUTING_RETRY_FAIL": "1"})
-        below, _ = run_child(
+        below, below_arrays = run_child(
             script, root, "below", args.module, args.module_sha256,
             dataset="credit")
+        below_off, below_off_arrays = run_child(
+            script, root, "below_off", args.module, args.module_sha256,
+            dataset="credit", environment={"XHDFE_AUTO_EARLY_ROUTING": "0"})
+        # Early routing (status 4): the switch taken and its identities.
+        no_early = {"XHDFE_AUTO_EARLY_ROUTING": "0"}
+        forced_failure = {"XHDFE_TEST_AUTO_ROUTING_RETRY_FAIL": "1"}
+        handoff_cap = {"XHDFE_CG_ITER_CAP": "10"}
+        taken = "pf_bench_difficult_n100k_3fe"
+        early, early_arrays = run_child(
+            script, root, "early", args.module, args.module_sha256, dataset=taken)
+        early_off, early_off_arrays = run_child(
+            script, root, "early_off", args.module, args.module_sha256,
+            dataset=taken, environment=no_early)
+        early_failed, early_failed_arrays = run_child(
+            script, root, "early_failed", args.module, args.module_sha256,
+            dataset=taken, environment=forced_failure)
+        early_off_failed, early_off_failed_arrays = run_child(
+            script, root, "early_off_failed", args.module, args.module_sha256,
+            dataset=taken, environment={**forced_failure, **no_early})
+        stays, stays_arrays = run_child(
+            script, root, "stays", args.module, args.module_sha256,
+            dataset="synthetic-uniform-hard")
+        stays_off, stays_off_arrays = run_child(
+            script, root, "stays_off", args.module, args.module_sha256,
+            dataset="synthetic-uniform-hard", environment=no_early)
+        handoff, handoff_arrays = run_child(
+            script, root, "handoff", args.module, args.module_sha256,
+            dataset="patents", environment=handoff_cap)
+        handoff_off, handoff_off_arrays = run_child(
+            script, root, "handoff_off", args.module, args.module_sha256,
+            dataset="patents", environment={**handoff_cap, **no_early})
+        gate, gate_arrays = run_child(
+            script, root, "gate", args.module, args.module_sha256, dataset="github")
+        gate_off, gate_off_arrays = run_child(
+            script, root, "gate_off", args.module, args.module_sha256,
+            dataset="github", environment=no_early)
+        early_cache_path = root / "early.cache"
+        early_cache_write, early_cache_write_arrays = run_child(
+            script, root, "early_cache_write", args.module, args.module_sha256,
+            dataset=taken,
+            environment={
+                "XHDFE_ABSORPTION_CACHE": str(early_cache_path),
+                "XHDFE_ABSORPTION_CACHE_MODE": "write",
+            })
+        early_cache_read, early_cache_read_arrays = run_child(
+            script, root, "early_cache_read", args.module, args.module_sha256,
+            dataset=taken,
+            environment={
+                "XHDFE_ABSORPTION_CACHE": str(early_cache_path),
+                "XHDFE_ABSORPTION_CACHE_MODE": "read",
+            })
         custom, _ = run_child(
             script, root, "custom", args.module, args.module_sha256,
             tolerance=1e-10)
@@ -312,11 +396,76 @@ def parent(args) -> int:
         assert generation_miss["status"] == 2
         assert same_arrays(generation_miss_arrays, fired_arrays)
 
+        # Early routing, predictive rule: pf_bench_difficult_n100k_3fe leaves
+        # its accelerated sweep; the retry's MLSMR runs at once and returns
+        # exactly what the retry returns with early routing off (status 2).
+        for scenario in (early, early_off, early_failed, early_off_failed, stays,
+                         stays_off, handoff, handoff_off, gate, gate_off,
+                         early_cache_write, early_cache_read, below_off):
+            assert scenario.get("returned", True), scenario.get("error", "")
+        assert early["policy"] and early["eligible"] and early["fired"]
+        assert early["status"] == 4 and early["method"] == 6
+        # Checkpoint 16: where the D1 trace put this fit above M = 30.
+        assert early["primary_method"] == 1 and early["primary_iterations"] == 16
+        assert early["primary_rel"] > 1e-11 and early["retry_rel"] <= 1e-11
+        assert early["iterations"] == early["retry_iterations"]
+        assert early_off["status"] == 2 and early_off["method"] == 6
+        assert early["primary_iterations"] < early_off["primary_iterations"]
+        assert early["iterations"] == early_off["iterations"]
+        assert same_arrays(early_arrays, early_off_arrays)
+        # Fail-safe: when MLSMR fails after the leave, the primary runs again
+        # with early routing off and today's route returns its result.
+        compared = ("status", "method", "iterations", "primary_method",
+                    "primary_iterations", "primary_rel", "retry_iterations",
+                    "retry_rel", "converged", "precision")
+        assert early_failed["status"] == 3 and early_failed["method"] == 1
+        assert all(early_failed[key] == early_off_failed[key] for key in compared)
+        assert same_arrays(early_failed_arrays, early_off_failed_arrays)
+        # Not taken: below the trigger (credit) and a prediction below the
+        # margin at every checkpoint (synthetic-uniform-hard).
+        assert below_off["status"] == 1 and same_arrays(below_arrays, below_off_arrays)
+        assert stays["status"] == 1 and stays_off["status"] == 1
+        assert stays["iterations"] == stays_off["iterations"] >= 8
+        assert same_arrays(stays_arrays, stays_off_arrays)
+        # Structural rule: patents, its accelerator capped at 10 iterations,
+        # does not hand its iterate to a conjugate-gradient stage.
+        assert handoff["status"] == 4 and handoff["method"] == 6
+        assert handoff["primary_iterations"] == 10 and handoff["primary_rel"] == 0.0
+        assert handoff["iterations"] == handoff["retry_iterations"]
+        if handoff_off["method"] == 6:
+            # Today's route also ends in MLSMR (the retry, or the restart
+            # after a breakdown): the same result.
+            assert same_arrays(handoff_arrays, handoff_off_arrays)
+        else:
+            # Today's hand-off stage converged below the trigger and was
+            # kept: the accepted case, two certified results.
+            assert handoff_off["status"] == 1 and handoff_off["precision"]
+            assert np.array_equal(handoff_arrays["sample"], handoff_off_arrays["sample"])
+            assert np.allclose(handoff_arrays["b"], handoff_off_arrays["b"],
+                               rtol=1e-6, atol=1e-10)
+        # A stage entered at a direct gate (github): the predictive rule
+        # decides on the stage's own iterations and leaves at 64. The result
+        # is today's (MLSMR after the breakdown restart), with MLSMR
+        # iterations only.
+        # With F1 the CG may converge above the 1e-11 retry trigger and the same MLSMR runs afterwards (status 2): the route differs, the result does not.
+        assert gate_off["status"] in (0, 2) and gate_off["method"] == 6
+        assert gate["status"] == 4 and gate["method"] == 6
+        assert gate["primary_iterations"] == 64 and gate["primary_rel"] > 1e-11
+        assert gate["iterations"] == gate["retry_iterations"] <= gate_off["iterations"]
+        assert same_arrays(gate_arrays, gate_off_arrays)
+        # Cache round trip with status 4.
+        assert early_cache_write["status"] == 4 and early_cache_read == early_cache_write
+        assert same_arrays(early_cache_write_arrays, early_cache_read_arrays)
+        assert same_arrays(early_cache_write_arrays, early_arrays)
+
     print(
         "AUTO_ROUTING_RETRY_PASS fired_bitidentical=1 kill_switch_old_identity=1 "
         "failure_primary_identity=1 below_trigger=1 exclusions=4 "
         "actual_mlsmr_no_retry=1 promotion_band_exclusions=2 iv_excluded=1 "
-        "cache_roundtrip=1 old_generation_miss=1 one_thread_bitidentical=1"
+        "cache_roundtrip=1 old_generation_miss=1 one_thread_bitidentical=1 "
+        "early_taken_bitidentical=1 early_failsafe_identity=1 early_not_taken=2 "
+        f"early_handoff=1 early_handoff_today_mlsmr={int(handoff_off['method'] == 6)} "
+        f"early_gate_status={gate['status']} early_kill_switch=1 early_cache_roundtrip=1"
     )
     return 0
 

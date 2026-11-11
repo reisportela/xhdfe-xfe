@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.1  20oct2026}{...}
+{* *! version 1.0.2  11nov2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachetable" "help xhdfegelbachetable"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachbootstrap} {hline 2}}Full-refit pairs bootstrap for Gelbach coefficient-movement accounting{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.1 (20oct2026), distributed with xhdfegelbach 1.6.1.}{p_end}
+{pstd}{bf:Version 1.0.2 (11nov2026), distributed with xhdfegelbach 1.6.2.}{p_end}
 
 
 {title:Syntax}
@@ -133,6 +133,8 @@ point covariance contract {cmd:r(cov)}, {cmd:r(total_cov)},
 {synopt:{cmd:r(gpu_used_point)}}real CUDA use in the point estimate{p_end}
 {synopt:{cmd:r(gpu_used_all_valid)}}real CUDA use in every valid refit{p_end}
 {synopt:{cmd:r(point_gpu_backend)}, {cmd:r(point_gpu_status)}}point backend diagnostics{p_end}
+{synopt:{cmd:r(point_cuda_tail)}}three-FE Comparable CUDA completion of the point estimate:
+{cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr} (see {help xhdfe}){p_end}
 {synopt:{cmd:r(interval_status)}}nonregularity qualification{p_end}
 {synopt:{cmd:r(rng)}}Stata RNG reproducibility convention{p_end}
 {synopt:{cmd:r(version)}}bootstrap-command version and date{p_end}

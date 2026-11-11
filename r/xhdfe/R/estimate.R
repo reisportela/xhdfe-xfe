@@ -17,12 +17,16 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
     stop("threads, default_threads, and max_threads must be nonnegative integers",
          call. = FALSE)
   }
-  sizing_values <- c(min_parallel_rows, target_rows_per_thread)
-  if (any(lengths(list(min_parallel_rows, target_rows_per_thread)) != 1L) ||
-      any(!is.finite(sizing_values)) || any(sizing_values <= 0) ||
-      any(sizing_values != floor(sizing_values))) {
-    stop("min_parallel_rows and target_rows_per_thread must be positive integers",
-         call. = FALSE)
+  if (length(min_parallel_rows) != 1L || !is.finite(min_parallel_rows) ||
+      min_parallel_rows <= 0 ||
+      min_parallel_rows != floor(min_parallel_rows)) {
+    stop("min_parallel_rows must be a positive integer", call. = FALSE)
+  }
+  # 0 selects the automatic rows per thread.
+  if (length(target_rows_per_thread) != 1L ||
+      !is.finite(target_rows_per_thread) || target_rows_per_thread < 0 ||
+      target_rows_per_thread != floor(target_rows_per_thread)) {
+    stop("target_rows_per_thread must be a nonnegative integer", call. = FALSE)
   }
   ssc <- parse_ssc(ssc)
   opts <- list(
@@ -395,6 +399,8 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     gpu_attempted = res$gpu_attempted,
     gpu_absorption_converged = res$gpu_absorption_converged,
     gpu_absorption_iterations = res$gpu_absorption_iterations,
+    cuda_tail_code = res$cuda_tail_code,
+    cuda_tail = res$cuda_tail,
     backend_requested = backend,
     fe_effects = fe_effects,
     fe_recovery_iterations = res$fe_recovery_iterations,

@@ -817,9 +817,12 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                      throw std::invalid_argument(
                          "num_threads, default_threads, and max_threads must be nonnegative");
                  }
-                 if (min_parallel_rows <= 0 || target_rows_per_thread <= 0) {
+                 if (min_parallel_rows <= 0) {
+                     throw std::invalid_argument("min_parallel_rows must be positive");
+                 }
+                 if (target_rows_per_thread < 0) {
                      throw std::invalid_argument(
-                         "min_parallel_rows and target_rows_per_thread must be positive");
+                         "target_rows_per_thread must be nonnegative");
                  }
                  HdfeOptions opts;
                  opts.se_type = parse_se_type(se_type);
@@ -909,7 +912,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
 	             py::arg("default_threads") = 0,
              py::arg("max_threads") = 0,
              py::arg("min_parallel_rows") = 20000,
-             py::arg("target_rows_per_thread") = 500000,
+             py::arg("target_rows_per_thread") = 0,
              py::arg("drop_singletons") = true,
              py::arg("retain_fes") = false,
              py::arg("symmetric_sweep") = false,
@@ -1657,6 +1660,12 @@ All weight-type flags require ``weights`` and are mutually exclusive.
         .def_property_readonly("gpu_absorption_iterations_", [](const HdfeRegressorV11& self) {
             return self.gpu_absorption_iterations();
         })
+        .def_property_readonly("cuda_tail_code_", [](const HdfeRegressorV11& self) {
+            return self.cuda_tail_code();
+        })
+        .def_property_readonly("cuda_tail_", [](const HdfeRegressorV11& self) {
+            return std::string(self.cuda_tail_name());
+        })
         .def_property_readonly("absorption_method_used", [](const HdfeRegressorV11& self) {
             return self.absorption_method_used();
         })
@@ -2208,6 +2217,8 @@ All weight-type flags require ``weights`` and are mutually exclusive.
                 r.gpu_absorption_converged;
             d["gpu_absorption_iterations"] =
                 r.gpu_absorption_iterations;
+            d["cuda_tail_code"] = r.cuda_tail_code;
+            d["cuda_tail"] = std::string(hdfe::detail::cuda_tail_name(r.cuda_tail_code));
             d["converged"] = r.converged;
             d["notes"] = r.notes;
             return d;

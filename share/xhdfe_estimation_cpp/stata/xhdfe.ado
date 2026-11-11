@@ -1,5 +1,5 @@
-*! version 2.30.1 20oct2026
-program define xhdfe, eclass sortpreserve
+*! version 2.31.0 11nov2026
+program define xhdfe, eclass
     version 16.0
 
     capture syntax, version
@@ -24,7 +24,23 @@ program define xhdfe, eclass sortpreserve
     // version queries above intentionally preserve their historical behavior.
     ereturn clear
     local output = cond(c(noisily), "noisily", "quietly")
-    capture `output' _xhdfe_estimate `0'
+    // sortpreserve builds an index of every observation on each call, and an
+    // estimation never reorders the data: egen restores its own sort and
+    // time-series operators stop with r(5) instead of sorting. The index is
+    // needed only when the data are sorted by an automatic output that this
+    // call may refill (__hdfe#__, _reghdfe_resid): Stata then re-sorts on exit
+    // so that the marker stays true. XHDFE_SORTPRESERVE=1 forces that path.
+    local runner "_xhdfe_estimate"
+    local sort_key : sortedby
+    foreach key_var of local sort_key {
+        if ("`key_var'" == "_reghdfe_resid" | substr("`key_var'", 1, 6) == "__hdfe") {
+            local runner "_xhdfe_estimate_sortpreserve"
+        }
+    }
+    if ("`: environment XHDFE_SORTPRESERVE'" == "1") {
+        local runner "_xhdfe_estimate_sortpreserve"
+    }
+    capture `output' `runner' `0'
     local rc = _rc
     if (`rc') {
         ereturn clear
@@ -32,9 +48,14 @@ program define xhdfe, eclass sortpreserve
     }
 end
 
+program define _xhdfe_estimate_sortpreserve, eclass sortpreserve
+    version 16.0
+    _xhdfe_estimate `0'
+end
+
 program define _xhdfe_package_version, rclass
     version 16.0
-    return local package_version "2.30.1 20oct2026"
+    return local package_version "2.31.0 11nov2026"
 end
 
 program define _xhdfe_estimate, eclass
@@ -191,7 +212,7 @@ program define _xhdfe_estimate, eclass
         DEFAULTThreads(integer 0) ///
         MAXThreads(integer 0) ///
         MINPARRows(integer 20000) ///
-        TARGETRPT(integer 500000) ///
+        TARGETRPT(integer 0) ///
         NOSAMPle ///
         TIMEit ///
         VERBose(integer -1) ///
@@ -1502,7 +1523,7 @@ program define _xhdfe_estimate, eclass
 
     // Some Stata versions leave long option defaults empty; enforce defaults here.
     if ("`minparrows'" == "") local minparrows 20000
-    if ("`targetrpt'" == "") local targetrpt 500000
+    if ("`targetrpt'" == "") local targetrpt 0
     if (`numthreads' < 0) {
         di as err "numthreads() must be >= 0"
         exit 198
@@ -1519,8 +1540,8 @@ program define _xhdfe_estimate, eclass
         di as err "minparallelrows() must be positive"
         exit 198
     }
-    if (`targetrpt' <= 0) {
-        di as err "targetrowsperthread() must be positive"
+    if (`targetrpt' < 0) {
+        di as err "targetrowsperthread() must be >= 0"
         exit 198
     }
 
@@ -1820,6 +1841,27 @@ program define _xhdfe_estimate, eclass
         local plugin_varlist "`plugin_varlist' `fe_out_vars'"
     }
     local plugin_varlist "`plugin_varlist' `esample'"
+    // An alias variable (Stata 18+, fralias) resolves through another frame;
+    // the plugin keeps its serial reader when it receives one.
+    local alias_vars 0
+    if (c(stata_version) >= 18) {
+        foreach v of local plugin_varlist {
+            local is_alias : isalias `v'
+            if (`is_alias') local alias_vars 1
+        }
+    }
+    // The estimation-sample marker goes last and sample_marker gives its
+    // position: the parallel reader selects the rows whose marker is not zero,
+    // the serial readers keep the if condition and ignore it.
+    local plugin_varlist "`plugin_varlist' `touse'"
+    local sample_marker : word count `plugin_varlist'
+    // Facts for the plugin's table of hosts qualified for the parallel read.
+    local host_edition
+    if (c(stata_version) >= 17) {
+        local host_edition "`c(edition_real)'"
+    }
+    local host_machine "`c(machine_type)'"
+    local host_machine : subinstr local host_machine ";" "", all
 
     // Matrices and scalars to receive results.
     tempname b V
@@ -1885,13 +1927,14 @@ program define _xhdfe_estimate, eclass
         sSlopeBlockChecked sSlopeBlockRel sSlopeBlockFrob sSlopeBlockRms sSlopeBlockMax sSlopeBlockSkipped ///
         sSlopeWorstFe sSlopeWorstMoment sSlopeRetryStages sSlopeRetryIter sSlopeInternalTol ///
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
-        sGpuUsed sGpuStatus ///
+        sGpuUsed sGpuStatus sCudaTail ///
         sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth sNclust sClustScale sVcvFix ///
         sFeRecConv sFeRecIter sFeRecMaxDelta
     scalar `sGpuUsed' = 0
     scalar `sGpuStatus' = 0
     scalar `sSat' = 0
     scalar `sGpuAttempted' = 0
+    scalar `sCudaTail' = 0
     scalar `sGpuAbsConv' = .
     scalar `sGpuAbsIter' = .
     scalar `sVcvFix' = 0
@@ -1929,6 +1972,9 @@ program define _xhdfe_estimate, eclass
     if (`dkraay_bw' >= 0) local cfg "`cfg'dkraay_bandwidth=`dkraay_bw';"
     local cfg "`cfg'num_threads=`numthreads';default_threads=`defaultthreads';max_threads=`maxthreads';"
     local cfg "`cfg'min_parallel_rows=`minparrows';target_rows_per_thread=`targetrpt';"
+    local cfg "`cfg'sample_marker=`sample_marker';alias_vars=`alias_vars';"
+    local cfg "`cfg'host_os=`c(os)';host_machine=`host_machine';host_edition=`host_edition';"
+    local cfg "`cfg'host_stata_version=`c(stata_version)';"
     local cfg "`cfg'drop_singletons=`drop_singletons';retain_fes=`retain_fes';symmetric_sweep=`symmetric_sweep';"
     local cfg "`cfg'tolerance_mode=`tolerance_mode';"
     if (!`group_mode') {
@@ -1963,6 +2009,7 @@ program define _xhdfe_estimate, eclass
     local cfg "`cfg's_gpu_used=`sGpuUsed';s_method_used=`sMeth';"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
+    local cfg "`cfg's_cuda_tail_code=`sCudaTail';"
     local cfg "`cfg's_num_clusters=`sNclust';s_cluster_scale=`sClustScale';"
     local cfg "`cfg's_vcv_psd_fixed=`sVcvFix';"
 
@@ -2115,6 +2162,7 @@ program define _xhdfe_estimate, eclass
     else if (scalar(`sThrLimitCode') == 2) local thread_limit_reason "auto_policy"
     else if (scalar(`sThrLimitCode') == 3) local thread_limit_reason "auto_max_threads"
     else if (scalar(`sThrLimitCode') == 4) local thread_limit_reason "openmp_unavailable"
+    else if (scalar(`sThrLimitCode') == 6) local thread_limit_reason "auto_team_coordination"
 
     // When the user explicitly requests a GPU backend, do not accept CPU
     // fallback results. GPU failures and non-convergence must be surfaced as
@@ -2658,6 +2706,7 @@ program define _xhdfe_estimate, eclass
     if (scalar(`sAutoRetryStatus') == 1) local auto_retry_status "below_trigger"
     else if (scalar(`sAutoRetryStatus') == 2) local auto_retry_status "used"
     else if (scalar(`sAutoRetryStatus') == 3) local auto_retry_status "failed"
+    else if (scalar(`sAutoRetryStatus') == 4) local auto_retry_status "left_early"
     ereturn local auto_retry_status "`auto_retry_status'"
     ereturn scalar slope_block_checked = scalar(`sSlopeBlockChecked')
     ereturn scalar slope_block_residual_rel = scalar(`sSlopeBlockRel')
@@ -2690,6 +2739,11 @@ program define _xhdfe_estimate, eclass
     ereturn scalar gpu_attempted = scalar(`sGpuAttempted')
     ereturn scalar gpu_absorption_converged = scalar(`sGpuAbsConv')
     ereturn scalar gpu_absorption_iterations = scalar(`sGpuAbsIter')
+    ereturn scalar cuda_tail_code = scalar(`sCudaTail')
+    local cuda_tail "none"
+    if (scalar(`sCudaTail') == 1) local cuda_tail "device-lsmr"
+    else if (scalar(`sCudaTail') == 2) local cuda_tail "host-mlsmr"
+    ereturn local cuda_tail "`cuda_tail'"
     ereturn local gpu_status "`gpu_status'"
     ereturn local tolerance_mode "`tolerance_mode'"
     if ("`gpu_backend'" != "") {

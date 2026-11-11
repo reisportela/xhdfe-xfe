@@ -5955,6 +5955,30 @@ void apply_jacobi_update(Eigen::VectorXd& y,
 // ===================================================================
 constexpr int kPackedPfDist = 24;
 
+// Widest design the packed layout serves. A row holds y and the regressors,
+// so the kernels are instantiated for S = 2 .. kPackedMaxLanes.
+constexpr int kPackedMaxCols = 16;
+constexpr int kPackedMaxLanes = kPackedMaxCols + 1;
+
+// XHDFE_PACKED_MAX_COLS=<1..kPackedMaxCols> narrows the packed layout to that
+// many regressors for the whole process (8 is the 2.30.1 route); other values
+// are ignored. XHDFE_PACKED=0 still turns the packed layout off.
+int packed_max_cols() {
+    static const int value = [] {
+        const char* raw = std::getenv("XHDFE_PACKED_MAX_COLS");
+        if (raw == nullptr || *raw == '\0') {
+            return kPackedMaxCols;
+        }
+        char* end = nullptr;
+        const long long parsed = std::strtoll(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed < 1 || parsed > kPackedMaxCols) {
+            return kPackedMaxCols;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return value;
+}
+
 // Grouped gather/scatter. Random == true uses csr.obs_index (non-contiguous
 // FE); Random == false treats observations of a group as the contiguous range
 // [group_ptr[g], group_ptr[g+1]) (contiguous FE). `means` is scratch of size
@@ -6443,6 +6467,11 @@ void packed_demean_obspart_fused(const double* source,
     }
 }
 
+// The three dispatch tables below hold the cases S = 2 .. kPackedDispatchMaxLanes.
+constexpr int kPackedDispatchMaxLanes = 17;
+static_assert(kPackedMaxLanes <= kPackedDispatchMaxLanes,
+              "kPackedMaxLanes exceeds the cases of the packed dispatch tables");
+
 // Dispatch on S and on the source of the rows; false when that fused form
 // does not exist and the caller keeps the two passes.
 bool packed_demean_fused_dispatch(int S, int mode, int kind, const double* source,
@@ -6485,6 +6514,14 @@ bool packed_demean_fused_dispatch(int S, int mode, int kind, const double* sourc
         HDFE_PF_CASE(7)
         HDFE_PF_CASE(8)
         HDFE_PF_CASE(9)
+        HDFE_PF_CASE(10)
+        HDFE_PF_CASE(11)
+        HDFE_PF_CASE(12)
+        HDFE_PF_CASE(13)
+        HDFE_PF_CASE(14)
+        HDFE_PF_CASE(15)
+        HDFE_PF_CASE(16)
+        HDFE_PF_CASE(17)
         default:
             return false;
     }
@@ -6492,7 +6529,7 @@ bool packed_demean_fused_dispatch(int S, int mode, int kind, const double* sourc
 #undef HDFE_PF_KIND
 }
 
-// Runtime dispatch on S = num_cols + 1 (supported range [2, 9], i.e. up to 8
+// Runtime dispatch on S = num_cols + 1 (supported range [2, 17], i.e. up to 16
 // regressors). Returns false if S is out of range so the caller can fall back.
 bool packed_demean_grouped_dispatch(int S, bool random, double* cur,
                                     const int* group_ptr, const int* obs_index,
@@ -6517,6 +6554,14 @@ bool packed_demean_grouped_dispatch(int S, bool random, double* cur,
         HDFE_PG_CASE(7)
         HDFE_PG_CASE(8)
         HDFE_PG_CASE(9)
+        HDFE_PG_CASE(10)
+        HDFE_PG_CASE(11)
+        HDFE_PG_CASE(12)
+        HDFE_PG_CASE(13)
+        HDFE_PG_CASE(14)
+        HDFE_PG_CASE(15)
+        HDFE_PG_CASE(16)
+        HDFE_PG_CASE(17)
         default:
             return false;
     }
@@ -6542,6 +6587,14 @@ bool packed_demean_obspart_dispatch(int S, double* cur, const int* group_ids,
         HDFE_PO_CASE(7)
         HDFE_PO_CASE(8)
         HDFE_PO_CASE(9)
+        HDFE_PO_CASE(10)
+        HDFE_PO_CASE(11)
+        HDFE_PO_CASE(12)
+        HDFE_PO_CASE(13)
+        HDFE_PO_CASE(14)
+        HDFE_PO_CASE(15)
+        HDFE_PO_CASE(16)
+        HDFE_PO_CASE(17)
         default:
             return false;
     }
@@ -6585,6 +6638,739 @@ bool thread_cuda_forward_probe_requested() noexcept {
     return tls_cuda_forward_probe_requested;
 }
 
+namespace {
+
+// --- Early-routing trace (measurement for package D1) -------------------------
+// XHDFE_EARLY_ROUTING_TRACE=1 prints, for every solve of absorb_fixed_effects,
+// the route it takes, the quantities an early-routing predictor could read at
+// iterations 4, 8, 16, ... of each sweep phase and conjugate-gradient stage,
+// and what the completed stage reached. The certificate it adds at those
+// checkpoints is the one certify_absorption_result reports, computed serially
+// into its own buffers from iterates it only reads, outside any parallel
+// region and without the parallel observer; results, routes, iteration counts
+// and diagnostics are those of a run without the switch. The time spent on it
+// is reported apart (trace_s) and left out of `elapsed`. Off, nothing below
+// runs. Read once per process.
+bool early_routing_trace_enabled() {
+    static const bool on = []() {
+        const char* e = std::getenv("XHDFE_EARLY_ROUTING_TRACE");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return on;
+}
+
+long long early_routing_trace_next_solve() {
+    static std::atomic<long long> next{0};
+    return ++next;
+}
+
+// A solve that ends on a direct or specialised route before any sweep.
+void early_routing_trace_route_only(const char* route) {
+    if (!early_routing_trace_enabled()) {
+        return;
+    }
+    std::ostringstream line;
+    line << "xhdfe early_routing_trace event=route solve="
+         << early_routing_trace_next_solve() << " route=" << route << '\n';
+    std::cerr << line.str();
+}
+
+class EarlyRoutingTrace {
+public:
+    EarlyRoutingTrace(const Eigen::VectorXd& y,
+                      const Eigen::MatrixXd& X,
+                      const std::vector<FeIndexer>& indexers,
+                      const double* weights,
+                      const HdfeOptions& options,
+                      std::chrono::steady_clock::time_point solve_start)
+        : on_(early_routing_trace_enabled()),
+          indexers_(indexers),
+          weights_(weights),
+          start_(solve_start) {
+        if (!on_) {
+            return;
+        }
+        const auto setup_t0 = std::chrono::steady_clock::now();
+        solve_ = early_routing_trace_next_solve();
+        n_ = static_cast<int>(y.size());
+        lanes_ = 1 + static_cast<int>(X.cols());
+        // Denominator of the certificate: the norm of each original column,
+        // with the dominant-origin rule certify_absorption_result applies in
+        // reghdfe-comparable mode, times the operator norm.
+        original_norm_.assign(static_cast<std::size_t>(lanes_), 0.0);
+        for (int k = 0; k < lanes_; ++k) {
+            const double* raw = k == 0 ? y.data() : X.col(k - 1).data();
+            long double sumsq = 0.0L;
+            long double sum = 0.0L;
+            for (int i = 0; i < n_; ++i) {
+                sumsq += static_cast<long double>(raw[i]) * raw[i];
+                sum += raw[i];
+            }
+            long double norm_sq = sumsq;
+            if (options.tolerance_mode == ToleranceMode::ReghdfeComparable && n_ > 0 &&
+                sum * (sum / n_) > (1.0L - 1.0L / 1024.0L) * sumsq) {
+                const long double origin = raw[0];
+                long double shifted_sum = 0.0L;
+                for (int i = 0; i < n_; ++i) {
+                    shifted_sum += static_cast<long double>(raw[i]) - origin;
+                }
+                const long double mean = shifted_sum / n_;
+                long double centered_sq = 0.0L;
+                for (int i = 0; i < n_; ++i) {
+                    const long double delta = static_cast<long double>(raw[i]) - origin - mean;
+                    centered_sq += delta * delta;
+                }
+                if (centered_sq > 0.0L && centered_sq < sumsq / 1024.0L) {
+                    norm_sq = centered_sq;
+                }
+            }
+            original_norm_[static_cast<std::size_t>(k)] =
+                std::sqrt(static_cast<double>(norm_sq));
+        }
+        long double weight_sq = 0.0L;
+        for (int i = 0; i < n_; ++i) {
+            const double w = weights_ ? weights_[i] : 1.0;
+            weight_sq += static_cast<long double>(w) * w;
+        }
+        operator_norm_ = std::sqrt(static_cast<double>(
+            weight_sq * static_cast<long double>(indexers_.size())));
+        trace_seconds_ += seconds_since(setup_t0);
+    }
+
+    bool on() const { return on_; }
+
+    void begin(int num_cols, bool use_accel, bool two_stage, int iter_warmup,
+               int iter_two_fe, bool honest, const HdfeOptions& options,
+               int accel_budget, int difficulty) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=begin solve=" << solve_
+             << " n=" << n_ << " nfe=" << indexers_.size() << " cols=" << num_cols
+             << " groups=";
+        for (std::size_t dim = 0; dim < indexers_.size(); ++dim) {
+            line << (dim ? "," : "") << indexers_[dim].num_groups;
+        }
+        line << " accel=" << (use_accel ? 1 : 0) << " two_stage=" << (two_stage ? 1 : 0)
+             << " warmup=" << iter_warmup << " two_fe=" << iter_two_fe
+             << " honest=" << (honest ? 1 : 0) << " tol=" << options.tol
+             << " mode=" << static_cast<int>(options.tolerance_mode)
+             << " max_iter=" << options.max_iter << " accel_budget=" << accel_budget
+             << " difficulty=" << difficulty << " weights=" << (weights_ ? 1 : 0)
+             << " symmetric=" << (options.symmetric_sweep ? 1 : 0) << '\n';
+        std::cerr << line.str();
+    }
+
+    void route(const char* name) {
+        if (!on_) {
+            return;
+        }
+        route_ = name;
+        std::ostringstream line;
+        line << "xhdfe early_routing_trace event=route solve=" << solve_ << " route=" << name
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // A new phase: `offset` iterations were done before it in this solve.
+    void phase(const char* name, int offset) {
+        if (!on_) {
+            return;
+        }
+        phase_ = name;
+        offset_ = offset;
+        count_ = 0;
+    }
+
+    // One iteration of an accelerated sweep loop, after irons_tuck_accumulate:
+    // `iter` iterations done in the phase; `norm` scales the stop test, which
+    // is sqrt(d1sq) <= tol * max(1, norm).
+    template <class Value>
+    void sweep(int iter, const IronsTuckStats& stats, double norm, double tol,
+               bool suspended, int restarts, Value value) {
+        if (!on_) {
+            return;
+        }
+        const double r = std::sqrt(stats.d1sq) / std::max(1.0, norm);
+        push(r);
+        if (!checkpoint(iter)) {
+            return;
+        }
+        const double c = stats.ssq != 0.0 ? stats.vprod / stats.ssq
+                                           : std::numeric_limits<double>::quiet_NaN();
+        const double rho = c / (c - 1.0);
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=checkpoint solve=" << solve_
+             << " route=" << route_ << " phase=" << phase_ << " iter=" << iter
+             << " total=" << offset_ + iter << " r=" << r << " q4=" << rate(4)
+             << " q8=" << rate(8) << " c=" << c << " rho=" << rho << " norm=" << norm
+             << " tol=" << tol << " suspended=" << (suspended ? 1 : 0)
+             << " restarts=" << restarts << " cert=" << cert << " elapsed=" << elapsed()
+             << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // One check of a plain sweep loop: the change-of-norm statistic it stops
+    // on (rel_change / step < tol).
+    template <class Value>
+    void plain(int iter, double stat, double tol, Value value) {
+        if (!on_) {
+            return;
+        }
+        push(stat);
+        if (!checkpoint(iter)) {
+            return;
+        }
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=checkpoint solve=" << solve_
+             << " route=" << route_ << " phase=" << phase_ << " iter=" << iter
+             << " total=" << offset_ + iter << " r=" << stat << " q4=" << rate(4)
+             << " q8=" << rate(8) << " tol=" << tol << " cert=" << cert
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // One iteration of a conjugate-gradient stage: the largest lane update
+    // error, the quantity its stop tests (<= tol).
+    template <class Value>
+    void cg(int iter, double update_error, double tol, Value value) {
+        if (!on_) {
+            return;
+        }
+        push(update_error);
+        if (!checkpoint(iter)) {
+            return;
+        }
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=cg_checkpoint solve=" << solve_
+             << " route=" << route_ << " iter=" << iter << " err=" << update_error
+             << " q4=" << rate(4) << " q8=" << rate(8) << " tol=" << tol << " cert=" << cert
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // A phase stopped by its own rule; `value` reads the iterate it returns,
+    // before any polish.
+    template <class Value>
+    void stop(int iter, const char* reason, Value value) {
+        if (!on_) {
+            return;
+        }
+        const double last = count_ > 0 ? ring_[static_cast<std::size_t>(count_ - 1) % kRing]
+                                       : std::numeric_limits<double>::quiet_NaN();
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=stop solve=" << solve_ << " route=" << route_
+             << " phase=" << phase_ << " iter=" << iter << " total=" << offset_ + iter
+             << " reason=" << reason << " r=" << last << " cert=" << cert
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    void handoff(int iter, const char* reason, double ratio) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=handoff solve=" << solve_
+             << " route=" << route_ << " phase=" << phase_ << " iter=" << iter
+             << " total=" << offset_ + iter << " reason=" << reason << " ratio=" << ratio
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // A phase that used its whole budget without stopping by its own rule.
+    void exhausted(int iter) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line << "xhdfe early_routing_trace event=exhausted solve=" << solve_
+             << " route=" << route_ << " phase=" << phase_ << " iter=" << iter
+             << " total=" << offset_ + iter << " elapsed=" << elapsed()
+             << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // End of a conjugate-gradient stage. `stage` is where the last iteration
+    // was (1 step size, 2 final-step guard, 3 direction update, 4 update
+    // error); with converged=0 it names the guard that ended the stage, unless
+    // the iteration budget did. `value` reads the iterate the stage returns.
+    template <class Value>
+    void cg_end(int iterations, bool converged, int stage, int max_iter, Value value) {
+        if (!on_) {
+            return;
+        }
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=cg_end solve=" << solve_ << " route=" << route_
+             << " iterations=" << iterations << " converged=" << (converged ? 1 : 0)
+             << " stage=" << (converged ? 0 : stage)
+             << " budget_spent=" << (iterations >= max_iter ? 1 : 0) << " cert=" << cert
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    void polish(int sweeps, double final_max) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=polish solve=" << solve_ << " route=" << route_
+             << " sweeps=" << sweeps << " final_max=" << final_max
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // End of the solve; `value` reads the iterate it returns, whose
+    // certificate the regressor then computes in full (primary_rel).
+    template <class Value>
+    void end(bool converged, int iterations, bool cg_restart, Value value) {
+        if (!on_) {
+            return;
+        }
+        const double cert = certificate(value);
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=end solve=" << solve_ << " route=" << route_
+             << " converged=" << (converged ? 1 : 0) << " iterations=" << iterations
+             << " cg_restart=" << (cg_restart ? 1 : 0) << " cert=" << cert
+             << " elapsed=" << elapsed() << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+    // The compiled early-routing rule, and whether it is active in this solve.
+    void policy(double margin, bool kappa_each, int min_remaining, bool active) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line << "xhdfe early_routing_trace event=policy solve=" << solve_
+             << " margin=" << margin << " kappa_each=" << (kappa_each ? 1 : 0)
+             << " m_min=" << min_remaining << " active=" << (active ? 1 : 0) << '\n';
+        std::cerr << line.str();
+    }
+
+    // The solve left early (rule 1 predictive, 2 structural) after
+    // `iterations` iterations; the regressor runs MLSMR instead.
+    void left(int rule, int iterations, double prediction) {
+        if (!on_) {
+            return;
+        }
+        std::ostringstream line;
+        line.precision(10);
+        line << "xhdfe early_routing_trace event=left solve=" << solve_ << " route=" << route_
+             << " phase=" << phase_ << " rule=" << rule << " iterations=" << iterations
+             << " predicted=" << prediction << " elapsed=" << elapsed()
+             << " trace_s=" << trace_seconds_ << '\n';
+        std::cerr << line.str();
+    }
+
+private:
+    static constexpr int kRing = 16;
+
+    static double seconds_since(std::chrono::steady_clock::time_point t0) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+
+    static bool checkpoint(int iter) { return iter >= 4 && (iter & (iter - 1)) == 0; }
+
+    double elapsed() const { return seconds_since(start_) - trace_seconds_; }
+
+    void push(double value) {
+        ring_[static_cast<std::size_t>(count_) % kRing] = value;
+        ++count_;
+    }
+
+    // Geometric mean of the ratio per iteration over the last `window` values.
+    double rate(int window) const {
+        if (count_ <= window) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        const double latest = ring_[static_cast<std::size_t>(count_ - 1) % kRing];
+        const double earlier = ring_[static_cast<std::size_t>(count_ - 1 - window) % kRing];
+        if (!(earlier > 0.0) || !(latest >= 0.0)) {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        return std::pow(latest / earlier, 1.0 / window);
+    }
+
+    // max over columns of ||D' v_col|| / (||D|| * ||original col||), the
+    // abs_residual_rel of certify_absorption_result, for the iterate `value`
+    // reads (value(i, k): row i, column k, k = 0 being y).
+    template <class Value>
+    double certificate(Value value) {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::vector<long double> residual(static_cast<std::size_t>(lanes_), 0.0L);
+        std::vector<double> sums;
+        for (const FeIndexer& idx : indexers_) {
+            const std::size_t groups = static_cast<std::size_t>(std::max(0, idx.num_groups));
+            const std::size_t lanes = static_cast<std::size_t>(lanes_);
+            sums.assign(groups * lanes, 0.0);
+            const int* group_ids = idx.group_ids.data();
+            for (int i = 0; i < n_; ++i) {
+                const double w = weights_ ? weights_[i] : 1.0;
+                double* s = sums.data() + static_cast<std::size_t>(group_ids[i]) * lanes;
+                for (int k = 0; k < lanes_; ++k) {
+                    s[k] += w * value(i, k);
+                }
+            }
+            for (std::size_t g = 0; g < groups; ++g) {
+                for (std::size_t k = 0; k < lanes; ++k) {
+                    const double v = sums[g * lanes + k];
+                    residual[k] += static_cast<long double>(v) * v;
+                }
+            }
+        }
+        double worst = 0.0;
+        for (int k = 0; k < lanes_; ++k) {
+            const double absolute =
+                std::sqrt(static_cast<double>(residual[static_cast<std::size_t>(k)]));
+            const double scale = operator_norm_ * original_norm_[static_cast<std::size_t>(k)];
+            double relative = 0.0;
+            if (scale > 0.0) {
+                relative = absolute / scale;
+            } else if (absolute > 0.0) {
+                relative = std::numeric_limits<double>::max();
+            }
+            worst = std::max(worst, relative);
+        }
+        trace_seconds_ += seconds_since(t0);
+        return worst;
+    }
+
+    bool on_ = false;
+    const std::vector<FeIndexer>& indexers_;
+    const double* weights_ = nullptr;
+    std::chrono::steady_clock::time_point start_;
+    long long solve_ = 0;
+    int n_ = 0;
+    int lanes_ = 0;
+    std::vector<double> original_norm_;
+    double operator_norm_ = 0.0;
+    double trace_seconds_ = 0.0;
+    const char* route_ = "none";
+    const char* phase_ = "none";
+    int offset_ = 0;
+    int count_ = 0;
+    std::array<double, kRing> ring_{};
+};
+
+// ---- Early routing ----
+// On the ordinary retry's eligible route the regressor sets
+// options.early_routing on the primary solve only. That solve then leaves
+// for the retry's MLSMR:
+// - predictive rule: in the main phase of an accelerated sweep loop, and in a
+//   conjugate-gradient stage entered at a direct gate (automatic
+//   dominant-share or path-like), when its final certificate is predicted
+//   above the retry's trigger with margin. At the checkpoints k = 8, 16, 32,
+//   ... of the phase or stage, after the stop test and while no divergence
+//   safeguard is active, with r the quantity the stop tests (the sweep's
+//   relative step, or the stage's update error):
+//     q = (r_k / r_{k-8})^(1/8) (window 4 at k = 8), its decay per iteration;
+//     m = ceil(log(tol / r_k) / log q), the iterations still needed;
+//     kappa = C / r_k, C the certificate of the iterate (one pass);
+//   it leaves when A = kappa * q * tol > M * 1e-11 and m >= m_min;
+// - structural rule: at the hand-off from an accelerator that diverged or
+//   reached its iteration cap, it does not start the conjugate-gradient
+//   stage. A converged hand-off stage could end below the trigger and be
+//   kept today; that case is possible in principle and accepted, since the
+//   accelerator has already failed on the graph.
+// A left solve returns unconverged and marked, and the regressor runs the
+// retry's MLSMR at once. M, m_min and the kappa variant come from the D1
+// table (benchmarks/_out/perf_fereg_gap_20261106/d1_trace).
+// Adopted from the wider D1 table (70 fits, 46 kept with three draws per
+// synthetic cell): kappa read at each checkpoint with M = 30 leaves 5 of 24
+// discarded sweeps, none kept, with the smallest margin to a kept fit 11.3.
+constexpr double kEarlyRoutingTrigger = 1.0e-11;          // the retry's trigger
+constexpr double kEarlyRoutingMargin = 30.0;              // M
+constexpr bool kEarlyRoutingKappaEachCheckpoint = true;   // false: kappa read once
+constexpr int kEarlyRoutingMinRemaining = 4;              // m_min
+constexpr int kEarlyRoutingFirstCheckpoint = 8;
+
+class EarlyRouting {
+public:
+    EarlyRouting(bool active,
+                 const Eigen::VectorXd& y,
+                 const Eigen::MatrixXd& X,
+                 const std::vector<FeIndexer>& indexers,
+                 const double* weights,
+                 const HdfeOptions& options,
+                 int threads)
+        : active_(active && weights == nullptr && !indexers.empty() && y.size() > 0),
+          y_(y),
+          X_(X),
+          indexers_(indexers),
+          options_(options),
+          threads_(std::max(1, threads)),
+          group_ptr_(indexers.size(), nullptr),
+          obs_index_(indexers.size(), nullptr) {
+        if (!active_) {
+            return;
+        }
+        const int n = static_cast<int>(y.size());
+        for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
+            if (indexer_has_contiguous_groups(indexers[dim], n)) {
+                group_ptr_[dim] = indexers[dim].group_ptr.data();
+            }
+        }
+        ring_.fill(std::numeric_limits<double>::quiet_NaN());
+    }
+
+    bool active() const { return active_; }
+    int rule() const { return rule_; }
+    double prediction() const { return prediction_; }
+    double kappa() const { return kappa_; }
+    double rate() const { return rate_; }
+
+    // The rows of each group of `dim` in a fixed order (a CSR the caller
+    // already holds); otherwise the certificate scatters by row chunks.
+    void group_order(std::size_t dim, const int* group_ptr, const int* obs_index) {
+        if (active_ && group_ptr_[dim] == nullptr) {
+            group_ptr_[dim] = group_ptr;
+            obs_index_[dim] = obs_index;
+        }
+    }
+
+    // A new phase of a sweep loop, or a conjugate-gradient stage: only the
+    // main phase (or the only one) and a stage entered at a direct gate
+    // decide.
+    void phase(bool decides) {
+        deciding_ = active_ && decides;
+        ring_.fill(std::numeric_limits<double>::quiet_NaN());
+    }
+    bool deciding() const { return deciding_; }
+
+    static bool checkpoint(int iter) {
+        return iter >= kEarlyRoutingFirstCheckpoint && (iter & (iter - 1)) == 0;
+    }
+    // r is read at each checkpoint, 4 iterations before the first and 8
+    // before the others; nothing else is kept. (For k = 16 the earlier value
+    // is iteration 8, itself a checkpoint.)
+    static bool records(int iter) {
+        return checkpoint(iter) || iter == kEarlyRoutingFirstCheckpoint - 4 ||
+               (iter > kEarlyRoutingFirstCheckpoint && checkpoint(iter + 8));
+    }
+    void record(int iter, double r) { ring_[static_cast<std::size_t>(iter) & 15U] = r; }
+
+    // At checkpoint `iter`, after the stop test and outside any divergence
+    // state; `value(i, k)` reads the iterate (column k, k = 0 being y).
+    // True to leave.
+    template <class Value>
+    bool decide(int iter, double tol, Value value) {
+        const int window = iter == kEarlyRoutingFirstCheckpoint ? 4 : 8;
+        const double r = ring_[static_cast<std::size_t>(iter) & 15U];
+        const double earlier = ring_[static_cast<std::size_t>(iter - window) & 15U];
+        if (!(tol > 0.0) || !(r > tol) || !(earlier > 0.0) ||
+            !hdfe::detail::ieee_finite(r) || !hdfe::detail::ieee_finite(earlier)) {
+            return false;
+        }
+        const double q = std::pow(r / earlier, 1.0 / window);
+        if (!(q > 0.0)) {
+            return false;
+        }
+        const double remaining = q < 1.0 ? std::ceil(std::log(tol / r) / std::log(q))
+                                         : std::numeric_limits<double>::infinity();
+        if (!(remaining >= kEarlyRoutingMinRemaining)) {
+            return false;
+        }
+        if (kEarlyRoutingKappaEachCheckpoint || !(kappa_ > 0.0)) {
+            const double certificate_value = certificate(value);
+            if (!hdfe::detail::ieee_finite(certificate_value)) {
+                return false;
+            }
+            kappa_ = certificate_value / r;
+        }
+        const double predicted = kappa_ * q * tol;
+        if (!(predicted > kEarlyRoutingMargin * kEarlyRoutingTrigger)) {
+            return false;
+        }
+        rule_ = 1;
+        prediction_ = predicted;
+        rate_ = q;
+        return true;
+    }
+
+    // The accelerator hands its iterate to a conjugate-gradient stage.
+    bool leave_at_handoff() {
+        if (!active_) {
+            return false;
+        }
+        rule_ = 2;
+        return true;
+    }
+
+private:
+    // abs_residual_rel of the iterate `value` reads, as
+    // certify_absorption_result computes it on the ordinary route: max over
+    // columns of ||D' v_col|| / (||D|| ||original col||), with the
+    // dominant-origin scale in reghdfe-comparable mode. Fixed logical chunks
+    // throughout, so the value does not depend on the team size.
+    template <class Value>
+    double certificate(Value value) {
+        const int n = static_cast<int>(y_.size());
+        const int lanes = 1 + static_cast<int>(X_.cols());
+        if (original_norm_.empty()) {
+            denominators(n, lanes);
+        }
+        std::vector<long double> residual(static_cast<std::size_t>(lanes), 0.0L);
+        for (std::size_t dim = 0; dim < indexers_.size(); ++dim) {
+            const FeIndexer& idx = indexers_[dim];
+            const int groups = idx.num_groups;
+            if (groups <= 0) {
+                continue;
+            }
+            level_sums(n, groups, lanes, idx.group_ids.data(), group_ptr_[dim],
+                       obs_index_[dim], value);
+            for (int k = 0; k < lanes; ++k) {
+                residual[static_cast<std::size_t>(k)] += static_cast<long double>(
+                    deterministic_chunked_sum<int>(
+                        groups, threads_, [&](int group) {
+                            const double sum = sums_[static_cast<std::size_t>(group) *
+                                                         static_cast<std::size_t>(lanes) +
+                                                     static_cast<std::size_t>(k)];
+                            return sum * sum;
+                        }, options_.parallel_observer));
+            }
+        }
+        double worst = 0.0;
+        for (int k = 0; k < lanes; ++k) {
+            const double absolute = std::sqrt(static_cast<double>(
+                std::max(0.0L, residual[static_cast<std::size_t>(k)])));
+            const double scale = operator_norm_ * original_norm_[static_cast<std::size_t>(k)];
+            if (scale > 0.0) {
+                worst = std::max(worst, absolute / scale);
+            } else if (absolute > 0.0) {
+                worst = std::numeric_limits<double>::max();
+            }
+        }
+        return worst;
+    }
+
+    void denominators(int n, int lanes) {
+        original_norm_.assign(static_cast<std::size_t>(lanes), 0.0);
+        for (int k = 0; k < lanes; ++k) {
+            const double* raw = k == 0 ? y_.data() : X_.col(k - 1).data();
+            long double norm_sq = static_cast<long double>(
+                deterministic_sumsq_raw(raw, n, threads_, options_.parallel_observer));
+            if (options_.tolerance_mode == ToleranceMode::ReghdfeComparable && n > 0) {
+                const long double sum = deterministic_chunked_sum<int>(
+                    n, threads_, [&](int row) { return raw[row]; }, options_.parallel_observer);
+                if (sum * (sum / n) > (1.0L - 1.0L / 1024.0L) * norm_sq) {
+                    const long double origin = raw[0];
+                    long double shifted_sum = 0.0L;
+                    for (int row = 0; row < n; ++row) {
+                        shifted_sum += static_cast<long double>(raw[row]) - origin;
+                    }
+                    const long double mean = shifted_sum / n;
+                    long double centered_sq = 0.0L;
+                    for (int row = 0; row < n; ++row) {
+                        const long double delta = static_cast<long double>(raw[row]) - origin - mean;
+                        centered_sq += delta * delta;
+                    }
+                    if (centered_sq > 0.0L && centered_sq < norm_sq / 1024.0L) {
+                        norm_sq = centered_sq;
+                    }
+                }
+            }
+            original_norm_[static_cast<std::size_t>(k)] =
+                std::sqrt(static_cast<double>(std::max(0.0L, norm_sq)));
+        }
+        // Unit weights: ||D||^2 = sum over dimensions of the row count.
+        operator_norm_ = std::sqrt(static_cast<double>(indexers_.size()) * static_cast<double>(n));
+    }
+
+    // Level sums of one dimension for every column, each group reduced in a
+    // fixed order: by one thread over its rows when they are known (groups
+    // stored contiguously, or a CSR), otherwise over fixed row chunks added in
+    // chunk order.
+    template <class Value>
+    void level_sums(int n, int groups, int lanes, const int* group_ids, const int* group_ptr,
+                    const int* obs_index, Value value) {
+        const std::size_t width = static_cast<std::size_t>(lanes);
+        const std::size_t block = static_cast<std::size_t>(groups) * width;
+        [[maybe_unused]] const int team = threads_;
+        sums_.assign(block, 0.0);
+        if (group_ptr != nullptr) {
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+            for (int group = 0; group < groups; ++group) {
+                double* total = sums_.data() + static_cast<std::size_t>(group) * width;
+                const int end = group_ptr[group + 1];
+                for (int position = group_ptr[group]; position < end; ++position) {
+                    const int row = obs_index != nullptr ? obs_index[position] : position;
+                    for (int k = 0; k < lanes; ++k) {
+                        total[k] += value(row, k);
+                    }
+                }
+            }
+            return;
+        }
+        const int chunks = deterministic_scatter_chunk_count(n, groups, lanes);
+        scratch_.assign(block * static_cast<std::size_t>(chunks), 0.0);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (team > 1)
+#endif
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            double* mine = scratch_.data() + static_cast<std::size_t>(chunk) * block;
+            const int end = deterministic_chunk_end(n, chunk, chunks);
+            for (int row = deterministic_chunk_begin(n, chunk, chunks); row < end; ++row) {
+                double* total = mine + static_cast<std::size_t>(group_ids[row]) * width;
+                for (int k = 0; k < lanes; ++k) {
+                    total[k] += value(row, k);
+                }
+            }
+        }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+        for (int group = 0; group < groups; ++group) {
+            double* total = sums_.data() + static_cast<std::size_t>(group) * width;
+            for (int chunk = 0; chunk < chunks; ++chunk) {
+                const double* part = scratch_.data() + static_cast<std::size_t>(chunk) * block +
+                                     static_cast<std::size_t>(group) * width;
+                for (int k = 0; k < lanes; ++k) {
+                    total[k] += part[k];
+                }
+            }
+        }
+    }
+
+    bool active_ = false;
+    bool deciding_ = false;
+    const Eigen::VectorXd& y_;
+    const Eigen::MatrixXd& X_;
+    const std::vector<FeIndexer>& indexers_;
+    const HdfeOptions& options_;
+    int threads_ = 1;
+    std::vector<const int*> group_ptr_;
+    std::vector<const int*> obs_index_;
+    std::array<double, 16> ring_{};
+    int rule_ = 0;
+    double prediction_ = 0.0;
+    double kappa_ = 0.0;
+    double rate_ = 0.0;
+    std::vector<double> original_norm_;
+    double operator_norm_ = 0.0;
+    std::vector<double> sums_;
+    std::vector<double> scratch_;
+};
+
+}  // namespace
+
 AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                       const Eigen::MatrixXd& X,
                                       const std::vector<Eigen::VectorXi>& fes,
@@ -6615,6 +7401,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         AbsorptionResult direct;
         if (weighted_two_by_two::try_cpu(y, X, fes, weights, options, direct)) {
             cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+            early_routing_trace_route_only("weighted_two_by_two");
             return direct;
         }
     }
@@ -6680,6 +7467,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 {a.group_ids.data(),a.num_groups,a.num_levels_present},
                 {b.group_ids.data(),b.num_groups,b.num_levels_present},weights,options,direct)) {
             cpu_profile_log_elapsed("abs_total",absorb_total_t0);
+            early_routing_trace_route_only("additive_cell");
             return direct;
         }
     }
@@ -6692,6 +7480,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         AbsorptionResult direct;
         if (weighted_two_by_two::try_cpu_indexed(y, X, views, weights, options, direct)) {
             cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+            early_routing_trace_route_only("weighted_two_by_two_indexed");
             return direct;
         }
     }
@@ -6710,10 +7499,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             if (run_schwarz_absorption_from_indexers(y, X, indexers, options,
                                                      convergence_tol, result)) {
                 cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+                early_routing_trace_route_only("schwarz");
                 return result;
             }
             if (!options.from_auto) {
                 cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+                early_routing_trace_route_only("schwarz_failed");
                 return result;
             }
         } else if (!options.from_auto) {
@@ -6736,6 +7527,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             absorb_fixed_effects_sparse(y, X, indexers, weights, options, true);
         if (exact_result.converged) {
             cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+            early_routing_trace_route_only("reference_sparse");
             return exact_result;
         }
     }
@@ -6965,6 +7757,32 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
     cpu_profile_log_elapsed("abs_setup", setup_t0);
 
     const auto solve_t0 = std::chrono::steady_clock::now();
+    EarlyRoutingTrace trace(y, X, indexers, weight_ptr, options, solve_t0);
+    trace.begin(num_cols, use_accel, enable_two_stage, iter_warmup, iter_two_fe, honest_mode,
+                options, accel_iter_budget, static_cast<int>(difficulty));
+    // Early routing (see EarlyRouting): only on the primary solve the
+    // regressor marked, and only for the stop rule the prediction reads.
+    EarlyRouting early(options.early_routing && honest_mode, y, X, indexers, weight_ptr,
+                       options, threads);
+    trace.policy(kEarlyRoutingMargin, kEarlyRoutingKappaEachCheckpoint,
+                 kEarlyRoutingMinRemaining, early.active());
+    for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
+        if (use_csr[dim]) {
+            early.group_order(dim, csr[dim].group_ptr.data(), csr[dim].obs_index.data());
+        }
+    }
+    // Marks the result of a solve that leaves early; the caller returns it.
+    auto mark_left = [&](int iterations) {
+        result.iterations = iterations;
+        result.converged = false;
+        result.precision_certified = false;
+        result.early_routing_left = early.rule();
+        result.early_routing_prediction = early.prediction();
+        result.early_routing_kappa = early.kappa();
+        result.early_routing_rate = early.rate();
+        trace.left(early.rule(), iterations, early.prediction());
+        cpu_profile_log_elapsed("abs_total", absorb_total_t0);
+    };
 
     // ---------------- AoS (packed) fast path ----------------
     // Eligible only for the standard accelerated absorption with unit weights
@@ -6990,7 +7808,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
         }
         const bool use_packed = use_accel && unit_weights && !options.retain_fixed_effects &&
-                                num_cols >= 1 && num_cols <= 8 && any_noncontig && !packed_disabled;
+                                num_cols >= 1 && num_cols <= packed_max_cols() &&
+                                any_noncontig && !packed_disabled;
         if (use_packed) {
             const int Sp = num_cols + 1;
             const std::size_t flat_size = static_cast<std::size_t>(n) * static_cast<std::size_t>(Sp);
@@ -7065,6 +7884,11 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 mlsmr_env_enabled("XHDFE_PACKED_FUSED", true);
             const bool packed_fused =
                 packed_fused_enabled && flat_size * sizeof(double) >= kPackedFusedMinBytes;
+            if (packed_profile) {
+                std::cerr << "cpu_profile label=abs_packed_fused active="
+                          << (packed_fused ? 1 : 0)
+                          << " bytes=" << flat_size * sizeof(double) << '\n';
+            }
             // Blocks of levels of the grouped dimensions, for the fused forms.
             std::vector<std::vector<int>> pblocks(indexers.size());
             if (packed_fused) {
@@ -7243,7 +8067,6 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
             auto packed_col_sumsq = [&](const Eigen::VectorXd& value) {
                 Eigen::VectorXd out = Eigen::VectorXd::Zero(Sp);
-                constexpr int kPackedMaxLanes = 9;
                 const int chunks = deterministic_chunk_count(n);
                 InlineOrDynamicBuffer<
                     double,
@@ -7285,7 +8108,6 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             auto packed_col_dot = [&](const Eigen::VectorXd& lhs,
                                       const Eigen::VectorXd& rhs) {
                 Eigen::VectorXd out = Eigen::VectorXd::Zero(Sp);
-                constexpr int kPackedMaxLanes = 9;
                 const int chunks = deterministic_chunk_count(n);
                 InlineOrDynamicBuffer<
                     double,
@@ -7355,6 +8177,14 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 return !(e != nullptr && e[0] == '0');
             }();
             bool packed_accel_diverged = false;
+            bool packed_early_left = false;
+            // The packed path's own group orders serve the certificate.
+            for (std::size_t dim = 0; dim < indexers.size(); ++dim) {
+                if (pmode[dim] == 1) {
+                    early.group_order(dim, pcsr[dim]->group_ptr.data(),
+                                      pcsr[dim]->obs_index.data());
+                }
+            }
 
             auto packed_accel_phase = [&](const std::vector<std::size_t>& order, int max_iter,
                                           int& iter_used) -> bool {
@@ -7411,6 +8241,10 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 bool accel_suspended = false;
                 int accel_restart_count = 0;
                 double max_ratio_seen = 1.0;
+                // Read once: the per-iteration work of the trace and of early
+                // routing runs only when they are on.
+                const bool tracing = trace.on();
+                const bool deciding = early.deciding();
                 packed_sweep_copy(gx, cur, order, nullptr);
                 for (int iter = 0; iter < max_iter; ++iter) {
                     const bool do_check =
@@ -7419,6 +8253,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
                     IronsTuckStats stats;
                     irons_tuck_accumulate(cur.data(), gx.data(), ggx.data(), cur.size(), stats);
+                    if (tracing) {
+                        trace.sweep(iter + 1, stats, prev_norm, honest_tol, accel_suspended,
+                                    accel_restart_count, [&](int i, int k) {
+                                        return gx[static_cast<Eigen::Index>(i) * Sp + k];
+                                    });
+                    }
                     if (honest_mode &&
                         std::sqrt(stats.d1sq) <=
                             honest_tol * std::max(1.0, prev_norm)) {
@@ -7427,6 +8267,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         // available iterate to the fixed point.
                         parallel_copy_vec(cur, ggx, threads);
                         iter_used = iter + 1;
+                        trace.stop(iter + 1, "honest", [&](int i, int k) {
+                            return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                        });
                         if (xhdfe_accel_debug()) {
                             std::fprintf(stderr,
                                          "[ACCEL packed CONVERGED iter_used=%d restarts=%d max_ratio=%.4f]\n",
@@ -7437,7 +8280,27 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     if (stats.ssq == 0.0) {
                         parallel_copy_vec(cur, gx, threads);
                         iter_used = iter + 1;
+                        trace.stop(iter + 1, "ssq0", [&](int i, int k) {
+                            return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                        });
                         return true;
+                    }
+                    // Early routing: after the stop test, before the next
+                    // accelerated sweep, never while the safeguard acts.
+                    if (deciding) {
+                        const int it = iter + 1;
+                        if (EarlyRouting::records(it)) {
+                            early.record(it, std::sqrt(stats.d1sq) / std::max(1.0, prev_norm));
+                        }
+                        if (EarlyRouting::checkpoint(it) && !accel_suspended &&
+                            accel_restart_count == 0 &&
+                            early.decide(it, honest_tol, [&](int i, int k) {
+                                return gx[static_cast<Eigen::Index>(i) * Sp + k];
+                            })) {
+                            packed_early_left = true;
+                            iter_used = it;
+                            return false;
+                        }
                     }
                     double coef = stats.vprod / stats.ssq;
                     if (accel_suspended) {
@@ -7478,6 +8341,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                     packed_accel_diverged = true;
                                     parallel_copy_vec(cur, gx, threads);
                                     iter_used = iter + 1;
+                                    trace.handoff(iter + 1, "bail", ratio);
                                     return false;
                                 }
                                 if (curr_norm > kAccelDivergeFactor * best_resid) {
@@ -7493,6 +8357,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             (rel_change / static_cast<double>(step)) < convergence_tol) {
                             parallel_copy_vec(cur, gx, threads);
                             iter_used = iter + 1;
+                            trace.stop(iter + 1, "change", [&](int i, int k) {
+                                return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                            });
                             return true;
                         }
                     }
@@ -7503,6 +8370,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         packed_accel_diverged = true;
                         parallel_copy_vec(cur, gx, threads);
                         iter_used = iter + 1;
+                        trace.handoff(iter + 1, "cap", max_ratio_seen);
                         return false;
                     }
                     if (!accel_suspended && iter_grand_acc > 0 &&
@@ -7535,6 +8403,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 }
                 parallel_copy_vec(cur, gx, threads);
                 iter_used = max_iter;
+                trace.exhausted(max_iter);
                 return false;
             };
 
@@ -7589,10 +8458,40 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
                 std::vector<uint8_t> lane_solved(
                     static_cast<std::size_t>(Sp), 0);
+                // CG-02 slow-mode continuation (F1). Kill switch
+                // XHDFE_CG_SLOW_MODE_CONTINUE=0 restores the 2.30.1 rule (every
+                // step > tol at an energy-predicted stop breaks down).
+                const bool slow_mode_continue = []() {
+                    const char* e = std::getenv("XHDFE_CG_SLOW_MODE_CONTINUE");
+                    return !(e != nullptr && e[0] == '0');
+                }();
+                const double slow_mode_floor =
+                    100.0 * std::numeric_limits<double>::epsilon();
+                std::vector<double> deferred_step(static_cast<std::size_t>(Sp), 0.0);
+                bool any_deferred = false;
+                int slow_mode_deferrals = 0;
+                // F1 rev. 2: a genuine slow mode keeps shrinking the step geometrically
+                // (CG), so progress, not a count, stops the deferrals: a lane breaks down
+                // when its step has not fallen by 10 % in kSlowModeStallWindow consecutive
+                // deferrals. kSlowModeMaxDeferrals (cumulative per solve, never reset) is
+                // a hard backstop so a pathological lane still reaches the restart with
+                // budget left. CG-02's direction is rejected by the lambda_p floor first.
+                constexpr int kSlowModeStallWindow = 32;
+                constexpr int kSlowModeMaxDeferrals = 2048;
+                std::vector<int> lane_deferrals(static_cast<std::size_t>(Sp), 0);
+                std::vector<int> deferrals_since_progress(static_cast<std::size_t>(Sp), 0);
+                std::vector<double> best_step(static_cast<std::size_t>(Sp),
+                                              std::numeric_limits<double>::infinity());
 
                 converged = false;
                 int cg_iters = 0;
+                int cg_stage = 0;  // for the early-routing trace only
+                // Read once, before the loop.
+                const bool tracing = trace.on();
+                const bool deciding = early.deciding();
+                const bool accel_debug = xhdfe_accel_debug();
                 for (int iter = 1; iter <= options.max_iter; ++iter) {
+                    cg_stage = 1;
                     projection_sweep(u, v);
                     const Eigen::VectorXd denom = packed_col_dot(u, v);
                     alpha.setZero();
@@ -7640,6 +8539,11 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     if (cg_breakdown) {
                         break;
                     }
+                    cg_stage = 2;
+                    if (any_deferred) {
+                        std::fill(deferred_step.begin(), deferred_step.end(), 0.0);
+                        any_deferred = false;
+                    }
                     // Comparable/Strict also guard the actual final update.
                     // Fast retains its published energy-based CG stopping
                     // rule; imposing this extra norm changed that contract.
@@ -7659,10 +8563,51 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                 std::sqrt(recent[k] / scale) <= options.tol) {
                                 const double step = std::abs(alpha[k]) *
                                     std::sqrt(direction_sq[k] / scale);
-                                if (!hdfe::detail::ieee_finite(step) || step > options.tol) {
+                                if (hdfe::detail::ieee_finite(step) && step <= options.tol) {
+                                    continue;
+                                }
+                                // Lesson CG-02 (F1): lambda_p = p'Ap/p'p (Rayleigh quotient of p)
+                                // amplifies sweep roundoff by ~1/lambda_p. While eps/lambda_p is two
+                                // orders below tol, apply the step but defer acceptance; else break down.
+                                const double energy_ratio = std::sqrt(recent[k] / scale);
+                                const double lambda_p = denom[k] / direction_sq[k];
+                                bool defer = slow_mode_continue &&
+                                    hdfe::detail::ieee_finite(step) &&
+                                    hdfe::detail::ieee_finite(lambda_p) &&
+                                    lambda_p * options.tol >= slow_mode_floor;
+                                const char* event =
+                                    defer ? "slow-mode-continue" : "breakdown stage=step-norm";
+                                const std::size_t lane = static_cast<std::size_t>(k);
+                                if (defer) {
+                                    if (step < 0.9 * best_step[lane]) {
+                                        best_step[lane] = step;
+                                        deferrals_since_progress[lane] = 0;
+                                    } else {
+                                        ++deferrals_since_progress[lane];
+                                    }
+                                    if (deferrals_since_progress[lane] >= kSlowModeStallWindow) {
+                                        defer = false;
+                                        event = "breakdown stage=slow-mode-stalled";
+                                    } else if (lane_deferrals[lane] >= kSlowModeMaxDeferrals) {
+                                        defer = false;
+                                        event = "breakdown stage=slow-mode-exhausted";
+                                    }
+                                }
+                                if (accel_debug) {
+                                    std::fprintf(stderr,
+                                                 "[ACCEL cpu CG %s iter=%d lane=%d a=%.17g b=%.17g c=%.17g lambda_p=%.17g energy_ratio=%.17g since_progress=%d best_step=%.17g]\n",
+                                                 event, iter, k, step, options.tol, alpha[k], lambda_p,
+                                                 energy_ratio, deferrals_since_progress[lane],
+                                                 best_step[lane]);
+                                }
+                                if (!defer) {
                                     cg_breakdown = true;
                                     break;
                                 }
+                                deferred_step[lane] = step;
+                                any_deferred = true;
+                                ++lane_deferrals[lane];
+                                ++slow_mode_deferrals;
                             }
                         }
                     }
@@ -7672,6 +8617,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     packed_axpy_columns(cur, u, alpha);
                     packed_axpy_columns(r, v, alpha);
 
+                    cg_stage = 3;
                     const Eigen::VectorXd ssr_old = ssr;
                     ssr = packed_col_sumsq(r);
                     beta.setZero();
@@ -7712,6 +8658,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         break;
                     }
 
+                    cg_stage = 4;
                     bool newly_solved = false;
                     double update_error = 0.0;
                     for (int k = 0; k < Sp; ++k) {
@@ -7729,7 +8676,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             cg_breakdown = true;
                             break;
                         }
-                        const double err = std::sqrt(ratio);
+                        double err = std::sqrt(ratio);
+                        if (any_deferred) {
+                            // A lane deferred by the CG-02 slow-mode rule reports the
+                            // step it just applied (> tol): not accepted, no stop now.
+                            err = std::max(err, deferred_step[static_cast<std::size_t>(k)]);
+                        }
                         if (!hdfe::detail::ieee_finite(err)) {
                             cg_breakdown = true;
                             break;
@@ -7747,9 +8699,28 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     if (cg_breakdown) {
                         break;
                     }
+                    if (tracing) {
+                        trace.cg(iter, update_error, options.tol, [&](int i, int k) {
+                            return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                        });
+                    }
                     if (update_error <= options.tol) {
                         converged = true;
                         break;
+                    }
+                    // Early routing in a stage entered at a direct gate: after
+                    // the stop test, on the stage's own iterations.
+                    if (deciding) {
+                        if (EarlyRouting::records(iter)) {
+                            early.record(iter, update_error);
+                        }
+                        if (EarlyRouting::checkpoint(iter) &&
+                            early.decide(iter, options.tol, [&](int i, int k) {
+                                return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                            })) {
+                            packed_early_left = true;
+                            break;
+                        }
                     }
                     // Zero only when a lane first freezes. Keep the normal
                     // direction update branch-free and vectorizable.
@@ -7782,9 +8753,13 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 }
                 result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
                 result.cg_restart_required = !converged;
+                trace.cg_end(result.iterations, converged, cg_stage, options.max_iter,
+                             [&](int i, int k) {
+                                 return cur[static_cast<Eigen::Index>(i) * Sp + k];
+                             });
                 if (xhdfe_accel_debug()) {
-                    std::fprintf(stderr, "[ACCEL packed CG iters=%d converged=%d]\n",
-                                 result.iterations, converged ? 1 : 0);
+                    std::fprintf(stderr, "[ACCEL packed CG iters=%d converged=%d deferred=%d]\n",
+                                 result.iterations, converged ? 1 : 0, slow_mode_deferrals);
                 }
             };
 
@@ -7795,13 +8770,24 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 should_use_pathlike_cg_accelerator(indexers, n, total_levels_for_exact_sparse,
                                                    weights, options);
             if (use_packed_cg && !sweep_order.empty()) {
+                trace.route("packed_cg_gate");
+                trace.phase("cg", 0);
+                early.phase(true);
                 run_packed_cg(sweep_order);
+                if (packed_early_left) {
+                    result.cg_restart_required = false;
+                    mark_left(result.iterations);
+                    return result;
+                }
             } else {
+                trace.route("packed_accel");
                 int remaining = accel_iter_budget;
                 int total_iters = 0;
                 converged = false;
                 if (iter_warmup > 0 && remaining > 0) {
                     int phase_iters = 0;
+                    trace.phase("warmup", total_iters);
+                    early.phase(false);
                     converged = packed_accel_phase(sweep_order, std::min(iter_warmup, remaining),
                                                    phase_iters);
                     total_iters += phase_iters;
@@ -7810,19 +8796,34 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 if (!converged && !packed_accel_diverged && !two_fe_order.empty() &&
                     iter_two_fe > 0 && remaining > 0) {
                     int phase_iters = 0;
+                    trace.phase("two_fe", total_iters);
+                    early.phase(false);
                     packed_accel_phase(two_fe_order, std::min(iter_two_fe, remaining), phase_iters);
                     total_iters += phase_iters;
                     remaining -= phase_iters;
                 }
                 if (!converged && !packed_accel_diverged && remaining > 0) {
                     int phase_iters = 0;
+                    trace.phase("main", total_iters);
+                    early.phase(true);
                     converged = packed_accel_phase(sweep_order, remaining, phase_iters);
                     total_iters += phase_iters;
                     remaining -= phase_iters;
+                    if (packed_early_left) {
+                        mark_left(total_iters);
+                        return result;
+                    }
                 }
                 if (!converged && packed_accel_diverged && !sweep_order.empty()) {
                     // Irons-Tuck diverged (safeguard fired). Finish with the
                     // stable symmetric-operator CG rather than plain Gauss-Seidel.
+                    trace.route("packed_cg_handoff");
+                    if (early.leave_at_handoff()) {
+                        mark_left(total_iters);
+                        return result;
+                    }
+                    trace.phase("cg", total_iters);
+                    early.phase(false);
                     run_packed_cg(sweep_order);
                 } else if (converged) {
                     result.iterations = total_iters;
@@ -7888,6 +8889,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 packed_polish_ran = true;
                 packed_polish_sweeps = polish_done;
                 packed_polish_final_max = final_max;
+                trace.polish(polish_done, final_max);
                 cpu_profile_log_elapsed("abs_polish_packed", packed_polish_t0);
             }
             if (packed_profile) {
@@ -7936,6 +8938,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             should_use_pathlike_cg_accelerator(indexers, n, total_levels_for_exact_sparse,
                                                weights, options);
         if (!enable_two_stage && use_accel && !use_pathlike_cg) {
+        trace.route("column_accel");
+        trace.phase("main", 0);
         auto run_sweep = [&](Eigen::VectorXd& y_in,
                              Eigen::MatrixXd& X_in,
                              double* out_sumsq,
@@ -8030,6 +9034,11 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 
         Eigen::VectorXd y_ggx = y_gx;
         Eigen::MatrixXd X_ggx = X_gx;
+        // Read once: the per-iteration work of the trace and of early routing
+        // runs only when they are on. The single phase is the main one.
+        early.phase(true);
+        const bool tracing = trace.on();
+        const bool deciding = early.deciding();
         for (int iter = 0; iter < accel_iter_budget; ++iter) {
             const bool do_check =
                 (check_interval == 1 || iter < check_interval || iter % check_interval == 0);
@@ -8048,6 +9057,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 irons_tuck_accumulate(result.X_tilde.data(), X_gx.data(), X_ggx.data(),
                                       X_gx.size(), stats);
             }
+            if (tracing) {
+                trace.sweep(iter + 1, stats, prev_norm, honest_tol, accel_suspended,
+                            accel_restart_count, [&](int i, int k) {
+                                return k == 0 ? y_gx[i] : X_gx(i, k - 1);
+                            });
+            }
 
             if (honest_mode &&
                 std::sqrt(stats.d1sq) <= honest_tol * std::max(1.0, prev_norm)) {
@@ -8058,6 +9073,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 }
                 result.iterations = iter + 1;
                 converged = true;
+                trace.stop(iter + 1, "honest", [&](int i, int k) {
+                    return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                });
                 if (xhdfe_accel_debug()) {
                     std::fprintf(stderr, "[ACCEL soa CONVERGED iter_used=%d restarts=%d]\n",
                                  iter + 1, accel_restart_count);
@@ -8070,9 +9088,28 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 if (store_alphas) {
                     copy_alpha(alpha_result, alpha_gx);
                 }
+                trace.stop(iter + 1, "ssq0", [&](int i, int k) {
+                    return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                });
                 result.iterations = iter + 1;
                 converged = true;
                 break;
+            }
+            // Early routing: after the stop test, before the next accelerated
+            // sweep, never while the safeguard acts.
+            if (deciding) {
+                const int it = iter + 1;
+                if (EarlyRouting::records(it)) {
+                    early.record(it, std::sqrt(stats.d1sq) / std::max(1.0, prev_norm));
+                }
+                if (EarlyRouting::checkpoint(it) && !accel_suspended &&
+                    accel_restart_count == 0 &&
+                    early.decide(it, honest_tol, [&](int i, int k) {
+                        return k == 0 ? y_gx[i] : X_gx(i, k - 1);
+                    })) {
+                    mark_left(it);
+                    return result;
+                }
             }
 
             double coef = stats.vprod / stats.ssq;
@@ -8128,6 +9165,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     }
                     result.iterations = iter + 1;
                     converged = true;
+                    trace.stop(iter + 1, "change", [&](int i, int k) {
+                        return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                    });
                     break;
                 }
             }
@@ -8199,8 +9239,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             if (store_alphas) {
                 copy_alpha(alpha_result, alpha_gx);
             }
+            trace.exhausted(accel_iter_budget);
         }
         } else if (!enable_two_stage && !use_pathlike_cg) {
+        trace.route("column_plain");
+        trace.phase("main", 0);
+        const bool tracing = trace.on();  // read once, before the loop
 	        double prev_norm = combined_norm(result.y_tilde, result.X_tilde);
 	        const int check_interval = std::max(1, options.convergence_check_interval);
 	        int last_check_iter = -1;
@@ -8249,13 +9293,27 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 const int step = iter - last_check_iter;
                 last_check_iter = iter;
                 prev_norm = curr_norm;
+                if (tracing) {
+                    trace.plain(iter + 1,
+                                step > 0 ? rel_change / static_cast<double>(step)
+                                         : std::numeric_limits<double>::quiet_NaN(),
+                                convergence_tol, [&](int i, int k) {
+                                    return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                                });
+                }
                 if (step > 0 &&
                     (rel_change / static_cast<double>(step)) < convergence_tol) {
                     result.iterations = iter + 1;
                     converged = true;
+                    trace.stop(iter + 1, "change", [&](int i, int k) {
+                        return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                    });
                     break;
                 }
             }
+        }
+        if (!converged) {
+            trace.exhausted(options.max_iter);
         }
     } else {
         auto run_sweep = [&](Eigen::VectorXd& y_in,
@@ -8307,6 +9365,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         };
 
         if (use_pathlike_cg) {
+            trace.route("column_pathlike_cg");
+            trace.phase("cg", 0);
+            early.phase(true);
             const std::vector<std::size_t> cg_order{0, 1};
             use_symmetric = true;
             auto projection_sweep = [&](const Eigen::VectorXd& y_src,
@@ -8376,10 +9437,40 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 1.0 / std::sqrt(std::numeric_limits<double>::epsilon());
             std::vector<uint8_t> lane_solved(
                 static_cast<std::size_t>(ssr.size()), 0);
+            // CG-02 slow-mode continuation (F1). Kill switch
+            // XHDFE_CG_SLOW_MODE_CONTINUE=0 restores the 2.30.1 rule (every
+            // step > tol at an energy-predicted stop breaks down).
+            const bool slow_mode_continue = []() {
+                const char* e = std::getenv("XHDFE_CG_SLOW_MODE_CONTINUE");
+                return !(e != nullptr && e[0] == '0');
+            }();
+            const double slow_mode_floor =
+                100.0 * std::numeric_limits<double>::epsilon();
+            std::vector<double> deferred_step(static_cast<std::size_t>(ssr.size()), 0.0);
+            bool any_deferred = false;
+            int slow_mode_deferrals = 0;
+            // F1 rev. 2: a genuine slow mode keeps shrinking the step geometrically
+            // (CG), so progress, not a count, stops the deferrals: a lane breaks down
+            // when its step has not fallen by 10 % in kSlowModeStallWindow consecutive
+            // deferrals. kSlowModeMaxDeferrals (cumulative per solve, never reset) is
+            // a hard backstop so a pathological lane still reaches the restart with
+            // budget left. CG-02's direction is rejected by the lambda_p floor first.
+            constexpr int kSlowModeStallWindow = 32;
+            constexpr int kSlowModeMaxDeferrals = 2048;
+            std::vector<int> lane_deferrals(static_cast<std::size_t>(ssr.size()), 0);
+            std::vector<int> deferrals_since_progress(static_cast<std::size_t>(ssr.size()), 0);
+            std::vector<double> best_step(static_cast<std::size_t>(ssr.size()),
+                                          std::numeric_limits<double>::infinity());
 
             bool cg_converged = false;
             int cg_iters = 0;
+            int cg_stage = 0;  // for the early-routing trace only
+            // Read once, before the loop.
+            const bool tracing = trace.on();
+            const bool deciding = early.deciding();
+            const bool accel_debug = xhdfe_accel_debug();
             for (int iter = 1; iter <= options.max_iter; ++iter) {
+                cg_stage = 1;
                 projection_sweep(u_y, u_X, v_y, v_X);
                 const Eigen::VectorXd denom = col_dot(u_y, u_X, v_y, v_X);
                 alpha.setZero();
@@ -8427,6 +9518,11 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 if (cg_breakdown) {
                     break;
                 }
+                cg_stage = 2;
+                if (any_deferred) {
+                    std::fill(deferred_step.begin(), deferred_step.end(), 0.0);
+                    any_deferred = false;
+                }
                 bool candidate_lane = false;
                 for (Eigen::Index k = 0; k < ssr.size(); ++k) {
                     if (!lane_solved[static_cast<std::size_t>(k)] &&
@@ -8443,10 +9539,51 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             std::sqrt(recent[k] / scale) <= options.tol) {
                             const double step = std::abs(alpha[k]) *
                                 std::sqrt(direction_sq[k] / scale);
-                            if (!hdfe::detail::ieee_finite(step) || step > options.tol) {
+                            if (hdfe::detail::ieee_finite(step) && step <= options.tol) {
+                                continue;
+                            }
+                            // Lesson CG-02 (F1): lambda_p = p'Ap/p'p (Rayleigh quotient of p)
+                            // amplifies sweep roundoff by ~1/lambda_p. While eps/lambda_p is two
+                            // orders below tol, apply the step but defer acceptance; else break down.
+                            const double energy_ratio = std::sqrt(recent[k] / scale);
+                            const double lambda_p = denom[k] / direction_sq[k];
+                            bool defer = slow_mode_continue &&
+                                hdfe::detail::ieee_finite(step) &&
+                                hdfe::detail::ieee_finite(lambda_p) &&
+                                lambda_p * options.tol >= slow_mode_floor;
+                            const char* event =
+                                defer ? "slow-mode-continue" : "breakdown stage=step-norm";
+                            const std::size_t lane = static_cast<std::size_t>(k);
+                            if (defer) {
+                                if (step < 0.9 * best_step[lane]) {
+                                    best_step[lane] = step;
+                                    deferrals_since_progress[lane] = 0;
+                                } else {
+                                    ++deferrals_since_progress[lane];
+                                }
+                                if (deferrals_since_progress[lane] >= kSlowModeStallWindow) {
+                                    defer = false;
+                                    event = "breakdown stage=slow-mode-stalled";
+                                } else if (lane_deferrals[lane] >= kSlowModeMaxDeferrals) {
+                                    defer = false;
+                                    event = "breakdown stage=slow-mode-exhausted";
+                                }
+                            }
+                            if (accel_debug) {
+                                std::fprintf(stderr,
+                                             "[ACCEL cpu CG %s iter=%d lane=%d a=%.17g b=%.17g c=%.17g lambda_p=%.17g energy_ratio=%.17g since_progress=%d best_step=%.17g]\n",
+                                             event, iter, static_cast<int>(k), step, options.tol,
+                                             alpha[k], lambda_p, energy_ratio,
+                                             deferrals_since_progress[lane], best_step[lane]);
+                            }
+                            if (!defer) {
                                 cg_breakdown = true;
                                 break;
                             }
+                            deferred_step[lane] = step;
+                            any_deferred = true;
+                            ++lane_deferrals[lane];
+                            ++slow_mode_deferrals;
                         }
                     }
                 }
@@ -8460,6 +9597,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     r_X.col(j).noalias() -= alpha[1 + j] * v_X.col(j);
                 }
 
+                cg_stage = 3;
                 const Eigen::VectorXd ssr_old = ssr;
                 ssr = col_sumsq(r_y, r_X);
                 beta.setZero();
@@ -8500,6 +9638,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     break;
                 }
 
+                cg_stage = 4;
                 double update_error = 0.0;
                 for (Eigen::Index k = 0; k < recent.size(); ++k) {
                     if (lane_solved[static_cast<std::size_t>(k)]) {
@@ -8516,7 +9655,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         cg_breakdown = true;
                         break;
                     }
-                    const double err = std::sqrt(ratio);
+                    double err = std::sqrt(ratio);
+                    if (any_deferred) {
+                        // A lane deferred by the CG-02 slow-mode rule reports the
+                        // step it just applied (> tol): not accepted, no stop now.
+                        err = std::max(err, deferred_step[static_cast<std::size_t>(k)]);
+                    }
                     if (!hdfe::detail::ieee_finite(err)) {
                         cg_breakdown = true;
                         break;
@@ -8530,9 +9674,28 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 if (cg_breakdown) {
                     break;
                 }
+                if (tracing) {
+                    trace.cg(iter, update_error, options.tol, [&](int i, int k) {
+                        return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                    });
+                }
                 if (update_error <= options.tol) {
                     cg_converged = true;
                     break;
+                }
+                // Early routing in a stage entered at a direct gate: after the
+                // stop test, on the stage's own iterations.
+                if (deciding) {
+                    if (EarlyRouting::records(iter)) {
+                        early.record(iter, update_error);
+                    }
+                    if (EarlyRouting::checkpoint(iter) &&
+                        early.decide(iter, options.tol, [&](int i, int k) {
+                            return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                        })) {
+                        mark_left(iter);
+                        return result;
+                    }
                 }
                 if (lane_solved[0]) {
                     r_y.setZero();
@@ -8553,6 +9716,18 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             result.iterations = cg_iters > 0 ? cg_iters : options.max_iter;
             result.converged = cg_converged;
             result.cg_restart_required = !cg_converged;
+            trace.cg_end(result.iterations, cg_converged, cg_stage, options.max_iter,
+                         [&](int i, int k) {
+                             return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                         });
+            if (accel_debug) {
+                std::fprintf(stderr, "[ACCEL soa CG iters=%d converged=%d deferred=%d]\n",
+                             result.iterations, cg_converged ? 1 : 0, slow_mode_deferrals);
+            }
+            trace.end(result.converged, result.iterations, result.cg_restart_required,
+                      [&](int i, int k) {
+                          return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                      });
             result.sweep_order_used.clear();
             result.sweep_order_used.reserve(cg_order.size());
             for (const std::size_t dim : cg_order) {
@@ -8566,6 +9741,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
         FeAlphaState* alpha_state = store_alphas ? &alpha_result : nullptr;
 
         if (use_accel) {
+            trace.route("column_two_stage_accel");
+            bool two_stage_early_left = false;
             const int iter_grand_acc = 4;
             Eigen::VectorXd y_acc_a;
             Eigen::VectorXd y_acc_b;
@@ -8635,6 +9812,10 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                 }
                 run_sweep(y_gx, X_gx, order, nullptr, track_alpha ? &alpha_gx : nullptr);
 
+                // Read once: the per-iteration work of the trace and of early
+                // routing runs only when they are on.
+                const bool tracing = trace.on();
+                const bool deciding = early.deciding();
                 for (int iter = 0; iter < max_iter; ++iter) {
                     const bool do_check =
                         (check_interval == 1 || iter < check_interval || iter % check_interval == 0);
@@ -8654,6 +9835,12 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         irons_tuck_accumulate(result.X_tilde.data(), X_gx.data(), X_ggx.data(),
                                               X_gx.size(), stats);
                     }
+                    if (tracing) {
+                        trace.sweep(iter + 1, stats, prev_norm, honest_tol, accel_suspended, 0,
+                                    [&](int i, int k) {
+                                        return k == 0 ? y_gx[i] : X_gx(i, k - 1);
+                                    });
+                    }
 
                     if (honest_mode &&
                         std::sqrt(stats.d1sq) <=
@@ -8666,6 +9853,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             copy_alpha(*alpha_state, alpha_ggx);
                         }
                         iter_used = iter + 1;
+                        trace.stop(iter + 1, "honest", [&](int i, int k) {
+                            return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                        });
                         return true;
                     }
                     if (stats.ssq == 0.0) {
@@ -8677,7 +9867,26 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                             copy_alpha(*alpha_state, alpha_gx);
                         }
                         iter_used = iter + 1;
+                        trace.stop(iter + 1, "ssq0", [&](int i, int k) {
+                            return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                        });
                         return true;
+                    }
+                    // Early routing: after the stop test, before the next
+                    // accelerated sweep, never while the safeguard acts.
+                    if (deciding) {
+                        const int it = iter + 1;
+                        if (EarlyRouting::records(it)) {
+                            early.record(it, std::sqrt(stats.d1sq) / std::max(1.0, prev_norm));
+                        }
+                        if (EarlyRouting::checkpoint(it) && !accel_suspended &&
+                            early.decide(it, honest_tol, [&](int i, int k) {
+                                return k == 0 ? y_gx[i] : X_gx(i, k - 1);
+                            })) {
+                            two_stage_early_left = true;
+                            iter_used = it;
+                            return false;
+                        }
                     }
 
                     double coef = stats.vprod / stats.ssq;
@@ -8739,6 +9948,9 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                                 copy_alpha(*alpha_state, alpha_gx);
                             }
                             iter_used = iter + 1;
+                            trace.stop(iter + 1, "change", [&](int i, int k) {
+                                return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                            });
                             return true;
                         }
                     }
@@ -8815,12 +10027,15 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                     copy_alpha(*alpha_state, alpha_gx);
                 }
                 iter_used = max_iter;
+                trace.exhausted(max_iter);
                 return false;
             };
 
             int remaining = options.max_iter;
             if (iter_warmup > 0 && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("warmup", total_iters);
+                early.phase(false);
                 converged =
                     run_accel_phase(sweep_order, std::min(iter_warmup, remaining), phase_iters,
                                     alpha_state);
@@ -8829,6 +10044,8 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
             if (!converged && !two_fe_order.empty() && iter_two_fe > 0 && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("two_fe", total_iters);
+                early.phase(false);
                 run_accel_phase(two_fe_order, std::min(iter_two_fe, remaining), phase_iters,
                                 alpha_state);
                 total_iters += phase_iters;
@@ -8836,11 +10053,18 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
             if (!converged && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("main", total_iters);
+                early.phase(true);
                 converged = run_accel_phase(sweep_order, remaining, phase_iters, alpha_state);
                 total_iters += phase_iters;
                 remaining -= phase_iters;
+                if (two_stage_early_left) {
+                    mark_left(total_iters);
+                    return result;
+                }
             }
         } else {
+            trace.route("column_two_stage_plain");
             auto run_simple_phase = [&](const std::vector<std::size_t>& order,
                                         int max_iter,
                                         int& iter_used,
@@ -8851,6 +10075,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
 	                }
 	                double prev_norm = combined_norm(result.y_tilde, result.X_tilde);
 	                int last_check_iter = -1;
+                const bool tracing = trace.on();  // read once, before the loop
 	                for (int iter = 0; iter < max_iter; ++iter) {
                     const bool do_check =
                         (check_interval == 1 || iter < check_interval || iter % check_interval == 0);
@@ -8864,20 +10089,34 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
                         const int step = iter - last_check_iter;
                         last_check_iter = iter;
                         prev_norm = curr_norm;
+                        if (tracing) {
+                            trace.plain(iter + 1,
+                                        step > 0 ? rel_change / static_cast<double>(step)
+                                                 : std::numeric_limits<double>::quiet_NaN(),
+                                        convergence_tol, [&](int i, int k) {
+                                            return k == 0 ? result.y_tilde[i]
+                                                          : result.X_tilde(i, k - 1);
+                                        });
+                        }
                         if (step > 0 &&
                             (rel_change / static_cast<double>(step)) < convergence_tol) {
                             iter_used = iter + 1;
+                            trace.stop(iter + 1, "change", [&](int i, int k) {
+                                return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+                            });
                             return true;
                         }
                     }
                 }
                 iter_used = max_iter;
+                trace.exhausted(max_iter);
                 return false;
             };
 
             int remaining = options.max_iter;
             if (iter_warmup > 0 && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("warmup", total_iters);
                 converged =
                     run_simple_phase(sweep_order, std::min(iter_warmup, remaining), phase_iters,
                                      alpha_state);
@@ -8886,6 +10125,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
             if (!converged && !two_fe_order.empty() && iter_two_fe > 0 && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("two_fe", total_iters);
                 run_simple_phase(two_fe_order, std::min(iter_two_fe, remaining), phase_iters,
                                  alpha_state);
                 total_iters += phase_iters;
@@ -8893,6 +10133,7 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             }
             if (!converged && remaining > 0) {
                 int phase_iters = 0;
+                trace.phase("main", total_iters);
                 converged = run_simple_phase(sweep_order, remaining, phase_iters, alpha_state);
                 total_iters += phase_iters;
                 remaining -= phase_iters;
@@ -8988,12 +10229,17 @@ AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
             if (strict_tolerance) {
                 result.iterations += polish_done;
             }
+            trace.polish(polish_done, final_max);
         }
         if (strict_tolerance && final_max > polish_tol) {
             result.converged = false;
         }
     }
     cpu_profile_log_elapsed("abs_polish", polish_t0);
+    trace.end(result.converged, result.iterations, result.cg_restart_required,
+              [&](int i, int k) {
+                  return k == 0 ? result.y_tilde[i] : result.X_tilde(i, k - 1);
+              });
 
     if (options.retain_fixed_effects) {
         result.fe_group_ids.resize(indexers.size());
@@ -9676,7 +10922,10 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                                          const std::vector<HeterogeneousSlopeTerm>& slopes) {
     ScopedAuditEnvironment audit_environment;
     auto certified = [&](AbsorptionResult result) {
-        certify_absorption_result(y, X, fes, weights, options, slopes, result);
+        // A solve that left early is discarded for MLSMR: no certificate.
+        if (result.early_routing_left == 0) {
+            certify_absorption_result(y, X, fes, weights, options, slopes, result);
+        }
         return result;
     };
     if ((method == AbsorptionMethod::Lsmr || method == AbsorptionMethod::Mlsmr ||
@@ -9694,8 +10943,32 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 "slopes in absorb() yet; use reghdfe-comparable or xhdfe-fast, or an "
                 "explicit convergence() criterion");
         }
+        // Trace only (diagnostic build cand_p3_trace_20261110, P4): with
+        // XHDFE_SLOPE_STAGE_TRACE=1 every solve of this heterogeneous-slope
+        // continuation prints the values its decisions read (the certificate
+        // at the original options against its limit, the slope-block residual
+        // against the continuation target, the booleans) and the decision
+        // taken; -1 (or nan) marks a value the decision did not read. Off (the
+        // default), nothing is timed or printed and every decision reads the
+        // same values, in the same order, as before.
+        static const bool slope_stage_trace = [] {
+            const char* e = std::getenv("XHDFE_SLOPE_STAGE_TRACE");
+            return e != nullptr && std::strcmp(e, "1") == 0;
+        }();
+        const auto slope_trace_clock = [&]() {
+            return slope_stage_trace ? std::chrono::steady_clock::now()
+                                     : std::chrono::steady_clock::time_point{};
+        };
+        const auto slope_trace_seconds = [&](std::chrono::steady_clock::time_point start) {
+            return slope_stage_trace
+                       ? std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+                             .count()
+                       : 0.0;
+        };
+        const auto primary_start = slope_trace_clock();
         AbsorptionResult primary = certified(absorb_fixed_effects_v6_mixed(
             y, X, fes, weights, options, method, slopes));
+        const double primary_seconds = slope_trace_seconds(primary_start);
         primary.slope_internal_tolerance = options.tol;
         // A certified value above the residual-relative limit can only have
         // passed the original-scale pure-FE moment check. No result-structure
@@ -9707,7 +10980,39 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             return weights == nullptr && X.cols() == 0 && state.precision_certified &&
                    state.slope_block_residual_rel > slope_public_limit;
         };
-        if (pure_fe_moments_accepted(primary)) {
+        auto trace_slope_solve = [&](const char* solve, int stage, double stage_tol,
+                                     const AbsorptionResult& r, int stage_iterations,
+                                     int cumulative, double seconds, double block_target,
+                                     int target_met, int adaptive, int explicit_ref,
+                                     const char* decision) {
+            if (!slope_stage_trace) return;
+            std::fprintf(stderr,
+                         "slope_stage_trace solve=%s stage=%d stage_tol=%.6e eff_tol=%.6e "
+                         "cert_limit=%.6e block_target=%.6e stage_iterations=%d "
+                         "cumulative_iterations=%d max_iter=%d converged=%d certified=%d "
+                         "block_checked=%d abs_residual_rel=%.6e block_residual_rel=%.6e "
+                         "pure_fe_moments=%d target_met=%d adaptive_eligible=%d "
+                         "explicit_refinement=%d gpu_attempted=%d gpu_used=%d gpu_status=%d "
+                         "cuda_tail=%s cg_restart_required=%d mode=%d criterion=%d from_auto=%d "
+                         "weights=%d regressors=%d seconds=%.6f decision=%s\n",
+                         solve, stage, stage_tol, effective_absorption_tolerance(options),
+                         slope_public_limit, block_target, stage_iterations, cumulative,
+                         options.max_iter, r.converged ? 1 : 0, r.precision_certified ? 1 : 0,
+                         r.slope_block_checked ? 1 : 0, r.abs_residual_rel,
+                         r.slope_block_residual_rel, pure_fe_moments_accepted(r) ? 1 : 0,
+                         target_met, adaptive, explicit_ref, r.gpu_attempted ? 1 : 0,
+                         r.gpu_used ? 1 : 0, r.gpu_status_code, cuda_tail_name(r.cuda_tail),
+                         r.cg_restart_required ? 1 : 0, static_cast<int>(options.tolerance_mode),
+                         static_cast<int>(options.convergence_criterion),
+                         options.from_auto ? 1 : 0, weights != nullptr ? 1 : 0,
+                         static_cast<int>(X.cols()), seconds, decision);
+        };
+        const bool primary_pure_fe = pure_fe_moments_accepted(primary);
+        if (primary_pure_fe) {
+            trace_slope_solve("primary", 0, options.tol, primary, primary.iterations,
+                              primary.iterations, primary_seconds,
+                              std::numeric_limits<double>::quiet_NaN(), -1, -1, -1,
+                              "return-primary-pure-fe-moments");
             return primary;
         }
         const double slope_continuation_target = std::max(
@@ -9739,8 +11044,15 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             options.convergence_criterion != ConvergenceCriterion::Auto &&
             primary.converged && !primary.precision_certified &&
             options.tol > 0.0 && options.max_iter > primary.iterations;
-        if ((primary.precision_certified && slope_target_met(primary)) ||
-            (!adaptive_eligible && !explicit_refinement)) {
+        const bool return_primary =
+            (primary.precision_certified && slope_target_met(primary)) ||
+            (!adaptive_eligible && !explicit_refinement);
+        trace_slope_solve("primary", 0, options.tol, primary, primary.iterations,
+                          primary.iterations, primary_seconds, slope_continuation_target,
+                          slope_stage_trace ? (slope_target_met(primary) ? 1 : 0) : -1,
+                          adaptive_eligible ? 1 : 0, explicit_refinement ? 1 : 0,
+                          return_primary ? "return-primary" : "continue");
+        if (return_primary) {
             return primary;
         }
 
@@ -9772,6 +11084,14 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         for (const double stage_tolerance : stage_tolerances) {
             const int remaining = options.max_iter - cumulative_iterations;
             if (remaining <= 0) {
+                if (slope_stage_trace) {
+                    std::fprintf(stderr,
+                                 "slope_stage_trace decision=budget-exhausted-before-stage "
+                                 "next_stage_tol=%.6e completed_stages=%d "
+                                 "cumulative_iterations=%d max_iter=%d\n",
+                                 stage_tolerance, completed_stages, cumulative_iterations,
+                                 options.max_iter);
+                }
                 break;
             }
             HdfeOptions stage_options = options;
@@ -9780,11 +11100,13 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             stage_options.from_auto = false;
             const bool seed_cpu_continuation = !weights && !options.retain_fixed_effects &&
                 last.converged && !last.gpu_used && !last.gpu_attempted;
+            const auto stage_start = slope_trace_clock();
             AbsorptionResult stage = seed_cpu_continuation
                 ? absorb_fixed_effects_v6_mixed_impl(
                     y, X, fes, weights, stage_options, method, slopes, &last)
                 : absorb_fixed_effects_v6_mixed(
                     y, X, fes, weights, stage_options, method, slopes);
+            const double stage_seconds = slope_trace_seconds(stage_start);
             const int stage_iterations = stage.iterations;
             cumulative_iterations += stage_iterations;
             ++completed_stages;
@@ -9797,13 +11119,27 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             if (stage.gpu_attempted) {
                 stage.gpu_absorption_iterations = cumulative_iterations;
             }
-            if (stage.converged && stage.precision_certified &&
+            const bool accept_stage =
+                stage.converged && stage.precision_certified &&
                 (explicit_refinement || pure_fe_moments_accepted(stage) ||
-                 slope_target_met(stage))) {
+                 slope_target_met(stage));
+            trace_slope_solve(seed_cpu_continuation ? "stage-seeded" : "stage-cold",
+                              completed_stages, stage_tolerance, stage, stage_iterations,
+                              cumulative_iterations, stage_seconds, slope_continuation_target,
+                              slope_stage_trace ? (slope_target_met(stage) ? 1 : 0) : -1,
+                              adaptive_eligible ? 1 : 0, explicit_refinement ? 1 : 0,
+                              accept_stage ? "accept-stage" : "reject-stage");
+            if (accept_stage) {
                 return stage;
             }
             last = std::move(stage);
             if (stage_iterations >= remaining) {
+                if (slope_stage_trace) {
+                    std::fprintf(stderr,
+                                 "slope_stage_trace decision=budget-exhausted-after-stage "
+                                 "completed_stages=%d cumulative_iterations=%d max_iter=%d\n",
+                                 completed_stages, cumulative_iterations, options.max_iter);
+                }
                 break;
             }
         }
@@ -9814,6 +11150,12 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             cumulative_iterations - primary_iterations;
         // The continuation target must not invalidate a certified final solve.
         if (last.converged && last.precision_certified) {
+            if (slope_stage_trace) {
+                std::fprintf(stderr,
+                             "slope_stage_trace decision=return-last-certified "
+                             "completed_stages=%d cumulative_iterations=%d\n",
+                             completed_stages, cumulative_iterations);
+            }
             return last;
         }
         last.converged = false;
@@ -9823,6 +11165,12 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             last.gpu_status_code = 3;
             last.gpu_absorption_converged = false;
             last.gpu_absorption_iterations = cumulative_iterations;
+        }
+        if (slope_stage_trace) {
+            std::fprintf(stderr,
+                         "slope_stage_trace decision=refuse completed_stages=%d "
+                         "cumulative_iterations=%d max_iter=%d\n",
+                         completed_stages, cumulative_iterations, options.max_iter);
         }
         return last;
     }
@@ -10305,6 +11653,9 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             result.gpu_attempted = true;
             result.gpu_absorption_converged = gpu_result.converged;
             result.gpu_absorption_iterations = gpu_result.iterations;
+            // P3-fix (3'): whether a strict stage used the device LSMR restart
+            // of its sequence; the regressor passes it to its strict repair.
+            result.cuda_strict_lsmr_restart = gpu_result.cuda_strict_lsmr_restart;
             if (gpu_backend_requested(gpu_backend)) {
                 result.converged = false;
                 result.iterations = gpu_result.iterations;
@@ -10317,6 +11668,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         HdfeOptions passthrough = options;
         passthrough.symmetric_sweep = (selected == AbsorptionMethod::SymmetricGaussSeidel);
         passthrough.absorption_method = selected;
+        // After a GPU attempt the retry is ineligible; so is early routing.
+        passthrough.early_routing = options.early_routing && !result.gpu_attempted;
         AbsorptionResult cpu_result = absorb_fixed_effects(y, X, fes, weights, passthrough);
         if (result.gpu_attempted) {
             mark_gpu_failure_fallback(cpu_result, result, result.gpu_status_code == 3);
@@ -10381,6 +11734,8 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         result.gpu_attempted = true;
         result.gpu_absorption_converged = gpu_result.converged;
         result.gpu_absorption_iterations = gpu_result.iterations;
+        // P3-fix (3'): as above, the state of the strict LSMR restart.
+        result.cuda_strict_lsmr_restart = gpu_result.cuda_strict_lsmr_restart;
         if (gpu_backend_requested(gpu_backend)) {
             result.converged = false;
             result.iterations = gpu_result.iterations;

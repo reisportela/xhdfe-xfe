@@ -44,6 +44,7 @@ for maximum in [150, 1000]:
         row.update(status="PASS" if valid else "FAIL_UNEXPECTED_RETURN",
                    returned=True, iterations=int(model.num_iterations_),
                    converged=bool(model.converged_), gpu_used=bool(model.gpu_used_),
+                   cuda_tail=str(getattr(model, 'cuda_tail_', 'n/a')),
                    **difference)
     except RuntimeError as error:
         message = str(error)

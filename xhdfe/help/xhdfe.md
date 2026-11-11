@@ -1,15 +1,19 @@
 # xhdfe Python help
 
-Package documentation version: 2.30.1.20261020. Use `python -m xhdfe --version`
+Package documentation version: 2.31.0.20261111. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
-This version corrects an inherited CUDA Comparable covariance error for
+Version 2.31.0 corrects Student-t inference under the 53-bit x87 precision of
+Windows hosts, corrects weighted `reghdfe-comparable` fits on CPU and carries
+the routing and performance changes listed in the release notes. Old
+absorption caches are invalidated automatically.
+
+Version 2.30.1 corrected an inherited CUDA Comparable covariance error for
 ordinary models with three fixed effects, no weights and no saved effects.
 The remaining projection is completed at the existing target and within the
-total iteration budget. GPU repair diagnostics include all attempted work,
-and old absorption caches are invalidated automatically. The release record
-documents the accepted runtime cost relative to 2.29.1; Fast retains its
-separate approximation contract.
+total iteration budget, and GPU repair diagnostics include all attempted
+work. The 2.30.1 release record documents the accepted runtime cost relative
+to 2.29.1; Fast retains its separate approximation contract.
 
 `xhdfe` is the Python package wrapper around the v11 xhdfe C++ backend. It
 exposes the same compiled estimator that older scripts imported as
@@ -348,7 +352,7 @@ xhdfe.HdfeRegressor(
     default_threads=0,
     max_threads=0,
     min_parallel_rows=20000,
-    target_rows_per_thread=500000,
+    target_rows_per_thread=0,
     drop_singletons=True,
     retain_fes=False,
     symmetric_sweep=False,
@@ -380,6 +384,22 @@ Main options:
   `max_threads` heuristics and are clamped only to the logical processors and
   OpenMP runtime limit visible to the process. A serial build fails loudly for
   requests above one.
+- `target_rows_per_thread`: rows per thread when auto-threading sizes the team.
+  The default `0` is automatic: one thread per 25,000 rows when fixed effects
+  are absorbed with `retain_fes=False`, within the problem-size cap (one thread
+  below 100,000 rows, at most 8 below 250,000 and at most 16 otherwise), and
+  one thread per 500,000 rows with `retain_fes=True` or without fixed effects.
+  A positive value applies that fixed number of rows per thread on every path;
+  `500000` restores the automatic rule of version 2.30.1. Setting
+  `XHDFE_AUTO_ROWS_PER_THREAD` to a positive integer before the first fit
+  replaces the 25,000 for the process. On Linux and macOS the automatic teams
+  of one user's simultaneous fits share the machine: such a fit takes the
+  smallest of its automatic team, the logical processors divided by the number
+  of fits running and the processors not taken by the other fits' absorptions,
+  never fewer threads than `target_rows_per_thread=500000` would give. A
+  positive `num_threads` is never reduced. A lowered team reports
+  `thread_limit_code_ == 6` and `thread_limit_reason_ == "auto_team_coordination"`.
+  `XHDFE_AUTO_TEAM_COORDINATION=0` before the first fit turns this off.
 - `drop_singletons`: drop singleton observations before estimation.
 - `keepsingletons`: reghdfe-compatible override for `drop_singletons`.
 - `retain_fes`: recover per-observation fixed-effect contributions.
@@ -529,7 +549,32 @@ Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
-## Known limitations (2.30.1)
+## Known limitations (2.31.0)
+
+- Weighted ordinary three-fixed-effect fits on CUDA in `reghdfe-comparable`
+  keep the 2.30.1 sweep exit: converged and certified, but outside the
+  comparable contract against `reghdfe` at tolerance 1e-12 (public
+  240,000-row three-way fixture: coefficients up to 4.4e-7 and standard
+  errors up to 2.3e-5 relative). Use the CPU backend, where weighted fits are
+  corrected in this release.
+- `retain_fes=True` in `reghdfe-comparable` uses the effect-capturing sweep,
+  whose exit can leave coefficients and standard errors outside the
+  comparable contract (in the measured cases up to 4.5e-7 relative in
+  coefficients and 1e-4 in the covariance).
+- CUDA `strict-residual` with the automatic method and criterion and no
+  weights may pass the relative certificate without the final strict check
+  (public fixture: coefficients 1.5e-7 and standard errors 1.7e-4 relative
+  to an exact reference). Inherited, present in 2.28.1. Use the CPU backend
+  for strict-residual results.
+- On CUDA, `residuals_` has the accuracy of the CUDA fit (for example 8.4e-4
+  relative for `xhdfe-fast` and 1.3e-6 for `reghdfe-comparable` on a
+  path-like two-FE public fixture).
+- Windows, near-perfect fits: near-perfect additive-cell fixtures returned
+  exact coefficients and certified fits with relative covariance errors of
+  2.65e-9, 1.74e-4 and 1.82e+2 at relative residual noise of 2^-12, 2^-20 and
+  2^-30; the same fixtures on Linux returned 2.2e-16. The exact additive-cell
+  projection needs extended-precision arithmetic, which Windows hosts run at
+  53 bits.
 
 - A fit that converges by the solver's stopping rule but does not pass the
   precision certificate raises an error and returns no estimates, in Python,
@@ -644,13 +689,29 @@ After `fit`, the regressor exposes:
   (`stderr_`, `tvalues_`, `pvalues_`, `conf_int_`) is `NaN`, matching
   `regress`/`reghdfe`; earlier releases reported standard errors of order
   `1e-16`, which produced spurious significance.
+
+  With absorbed fixed effects the intercept is the constant recovered by
+  the FE normalisation, `mean(y) - mean(X) @ beta`. When a one-way cluster
+  nests an absorbed intercept dimension (every cluster is a union of its
+  levels; a slope term counts only with `include_intercept=True`), the
+  cluster sums of the residuals are exactly zero and the intercept's row and
+  column of `covariance_` are exactly `m @ V @ m` and `-V @ m`, with
+  `m = mean(X)` and `V` the slope block; this applies on every absorption
+  route and backend, but not with `tolerance_mode="xhdfe-fast"`, instruments
+  or Driscoll-Kraay errors. That variance is zero when `m = 0` or there are
+  no regressors: the intercept's `stderr_` is then `0.0` and its `tvalues_`,
+  `pvalues_` and `conf_int_` are `NaN`. This does not mean a structural
+  parameter known without uncertainty; the constant is a normalisation of
+  the absorbed effects. Saturated designs and fewer than two clusters keep
+  the conventions above.
 - Runtime diagnostics: `threads_requested_`, `threads_effective_`,
   `threads_used_` (largest team observed doing real work),
   `parallel_workers_active_` (largest useful-worker count in one region),
   `thread_capacity_`, `openmp_enabled_`, `thread_limit_code_`,
   `thread_limit_reason_`, `absorption_method_used`,
   `gpu_attempted_`, `gpu_used_`, `gpu_status_code_`,
-  `gpu_absorption_converged_`, `gpu_absorption_iterations_`.
+  `gpu_absorption_converged_`, `gpu_absorption_iterations_`,
+  `cuda_tail_code_`, `cuda_tail_`.
 
 `summary()` returns a formatted text table.
 
@@ -728,6 +789,44 @@ Consult the versioned validation record for the exact tested artifacts and
 scope. Python callers must check
 `gpu_used_` and `gpu_status_code_`: an unavailable CUDA backend can return a
 CPU result. Fast and Comparable remain distinct approximation contracts.
+
+For unweighted Comparable fits with three fixed effects, the CUDA path
+completes the projection after its sweeps. This completion normally runs on
+the GPU. When a short GPU probe predicts a long GPU solve (graphs that mix
+slowly) and the CPU would itself absorb the fit with MLSMR, the CPU finishes it
+with MLSMR from the state the GPU sweeps reached, at the same tolerance, within
+the same iteration budget and under the same precision certificate, using the
+fit's thread team. `cuda_tail_` names it: `device-lsmr`, `host-mlsmr` (then
+`gpu_used_` stays 1 and `absorption_method_used` is MLSMR), or `none` when no
+completion ran; `cuda_tail_code_` is 0, 1 or 2. At tight tolerances the GPU
+sweeps can instead hand over to a conjugate-gradient stage; when that stage
+stops without converging, the fit restarts from the original data with GPU
+LSMR. The same probe and the same CPU decision apply to that restart: when both
+point to the CPU, the CPU solves the fit with MLSMR from the original data
+(never from the conjugate-gradient state) and `cuda_tail_` is `host-mlsmr`; a
+restart kept on the GPU reports `none` (2.30.1 behaviour), so `none` also
+covers that GPU restart (the trace below names it `restart->device-lsmr`).
+`num_iterations_` and `gpu_absorption_iterations_` count all of it: the GPU
+sweeps (including those before a conjugate-gradient stage that is then
+restarted), the conjugate-gradient iterations, the GPU solver and the CPU
+iterations, all charged to one `max_iter` budget that is never reset: the
+conjugate-gradient stage only receives what the sweeps left, and a fit whose
+sweeps and conjugate-gradient stage use the whole budget raises with no
+estimates (`iterations=max_iter/max_iter`). One exception, on the CPU and on
+the GPU alike: when the conjugate-gradient stage converges (no restart),
+`num_iterations_` counts its iterations but not the sweeps before it. The
+environment variable `XHDFE_CUDA_TAIL_HANDOVER=0` keeps the completion and the
+restart on the GPU (2.30.1 behaviour, including its budget and iteration count:
+the sweeps before a conjugate-gradient stage are then neither charged to its
+budget nor counted). For diagnosis,
+`XHDFE_GI_LSMR_TRACE=1` writes the decision to standard error: one
+`cuda_tail_probe` line per checkpoint (predicted remaining GPU work, CPU route
+selector), one `cuda_tail_handover` line when the CPU completes (iterations,
+seconds), one `cuda_it_to_cg` and one `cuda_cg_end` line around a
+conjugate-gradient stage, and one `cuda_tail_restart` line per restart
+(iterations and seconds of every stage, GPU and CPU apart). The same variable
+traces the LSMR solves of group/individual absorptions. The decision uses
+solver quantities only, never elapsed time.
 
 ## Mobility profiles
 

@@ -65,6 +65,7 @@ foreach threads in 1 2 8 16 24 48 {
         assert db <= 1e-9
         assert dv <= 1e-8
         display "THREE_FE `backend' `threads' `variant' b=" %21.14e db " V=" %21.14e dv
+        display "THREE_FE_TAIL `backend' `threads' `variant' `e(cuda_tail)'"
         restore
     }
 }

@@ -102,6 +102,7 @@ foreach threads in 1 16 {
         }
         assert e(N) == 240000
         assert e(converged) == 1
+        local tail "`e(cuda_tail)'"
         assert e(threads_used) == `threads'
         assert e(gpu_used) == ("`backend'" == "cuda")
         if "`backend'" == "cuda" {
@@ -117,6 +118,7 @@ foreach threads in 1 16 {
         assert db <= 1e-9
         assert dv <= 1e-8
         display "XFEPOUT_THREE_FE `backend' `threads' `variant' b=" %21.14e db " V=" %21.14e dv
+        display "XFEPOUT_TAIL `backend' `threads' `variant' `tail'"
         restore
     }
 }

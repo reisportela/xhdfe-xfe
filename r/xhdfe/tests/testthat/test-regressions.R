@@ -135,6 +135,29 @@ test_that("demean and group-FE front-ends reject malformed thread requests", {
   }
 })
 
+test_that("target_rows_per_thread defaults to 0 (automatic) and rejects invalid values", {
+  expect_identical(formals(xhdfe)$target_rows_per_thread, 0)
+  expect_identical(formals(xhdfe_fit)$target_rows_per_thread, 0)
+  m <- xhdfe(y ~ x1 | f1, rd, target_rows_per_thread = 0)
+  expect_identical(m$threads_requested, 0L)
+  # Below min_parallel_rows the automatic team is one thread on every path.
+  expect_identical(m$threads_effective, 1L)
+  for (value in list(-1, 1.5, c(1, 2), NA_real_, Inf, "2")) {
+    expect_error(
+      xhdfe(y ~ x1 | f1, rd, target_rows_per_thread = value),
+      "target_rows_per_thread must be a nonnegative integer",
+      fixed = TRUE
+    )
+  }
+  for (value in list(0, -1, 1.5)) {
+    expect_error(
+      xhdfe(y ~ x1 | f1, rd, min_parallel_rows = value),
+      "min_parallel_rows must be a positive integer",
+      fixed = TRUE
+    )
+  }
+})
+
 test_that("weighted fits use the effective N in ll and r2_a", {
   m_fw <- xhdfe(y ~ x1 | f1, rd, weights = ~round(w * 2),
                 weights_type = "frequency")

@@ -70,10 +70,26 @@ not part of the CPU/default runner.
   replay, `test`, `estat vce`, and heterogeneous-slope predictions
 - `predict` parity for `xb`, `d`, `xbd`, residuals, and `dresiduals`
 - singleton/drop and convergence-option behavior
+- data order and `sortedby` marker left untouched by successful and failed
+  commands, on unsorted, panel-sorted and regressor-sorted data, with
+  time-series operators and with automatic outputs used as sort keys
+  (`part1/sort-order.do`)
 - Gelbach iid/declared-cluster full-refit bootstrap reproducibility, manual
   first-draw and basic-CI oracles, analytic weights, added/common FEs,
   fail-closed validation, multi-format escaped tables and
   identity-preserving waterfall filtering
+- explicit OpenMP teams of 1 to 48 threads and the automatic rows-per-thread
+  rule at its row-count boundaries (`part1/threads-contract.do`), which
+  `run_stata_tests.sh` runs in three fresh processes: with the built-in density
+  and with `XHDFE_AUTO_ROWS_PER_THREAD=500000`, both with `XHDFE_PARALLEL_READ=0`
+  so that `e(threads_used)` is the fit's own team, and with the built-in density
+  and the parallel read left to the host; all with `OMP_NUM_THREADS` unset; the
+  runner skips it with a message when `nproc` reports fewer than 48 logical
+  processors
+
+`openmp_host_contract.do` is not part of the runner: `tools/run_stata_openmp_host.py`
+runs it for each thread request with `XHDFE_PARALLEL_READ=0` (the fit's own
+workers) and again with the parallel read left to the host.
 
 ## Version and categorical-interaction contracts
 
@@ -94,6 +110,52 @@ terms with three or more categorical components against the manually grouped
 identifier (bit identity of samples, DoF and `e(b)`/`e(V)`) and against `reghdfe`,
 and check the negative controls (`##` with more than two components in cluster
 options, continuous components in interaction terms).
+
+## Input-read contract
+
+The plugin reads its numeric inputs in one pass by observation and falls back
+to the column readers on any anomaly; `XHDFE_FUSED_READ=0` keeps the column
+readers. On a host qualified for it (Linux x86-64, Stata 19 MP) a pass of at
+least 2,000,000 values (rows times the variables the fused pass reads) with
+more than one thread goes through the parallel reader: the sample is selected
+from the marker variable the ado appends, and several threads read blocks of
+16,384 rows. The team of each pass is the fit's own team for its rows, so
+every threading option governs it, with at most one thread per block (and 16
+in automatic mode); `e(threads_used)` and `e(parallel_workers_active)` count
+the read's team and workers. Any anomaly discards the parallel pass and the
+serial pass reads everything again, so errors and messages are those of the
+serial readers; calls that receive an alias variable (`fralias`) keep the
+serial readers. `XHDFE_PARALLEL_READ=0`
+keeps the serial readers on every host; `XHDFE_PARALLEL_READ=1` forces the
+parallel reader on any host and exists only for qualification runs;
+`XHDFE_PARALLEL_READ_MIN_VALUES=<n>` replaces the size threshold and is a test
+hook; `XHDFE_PARALLEL_READ_PRETOUCH=0` lets the worker threads touch the
+destination pages first instead of the calling thread, for timing comparisons.
+
+`fused_read_contract.do` runs 47 fits, 49 on Stata 18 and later (identifiers
+that fit `int32` and identifiers that do not, also only in a later block,
+clusters shared with and distinct from the fixed effects, weights, slopes,
+instruments, strings, interactions, sample restrictions, `in` ranges, samples
+of one block of 16,384 rows, of one row more and of five blocks, three
+automatic fits with `targetrowsperthread()` and `maxthreads()`, one automatic
+fit on `in 1/5000` whose `e(threads_used)` must be the selection's team of 3 in
+the parallel run and 1 elsewhere, with `e(threads_effective)` 1, saved outputs,
+`group()`/`individual()`, alias variables), four invalid individual
+identifiers and an empty sample, and writes every result in hexadecimal; its
+second argument sets `numthreads()` (default 1; the automatic fits use 0).
+`run_stata_tests.sh` runs it in four fresh processes: the column and the fused
+reader with one thread, then the serial fused reader (`XHDFE_PARALLEL_READ=0`)
+and the forced parallel reader (`XHDFE_PARALLEL_READ=1`,
+`XHDFE_PARALLEL_READ_MIN_VALUES=1`) with four threads and `OMP_NUM_THREADS`
+unset. Each pair must give identical result files and all four runs identical
+input fingerprints (`plugin_profile label=input_digest` under
+`XHDFE_PROFILE_CPU=1`); the `plugin_profile label=read_parallel_mode` lines
+must show the parallel reader with teams of three and four, at least one
+anomaly sent back to the serial reader, the automatic read following
+`targetrowsperthread()` and `maxthreads()` (three threads, two threads, serial),
+the serial reader kept for alias variables, and no parallel pass in the serial
+run. The four-thread pair is skipped with a message on hosts with fewer than
+four logical processors.
 
 ## First-stage diagnostics
 

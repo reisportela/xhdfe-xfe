@@ -1,6 +1,6 @@
 # xhdfe Gelbach decomposition help
 
-Package version: xhdfe 2.30.1.20261020 (`xhdfegelbach` 1.6.1). This version
+Package version: xhdfe 2.31.0.20261111 (`xhdfegelbach` 1.6.2). This version
 includes the bootstrap, table and waterfall interfaces documented below.
 Inspect the installed package version with `python -m xhdfe --version`.
 
@@ -317,8 +317,10 @@ Inference and diagnostics:
   `recovery_parallel_workers_active`, `covariance_threads_used`, and
   `covariance_parallel_workers_active`;
 - `gpu_requested`, `gpu_attempted`, `gpu_used`, `gpu_backend`, `gpu_status`,
-  `gpu_status_code`, `gpu_absorption_converged`, and
-  `gpu_absorption_iterations`;
+  `gpu_status_code`, `gpu_absorption_converged`,
+  `gpu_absorption_iterations`, and `cuda_tail_code` / `cuda_tail` (how the
+  three-FE Comparable CUDA completion of the full-model fit ran: `none`,
+  `device-lsmr`, or `host-mlsmr`; see the xhdfe help);
 - `identity_gap`, `converged`, and `notes`;
 - the four sample-count fields documented above, plus the opt-in sample
   provenance fields.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.30.1.20261020 LANGUAGES CXX)
+project(xhdfe VERSION 2.31.0.20261111 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -163,6 +163,7 @@ endif()
 # Core library (v11 implementation)
 set(XHDFE_SOURCES
     src/hdfe_regressor_v11.cpp
+    src/auto_team_registry.cpp
     src/fe_absorption.cpp
     src/schwarz_demean.cpp
     src/akm_kss.cpp
@@ -359,6 +360,12 @@ if(BUILD_TESTING)
     target_include_directories(xhdfe_ac_arena_storage_contract PRIVATE src)
     add_test(NAME xhdfe_ac_arena_storage_contract
              COMMAND $<TARGET_FILE:xhdfe_ac_arena_storage_contract>)
+    add_executable(xhdfe_auto_team_registry_contract
+                   tests/auto_team_registry_contract.cpp
+                   src/auto_team_registry.cpp)
+    target_include_directories(xhdfe_auto_team_registry_contract PRIVATE include)
+    add_test(NAME xhdfe_auto_team_registry_contract
+             COMMAND $<TARGET_FILE:xhdfe_auto_team_registry_contract>)
     add_test(NAME xhdfe_no_raw_nonfinite_guards
              COMMAND ${CMAKE_COMMAND} -P
                      ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_no_raw_isfinite.cmake)
@@ -404,6 +411,37 @@ if(BUILD_TESTING)
     add_test(NAME xhdfe_student_t_precision
              COMMAND $<TARGET_FILE:xhdfe_student_t_precision>)
 
+    # Issue #18: public Student-t entry points under the Windows x64 host x87
+    # precision (53 bits) and other control words, imposed and proven by the
+    # test itself; the same production flags as xhdfe_student_t_precision.
+    # The fail_closed variant forces the post-guard precision probe to fail.
+    find_package(Threads REQUIRED)
+    foreach(_x87_variant IN ITEMS guard fail_closed)
+        set(_x87_target xhdfe_student_t_x87_${_x87_variant})
+        add_executable(${_x87_target} tests/student_t_x87_guard_contract.cpp)
+        target_include_directories(${_x87_target} PRIVATE include)
+        target_link_libraries(${_x87_target} PRIVATE Eigen3::Eigen Threads::Threads)
+        if(_x87_variant STREQUAL "fail_closed")
+            target_compile_definitions(${_x87_target} PRIVATE
+                XHDFE_TEST_STUDENT_T_FORCE_PROBE_FAILURE=1)
+        endif()
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            xhdfe_enable_native_tuning(${_x87_target})
+            target_compile_options(${_x87_target} PRIVATE
+                -O3
+                -ffast-math
+                -fno-finite-math-only
+                -funroll-loops
+                -ftree-vectorize
+                -fomit-frame-pointer
+                -fno-signed-zeros
+                -fno-trapping-math
+                -fassociative-math
+                -freciprocal-math)
+        endif()
+        add_test(NAME ${_x87_target} COMMAND $<TARGET_FILE:${_x87_target}>)
+    endforeach()
+
     if(NOT CMAKE_CROSSCOMPILING)
         find_package(Python3 COMPONENTS Interpreter QUIET)
         if(Python3_Interpreter_FOUND)
@@ -418,6 +456,13 @@ if(BUILD_TESTING)
                             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_public_inference_subnormal.py
                             --module-dir $<TARGET_FILE_DIR:py_hdfe_v11>)
                 set_tests_properties(xhdfe_public_inference_subnormal PROPERTIES
+                    ENVIRONMENT "XHDFE_GPU_BACKEND=cpu")
+                add_test(
+                    NAME xhdfe_student_t_x87_host_regime
+                    COMMAND ${Python3_EXECUTABLE}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_student_t_x87_host_regime.py
+                            --module-dir $<TARGET_FILE_DIR:py_hdfe_v11>)
+                set_tests_properties(xhdfe_student_t_x87_host_regime PROPERTIES
                     ENVIRONMENT "XHDFE_GPU_BACKEND=cpu")
             endif()
             add_test(

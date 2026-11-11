@@ -918,6 +918,8 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         "gpu_absorption_iterations": int(
             r["gpu_absorption_iterations"]
         ),
+        "cuda_tail_code": int(r["cuda_tail_code"]),
+        "cuda_tail": str(r["cuda_tail"]),
         "estimand": ("absorbed_target_allocation" if absorbed_mode else
                      "coefficient_movement"),
         "identity_status": (

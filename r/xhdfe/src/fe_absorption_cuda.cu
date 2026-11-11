@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -3409,6 +3410,478 @@ std::vector<std::size_t> filter_order(const std::vector<std::size_t>& order,
     return filtered;
 }
 
+// ---- F2-A: hand-over of the three-FE Comparable completion ("tail") ----
+// The device LSMR that completes the projection after the IT sweeps has only a
+// diagonal preconditioner. Where the graph mixes slowly it needs thousands of
+// iterations per right-hand side (pf_difficult_10m_3fe: about 7 000 x 11, 86 s),
+// while the host MLSMR with its graph preconditioner needs tens. A probe of the
+// device solve predicts its remaining work; when that work is long and the
+// CPU's own route selector would use MLSMR on this fit, the host MLSMR finishes
+// the projection from the same IT state. Calibration (phase 0, 07nov2026):
+// benchmarks/_out/perf_fereg_gap_20261106/f2_phase0/.
+//
+// F2-B (08nov2026): the cold device LSMR that restarts a three-FE Comparable
+// fit after a broken CG stage (absorb_fixed_effects_cuda) is probed by the same
+// rule; on a long prediction and an MLSMR vote, the host MLSMR solves the fit
+// from the original data (never from the CG iterate), within the budget left
+// by the sweeps, the CG stage and the probe.
+//
+// XHDFE_CUDA_TAIL_HANDOVER, read once at the tail of each absorption call and
+// once at a restart: unset or any other value = adaptive (default); a value
+// beginning with '0' = the 2.30.1 device tail and restart, without probe and
+// with the 2.30.1 iteration accounting; "force" = hand over after the first
+// device iteration, whatever the prediction and the CPU selector. "force" is
+// for tests and diagnostics only; it is reported as host-mlsmr like any
+// hand-over.
+enum class CudaTailMode { Adaptive, Off, Force };
+
+CudaTailMode cuda_tail_handover_mode() {
+    const char* e = std::getenv("XHDFE_CUDA_TAIL_HANDOVER");
+    if (e != nullptr && e[0] == '0') return CudaTailMode::Off;
+    if (e != nullptr && std::strcmp(e, "force") == 0) return CudaTailMode::Force;
+    return CudaTailMode::Adaptive;
+}
+
+// P8 (A1; design note section 6): the Comparable three-FE completion by the
+// device LSMR is open to a weights vector when the public request is
+// reghdfe-comparable with the Auto method and the Auto criterion (provenance:
+// options.comparable_intent, options.auto_intent; the weighted native repairs
+// run under NormChange and stay out). With weights the F2 hand-over is never
+// reached, not even under XHDFE_CUDA_TAIL_HANDOVER=force: the completion runs
+// without its probe (the host MLSMR and the F2-B restart solve the unweighted
+// problem). Opt-in in 2.31.0 (its cost on difficult weighted data exceeded the
+// release's cost limit): XHDFE_P8_CUDA_WEIGHTED_COMPLETION=1 enables it; unset or
+// any other value keeps the unweighted-only completion (read once per process).
+bool cuda_weighted_completion_applies(const HdfeOptions& options) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("XHDFE_P8_CUDA_WEIGHTED_COMPLETION");
+        return e != nullptr && e[0] == '1';
+    }();
+    return enabled && options.comparable_intent && options.auto_intent &&
+           options.convergence_criterion == ConvergenceCriterion::Auto;
+}
+
+// The rule. On the first right-hand side that reaches k = 64 device iterations
+// without converging, at k = 64, 128, 256, ... of that right-hand side:
+//   q     = (norm_ar_k / norm_ar_{k/2})^(2/k)   (norm_ar = |zetabar|, monotone)
+//   m0    = ln(tol / test2_k) / ln q
+//   m1    = (ln(tol / test2_k) + 0.5 ln((k + m0) / k)) / ln q
+//           (test2 divides by norm_a, the Frobenius estimate growing ~sqrt(k))
+//   work  = m_rem + (rhs_left - 1) (k + m_rem),   m_rem = max(1, ceil(m1))
+// The tail is long when work >= 8192 device RHS-iterations, about twice the
+// measured host/device break-even (ready 3 400, pf_difficult_10m_3fe 3 900);
+// q >= 1 counts as long. A long tail is handed over only if the CPU selector
+// says MLSMR; otherwise, or when the deciding right-hand side converges first,
+// the device keeps the tail for the whole fit.
+constexpr int kCudaTailFirstCheckpoint = 64;
+constexpr double kCudaTailWorkThreshold = 8192.0;
+
+// F2's own size guard (not a property of the CPU selector, whose minimum is
+// 200 000 rows): below 750 000 rows the CUDA tail is never handed over.
+constexpr int kCudaTailMinRows = 750000;
+
+// F2-B: the family of the probed cold restart and of its cumulative budget:
+// reghdfe-comparable, ordinary FEs (no slope, no saved FEs), exactly three of
+// them, unweighted, with regressors (the family of the F2-A tail).
+bool cuda_three_fe_family(const HdfeOptions& options,
+                          const std::vector<GpuFeInput>& fe_inputs,
+                          const Eigen::VectorXd* weights,
+                          int cols) {
+    return options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+           !options.retain_fixed_effects && fe_inputs.size() == 3 &&
+           weights == nullptr && cols > 0 &&
+           std::none_of(fe_inputs.begin(), fe_inputs.end(),
+                        [](const GpuFeInput& fe) { return fe.is_slope; });
+}
+
+// The CPU's own route for this fit. On the CPU, a three-FE Auto fit takes its
+// route from the automatic MLSMR selector of the regressor
+// (select_auto_mlsmr_method: a sampled Gauss-Seidel contraction probe on the
+// design, confirmed on all rows when the sample is unrepresentative), which
+// resolves to MLSMR or to its sweep fallback before the absorption starts. On
+// a CUDA fit the regressor lends that same selector, with the same arguments,
+// to the primary absorption through options.cuda_tail_route, and only when the
+// public request was Auto (options.auto_intent; from_auto keeps its own,
+// narrower, CUDA meaning). It is evaluated at most once per fit, after a long
+// prediction. No selector, a sweep answer or an exception keeps the device tail.
+struct CudaTailHostSelection {
+    bool applicable = false;  // selector lent, public Auto, n >= the F2 guard
+    bool evaluated = false;   // the selector answered (in this fit, at most once)
+    bool host_mlsmr = false;  // the CPU selector picks MLSMR
+    double rho = std::numeric_limits<double>::quiet_NaN();  // its sampled contraction
+    double seconds = 0.0;     // its evaluation's wall time in this fit (trace only)
+    int evaluations = 0;      // selector evaluations so far in this fit
+    // "not-asked" before the decision, then "auto-mlsmr", "auto-sweep" (the
+    // selector's vote), "n/a" (not applicable) or "exception".
+    const char* selector = "not-asked";
+    // "-", or why: "voted", "not-auto", "no-selector", "below-nmin", "exception",
+    // "forced".
+    const char* reason = "-";
+};
+
+CudaTailHostSelection select_cuda_tail_host_route(int n, const HdfeOptions& options) {
+    CudaTailHostSelection out;
+    out.selector = "n/a";
+    if (!options.auto_intent) {
+        out.reason = "not-auto";
+        return out;
+    }
+    if (options.cuda_tail_route == nullptr || !*options.cuda_tail_route) {
+        out.reason = "no-selector";
+        return out;
+    }
+    if (n < kCudaTailMinRows) {
+        out.reason = "below-nmin";
+        return out;
+    }
+    out.applicable = true;
+    const AutoRouteAnswer answer = (*options.cuda_tail_route)();
+    out.evaluated = true;
+    out.host_mlsmr = answer.mlsmr;
+    out.rho = answer.rho;
+    out.seconds = answer.seconds;
+    out.evaluations = answer.evaluations;
+    out.selector = answer.mlsmr ? "auto-mlsmr" : "auto-sweep";
+    out.reason = "voted";
+    return out;
+}
+
+struct CudaTailProbe {
+    CudaTailMode mode = CudaTailMode::Adaptive;
+    bool trace = false;
+    // "tail": the completion after converged IT sweeps (F2-A); "restart": the
+    // cold device LSMR after a broken CG stage (F2-B). Same rule, same selector.
+    const char* stage = "tail";
+    int rhs_count = 0;
+    int budget = 0;  // device iterations available to each right-hand side
+    std::function<CudaTailHostSelection()> select;  // the CPU selector, run once
+    int rhs = -1;    // the deciding right-hand side
+    bool decided = false;
+    bool handover = false;
+    bool selected = false;
+    CudaTailHostSelection selection;
+    int k = 0;                  // iterations of the deciding RHS at the decision
+    int device_iterations = 0;  // max over the device solves at the hand-over
+    double q = 0.0;
+    double m1 = 0.0;
+    double work = 0.0;
+    // Inputs of the last checkpoint, printed with the decision (trace only).
+    double norm_ar_k = 0.0;
+    double norm_ar_half = 0.0;
+    double test2_k = 0.0;
+    double tol_k = 0.0;
+    double m0 = 0.0;
+    double m_rem = 0.0;
+    double norm_ar_at[32] = {};  // norm_ar at iteration 2^j of the current RHS
+
+    // End of iteration kk (1-based) of right-hand side rhs_index, after the
+    // stop tests. Reads host scalars only. True to leave the device solve.
+    bool observe(int rhs_index, int kk, double norm_ar, double test2, double tol) {
+        if (decided) return false;
+        if (mode == CudaTailMode::Force) {
+            rhs = rhs_index;
+            k = kk;
+            decided = true;
+            handover = budget - kk >= 1;
+            selection.selector = "forced";
+            selection.reason = "forced";
+            report(rhs_index, kk, handover ? "handover" : "keep-budget");
+            return handover;
+        }
+        const bool power = kk > 0 && (kk & (kk - 1)) == 0;
+        if (!power) return false;
+        int j = 0;
+        for (unsigned v = static_cast<unsigned>(kk); v > 1U; v >>= 1U) ++j;
+        if (j >= 32) return false;
+        norm_ar_at[j] = norm_ar;  // overwritten by each right-hand side in turn
+        if (kk < kCudaTailFirstCheckpoint) return false;
+        if (rhs < 0) rhs = rhs_index;
+        if (rhs_index != rhs) return false;
+        const double before = norm_ar_at[j - 1];
+        if (!finite_double_bits(norm_ar) || !finite_double_bits(before) ||
+            !finite_double_bits(test2) || !(before > 0.0) || !(norm_ar > 0.0) ||
+            !(tol > 0.0) || !(test2 > tol)) {
+            return false;  // no decision at this checkpoint
+        }
+        k = kk;
+        norm_ar_k = norm_ar;
+        norm_ar_half = before;
+        test2_k = test2;
+        tol_k = tol;
+        q = std::pow(norm_ar / before, 2.0 / static_cast<double>(kk));
+        bool finite_m = false;
+        m0 = 0.0;
+        m1 = 0.0;
+        if (q > 0.0 && q < 1.0) {
+            const double lq = std::log(q);
+            const double gap = std::log(tol / test2);
+            m0 = gap / lq;
+            m1 = (gap + 0.5 * std::log((kk + m0) / static_cast<double>(kk))) / lq;
+            finite_m = finite_double_bits(m1);
+        }
+        const double rhs_left = static_cast<double>(rhs_count - rhs_index);
+        m_rem = 0.0;
+        if (finite_m) {
+            m_rem = std::max(1.0, std::ceil(m1));
+            work = m_rem + (rhs_left - 1.0) * (static_cast<double>(kk) + m_rem);
+        } else {
+            work = std::numeric_limits<double>::infinity();
+        }
+        const char* decision = "continue";
+        if (!(work < kCudaTailWorkThreshold)) {
+            decided = true;
+            if (budget - kk < 1) {
+                decision = "keep-budget";
+            } else {
+                if (!selected) {
+                    selected = true;
+                    try {
+                        if (select) selection = select();
+                    } catch (...) {
+                        selection = CudaTailHostSelection{};  // keep the device tail
+                        selection.selector = "exception";
+                        selection.reason = "exception";
+                    }
+                }
+                handover = selection.host_mlsmr;
+                decision = handover ? "handover" : "keep-selector";
+            }
+        }
+        report(rhs_index, kk, decision);
+        return handover;
+    }
+
+    // The device solve of right-hand side rhs_index ended without a hand-over.
+    void finish(int rhs_index) {
+        if (!decided && rhs == rhs_index) decided = true;
+    }
+
+    void report(int rhs_index, int kk, const char* decision) const {
+        if (!trace) return;
+        std::fprintf(stderr,
+                     "cuda_tail_probe rhs=%d k=%d rhs_count=%d norm_ar=%.17g "
+                     "norm_ar_half=%.17g test2=%.17g tol=%.17g q=%.17g m0=%.17g "
+                     "m1=%.17g m_rem=%.17g work=%.17g threshold=%.17g budget=%d "
+                     "budget_left=%d decision=%s selector=%s reason=%s applicable=%d "
+                     "evaluated=%d evaluations=%d rho=%.17g select_seconds=%.6f "
+                     "stage=%s\n",
+                     rhs_index, kk, rhs_count, norm_ar_k, norm_ar_half, test2_k, tol_k,
+                     q, m0, m1, m_rem, work, kCudaTailWorkThreshold, budget,
+                     budget - kk, decision, selection.selector, selection.reason,
+                     selection.applicable ? 1 : 0, selection.evaluated ? 1 : 0,
+                     selection.evaluations, selection.rho, selection.seconds, stage);
+    }
+};
+
+// Host MLSMR on the IT state (F2-A). Absorption is a projection: the IT state
+// differs from the original data by a vector in the span of the fixed effects,
+// so its projection is the projection of the original data; the device probe's
+// own partial work is simply discarded. Exceptions are contained: a host
+// failure never turns the CUDA fit into a GPU failure, the caller finishes on
+// the device with what is left of the budget. The thread team is the fit's own
+// (options.num_threads, the absorption lease), as for any host absorption.
+bool complete_cuda_tail_on_host(const Eigen::VectorXd& warm_y,
+                                const Eigen::MatrixXd& warm_x,
+                                const std::vector<GpuFeInput>& fe_inputs,
+                                int n,
+                                const HdfeOptions& base,
+                                int budget,
+                                AbsorptionResult& host,
+                                int& host_iterations,
+                                double& host_seconds) {
+    host_iterations = 0;
+    host_seconds = 0.0;
+    if (budget <= 0) return false;
+    const auto start = std::chrono::steady_clock::now();
+    bool ok = false;
+    try {
+        std::vector<Eigen::VectorXi> fes;
+        fes.reserve(fe_inputs.size());
+        for (const auto& fe : fe_inputs) {
+            fes.emplace_back(Eigen::Map<const Eigen::VectorXi>(fe.group_ids, n));
+        }
+        HdfeOptions mo = base;
+        mo.absorption_method = AbsorptionMethod::Mlsmr;
+        mo.max_iter = budget;
+        mo.early_routing = false;
+        host = absorb_fixed_effects_mlsmr(warm_y, warm_x, fes, nullptr, mo);
+        host_iterations = std::max(0, host.iterations);
+        ok = host.converged;
+    } catch (...) {
+        host = AbsorptionResult{};
+        ok = false;
+    }
+    host_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    return ok;
+}
+
+// ---- P3-fix: the xhdfe-fast restart of a broken CUDA CG stage ----
+// Brief Verifications/perf_fereg_gap_20261106/briefs/P3_FIX_REINICIO_FAST_CUDA.md;
+// investigation RELATORIO_P3_20261108.md; the restart is
+// restart_fast_cg_after_breakdown, below absorb_fixed_effects_cuda_impl.
+//
+// Test hook, tests and diagnostics only (inert unless set, read once per
+// process): XHDFE_TEST_CUDA_CG_BREAKDOWN=<k> (k >= 1) breaks down the first
+// CUDA block-CG stage of the process that reaches its iteration k, before that
+// iteration's step, as a real breakdown would; "<k>:all" breaks down every CG
+// stage of the process at its iteration k. Any other value leaves the hook
+// off. It lets tests/analytic_precision/cuda_fast_restart_contract.py exercise
+// the restart on demand; nothing else reads it.
+struct CudaCgTestBreakdown {
+    int iteration = 0;  // 0: off
+    bool every_stage = false;
+};
+
+const CudaCgTestBreakdown& cuda_cg_test_breakdown() {
+    static const CudaCgTestBreakdown hook = []() {
+        CudaCgTestBreakdown out;
+        const char* e = std::getenv("XHDFE_TEST_CUDA_CG_BREAKDOWN");
+        if (e == nullptr || *e == '\0') return out;
+        char* end = nullptr;
+        const long k = std::strtol(e, &end, 10);
+        if (end == e || k < 1 || k > std::numeric_limits<int>::max()) return out;
+        if (*end == '\0') {
+            out.iteration = static_cast<int>(k);
+        } else if (std::strcmp(end, ":all") == 0) {
+            out.iteration = static_cast<int>(k);
+            out.every_stage = true;
+        }
+        return out;
+    }();
+    return hook;
+}
+
+std::atomic<int> g_cuda_cg_test_breakdowns{0};
+
+// Test hook, tests and diagnostics only (inert unless set, read once per process):
+// XHDFE_TEST_CUDA_STRICT_LSMR_REJECT=1 rejects the state that the strict device
+// LSMR restart of a broken CG stage approved (restart_strict_after_breakdown), so
+// tests/analytic_precision exercises the strict repair that must follow it and the
+// end of the sequence (flow control, not a frequency). Any other value: off.
+bool cuda_strict_lsmr_test_reject() {
+    static const bool reject = []() {
+        const char* e = std::getenv("XHDFE_TEST_CUDA_STRICT_LSMR_REJECT");
+        return e != nullptr && std::strcmp(e, "1") == 0;
+    }();
+    return reject;
+}
+
+// True when the hook breaks down the current CG stage at iteration `iter`.
+bool cuda_cg_test_breakdown_due(int iter) {
+    const CudaCgTestBreakdown& hook = cuda_cg_test_breakdown();
+    if (hook.iteration <= 0 || iter != hook.iteration) return false;
+    if (hook.every_stage) {
+        g_cuda_cg_test_breakdowns.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+    int none = 0;
+    return g_cuda_cg_test_breakdowns.compare_exchange_strong(none, 1);
+}
+
+// Cold restarts of the CG stage after its first attempt broke down: six
+// attempts in all at most. On the P3 reproducer 9 of 52 first attempts broke
+// down (0.17; Wilson 95 % upper bound 0.30). If consecutive attempts were
+// independent - an inference, measured per attempt index by the permanent test,
+// not a property this code relies on - six consecutive breakdowns would have
+// probability 0.17^6 = 2.4e-5 per fit (7.3e-4 at the upper bound). Each attempt
+// there costs 45 or 46 iterations, and every attempt runs within what the
+// earlier ones left of max_iter.
+constexpr int kFastCgColdRestarts = 5;
+
+// The device LSMR after every cold restart broke down (restart_fast_cg_after_breakdown,
+// step 2). It stays only if every forced execution of the permanent test ends in an
+// accepted LSMR fit on the GPU inside the envelope (decision rule written before the
+// measurement, RELATORIO_P3FIX_20261109.md section 4); otherwise it is false, and an
+// exhausted restart is refused.
+constexpr bool kFastCgRestartLsmrTier = true;
+
+// The shape of restart_fast_cg_after_breakdown: an xhdfe-fast fit with ordinary
+// FEs (no slope, no saved FE), unweighted, whose broken CG stage was entered at
+// the gate (cuda_it_handoff_reason is 0 exactly then: every hand-off from the
+// IT sweeps sets 1 or 2) and ran the non-deterministic reductions
+// (n > kCudaSmallCgMaxRows). The public request must be xhdfe-fast without saved
+// FEs (options.fast_intent, set once by the regressor): a strict-residual fit
+// repaired natively as xhdfe-fast restarts with the device LSMR and the strict
+// check instead (HdfeOptions::strict_provenance, restart_strict_after_breakdown),
+// and the
+// projection continuation of a savefe fit reaches this point with xhdfe-fast
+// options but keeps its 2.30.1 restart, as does every caller that sets neither
+// flag. Every other broken CG stage keeps its 2.30.1 restart
+// (absorb_fixed_effects_cuda).
+bool cuda_fast_cg_restart_applies(const HdfeOptions& options,
+                                  const std::vector<GpuFeInput>& fe_inputs,
+                                  const Eigen::VectorXd* weights,
+                                  int n,
+                                  const AbsorptionResult& broken) {
+    return options.fast_intent && options.tolerance_mode == ToleranceMode::XhdfeFast &&
+           !options.retain_fixed_effects && weights == nullptr &&
+           n > kCudaSmallCgMaxRows && broken.cuda_it_handoff_reason == 0 &&
+           std::none_of(fe_inputs.begin(), fe_inputs.end(),
+                        [](const GpuFeInput& fe) { return fe.is_slope; });
+}
+
+// F2-B: the ledger of the cold restart of a three-FE Comparable fit after a
+// broken CG stage, one trace line (XHDFE_GI_LSMR_TRACE) with the iterations and
+// wall seconds of every stage, device and host apart, and the outcome.
+// it_iterations: the IT sweeps before the hand-off to the CG stage that the CG
+// stage did not count; cg_iterations: what the CG stage counted (also the
+// sweeps under the N1 continuation); counted_before: what the restart charged
+// to the budget before its own work (it + cg; cg alone under
+// XHDFE_CUDA_TAIL_HANDOVER=0, the 2.30.1 accounting); budget: the device
+// iterations left to each right-hand side. device_*: the probed (or, with the
+// switch at 0, the plain) cold device LSMR, max over right-hand sides; host_*:
+// the host MLSMR after a hand-over; after_*: the cold device LSMR after a host
+// failure. Seconds are trace only.
+struct CudaRestartLedger {
+    const char* mode = "adaptive";
+    int it_iterations = 0;
+    int it_reason = 0;
+    double it_seconds = 0.0;
+    int cg_iterations = 0;
+    double cg_seconds = 0.0;
+    int counted_before = 0;
+    int max_iter = 0;
+    int budget = 0;
+    int device_iterations = 0;
+    double device_seconds = 0.0;
+    int host_budget = 0;
+    int host_iterations = 0;
+    bool host_converged = false;
+    double host_seconds = 0.0;
+    int after_iterations = 0;
+    double after_seconds = 0.0;
+    int threads = 0;
+    int iterations = 0;
+    const char* outcome = "restart->device-lsmr";
+
+    void print(const CudaTailProbe* probe) const {
+        std::fprintf(stderr,
+                     "cuda_tail_restart mode=%s it_iterations=%d it_reason=%s "
+                     "it_seconds=%.6f cg_iterations=%d cg_seconds=%.6f counted_before=%d "
+                     "max_iter=%d budget=%d probe_decided=%d probe_rhs=%d probe_k=%d "
+                     "device_iterations=%d device_seconds=%.6f selector=%s reason=%s "
+                     "rho=%.17g select_seconds=%.6f evaluations=%d host_method=mlsmr "
+                     "host_budget=%d host_iterations=%d host_converged=%d "
+                     "host_seconds=%.6f after_iterations=%d after_seconds=%.6f threads=%d "
+                     "iterations=%d outcome=%s\n",
+                     mode, it_iterations,
+                     it_reason == 1 ? "divergence" : (it_reason == 2 ? "cap" : "none"),
+                     it_seconds, cg_iterations, cg_seconds, counted_before, max_iter,
+                     budget, probe != nullptr && probe->decided ? 1 : 0,
+                     probe != nullptr ? probe->rhs : -1, probe != nullptr ? probe->k : 0,
+                     device_iterations, device_seconds,
+                     probe != nullptr ? probe->selection.selector : "n/a",
+                     probe != nullptr ? probe->selection.reason : "off",
+                     probe != nullptr ? probe->selection.rho
+                                      : std::numeric_limits<double>::quiet_NaN(),
+                     probe != nullptr ? probe->selection.seconds : 0.0,
+                     probe != nullptr ? probe->selection.evaluations : 0, host_budget,
+                     host_iterations, host_converged ? 1 : 0, host_seconds,
+                     after_iterations, after_seconds, threads, iterations, outcome);
+    }
+};
+
 }  // namespace
 
 bool cuda_backend_available() {
@@ -3430,7 +3903,8 @@ static bool absorb_ordinary_lsmr_cuda(
     const std::vector<GpuFeInput>& fe_inputs,
     const Eigen::VectorXd* weights,
     const HdfeOptions& options,
-    AbsorptionResult& result);
+    AbsorptionResult& result,
+    CudaTailProbe* probe = nullptr);
 
 bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -3675,6 +4149,9 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
         (honest_mode ||
          (accel_guard_always_enabled() && cuda_guard_cg_bail_enabled));
     bool accel_diverged = false;
+    // Why the IT sweeps handed their iterate to the CG stage (F2-B ledger and
+    // trace): 1 divergence (cg_bail_factor), 2 the cg_iter_cap iteration cap.
+    int accel_handoff_reason = 0;
     if (store_alphas && fe_tol > 0.0 && convergence_tol > 0.0) {
         constexpr double kFeTolScale = 1e-8;
         // Transporting an absolute max-update tolerance must not relax this
@@ -5040,6 +5517,7 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                                                        "cudaMemcpy x cg-bail failed");
                                         }
                                         accel_diverged = true;
+                                        accel_handoff_reason = 1;
                                         iter_used = iter + 1;
                                         return false;
                                     }
@@ -5117,6 +5595,7 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                                            "cudaMemcpy x cg-cap failed");
                             }
                             accel_diverged = true;
+                            accel_handoff_reason = 2;
                             iter_used = iter + 1;
                             return false;
                         }
@@ -5261,10 +5740,17 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                 // and as the IT divergence fallback. CG re-derives its residual
                 // from d_y/d_x, so it is safe to run on any handed-off iterate.
                 auto run_cuda_cg = [&](const std::vector<std::size_t>& cg_order,
-                                       int preceding_iterations) {
+                                       int preceding_iterations,
+                                       int budget_charge) {
                     next_necessary_check = 0;
                     const int counted_before = necessary_continuation ? preceding_iterations : 0;
-                    const int cg_budget = std::max(0, options.max_iter - counted_before);
+                    // F2-B: budget_charge is what the stages before this one already
+                    // spent of max_iter (the IT sweeps, in the three-FE family with
+                    // the hand-over switch not at 0; 0 otherwise, the 2.30.1 budget).
+                    // The CG stage never runs past what is left; its `iterations`
+                    // keep the 2.30.1 accounting (counted_before).
+                    const int cg_budget = std::max(
+                        0, options.max_iter - std::max(counted_before, budget_charge));
                     // CG needs the symmetric (forward+backward) sweep so that
                     // (I - G) is self-adjoint. The gate path already forces this
                     // (use_reghdfe_cg => use_symmetric=true at setup); for the
@@ -5564,7 +6050,53 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                                     stage, iter, lane, a, b, c);
                             }
                         };
+                    // CG-02 slow-mode continuation (F1). Kill switch
+                    // XHDFE_CG_SLOW_MODE_CONTINUE=0 restores the 2.30.1 rule (every
+                    // step > tol at an energy-predicted stop breaks down).
+                    const bool slow_mode_continue = []() {
+                        const char* e = std::getenv("XHDFE_CG_SLOW_MODE_CONTINUE");
+                        return !(e != nullptr && e[0] == '0');
+                    }();
+                    const double slow_mode_floor =
+                        100.0 * std::numeric_limits<double>::epsilon();
+                    std::vector<double> deferred_step(
+                        static_cast<std::size_t>(cg_width), 0.0);
+                    bool any_deferred = false;
+                    int slow_mode_deferrals = 0;
+                    // F1 rev. 2: a genuine slow mode keeps shrinking the step geometrically
+                    // (CG), so progress, not a count, stops the deferrals: a lane breaks down
+                    // when its step has not fallen by 10 % in kSlowModeStallWindow consecutive
+                    // deferrals. kSlowModeMaxDeferrals (cumulative per solve, never reset) is
+                    // a hard backstop so a pathological lane still reaches the restart with
+                    // budget left. CG-02's direction is rejected by the lambda_p floor first.
+                    constexpr int kSlowModeStallWindow = 32;
+                    constexpr int kSlowModeMaxDeferrals = 2048;
+                    std::vector<int> lane_deferrals(
+                        static_cast<std::size_t>(cg_width), 0);
+                    std::vector<int> deferrals_since_progress(
+                        static_cast<std::size_t>(cg_width), 0);
+                    std::vector<double> best_step(
+                        static_cast<std::size_t>(cg_width),
+                        std::numeric_limits<double>::infinity());
+                    const bool cg_accel_debug =
+                        std::getenv("XHDFE_ACCEL_DEBUG") != nullptr;
+                    auto report_cg_step_guard =
+                        [&](const char* event, int iter, int lane, double step,
+                            double alpha_lane, double lambda_p, double energy_ratio,
+                            int since_progress, double lane_best_step) {
+                            if (cg_accel_debug) {
+                                std::fprintf(
+                                    stderr,
+                                    "[ACCEL cuda CG %s iter=%d lane=%d a=%.17g b=%.17g "
+                                    "c=%.17g lambda_p=%.17g energy_ratio=%.17g "
+                                    "since_progress=%d best_step=%.17g]\n",
+                                    event, iter, lane, step, options.tol, alpha_lane,
+                                    lambda_p, energy_ratio, since_progress, lane_best_step);
+                            }
+                        };
 
+                    // P3-fix test hook (XHDFE_TEST_CUDA_CG_BREAKDOWN); 0 unless set.
+                    const int test_breakdown_iteration = cuda_cg_test_breakdown().iteration;
                     int cg_iters = 0;
                     for (int iter = 1; iter <= cg_budget; ++iter) {
                         projection_sweep(d_y_ggx.data(), d_x_ggx.data(),
@@ -5636,8 +6168,17 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                             }
                         }
                         cg_iters = iter;
+                        if (!cg_breakdown && iter == test_breakdown_iteration &&
+                            cuda_cg_test_breakdown_due(iter)) {
+                            report_cg_breakdown("test-forced", iter, -1, 0.0, 0.0, 0.0);
+                            cg_breakdown = true;
+                        }
                         if (cg_breakdown) {
                             break;
+                        }
+                        if (any_deferred) {
+                            std::fill(deferred_step.begin(), deferred_step.end(), 0.0);
+                            any_deferred = false;
                         }
                         bool candidate_lane = false;
                         for (int k = 0; k < cg_width; ++k) {
@@ -5661,12 +6202,46 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                                     std::sqrt(recent[lane] / scale) <= options.tol) {
                                     const double step = std::abs(alpha[lane]) *
                                         std::sqrt(direction_sq[lane] / scale);
-                                    if (!finite_double_bits(step) || step > options.tol) {
-                                        report_cg_breakdown("step-norm", iter, k, step,
-                                                            options.tol, alpha[lane]);
+                                    if (finite_double_bits(step) && step <= options.tol) {
+                                        continue;
+                                    }
+                                    // Lesson CG-02 (F1): lambda_p = p'Ap/p'p (Rayleigh quotient of p)
+                                    // amplifies sweep roundoff by ~1/lambda_p. While eps/lambda_p is two
+                                    // orders below tol, apply the step but defer acceptance; else break down.
+                                    const double energy_ratio = std::sqrt(recent[lane] / scale);
+                                    const double lambda_p = denom[lane] / direction_sq[lane];
+                                    bool defer = slow_mode_continue &&
+                                        finite_double_bits(step) &&
+                                        finite_double_bits(lambda_p) &&
+                                        lambda_p * options.tol >= slow_mode_floor;
+                                    const char* event =
+                                        defer ? "slow-mode-continue" : "breakdown stage=step-norm";
+                                    if (defer) {
+                                        if (step < 0.9 * best_step[lane]) {
+                                            best_step[lane] = step;
+                                            deferrals_since_progress[lane] = 0;
+                                        } else {
+                                            ++deferrals_since_progress[lane];
+                                        }
+                                        if (deferrals_since_progress[lane] >= kSlowModeStallWindow) {
+                                            defer = false;
+                                            event = "breakdown stage=slow-mode-stalled";
+                                        } else if (lane_deferrals[lane] >= kSlowModeMaxDeferrals) {
+                                            defer = false;
+                                            event = "breakdown stage=slow-mode-exhausted";
+                                        }
+                                    }
+                                    report_cg_step_guard(
+                                        event, iter, k, step, alpha[lane], lambda_p, energy_ratio,
+                                        deferrals_since_progress[lane], best_step[lane]);
+                                    if (!defer) {
                                         cg_breakdown = true;
                                         break;
                                     }
+                                    deferred_step[lane] = step;
+                                    any_deferred = true;
+                                    ++lane_deferrals[lane];
+                                    ++slow_mode_deferrals;
                                 }
                             }
                         }
@@ -5761,7 +6336,12 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                                 cg_breakdown = true;
                                 break;
                             }
-                            const double err = std::sqrt(ratio);
+                            double err = std::sqrt(ratio);
+                            if (any_deferred) {
+                                // A lane deferred by the CG-02 slow-mode rule reports the
+                                // step it just applied (> tol): not accepted, no stop now.
+                                err = std::max(err, deferred_step[lane]);
+                            }
                             if (!finite_double_bits(err)) {
                                 report_cg_breakdown(
                                     "error", iter, k, err, ratio, 0.0);
@@ -5825,20 +6405,90 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                             "CG restore-scale kernel launch failed");
                     }
                     if (std::getenv("XHDFE_ACCEL_DEBUG") != nullptr) {
-                        std::fprintf(stderr, "[ACCEL cuda CG iters=%d converged=%d]\n",
-                                     result.iterations, converged ? 1 : 0);
+                        std::fprintf(stderr, "[ACCEL cuda CG iters=%d converged=%d deferred=%d]\n",
+                                     result.iterations, converged ? 1 : 0, slow_mode_deferrals);
+                    }
+                };
+
+                // F2-B ledger of the CG stage. The stage itself runs as in
+                // 2.30.1: its budget and `iterations` exclude the IT sweeps
+                // that preceded a hand-off (counted only under the N1
+                // continuation). The ledger keeps those uncounted sweeps, the
+                // hand-off reason and the wall time of the sweeps and of the
+                // CG stage for the cold restart that follows a broken CG stage
+                // (absorb_fixed_effects_cuda) and for the trace. With
+                // XHDFE_GI_LSMR_TRACE the stage boundaries are synchronised,
+                // so the seconds are each stage's device work; no decision
+                // reads them, and without the trace nothing is synchronised.
+                const bool f2_stage_trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+                if (f2_stage_trace) {
+                    cuda_check(cudaDeviceSynchronize(), "IT stage trace synchronisation failed");
+                }
+                const auto accel_stage_start = std::chrono::steady_clock::now();
+                auto run_cg_stage = [&](int preceding_iterations, bool after_sweeps) {
+                    if (f2_stage_trace) {
+                        cuda_check(cudaDeviceSynchronize(),
+                                   "CG stage trace synchronisation failed");
+                    }
+                    const auto cg_start = std::chrono::steady_clock::now();
+                    const int uncounted = necessary_continuation ? 0 : preceding_iterations;
+                    const double it_seconds = after_sweeps
+                        ? std::chrono::duration<double>(cg_start - accel_stage_start).count()
+                        : 0.0;
+                    // F2-B: in the three-FE family (switch not at 0) the budget is
+                    // cumulative in every stage: the CG stage receives max_iter minus
+                    // the IT sweeps before it, so the sweeps, the CG stage and the
+                    // restart that may follow never exceed max_iter together.
+                    const int budget_charge =
+                        after_sweeps && cuda_three_fe_family(options, fe_inputs, weights, cols) &&
+                                cuda_tail_handover_mode() != CudaTailMode::Off
+                            ? preceding_iterations
+                            : 0;
+                    const int cg_budget = std::max(
+                        0, options.max_iter -
+                               std::max(preceding_iterations - uncounted, budget_charge));
+                    if (f2_stage_trace && after_sweeps) {
+                        std::fprintf(stderr,
+                                     "cuda_it_to_cg reason=%s it_iterations=%d it_seconds=%.6f "
+                                     "uncounted=%d max_iter=%d cg_budget=%d\n",
+                                     accel_handoff_reason == 1 ? "divergence"
+                                         : (accel_handoff_reason == 2 ? "cap" : "other"),
+                                     preceding_iterations, it_seconds, uncounted,
+                                     options.max_iter, cg_budget);
+                    }
+                    run_cuda_cg(sweep_order, preceding_iterations, budget_charge);
+                    if (f2_stage_trace) {
+                        cuda_check(cudaDeviceSynchronize(),
+                                   "CG stage trace synchronisation failed");
+                    }
+                    const double cg_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - cg_start).count();
+                    result.cuda_cg_uncounted_it_iterations = uncounted;
+                    result.cuda_it_handoff_reason = after_sweeps ? accel_handoff_reason : 0;
+                    result.cuda_it_seconds = it_seconds;
+                    result.cuda_cg_seconds = cg_seconds;
+                    if (f2_stage_trace) {
+                        std::fprintf(stderr,
+                                     "cuda_cg_end entry=%s cg_iterations=%d iterations=%d "
+                                     "converged=%d restart_required=%d cg_budget=%d "
+                                     "seconds=%.6f\n",
+                                     after_sweeps ? "sweeps" : "gate",
+                                     result.iterations - (preceding_iterations - uncounted),
+                                     result.iterations, converged ? 1 : 0,
+                                     result.cg_restart_required ? 1 : 0, cg_budget,
+                                     cg_seconds);
                     }
                 };
 
                 const bool cg_fallback_possible =
                     cuda_cg_fallback_ok && !sweep_order.empty();
                 if (use_reghdfe_cg && !sweep_order.empty()) {
-                    run_cuda_cg(sweep_order, 0);
+                    run_cg_stage(0, false);
                 } else if (!enable_two_stage) {
                     int phase_iters = 0;
                     converged = run_accel_phase(sweep_order, accel_iter_budget, phase_iters);
                     if (!converged && accel_diverged && cg_fallback_possible) {
-                        run_cuda_cg(sweep_order, phase_iters);
+                        run_cg_stage(phase_iters, true);
                     } else if (converged) {
                         result.iterations = phase_iters;
                     }
@@ -5869,7 +6519,7 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                         remaining -= phase_iters;
                     }
                     if (!converged && accel_diverged && cg_fallback_possible) {
-                        run_cuda_cg(sweep_order, total_iters);
+                        run_cg_stage(total_iters, true);
                     } else if (converged) {
                         result.iterations = total_iters;
                     }
@@ -5877,9 +6527,25 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                 // Complete the unfinished FE component from the successful
                 // IT state with the existing device Krylov solve. The original
                 // ordinary tolerance and remaining iteration budget apply.
+                //
+                // F2-A: the device solve is probed (CudaTailProbe). When it is
+                // predicted long and the CPU's own selector would use MLSMR on
+                // this fit, the host MLSMR completes the projection from the
+                // same IT state, at the same 1e-11 Krylov floor, within the
+                // remaining budget: completed + device probe + host iterations.
+                // The host never runs a sweep here. The IT state has already
+                // satisfied the sweep's Comparable stop (the norm-of-change rule
+                // at the nominal tolerance) while weak FE components were left
+                // unfinished; a sweep started from it would accept at its first
+                // check and return that incomplete projection, which is the
+                // demonstrated covariance error this completion exists to fix
+                // (docs/LICOES_CUDA_COVARIANCIA_20261020.md). When the selector
+                // would sweep, or does not apply, the device keeps the tail.
                 if (allow_cg && converged && !use_reghdfe_cg && !have_cg_iteration_count &&
                     options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
-                    fe_inputs.size() == 3 && weights == nullptr && !any_slope &&
+                    fe_inputs.size() == 3 &&
+                    (weights == nullptr || cuda_weighted_completion_applies(options)) &&
+                    !any_slope &&
                     !store_alphas && !options.retain_fixed_effects && cols > 0) {
                     const int completed = result.iterations;
                     const int remaining = std::max(0, options.max_iter - completed);
@@ -5892,12 +6558,90 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                         cuda_check(cudaMemcpy(warm_x.data(), d_x.data(),
                                               sizeof(double) * x_size, cudaMemcpyDeviceToHost),
                                    "warm ordinary LSMR X copy failed");
+                        // P8 (A1), test hook only (inert unless set, read once per
+                        // process): XHDFE_TEST_CUDA_COMPLETION_COLD=1 starts the
+                        // completion from the original data instead of the IT state,
+                        // for the cold/warm comparison with variable weights that
+                        // the design requires before trusting the warm start.
+                        static const bool completion_cold_hook = [] {
+                            const char* e = std::getenv("XHDFE_TEST_CUDA_COMPLETION_COLD");
+                            return e != nullptr && std::strcmp(e, "1") == 0;
+                        }();
+                        if (completion_cold_hook) {
+                            warm_y = y;
+                            warm_x = X;
+                        }
                         HdfeOptions tail_options = options;
                         tail_options.max_iter = remaining;
+                        const CudaTailMode tail_mode = cuda_tail_handover_mode();
+                        const bool tail_trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+                        CudaTailProbe probe;
+                        probe.mode = tail_mode;
+                        probe.trace = tail_trace;
+                        probe.rhs_count = cols + 1;
+                        probe.budget = remaining;
+                        probe.select = [&]() {
+                            return select_cuda_tail_host_route(n, options);
+                        };
                         AbsorptionResult repaired;
-                        const bool tail_ok = absorb_ordinary_lsmr_cuda(
-                            warm_y, warm_x, fe_inputs, weights, tail_options, repaired);
-                        repaired.iterations += completed;
+                        bool tail_ok = absorb_ordinary_lsmr_cuda(
+                            warm_y, warm_x, fe_inputs, weights, tail_options, repaired,
+                            // P8 (A1): never a probe with weights, so no F2 hand-over.
+                            (tail_mode == CudaTailMode::Off || weights != nullptr) ? nullptr
+                                                                                   : &probe);
+                        int spent = 0;
+                        if (tail_ok && probe.handover) {
+                            spent = probe.device_iterations;
+                            AbsorptionResult host;
+                            int host_iterations = 0;
+                            double host_seconds = 0.0;
+                            const bool host_ok = complete_cuda_tail_on_host(
+                                warm_y, warm_x, fe_inputs, n, tail_options,
+                                remaining - spent, host, host_iterations, host_seconds);
+                            if (tail_trace) {
+                                std::fprintf(stderr,
+                                             "cuda_tail_handover completed=%d probe_rhs=%d "
+                                             "probe_k=%d device_iterations=%d selector=%s "
+                                             "rho=%.17g select_seconds=%.6f "
+                                             "host_method=mlsmr host_budget=%d "
+                                             "host_iterations=%d host_converged=%d "
+                                             "host_seconds=%.6f threads=%d outcome=%s\n",
+                                             completed, probe.rhs, probe.k, spent,
+                                             probe.selection.selector,
+                                             probe.selection.rho,
+                                             probe.selection.seconds,
+                                             remaining - spent, host_iterations,
+                                             host_ok ? 1 : 0, host_seconds,
+                                             tail_options.num_threads,
+                                             host_ok ? "host-mlsmr"
+                                                     : "device-lsmr-after-host");
+                            }
+                            if (host_ok) {
+                                host.iterations = completed + spent + host_iterations;
+                                host.mlsmr_used = true;
+                                host.precision_certified = false;  // certified by the caller
+                                host.sweep_order_used.clear();
+                                host.cuda_tail = kCudaTailHostMlsmr;
+                                result = std::move(host);
+                                return true;
+                            }
+                            // The host stopped short of its budget or failed: the
+                            // device tail finishes with what is left, no probe.
+                            spent += host_iterations;
+                            tail_options.max_iter = remaining - spent;
+                            repaired = AbsorptionResult{};
+                            if (tail_options.max_iter > 0) {
+                                tail_ok = absorb_ordinary_lsmr_cuda(
+                                    warm_y, warm_x, fe_inputs, weights, tail_options,
+                                    repaired);
+                            } else {
+                                repaired.converged = false;
+                                repaired.precision_certified = false;
+                                repaired.mlsmr_used = true;
+                            }
+                        }
+                        repaired.iterations += completed + spent;
+                        repaired.cuda_tail = kCudaTailDeviceLsmr;
                         result = std::move(repaired);
                         return tail_ok;
                     }
@@ -6525,6 +7269,439 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
     }
 }
 
+// F2-B: the cold restart of a three-FE Comparable fit (unweighted, ordinary
+// FEs, regressors present) after a broken CG stage, probed like the F2-A tail.
+// The budget accumulates every stage of the fit: the IT sweeps before the
+// hand-off to the CG stage (which the CG stage does not count in its own
+// `iterations`, but which already limited its budget: run_cg_stage), the CG
+// stage, the device probe and the host; each stage receives what the stages
+// before it left of options.max_iter, which is never reset, and `iterations`
+// counts all of it, never more than max_iter. The device LSMR starts cold from the original data, as the 2.30.1
+// restart. When the probe predicts a long solve (work >= 8192 RHS-iterations
+// with budget left) and the CPU selector, evaluated at most once per fit,
+// votes MLSMR (or under "force"), the host MLSMR solves the fit cold from the
+// same original data: never from the CG iterate, whose broken recurrence may
+// have lost null-space components. A sweep vote, a selector that does not
+// apply or a short prediction keep the 2.30.1 device restart. A host failure
+// is contained: the device restarts cold with what is left, without probe.
+static bool restart_three_fe_after_cg(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
+                                      const std::vector<GpuFeInput>& fe_inputs,
+                                      const HdfeOptions& options,
+                                      CudaTailMode mode,
+                                      AbsorptionResult& result) {
+    const int n = static_cast<int>(y.size());
+    const int cols = static_cast<int>(X.cols());
+    const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    CudaRestartLedger ledger;
+    ledger.mode = mode == CudaTailMode::Force ? "force" : "adaptive";
+    ledger.it_iterations = std::max(0, result.cuda_cg_uncounted_it_iterations);
+    ledger.it_reason = result.cuda_it_handoff_reason;
+    ledger.it_seconds = result.cuda_it_seconds;
+    ledger.cg_iterations = std::max(0, result.iterations);
+    ledger.cg_seconds = result.cuda_cg_seconds;
+    ledger.max_iter = options.max_iter;
+    ledger.threads = options.num_threads;
+    const std::int64_t counted =
+        static_cast<std::int64_t>(ledger.it_iterations) + ledger.cg_iterations;
+    ledger.counted_before = static_cast<int>(
+        std::min<std::int64_t>(counted, std::numeric_limits<int>::max()));
+    ledger.budget = static_cast<int>(
+        std::max<std::int64_t>(0, static_cast<std::int64_t>(options.max_iter) - counted));
+    CudaTailProbe probe;
+    probe.mode = mode;
+    probe.trace = trace;
+    probe.stage = "restart";
+    probe.rhs_count = cols + 1;
+    probe.budget = ledger.budget;
+    probe.select = [&]() { return select_cuda_tail_host_route(n, options); };
+    if (ledger.budget <= 0) {
+        // The sweeps and the CG stage left nothing (the CG stage stopped at
+        // max_iter - IT): refuse with every stage counted (IT + CG = max_iter),
+        // as 2.30.1 does when its CG stage alone exhausts the budget.
+        result.iterations = ledger.counted_before;
+        result.converged = false;
+        result.precision_certified = false;
+        ledger.iterations = result.iterations;
+        ledger.outcome = "restart->budget-exhausted";
+        if (trace) ledger.print(&probe);
+        return true;
+    }
+    HdfeOptions retry_options = options;
+    retry_options.max_iter = ledger.budget;
+    AbsorptionResult repaired;
+    auto start = std::chrono::steady_clock::now();
+    bool repaired_ok = absorb_ordinary_lsmr_cuda(y, X, fe_inputs, nullptr, retry_options,
+                                                 repaired, &probe);
+    ledger.device_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    ledger.device_iterations = std::max(0, repaired.iterations);
+    int spent = 0;
+    if (repaired_ok && probe.handover) {
+        spent = probe.device_iterations;
+        ledger.device_iterations = spent;
+        ledger.host_budget = ledger.budget - spent;
+        AbsorptionResult host;
+        int host_iterations = 0;
+        double host_seconds = 0.0;
+        bool host_ok = false;
+        {
+            // The host absorber takes its inputs by value: one explicit copy of
+            // the original data (never the CG iterate).
+            const Eigen::VectorXd y_original = y;
+            const Eigen::MatrixXd X_original = X;
+            host_ok = complete_cuda_tail_on_host(y_original, X_original, fe_inputs, n,
+                                                 retry_options, ledger.host_budget, host,
+                                                 host_iterations, host_seconds);
+        }
+        ledger.host_iterations = host_iterations;
+        ledger.host_converged = host_ok;
+        ledger.host_seconds = host_seconds;
+        if (host_ok) {
+            host.iterations = ledger.counted_before + spent + host_iterations;
+            host.mlsmr_used = true;
+            host.precision_certified = false;  // certified by the caller
+            host.sweep_order_used.clear();
+            host.cuda_tail = kCudaTailHostMlsmr;
+            result = std::move(host);
+            ledger.iterations = result.iterations;
+            ledger.outcome = "restart->host-mlsmr";
+            if (trace) ledger.print(&probe);
+            return true;
+        }
+        // The host stopped short of its budget or failed: the device restarts
+        // cold with what is left, without probe.
+        spent += host_iterations;
+        retry_options.max_iter = ledger.budget - spent;
+        repaired = AbsorptionResult{};
+        ledger.outcome = "restart->device-lsmr-after-host";
+        if (retry_options.max_iter > 0) {
+            start = std::chrono::steady_clock::now();
+            repaired_ok = absorb_ordinary_lsmr_cuda(y, X, fe_inputs, nullptr,
+                                                    retry_options, repaired);
+            ledger.after_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start).count();
+            ledger.after_iterations = std::max(0, repaired.iterations);
+        } else {
+            repaired.converged = false;
+            repaired.precision_certified = false;
+            repaired.mlsmr_used = true;
+        }
+    }
+    repaired.iterations += ledger.counted_before + spent;
+    result = std::move(repaired);
+    ledger.iterations = result.iterations;
+    if (trace) ledger.print(&probe);
+    return repaired_ok;
+}
+
+// P3-fix (B): the restart of a broken xhdfe-fast CG stage in the shape of
+// cuda_fast_cg_restart_applies. That is the route of the P3 reproducer (the
+// public cov240k fixture: 240 000 rows, three FEs, tol 1e-8), where the 2.30.1
+// restart solved the fit again with a cold MAP under the Comparable stopping
+// rule (eff_tol 1e-9, norm of change; contraction 0.996 at its stop): against
+// an independent oracle that state was 43x (SE), 82x (V) and about 790x
+// (residuals) worse than the worst 2.28.1 fit, refused at tol 1e-8 by the
+// 0.5*tol repair gate and returned certified above 1e-8.
+//
+// 1. Up to kFastCgColdRestarts cold restarts of the same CG stage: the fit's
+//    own xhdfe-fast options (public tolerance, the CG's energy stopping rule,
+//    no Comparable floor), from the original data, each within what the
+//    earlier attempts left of max_iter. Why a cold restart can finish where the
+//    first attempt broke down: the stage combines its reductions with atomics
+//    in an order that changes between launches (n > kCudaSmallCgMaxRows), and
+//    on the reproducer the breakdown is a rounding event at the stop decision,
+//    not a property of the data: with the same inputs, 43 of 52 fresh
+//    processes converged at iteration 45 and 9 broke down at iteration 46 (a
+//    lane already at roundoff, alpha above the 1/sqrt(eps) ceiling). A
+//    deterministic stage would replay its breakdown and is outside this shape.
+//    Whether consecutive attempts in one process are independent is measured
+//    by the permanent test, not assumed by any decision here.
+// 2. When every attempt broke down and budget is left (and kFastCgRestartLsmrTier;
+//    otherwise the fit is refused), the device LSMR at the public xhdfe-fast
+//    tolerance (no 1e-11 floor, no refinement: the 2.26.2 LSMR semantics) solves
+//    the fit from the original data with what is left:
+//    the device counterpart of the CPU restart of a broken CG stage, which runs
+//    MLSMR with the caller's options (hdfe_regressor_v11.cpp,
+//    primary.cg_restart_required). The caller certifies the result like any
+//    CUDA absorption and applies its acceptance gates unchanged.
+// A broken attempt is never reused (AbsorptionResult::cg_restart_required),
+// and the 2.30.1 cold MAP never runs in this shape. `iterations` counts the
+// broken stage, every attempt and the LSMR, never more than max_iter; with no
+// budget left the fit is refused with all of it counted. One trace line
+// (XHDFE_GI_LSMR_TRACE) records the ledger.
+static bool restart_fast_cg_after_breakdown(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                            const Eigen::Ref<const Eigen::MatrixXd>& X,
+                                            const std::vector<GpuFeInput>& fe_inputs,
+                                            const Eigen::VectorXd* weights,
+                                            const std::vector<std::size_t>& sweep_order,
+                                            const HdfeOptions& options,
+                                            AbsorptionMethod method,
+                                            double solver_fe_tolerance,
+                                            AbsorptionResult& result) {
+    const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    const int broken_iterations = std::max(0, result.iterations);
+    int spent = std::min(options.max_iter, broken_iterations);
+    int restarts = 0;
+    int lsmr_iterations = 0;
+    bool lsmr_used = false;
+    bool finished = false;
+    bool ok = true;
+    const char* outcome = "budget-exhausted";
+    std::string attempt_iterations;  // iterations of every cold restart (trace only)
+    while (!finished && restarts < kFastCgColdRestarts && spent < options.max_iter) {
+        HdfeOptions retry_options = options;
+        retry_options.max_iter = options.max_iter - spent;
+        AbsorptionResult attempt;
+        const bool attempt_ok = absorb_fixed_effects_cuda_impl(
+            y, X, fe_inputs, weights, sweep_order, retry_options, method, attempt,
+            solver_fe_tolerance, true);
+        ++restarts;
+        const int used = std::max(0, attempt.iterations) +
+                         std::max(0, attempt.cuda_cg_uncounted_it_iterations);
+        spent = std::min(options.max_iter, spent + used);
+        if (trace) {
+            if (!attempt_iterations.empty()) attempt_iterations += ',';
+            attempt_iterations += std::to_string(used);
+        }
+        if (!attempt_ok || !attempt.cg_restart_required) {
+            // A CUDA failure ends the restart, as in 2.30.1; otherwise the
+            // stage finished without a breakdown.
+            outcome = !attempt_ok ? "cg-restart-failed"
+                    : (attempt.converged ? "cg-restart-converged" : "cg-restart-stopped");
+            ok = attempt_ok;
+            result = std::move(attempt);
+            finished = true;
+        } else {
+            outcome = "cg-restarts-broken";
+        }
+    }
+    if (!finished && kFastCgRestartLsmrTier && spent < options.max_iter) {
+        HdfeOptions retry_options = options;
+        retry_options.max_iter = options.max_iter - spent;
+        AbsorptionResult repaired;
+        ok = absorb_ordinary_lsmr_cuda(y, X, fe_inputs, weights, retry_options, repaired);
+        lsmr_used = true;
+        lsmr_iterations = std::max(0, repaired.iterations);
+        spent = std::min(options.max_iter, spent + lsmr_iterations);
+        outcome = !ok ? "lsmr-failed" : (repaired.converged ? "lsmr-converged" : "lsmr-stopped");
+        result = std::move(repaired);
+        finished = true;
+    }
+    if (!finished) {
+        // No budget left, or every attempt broke down and the LSMR tier is off:
+        // refuse with every stage counted.
+        outcome = spent < options.max_iter ? "cg-restarts-exhausted" : "budget-exhausted";
+        result.converged = false;
+        result.precision_certified = false;
+    }
+    result.iterations = spent;
+    result.cuda_fast_cg_restarts = restarts;
+    result.cuda_fast_lsmr_restart = lsmr_used;
+    if (trace) {
+        std::fprintf(stderr,
+                     "cuda_fast_restart broken_iterations=%d cold_restarts=%d "
+                     "restart_iterations=%s lsmr=%d lsmr_iterations=%d max_iter=%d "
+                     "iterations=%d outcome=%s seconds=%.6f\n",
+                     broken_iterations, restarts,
+                     attempt_iterations.empty() ? "-" : attempt_iterations.c_str(),
+                     lsmr_used ? 1 : 0, lsmr_iterations, options.max_iter, spent, outcome,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+                         .count());
+    }
+    return ok;
+}
+
+// Largest absolute group mean of v over the ordinary FEs, with the FEs' own
+// group weight sums (unit weights: the group sizes). Host pass, long double
+// sums; infinity on a non-finite value. The strict condition of
+// restart_strict_after_breakdown.
+static double strict_max_abs_group_mean(const Eigen::Ref<const Eigen::VectorXd>& v,
+                                        const std::vector<GpuFeInput>& fe_inputs,
+                                        const Eigen::VectorXd* weights) {
+    double out = 0.0;
+    const Eigen::Index n = v.size();
+    for (const GpuFeInput& fe : fe_inputs) {
+        if (fe.is_slope || fe.group_ids == nullptr || fe.weight_sums == nullptr ||
+            fe.num_groups <= 0) {
+            return std::numeric_limits<double>::infinity();
+        }
+        std::vector<long double> sums(static_cast<std::size_t>(fe.num_groups), 0.0L);
+        for (Eigen::Index i = 0; i < n; ++i) {
+            const long double w =
+                weights != nullptr ? static_cast<long double>((*weights)[i]) : 1.0L;
+            sums[static_cast<std::size_t>(fe.group_ids[i])] +=
+                w * static_cast<long double>(v[i]);
+        }
+        for (int g = 0; g < fe.num_groups; ++g) {
+            const double denominator = fe.weight_sums[g];
+            if (!(denominator > 0.0)) continue;
+            const double mean = static_cast<double>(
+                sums[static_cast<std::size_t>(g)] / static_cast<long double>(denominator));
+            if (!finite_double_bits(mean)) return std::numeric_limits<double>::infinity();
+            out = std::max(out, std::fabs(mean));
+        }
+    }
+    return out;
+}
+
+// P3-fix (3'), hypothesis P3-S and its scope addendum (RELATORIO_P3FIX_20261109.md
+// sections 11.2 and 11.3): the restart of a broken CG stage of a stage with the strict
+// provenance (HdfeOptions::strict_provenance): the native CUDA attempt of a
+// strict-residual fit, which configure_native_cuda_repair runs as xhdfe-fast with the
+// update criterion, or that fit's strict repair (run_strict_cuda_repair), whose
+// path-like two-FE CG gate ignores the mode. Up to 2.30.1 such a stage restarted with
+// the cold MAP under the Comparable stopping rule (norm of change), whose state,
+// outside the 2.28.1 envelope, the strict certificate accepted (sections 7.4 and 10).
+// The fit's recovery is a finite sequence: one device LSMR restart (here), then at
+// most one strict repair (the regressor), never the cold MAP. Here, within what the
+// broken stage left of max_iter:
+// 1. when the sequence has not used it (!strict_lsmr_consumed), a cold device LSMR
+//    from the original y and X (never from the CG iterate), the core of the
+//    Comparable restart without its host hand-over (no probe), under the existing
+//    ordinary strict policy: the stage's options in the strict-residual mode, so its
+//    Krylov target is min(tol, 1e-11) under the caller's ordinary parity floor;
+// 2. the strict condition - the largest absolute group mean of y~ over the FEs at
+//    most polish_tol = min(tol, 1e-10), that of the existing strict polish - judged on
+//    the LSMR state itself: when it holds, that state is delivered with no sweep;
+//    otherwise the existing strict polish (the MAP in the strict-residual mode at
+//    polish_tol, no CG) runs on the LSMR state, and its own exit (converged only when
+//    the condition is met) decides.
+// An approved state returns converged; the caller certifies it. Otherwise (LSMR
+// stopped, condition not met, budget exhausted, or the LSMR already used: a second
+// breakdown ends the sequence) the stage returns "not converged" (status 3) with
+// cuda_strict_lsmr_restart set, which the regressor reads to give its one strict
+// repair the state of the sequence; a CUDA failure returns false (status 4).
+// `iterations` counts the broken stage, the IT sweeps before it that it did not
+// count, the LSMR and the polish, never truncated, never more than max_iter. One
+// trace line (XHDFE_GI_LSMR_TRACE), cuda_strict_restart. Test hook, tests only:
+// XHDFE_TEST_CUDA_STRICT_LSMR_REJECT=1 rejects an approved LSMR state (flow control
+// of the sequence, not a frequency).
+static bool restart_strict_after_breakdown(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& fe_inputs,
+    const Eigen::VectorXd* weights,
+    const std::vector<std::size_t>& sweep_order,
+    const HdfeOptions& options,
+    AbsorptionMethod method,
+    double solver_fe_tolerance,
+    AbsorptionResult& result) {
+    const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    const auto start = std::chrono::steady_clock::now();
+    const int cg_iterations = std::max(0, result.iterations);
+    const int uncounted_it = std::max(0, result.cuda_cg_uncounted_it_iterations);
+    int spent = std::min(options.max_iter, cg_iterations + uncounted_it);
+    const bool lsmr_available = !options.strict_lsmr_consumed;
+    const double polish_tol =
+        options.tol > 0.0 ? std::min(options.tol, 1.0e-10) : options.tol;
+    int lsmr_iterations = 0;
+    int polish_iterations = 0;
+    bool lsmr_converged = false;
+    bool polished = false;
+    bool test_rejected = false;
+    double krylov_target = 0.0;
+    double lsmr_max_mean = std::numeric_limits<double>::quiet_NaN();
+    double final_max_mean_all = std::numeric_limits<double>::quiet_NaN();
+    double lsmr_seconds = 0.0;
+    double polish_seconds = 0.0;
+    bool ok = true;
+    const char* outcome = lsmr_available ? "budget-exhausted" : "lsmr-already-consumed";
+    bool converged = false;
+    if (lsmr_available && spent < options.max_iter) {
+        AbsorptionResult delivered;
+        HdfeOptions lsmr_options = options;
+        lsmr_options.max_iter = options.max_iter - spent;
+        lsmr_options.tolerance_mode = ToleranceMode::StrictResidual;
+        lsmr_options.convergence_criterion = ConvergenceCriterion::Auto;
+        lsmr_options.cuda_tail_route = nullptr;
+        const auto lsmr_start = std::chrono::steady_clock::now();
+        ok = absorb_ordinary_lsmr_cuda(y, X, fe_inputs, weights, lsmr_options, delivered);
+        lsmr_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - lsmr_start).count();
+        lsmr_iterations = std::max(0, delivered.iterations);
+        lsmr_converged = ok && delivered.converged;
+        krylov_target = delivered.krylov_internal_tolerance;
+        spent = std::min(options.max_iter, spent + lsmr_iterations);
+        if (!ok) {
+            outcome = "lsmr-failed";
+        } else if (!lsmr_converged) {
+            outcome = "lsmr-stopped";
+        } else {
+            lsmr_max_mean = strict_max_abs_group_mean(delivered.y_tilde, fe_inputs, weights);
+            if (lsmr_max_mean <= polish_tol) {
+                outcome = "lsmr-strict";
+                converged = true;
+            } else if (spent >= options.max_iter) {
+                outcome = "polish-budget-exhausted";
+            } else {
+                HdfeOptions polish_options = options;
+                polish_options.max_iter = options.max_iter - spent;
+                polish_options.tol = polish_tol;
+                polish_options.tolerance_mode = ToleranceMode::StrictResidual;
+                polish_options.convergence_criterion = ConvergenceCriterion::Auto;
+                polish_options.cuda_tail_route = nullptr;
+                AbsorptionResult polish;
+                const auto polish_start = std::chrono::steady_clock::now();
+                ok = absorb_fixed_effects_cuda_impl(
+                    delivered.y_tilde, delivered.X_tilde, fe_inputs, weights, sweep_order,
+                    polish_options, method, polish, solver_fe_tolerance, false);
+                polish_seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - polish_start).count();
+                polished = true;
+                polish_iterations = std::max(0, polish.iterations);
+                spent = std::min(options.max_iter, spent + polish_iterations);
+                if (!ok) {
+                    outcome = "polish-failed";
+                } else {
+                    converged = polish.converged;
+                    outcome = converged ? "lsmr-polished" : "polish-stopped";
+                    // The LSMR result keeps its Krylov diagnostics; the state
+                    // delivered is the polished one.
+                    delivered.y_tilde = std::move(polish.y_tilde);
+                    delivered.X_tilde = std::move(polish.X_tilde);
+                }
+            }
+        }
+        if (ok && converged && cuda_strict_lsmr_test_reject()) {
+            converged = false;
+            test_rejected = true;
+            outcome = "lsmr-rejected-by-test-hook";
+        }
+        if (trace && ok && delivered.y_tilde.size() == y.size()) {
+            final_max_mean_all = strict_max_abs_group_mean(delivered.y_tilde, fe_inputs, weights);
+            for (Eigen::Index c = 0; c < delivered.X_tilde.cols(); ++c) {
+                final_max_mean_all = std::max(
+                    final_max_mean_all,
+                    strict_max_abs_group_mean(delivered.X_tilde.col(c), fe_inputs, weights));
+            }
+        }
+        result = std::move(delivered);
+    }
+    result.converged = ok && converged;
+    result.precision_certified = false;
+    result.iterations = spent;
+    result.cuda_strict_lsmr_restart = true;
+    if (trace) {
+        std::fprintf(stderr,
+                     "cuda_strict_restart lsmr_available=%d cg_iterations=%d uncounted_it=%d "
+                     "lsmr_iterations=%d lsmr_converged=%d krylov_target=%.3e "
+                     "lsmr_max_mean=%.17g polish_tol=%.3e polished=%d polish_iterations=%d "
+                     "final_max_mean_all_columns=%.17g test_rejected=%d max_iter=%d "
+                     "iterations=%d outcome=%s seconds=%.6f lsmr_seconds=%.6f "
+                     "polish_seconds=%.6f\n",
+                     lsmr_available ? 1 : 0, cg_iterations, uncounted_it, lsmr_iterations,
+                     lsmr_converged ? 1 : 0, krylov_target, lsmr_max_mean, polish_tol,
+                     polished ? 1 : 0, polish_iterations, final_max_mean_all,
+                     test_rejected ? 1 : 0, options.max_iter, spent, outcome,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - start)
+                         .count(),
+                     lsmr_seconds, polish_seconds);
+    }
+    return ok;
+}
+
 bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const Eigen::Ref<const Eigen::MatrixXd>& X,
                                const std::vector<GpuFeInput>& fe_inputs,
@@ -6539,8 +7716,44 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
         solver_fe_tolerance, true);
     if (!ok || !result.cg_restart_required) return ok;
 
+    const bool ordinary_comparable =
+        options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+        !options.retain_fixed_effects &&
+        std::none_of(fe_inputs.begin(), fe_inputs.end(),
+                     [](const GpuFeInput& fe) { return fe.is_slope; });
+    // F2-B: the three-FE family of the F2-A tail (unweighted, regressors
+    // present) restarts with the probe unless XHDFE_CUDA_TAIL_HANDOVER=0.
+    const bool three_fe_restart =
+        cuda_three_fe_family(options, fe_inputs, weights, static_cast<int>(X.cols()));
+    if (three_fe_restart) {
+        const CudaTailMode restart_mode = cuda_tail_handover_mode();
+        if (restart_mode != CudaTailMode::Off) {
+            return restart_three_fe_after_cg(y, X, fe_inputs, options, restart_mode, result);
+        }
+    }
+    // P3-fix (B): a broken xhdfe-fast stage in the shape of
+    // cuda_fast_cg_restart_applies restarts cold (restart_fast_cg_after_breakdown),
+    // never with the cold MAP below.
+    if (cuda_fast_cg_restart_applies(options, fe_inputs, weights,
+                                     static_cast<int>(y.size()), result)) {
+        return restart_fast_cg_after_breakdown(y, X, fe_inputs, weights, sweep_order, options,
+                                               method, solver_fe_tolerance, result);
+    }
+    // P3-fix (3'), strict scope: a broken CG stage of a stage with the strict
+    // provenance (the native CUDA attempt of a strict-residual fit or its strict
+    // repair; HdfeOptions::strict_provenance, set by the regressor) restarts cold
+    // with the device LSMR and the strict check unless the fit already used that
+    // restart, and is refused otherwise (restart_strict_after_breakdown); never
+    // the cold MAP below. A weighted native attempt runs under the Comparable rule
+    // and keeps the device LSMR restart below.
+    if (options.strict_provenance && !ordinary_comparable) {
+        return restart_strict_after_breakdown(y, X, fe_inputs, weights, sweep_order, options,
+                                              method, solver_fe_tolerance, result);
+    }
+
     // Restart on the GPU from the original RHS: a broken CG recurrence can
     // lose null-space components which a warm repair cannot recover.
+    // (2.30.1, unchanged; for the three-FE family also under the switch at 0.)
     const int cg_iterations = result.iterations;
     if (cg_iterations >= options.max_iter) {
         result.converged = false;
@@ -6549,31 +7762,81 @@ bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     HdfeOptions retry_options = options;
     retry_options.max_iter -= cg_iterations;
-    const bool ordinary_comparable =
-        options.tolerance_mode == ToleranceMode::ReghdfeComparable &&
-        !options.retain_fixed_effects &&
-        std::none_of(fe_inputs.begin(), fe_inputs.end(),
-                     [](const GpuFeInput& fe) { return fe.is_slope; });
     if (ordinary_comparable) {
         // Cold MAP still left CUDA04's weak graph modes unfinished. Use the
         // device counterpart of the CPU's Krylov restart, at the existing
         // ordinary 1e-11 floor and strictly within the remaining budget.
+        CudaRestartLedger ledger;
+        const bool trace = three_fe_restart && std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+        if (trace) {
+            ledger.mode = "off";
+            ledger.it_iterations = std::max(0, result.cuda_cg_uncounted_it_iterations);
+            ledger.it_reason = result.cuda_it_handoff_reason;
+            ledger.it_seconds = result.cuda_it_seconds;
+            ledger.cg_iterations = cg_iterations;
+            ledger.cg_seconds = result.cuda_cg_seconds;
+            ledger.counted_before = cg_iterations;
+            ledger.max_iter = options.max_iter;
+            ledger.budget = retry_options.max_iter;
+            ledger.threads = options.num_threads;
+        }
+        const auto start = std::chrono::steady_clock::now();
         AbsorptionResult repaired;
         const bool repaired_ok = absorb_ordinary_lsmr_cuda(
             y, X, fe_inputs, weights, retry_options, repaired);
+        if (trace) {
+            ledger.device_seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - start).count();
+            ledger.device_iterations = std::max(0, repaired.iterations);
+        }
         repaired.iterations += cg_iterations;
         result = std::move(repaired);
+        if (trace) {
+            ledger.iterations = result.iterations;
+            ledger.print(nullptr);
+        }
         return repaired_ok;
     }
     // The accelerated cold MAP exit uses the nominal tolerance. Honour the
-    // original Comparable floor here too; Fast keeps its public tolerance.
+    // original Comparable floor here too. An xhdfe-fast stage reaches this cold
+    // MAP only outside the P3-fix shape and outside a stage with the strict
+    // provenance (both above), and then still under the Comparable stopping rule
+    // (RELATORIO_P3_20261108.md, section 7a).
     retry_options.tol = effective_absorption_tolerance(options);
     retry_options.tolerance_mode = ToleranceMode::ReghdfeComparable;
     retry_options.convergence_criterion = ConvergenceCriterion::NormChange;
+    // Trace only (diagnostic build cand_p3_trace_20261110, P4): with
+    // XHDFE_SLOPE_STAGE_TRACE=1 this cold MAP restart prints the broken stage
+    // it replaces and its own options, budget and outcome. Off (the default),
+    // nothing is timed or printed.
+    static const bool cold_map_trace = [] {
+        const char* e = std::getenv("XHDFE_SLOPE_STAGE_TRACE");
+        return e != nullptr && std::strcmp(e, "1") == 0;
+    }();
+    const int trace_uncounted_it = result.cuda_cg_uncounted_it_iterations;
+    const double trace_cg_seconds = result.cuda_cg_seconds;
+    const auto cold_start = cold_map_trace ? std::chrono::steady_clock::now()
+                                           : std::chrono::steady_clock::time_point{};
     AbsorptionResult repaired;
     const bool repaired_ok = absorb_fixed_effects_cuda_impl(
         y, X, fe_inputs, weights, sweep_order, retry_options, method, repaired,
         solver_fe_tolerance, false);
+    if (cold_map_trace) {
+        const bool slopes = std::any_of(fe_inputs.begin(), fe_inputs.end(),
+                                        [](const GpuFeInput& fe) { return fe.is_slope; });
+        std::fprintf(stderr,
+                     "cuda_cold_map_restart_trace slopes=%d weights=%d regressors=%d "
+                     "stage_mode=%d stage_tol=%.6e retry_tol=%.6e retry_mode=comparable "
+                     "retry_criterion=norm-change cg_iterations=%d uncounted_it=%d "
+                     "cg_seconds=%.6f budget=%d map_iterations=%d converged=%d ok=%d "
+                     "seconds=%.6f\n",
+                     slopes ? 1 : 0, weights != nullptr ? 1 : 0, static_cast<int>(X.cols()),
+                     static_cast<int>(options.tolerance_mode), options.tol, retry_options.tol,
+                     cg_iterations, trace_uncounted_it, trace_cg_seconds, retry_options.max_iter,
+                     repaired.iterations, repaired.converged ? 1 : 0, repaired_ok ? 1 : 0,
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - cold_start)
+                         .count());
+    }
     repaired.iterations += cg_iterations;
     result = std::move(repaired);
     return repaired_ok;
@@ -6652,7 +7915,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     const Eigen::VectorXd* weights,
     const HdfeOptions& options,
     AbsorptionResult& result,
-    bool ordinary_projection = false) {
+    bool ordinary_projection = false,
+    CudaTailProbe* probe = nullptr) {
     const int n = static_cast<int>(y.size());
     const int cols = static_cast<int>(X.cols());
     const int ld = static_cast<int>(X.rows());
@@ -6660,6 +7924,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     const int individuals = gi.num_individuals;
     const bool unit_weights = weights == nullptr;
     const bool trace = std::getenv("XHDFE_GI_LSMR_TRACE") != nullptr;
+    // The F2-A probe concerns the ordinary three-FE completion only.
+    if (!ordinary_projection) probe = nullptr;
     // Ordinary FEs reuse only the device operator and primary LSMR solve.
     // Group refinement and its forward guard do not define ordinary work.
     const bool capture_projection = !ordinary_projection;
@@ -7261,8 +8527,18 @@ static bool absorb_group_individual_lsmr_cuda_impl(
                     ++k;
                     break;
                 }
+                // F2-A probe of the three-FE completion: it reads host scalars
+                // only, so a fit that keeps the device tail is unchanged.
+                if (probe != nullptr &&
+                    probe->observe(rhs_index, k + 1, norm_ar, final_test2,
+                                   tolerance)) {
+                    stop_reason = "handover";
+                    ++k;
+                    break;
+                }
             }
             iterations = k;
+            if (probe != nullptr && !probe->handover) probe->finish(rhs_index);
             if (ordinary_projection && finite_double_bits(final_test2)) {
                 result.krylov_max_final_backward_error = std::max(
                     result.krylov_max_final_backward_error, final_test2);
@@ -7336,18 +8612,42 @@ static bool absorb_group_individual_lsmr_cuda_impl(
             int& iterations = rhs_iterations[static_cast<std::size_t>(rhs_index)];
             bool converged = false;
             solve_one(raw, rhs_index, iterations, converged, options.max_iter);
-            project_solution(raw, residual, rhs_index, false);
             max_iterations = std::max(max_iterations, iterations);
+            if (probe != nullptr && probe->handover) {
+                return;  // the host completes the tail; nothing to project
+            }
+            project_solution(raw, residual, rhs_index, false);
             all_converged = all_converged && converged;
         };
 
         solve_and_project(d_y.data(), lsmr.residual_y.data(), 0);
         for (int column = 0; column < cols; ++column) {
+            if (probe != nullptr && probe->handover) break;
             solve_and_project(
                 d_x.data() + static_cast<std::size_t>(column) * ld,
                 lsmr.residual_x.data() +
                     static_cast<std::size_t>(column) * ld,
                 column + 1);
+        }
+        if (probe != nullptr && probe->handover) {
+            // F2-A: leave before any projection or copy-back. The caller
+            // discards this device work and completes from the IT state;
+            // every device iteration stays counted.
+            probe->device_iterations = max_iterations;
+            result.iterations = max_iterations;
+            result.converged = false;
+            result.precision_certified = false;
+            result.mlsmr_used = true;
+            result.sweep_order_used.clear();
+            if (trace) {
+                const double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - solve_start).count();
+                std::fprintf(stderr,
+                             "gi_lsmr_handover rhs=%d k=%d iterations=%d "
+                             "seconds=%.6f\n",
+                             probe->rhs, probe->k, max_iterations, elapsed);
+            }
+            return true;
         }
 
         auto copy_residuals_to_host = [&]() {
@@ -7546,7 +8846,8 @@ static bool absorb_ordinary_lsmr_cuda(
     const std::vector<GpuFeInput>& fe_inputs,
     const Eigen::VectorXd* weights,
     const HdfeOptions& options,
-    AbsorptionResult& result) {
+    AbsorptionResult& result,
+    CudaTailProbe* probe) {
     if (y.size() <= 0 || y.size() > std::numeric_limits<int>::max() ||
         X.rows() != y.size() || fe_inputs.empty() ||
         options.retain_fixed_effects) {
@@ -7580,7 +8881,7 @@ static bool absorb_ordinary_lsmr_cuda(
     }
     const std::vector<GpuFeInput> standard(fe_inputs.begin(), fe_inputs.end() - 1);
     const bool ok = absorb_group_individual_lsmr_cuda_impl(
-        y, X, standard, gi, weights, options, result, true);
+        y, X, standard, gi, weights, options, result, true, probe);
     // The fit layer reports this device Krylov diversion as LSMR.
     result.mlsmr_used = true;
     if (ok) result.fe_levels.back() = last.num_levels_present;

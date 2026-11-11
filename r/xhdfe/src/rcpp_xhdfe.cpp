@@ -449,7 +449,7 @@ void parse_options(const Rcpp::List& opts, hdfe::HdfeOptions& out,
         default_threads > 0 ? default_threads : (num_threads > 0 ? num_threads : 0);
     threading.max_threads = get_int("max_threads", 0);
     threading.min_parallel_rows = get_int("min_parallel_rows", 20000);
-    threading.target_rows_per_thread = get_int("target_rows_per_thread", 500000);
+    threading.target_rows_per_thread = get_int("target_rows_per_thread", 0);
     threading.symmetric_sweep = out.symmetric_sweep;
 }
 
@@ -565,6 +565,8 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["gpu_attempted"] = reg.gpu_attempted();
     out["gpu_absorption_converged"] = reg.gpu_absorption_converged();
     out["gpu_absorption_iterations"] = reg.gpu_absorption_iterations();
+    out["cuda_tail_code"] = reg.cuda_tail_code();
+    out["cuda_tail"] = std::string(reg.cuda_tail_name());
 
     return out;
 }
@@ -803,6 +805,8 @@ Rcpp::List xhdfe_cpp_partial_out(Rcpp::NumericVector y,
     out["gpu_used"] = partial.gpu_used;
     out["gpu_status_code"] = partial.gpu_status_code;
     out["gpu_attempted"] = partial.gpu_attempted;
+    out["cuda_tail_code"] = partial.cuda_tail;
+    out["cuda_tail"] = std::string(hdfe::detail::cuda_tail_name(partial.cuda_tail));
     out["threads_used"] = reg.threads_used();
     out["threads_requested"] = reg.threads_requested();
     out["threads_effective"] = reg.threads_effective();
@@ -1548,6 +1552,8 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     out["gpu_attempted"] = r.gpu_attempted;
     out["gpu_absorption_converged"] = r.gpu_absorption_converged;
     out["gpu_absorption_iterations"] = r.gpu_absorption_iterations;
+    out["cuda_tail_code"] = r.cuda_tail_code;
+    out["cuda_tail"] = std::string(hdfe::detail::cuda_tail_name(r.cuda_tail_code));
     out["notes"] = r.notes;
     return out;
 }

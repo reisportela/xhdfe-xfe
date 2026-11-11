@@ -13,6 +13,10 @@
 #include "ols.hpp"
 
 namespace hdfe {
+namespace detail {
+class AutoTeamRegistration;
+}  // namespace detail
+
 namespace v11 {
 
 class BindingAttemptGuard;
@@ -23,7 +27,7 @@ struct ThreadingOptions {
     int default_threads = 0;       // 0 = hardware concurrency
     int max_threads = 0;           // 0 = no cap
     int min_parallel_rows = 20000;
-    int target_rows_per_thread = 500000;
+    int target_rows_per_thread = 0;  // 0 = automatic (see resolve_threads)
     bool symmetric_sweep = false;
 };
 
@@ -152,12 +156,24 @@ public:
     const std::string& thread_limit_reason() const noexcept {
         return thread_limit_reason_;
     }
+    // The team resolve_threads() gives a pass over n_rows observations with
+    // num_fes fixed-effect dimensions under this regressor's options and
+    // threading (its `effective` count; throws where resolve_threads()
+    // throws). A language adapter uses it to size parallel work done before
+    // fit(), such as reading the data, under the same switches as the fit.
+    int resolved_thread_count(int n_rows, int num_fes) const;
     AbsorptionMethod absorption_method_used() const noexcept { return method_used_; }
     bool gpu_used() const noexcept { return gpu_used_; }
     int gpu_status_code() const noexcept { return gpu_status_code_; }
     bool gpu_attempted() const noexcept { return gpu_attempted_; }
     bool gpu_absorption_converged() const noexcept { return gpu_absorption_converged_; }
     int gpu_absorption_iterations() const noexcept { return gpu_absorption_iterations_; }
+    // How the three-FE Comparable CUDA completion ran (detail::kCudaTail*):
+    // 0 none, 1 device LSMR, 2 host MLSMR; cuda_tail_name() is its label.
+    int cuda_tail_code() const noexcept { return cuda_tail_code_; }
+    const char* cuda_tail_name() const noexcept {
+        return detail::cuda_tail_name(cuda_tail_code_);
+    }
     const FeComponentStats& first_pair_component_stats() const noexcept {
         return first_pair_component_stats_;
     }
@@ -184,7 +200,16 @@ private:
         std::string limit_reason = "none";
     };
 
-    ThreadResolution resolve_threads(int n_rows, int num_fes) const;
+    // legacy_density: size an automatic team with the 2.30.1 density (one
+    // thread per 500 000 rows) on every path; the floor of team coordination.
+    ThreadResolution resolve_threads(int n_rows, int num_fes,
+                                     bool legacy_density = false) const;
+    // Records `resolution` in the per-user team registry (an intent at the
+    // start of a fit, a lease when its absorption starts) and returns it with
+    // the granted team; see hdfe/auto_team_registry.hpp.
+    ThreadResolution coordinate_auto_team(
+        ThreadResolution resolution, int n_rows, int num_fes,
+        detail::AutoTeamRegistration& registration, bool lease) const;
     void begin_parallel_observation(const ThreadResolution& resolution);
     void end_parallel_observation();
     void clear_consumable_state() noexcept;
@@ -224,6 +249,7 @@ private:
     bool gpu_attempted_ = false;
     bool gpu_absorption_converged_ = false;
     int gpu_absorption_iterations_ = 0;
+    int cuda_tail_code_ = 0;
     FeComponentStats first_pair_component_stats_;
 };
 
