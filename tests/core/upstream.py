@@ -153,8 +153,10 @@ def run(args):
             XHDFE_UPSTREAM_CALLS=str(call_receipt), XHDFE_UPSTREAM_BACKEND=args.backend,
             XHDFE_UPSTREAM_EQUIVALENT=str(int(args.mode == 'adapted')),
             XHDFE_CORE_DK_CONTRACT=str(int(args.mode == 'adapted' and relative == 'part1/dkraay.do')),
+            # fvstrip: one-ulp e(V) differences between back-to-back CUDA fits (1 in 20 repeats, pre-existing in D1).
             XHDFE_CORE_REPEAT_CONTRACT=str(int(args.mode == 'adapted' and args.backend == 'cuda'
-                and relative in ('part1/singleton-and-fweights.do', 'part1/memory.do'))),
+                and relative in ('part1/singleton-and-fweights.do', 'part1/memory.do',
+                                 'part1/fvstrip.do'))),
             XHDFE_UPSTREAM_FETOL=args.fe_tolerance, STATATMP=str(case / 'tmp'),
             TMPDIR=str(case / 'tmp'), CUDA_CACHE_PATH=str(case / 'tmp/cuda'),
             OMP_NUM_THREADS='2', OPENBLAS_NUM_THREADS='1', XHDFE_ABSORPTION_CACHE_MODE='off')

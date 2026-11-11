@@ -368,6 +368,7 @@ struct GelbachResult {
     bool gpu_attempted = false;
     bool gpu_absorption_converged = false;
     int gpu_absorption_iterations = 0;
+    int cuda_tail_code = 0;          //!< Three-FE Comparable CUDA completion of the full-model fit: 0 none, 1 device LSMR, 2 host MLSMR.
     std::string notes;
 };
 

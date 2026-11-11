@@ -1,7 +1,11 @@
 """Offline high-precision full covariance, including the translated intercept.
 
 The reference uses 80-digit arithmetic on the represented inputs. No
-observed discrepancy is used as an allowance.
+observed discrepancy is used as an allowance. Its final composition follows
+the documented multiway PSD policy: the standardized full cut, the override by
+the separately cut slope block and, when either cut acts, the D-C repair of
+the constant (10oct2026; repair_intercept_covariance_spectral), as in
+iv_covariance_psd_contract.py::reference.
 """
 import argparse
 import importlib.util
@@ -77,6 +81,35 @@ def clamp(covariance, scales):
     return inverse*vectors*mp.diag([max(v, 0) for v in values])*vectors.T*inverse
 
 
+def negative_spectrum(covariance, scales):
+    diagonal = mp.diag(scales)
+    values, _ = mp.eigsy(diagonal*((covariance+covariance.T)/2)*diagonal)
+    return any(value < 0 for value in values)
+
+
+def repair_constant(covariance, original_slopes, scales):
+    """Policy D-C: project the standardized cross-covariances of the constant
+    onto the positive spectrum of the original standardized slope block (the
+    spectrum the slope cut kept) and raise its variance to the Schur bound."""
+    p = original_slopes.rows
+    scale = mp.diag(scales[:p])
+    block = scale*((original_slopes+original_slopes.T)/2)*scale
+    values, vectors = mp.eigsy(block)
+    cross = mp.matrix([scales[j]*covariance[j, p]*scales[p] for j in range(p)])
+    coordinates = vectors.T*cross
+    projected = mp.zeros(p, 1)
+    required = mp.mpf(0)
+    for j in range(p):
+        if values[j] > 0:
+            projected += vectors[:, j]*coordinates[j]
+            required += coordinates[j]**2/values[j]
+    out = covariance.copy()
+    for j in range(p):
+        out[j, p] = out[p, j] = projected[j]/(scales[j]*scales[p])
+    out[p, p] = max(required, covariance[p, p]*scales[p]**2)/scales[p]**2
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--module", type=Path, required=True)
@@ -101,10 +134,13 @@ def main():
                 transform = mp.eye(4)
                 transform[3, 0] = -mp.mpf(offset)
                 b = transform*b0
-                v = clamp(transform*v0*transform.T, scales)
+                full = transform*v0*transform.T
+                v = clamp(full, scales)
                 for j in range(3):
                     for k in range(3):
                         v[j, k] = slopes[j, k]
+                if negative_spectrum(full, scales) or negative_spectrum(v0[:3, :3], scales[:3]):
+                    v = repair_constant(v, v0[:3, :3], scales)
                 xx = x.copy()
                 xx[:, 0] += offset
                 model = core.HdfeRegressor(num_threads=1, se_type="cluster",

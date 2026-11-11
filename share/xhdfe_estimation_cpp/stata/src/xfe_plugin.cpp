@@ -831,6 +831,8 @@ STDLL stata_call(int argc, char* argv[]) {
             args.get_optional("s_gpu_absorption_converged");
         const std::optional<std::string> s_gpu_absorption_iterations =
             args.get_optional("s_gpu_absorption_iterations");
+        const std::optional<std::string> s_cuda_tail_code =
+            args.get_optional("s_cuda_tail_code");
         const std::optional<std::string> s_method_used = args.get_optional("s_method_used");
         const std::optional<std::string> dof_table = args.get_optional("dof_table");
 
@@ -863,6 +865,7 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                    s_gpu_absorption_converged,
                                    s_gpu_absorption_iterations, reg);
+        maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
         maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
         maybe_store_dof_table(dof_table, r);
 

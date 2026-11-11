@@ -1,14 +1,23 @@
-"""Adversarial regressions for CG scale invariance and solved RHS lanes.
+"""Adversarial regressions for CG scale invariance and solved RHS lanes, and
+for the packed layout of designs with up to 16 regressors.
 
 Run against a local CMake build, for example:
 
     XHDFE_TEST_BUILD_DIR=build_cuda python tests/test_cg_breakdown.py
+
+Bit identity of the packed route up to 8 regressors with a build that predates
+the wider packed layout is checked only when XHDFE_TEST_REFERENCE_BUILD_DIR
+names that build's module directory; otherwise that test is skipped.
+XHDFE_TEST_PACKED_LARGE=1 adds the longer packed-against-column cases.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
 import unittest
 
@@ -164,6 +173,171 @@ class CgBreakdownTest(unittest.TestCase):
             convergence="reghdfe",
         )
         np.testing.assert_array_equal(reg.coef_, np.zeros(1))
+
+
+MODULE = Path(cpp.__file__).resolve()
+PACKED_WIDTH_ROWS = 200_000
+# The packed sweep switches to its blocked (fused) forms from 64 MiB of rows.
+PACKED_FUSED_MIN_BYTES = 1 << 26
+
+
+def _fused_expected(rows, p):
+    return int(rows * (p + 1) * 8 >= PACKED_FUSED_MIN_BYTES)
+
+# XHDFE_PACKED_MAX_COLS is read once per process, so every fit runs in a fresh
+# worker. The design has one contiguous, one high-cardinality non-contiguous
+# and one low-cardinality non-contiguous identifier: the three packed modes.
+PACKED_WORKER = r"""
+import importlib.util
+import json
+import sys
+
+import numpy as np
+
+spec = importlib.util.spec_from_file_location("py_hdfe_v11", sys.argv[1])
+core = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(core)
+n, p, threads = (int(value) for value in sys.argv[2:5])
+tol = float(sys.argv[5])
+i = np.arange(n, dtype=np.int64)
+fes = [(i // 40).astype(np.int32),
+       ((i * 7919) % 4999).astype(np.int32),
+       ((i * 31) % 37).astype(np.int32)]
+X = np.asfortranarray(np.column_stack([
+    np.sin(0.001 * (j + 1) * i) + ((i * (17 + 2 * j)) % (101 + j)) / (101 + j)
+    for j in range(p)]))
+y = (X @ np.linspace(0.5, -0.5, p) + 0.01 * fes[0] - 0.02 * fes[1]
+     + 0.03 * fes[2] + np.sin(0.0021 * i))
+reg = core.HdfeRegressor(se_type="robust", tol=tol, drop_singletons=False,
+                         num_threads=threads, absorption_method="gauss-seidel",
+                         tolerance_mode="reghdfe-comparable")
+reg.fit(y, X, fes=fes)
+print(json.dumps(dict(
+    coef=np.asarray(reg.coef_, dtype=np.float64).tolist(),
+    covariance=np.asarray(reg.covariance_, dtype=np.float64).tolist(),
+    iterations=int(reg.num_iterations_),
+    converged=bool(reg.converged_),
+    certified=bool(reg.precision_certified_))))
+"""
+
+
+def _packed_run(module, rows, p, threads, max_cols=None, tol=1e-10):
+    env = os.environ.copy()
+    env.update(XHDFE_PROFILE_CPU="1", XHDFE_GPU_BACKEND="cpu",
+               PYTHONDONTWRITEBYTECODE="1")
+    for name in ("XHDFE_PACKED", "XHDFE_PACKED_MAX_COLS", "XHDFE_PACKED_FUSED"):
+        env.pop(name, None)
+    if max_cols is not None:
+        env["XHDFE_PACKED_MAX_COLS"] = str(max_cols)
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", PACKED_WORKER, str(module), str(rows),
+         str(p), str(threads), repr(tol)],
+        env=env, capture_output=True, text=True, timeout=900)
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"packed worker rows={rows} p={p} threads={threads} "
+            f"max_cols={max_cols} tol={tol!r} failed:\n{completed.stderr[-2000:]}")
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    # The packed sweep reports each dimension and its mode, and whether it uses
+    # its fused forms, when profiled.
+    result["modes"] = {int(mode) for mode in re.findall(
+        r"label=abs_packed_dim dim=\d+ mode=(\d+)", completed.stderr)}
+    result["fused"] = {int(active) for active in re.findall(
+        r"label=abs_packed_fused active=([01]) bytes=\d+", completed.stderr)}
+    return result
+
+
+def _exact(result):
+    return result["coef"], result["covariance"], result["iterations"]
+
+
+def _assert_comparable(test, candidate, reference):
+    # Comparable-mode contract against the reference route:
+    # |db_j| <= 1e-9 max(1, |b_j|) and |dV_jk| <= 1e-8 sqrt(V_jj V_kk).
+    b = np.asarray(candidate["coef"])
+    b_ref = np.asarray(reference["coef"])
+    V = np.asarray(candidate["covariance"])
+    V_ref = np.asarray(reference["covariance"])
+    test.assertEqual(b.shape, b_ref.shape)
+    test.assertEqual(V.shape, V_ref.shape)
+    b_limit = 1e-9 * np.maximum(1.0, np.abs(b_ref))
+    b_ratio = np.max(np.abs(b - b_ref) / b_limit)
+    test.assertTrue(b_ratio <= 1.0, f"coefficients: max |db|/limit = {b_ratio:.3g}")
+    diagonal = np.diag(V_ref)
+    test.assertTrue(np.all(diagonal > 0.0), "reference variances must be positive")
+    V_limit = 1e-8 * np.sqrt(np.outer(diagonal, diagonal))
+    V_ratio = np.max(np.abs(V - V_ref) / V_limit)
+    test.assertTrue(V_ratio <= 1.0, f"covariance: max |dV|/limit = {V_ratio:.3g}")
+
+
+class PackedWidthTest(unittest.TestCase):
+    def test_switch_is_inert_up_to_eight_regressors(self):
+        # The bound is inclusive: XHDFE_PACKED_MAX_COLS=p keeps p regressors packed.
+        for p in (1, 4, 8):
+            for threads in (1, 16):
+                wide = _packed_run(MODULE, PACKED_WIDTH_ROWS, p, threads)
+                self.assertEqual(wide["modes"], {0, 1, 2})
+                for max_cols in sorted({8, p}):
+                    with self.subTest(p=p, threads=threads, max_cols=max_cols):
+                        narrow = _packed_run(MODULE, PACKED_WIDTH_ROWS, p, threads,
+                                             max_cols=max_cols)
+                        self.assertEqual(narrow["modes"], {0, 1, 2})
+                        self.assertEqual(_exact(wide), _exact(narrow))
+
+    def test_up_to_eight_regressors_match_the_reference_build(self):
+        directory = os.environ.get("XHDFE_TEST_REFERENCE_BUILD_DIR")
+        if not directory:
+            self.skipTest("set XHDFE_TEST_REFERENCE_BUILD_DIR to a module built "
+                          "without the wider packed layout to check bit identity")
+        modules = sorted(Path(directory).glob("py_hdfe_v11*.so"))
+        self.assertEqual(len(modules), 1, f"py_hdfe_v11 modules in {directory}")
+        for p in (1, 4, 8):
+            for threads in (1, 16):
+                with self.subTest(p=p, threads=threads):
+                    current = _packed_run(MODULE, PACKED_WIDTH_ROWS, p, threads)
+                    reference = _packed_run(modules[0], PACKED_WIDTH_ROWS, p, threads)
+                    self.assertEqual(current["modes"], {0, 1, 2})
+                    self.assertEqual(reference["modes"], {0, 1, 2})
+                    self.assertEqual(_exact(current), _exact(reference))
+
+    def test_nine_to_sixteen_regressors_take_the_packed_route(self):
+        # This design mixes slowly: at tol 1e-10 neither route is within the
+        # covariance limit of the exact solution, so the routes are compared at
+        # 1e-13 (docs/LICOES_ROTAS_VARRIMENTO_20261106.md).
+        tol = 1e-13
+        large = os.environ.get("XHDFE_TEST_PACKED_LARGE") == "1"
+        # (rows, p, run only with XHDFE_TEST_PACKED_LARGE=1)
+        cases = [(PACKED_WIDTH_ROWS, 9, False), (PACKED_WIDTH_ROWS, 16, False),
+                 (500_000, 16, False), (PACKED_WIDTH_ROWS, 10, True),
+                 (PACKED_WIDTH_ROWS, 12, True), (900_000, 9, True)]
+        for rows, p, optional in cases:
+            with self.subTest(rows=rows, p=p, threads=16):
+                if optional and not large:
+                    self.skipTest("skipped by default; set XHDFE_TEST_PACKED_LARGE=1 "
+                                  "to run this case")
+                packed = _packed_run(MODULE, rows, p, 16, tol=tol)
+                column = _packed_run(MODULE, rows, p, 16, max_cols=8, tol=tol)
+                self.assertEqual(packed["modes"], {0, 1, 2})
+                self.assertEqual(column["modes"], set())
+                self.assertEqual(packed["fused"], {_fused_expected(rows, p)})
+                self.assertEqual(column["fused"], set())
+                for result in (packed, column):
+                    self.assertTrue(result["converged"] and result["certified"])
+                _assert_comparable(self, packed, column)
+        with self.subTest(rows=PACKED_WIDTH_ROWS, p=10, threads=(1, 16)):
+            one = _packed_run(MODULE, PACKED_WIDTH_ROWS, 10, 1, tol=tol)
+            sixteen = _packed_run(MODULE, PACKED_WIDTH_ROWS, 10, 16, tol=tol)
+            fused = _fused_expected(PACKED_WIDTH_ROWS, 10)
+            for result in (one, sixteen):
+                self.assertEqual(result["modes"], {0, 1, 2})
+                self.assertEqual(result["fused"], {fused})
+                self.assertTrue(result["converged"] and result["certified"])
+            self.assertEqual(_exact(one), _exact(sixteen))
+
+    def test_seventeen_regressors_stay_on_the_column_layout(self):
+        result = _packed_run(MODULE, PACKED_WIDTH_ROWS, 17, 16)
+        self.assertEqual(result["modes"], set())
+        self.assertTrue(result["converged"] and result["certified"])
 
 
 if __name__ == "__main__":

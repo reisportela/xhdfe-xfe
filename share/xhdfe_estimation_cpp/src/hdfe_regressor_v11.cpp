@@ -51,6 +51,7 @@
 #include "fe_recovery_scale.hpp"
 #include "n1_checks.hpp"
 #include "n1_continuation.hpp"
+#include "hdfe/auto_team_registry.hpp"
 #include "hdfe/deterministic_parallel.hpp"
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
@@ -252,6 +253,34 @@ struct KahanSum {
     }
 };
 
+#ifdef HDFE_USE_OPENMP
+// Rows per thread when target_rows_per_thread is 0 (automatic). Fixed effects
+// absorbed without being retained use the denser value, still bounded by the
+// problem-size cap in resolve_threads; every other path keeps one thread per
+// 500 000 rows.
+constexpr int kAutoRowsPerThreadAbsorb = 25000;
+constexpr int kAutoRowsPerThreadUncapped = 500000;
+
+// XHDFE_AUTO_ROWS_PER_THREAD=<positive integer> replaces
+// kAutoRowsPerThreadAbsorb for the whole process; other values are ignored.
+int auto_rows_per_thread_absorb() {
+    static const int value = [] {
+        const char* raw = std::getenv("XHDFE_AUTO_ROWS_PER_THREAD");
+        if (raw == nullptr || *raw == '\0') {
+            return kAutoRowsPerThreadAbsorb;
+        }
+        char* end = nullptr;
+        const long long parsed = std::strtoll(raw, &end, 10);
+        if (end == raw || *end != '\0' || parsed <= 0 ||
+            parsed > std::numeric_limits<int>::max()) {
+            return kAutoRowsPerThreadAbsorb;
+        }
+        return static_cast<int>(parsed);
+    }();
+    return value;
+}
+#endif
+
 bool savefe_profile_enabled() {
     static const bool enabled = [] {
         const char* raw = std::getenv("XHDFE_PROFILE_SAVEFE");
@@ -271,6 +300,34 @@ bool cpu_profile_enabled() {
     static const bool enabled = [] {
         const char* raw = std::getenv("XHDFE_PROFILE_CPU");
         return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
+// P8 (CPU-W; design note section 3): the bounded MLSMR retry after a certified
+// sweep primary is open to weighted fits (a weights vector, the vector of ones
+// included) with the public Comparable intent, the Auto method and criterion
+// and at most three FEs; every other retry condition is unchanged (tol 1e-8,
+// trigger 1e-11, CPU). Early routing stays unweighted (its D1 calibration is).
+// XHDFE_P8_CPU_WEIGHTED_RETRY=0 restores the unweighted-only retry.
+bool cpu_weighted_retry_enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("XHDFE_P8_CPU_WEIGHTED_RETRY");
+        return !(e != nullptr && e[0] == '0');
+    }();
+    return enabled;
+}
+
+// P8 (CPU-W, its accounting): a weighted retry runs within what the primary
+// left of max_iter (nothing left: no retry, the primary stands), and the
+// published iterations count the primary and the retry, the discarded retry
+// included; the per-stage counters (auto_routing_retry_*) keep their meaning.
+// An unweighted retry keeps the base accounting. XHDFE_P8_CPU_RETRY_ACCOUNTING=0
+// restores the base accounting of the weighted retry (read once per process).
+bool cpu_retry_accounting_enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("XHDFE_P8_CPU_RETRY_ACCOUNTING");
+        return !(e != nullptr && e[0] == '0');
     }();
     return enabled;
 }
@@ -2252,6 +2309,16 @@ bool require_cuda_compatible_method(const HdfeOptions& options,
     return required;
 }
 
+// The Krylov absorber of a result with mlsmr_used: the device LSMR when the GPU
+// produced the transform, the host MLSMR otherwise, including the host
+// completion of a CUDA three-FE tail (F2-A). The reported method also routes
+// the later re-absorptions of the same fit (stored residuals, N1 refinement).
+AbsorptionMethod krylov_method_used(const detail::AbsorptionResult& result) {
+    return result.gpu_used && result.cuda_tail != detail::kCudaTailHostMlsmr
+               ? AbsorptionMethod::Lsmr
+               : AbsorptionMethod::Mlsmr;
+}
+
 void require_cuda_execution(bool required, const detail::AbsorptionResult& result) {
     if (required && !result.gpu_used) {
         throw std::runtime_error(
@@ -2280,6 +2347,16 @@ void require_accepted_absorption(const HdfeOptions& options,
     message << phase;
     if (slope_continuation) {
         message << ": heterogeneous-slope acceptance criteria not met after continuation";
+    } else if (result.fast_repair_target > 0.0) {
+        // P3-fix (C): a converged, publicly certified repair short of its target.
+        message << ": the CUDA repair converged and passed the public certificate but "
+                   "missed the bounded xhdfe-fast repair target (relative residual <= "
+                << std::scientific << result.fast_repair_target << ')';
+        if (result.cuda_fast_cg_restarts > 0) {
+            message << " after " << result.cuda_fast_cg_restarts
+                    << " cold restart(s) of its broken CG stage"
+                    << (result.cuda_fast_lsmr_restart ? " and the device LSMR" : "");
+        }
     } else {
         message << (result.converged ? ": precision certification failed" : ": did not converge");
     }
@@ -2468,6 +2545,18 @@ std::optional<bool> read_env_bool(const char* name) {
         return false;
     }
     return std::nullopt;
+}
+
+// XHDFE_EARLY_ROUTING_TRACE=1 (measurement for package D1, read once per
+// process): the regressor adds to the absorber's trace one line before the
+// primary solve, one before a conjugate-gradient restart and one with the
+// outcome of the ordinary routing retry. It changes nothing else.
+bool early_routing_trace_on() {
+    static const bool on = []() {
+        const char* e = std::getenv("XHDFE_EARLY_ROUTING_TRACE");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return on;
 }
 
 int read_env_int(const char* name, int default_value, int min_value) {
@@ -2692,9 +2781,14 @@ FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::Vec
 constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
-// Invalidate transforms preceding three-FE CUDA completion and retry accounting.
-constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x22624841443aULL;
-constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 1ULL;
+// Invalidate transforms certified before the xhdfe-fast CUDA CG restart and the
+// strict-residual recovery sequence of a broken CUDA CG stage (P3-fix (3'),
+// rounds 20-21 and scope addendum 2).
+// P8 (lean 2.31.0): invalidate transforms certified before the weighted CPU
+// retry and its cumulative budget, previously 0x22624841443f.
+constexpr std::uint64_t kAbsorptionSolveContractGeneration = 0x2262484144c1ULL;
+// 2: early routing (status 4) and its switch in the key.
+constexpr std::uint64_t kOrdinaryAutoRoutingRetryPolicyVersion = 2ULL;
 
 struct AbsorptionCacheKey {
     std::uint64_t sig1 = 0;
@@ -2774,6 +2868,12 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(options.ordinary_krylov_parity_floor ? 1ULL : 0ULL);
     update(kOrdinaryAutoRoutingRetryPolicyVersion);
     update(options.ordinary_auto_routing_retry ? 1ULL : 0ULL);
+    update(options.ordinary_auto_early_routing ? 1ULL : 0ULL);
+    // P8: the switches of the weighted CPU retry and of its accounting, which
+    // change a weighted transform; constant within a process, so a process with
+    // one of them off never shares an entry with one that has it on.
+    update((cpu_weighted_retry_enabled() ? 1ULL : 0ULL) |
+           (cpu_retry_accounting_enabled() ? 2ULL : 0ULL));
     update(weights ? 1ULL : 0ULL);
     update(options.fit_intercept ? 1ULL : 0ULL);
     update(options.drop_singletons ? 1ULL : 0ULL);
@@ -3259,7 +3359,7 @@ bool read_absorption_cache(const std::string& path,
         }
     }
     if (record.auto_routing_retry_status < 0 ||
-        record.auto_routing_retry_status > 3 ||
+        record.auto_routing_retry_status > 4 ||
         record.auto_routing_retry_primary_method < -1 ||
         record.auto_routing_retry_primary_method >
             static_cast<int>(AbsorptionMethod::AutoMlsmr) ||
@@ -3963,6 +4063,294 @@ double probe_fe_mean_norm(const Eigen::VectorXd& v,
     return std::sqrt(static_cast<double>(total / denom_total));
 }
 
+// ---- The block sample on data not sorted by identifier ----
+// The four contiguous blocks represent a panel sorted by its largest
+// identifier. When the rows are not sorted that way, almost every level of
+// that identifier appears once in the sample, the sampled graph is far
+// sparser than the data, and the contraction looks worse than it is. The
+// representation of the sample is r = (sample rows / sample levels) /
+// (rows / levels) of the identifier with the most levels in the full data:
+// about 1 for a sorted panel, about 1/(observations per level) for rows in
+// random order. When the block sample has chosen MLSMR on at least
+// kAutoMlsmrFullProbeMinRows rows and r is below kAutoMlsmrRepresentationMin,
+// the same probe runs on all rows with the team, and its contraction decides
+// under the same thresholds. XHDFE_AUTO_MLSMR_FULL_PROBE=0 restores the
+// block sample alone.
+constexpr int kAutoMlsmrFullProbeMinRows = 1000000;
+constexpr double kAutoMlsmrRepresentationMin = 0.25;
+// Memory cap of the chunk-private level sums of the full probe.
+constexpr std::size_t kAutoMlsmrProbeScratchBytes = 256ULL * 1024ULL * 1024ULL;
+
+// The dense ranks of build_indexer_lite(), on the team when there is one.
+FeIndexerLite build_probe_indexer(const Eigen::VectorXi& ids, int threads,
+                                  detail::ParallelWorkObserver* observer) {
+#ifdef HDFE_USE_OPENMP
+    return build_indexer_lite_team(ids, threads, observer);
+#else
+    (void)threads;
+    (void)observer;
+    return build_indexer_lite(ids);
+#endif
+}
+
+int popcount64(std::uint64_t x) {
+    x = x - ((x >> 1) & 0x5555555555555555ULL);
+    x = (x & 0x3333333333333333ULL) + ((x >> 2) & 0x3333333333333333ULL);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0fULL;
+    return static_cast<int>((x * 0x0101010101010101ULL) >> 56);
+}
+
+// Exact number of distinct values of `ids`, the same for any team: each
+// thread marks its rows in a bit set of its own over the id range, and the
+// bit sets are merged once (an OR does not depend on order); the lite
+// indexer when the range is sparse. Only a fallback: the selector receives
+// the level counts of the singleton scan when it ran.
+int count_levels_team(const Eigen::VectorXi& ids, int threads,
+                      detail::ParallelWorkObserver* observer) {
+    const int n = static_cast<int>(ids.size());
+    if (n == 0) {
+        return 0;
+    }
+    [[maybe_unused]] const int team = std::max(1, threads);
+    const int* const raw = ids.data();
+    const int chunks = detail::deterministic_parallel_chunk_count(n);
+    std::vector<int> chunk_min(static_cast<std::size_t>(chunks), raw[0]);
+    std::vector<int> chunk_max(static_cast<std::size_t>(chunks), raw[0]);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        const int begin = detail::deterministic_parallel_chunk_begin(n, chunk, chunks);
+        const int end = detail::deterministic_parallel_chunk_end(n, chunk, chunks);
+        int low = raw[begin];
+        int high = raw[begin];
+        for (int i = begin + 1; i < end; ++i) {
+            low = std::min(low, raw[i]);
+            high = std::max(high, raw[i]);
+        }
+        chunk_min[static_cast<std::size_t>(chunk)] = low;
+        chunk_max[static_cast<std::size_t>(chunk)] = high;
+    }
+    const int min_id = *std::min_element(chunk_min.begin(), chunk_min.end());
+    const int max_id = *std::max_element(chunk_max.begin(), chunk_max.end());
+    const long long range = static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
+    if (range <= 0 || range > 8LL * static_cast<long long>(n) + 64LL) {
+        return build_probe_indexer(ids, threads, observer).num_groups;
+    }
+    const std::size_t words = static_cast<std::size_t>((range + 63LL) / 64LL);
+    // One bit set per worker, within the scratch cap.
+    const int marking_team = static_cast<int>(std::max<std::size_t>(
+        1U, std::min<std::size_t>(static_cast<std::size_t>(team),
+                                  kAutoMlsmrProbeScratchBytes /
+                                      std::max<std::size_t>(1U, words * sizeof(std::uint64_t)))));
+    std::vector<std::vector<std::uint64_t>> marks(static_cast<std::size_t>(marking_team));
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel num_threads(marking_team) if (marking_team > 1)
+#endif
+    {
+        int worker = 0;
+#ifdef HDFE_USE_OPENMP
+        worker = omp_get_thread_num();
+#endif
+        std::vector<std::uint64_t>& mine = marks[static_cast<std::size_t>(worker)];
+        mine.assign(words, 0ULL);
+#ifdef HDFE_USE_OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            const int begin = detail::deterministic_parallel_chunk_begin(n, chunk, chunks);
+            const int end = detail::deterministic_parallel_chunk_end(n, chunk, chunks);
+            for (int i = begin; i < end; ++i) {
+                const std::uint64_t offset = static_cast<std::uint64_t>(
+                    static_cast<long long>(raw[i]) - static_cast<long long>(min_id));
+                mine[static_cast<std::size_t>(offset >> 6U)] |= 1ULL << (offset & 63U);
+            }
+        }
+    }
+    long long count = 0;
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) reduction(+ : count) num_threads(team) if (team > 1)
+#endif
+    for (long long word = 0; word < static_cast<long long>(words); ++word) {
+        std::uint64_t merged = 0ULL;
+        for (const auto& mine : marks) {
+            if (!mine.empty()) {
+                merged |= mine[static_cast<std::size_t>(word)];
+            }
+        }
+        count += popcount64(merged);
+    }
+    return static_cast<int>(count);
+}
+
+// Weighted level sums of one dimension over all rows, the same for any team:
+// fixed row chunks (as many as the memory cap allows), each with its own
+// partial sums, added in chunk order.
+template <class Contribution>
+void probe_level_sums_team(const FeIndexerLite& idx, int n, Contribution contribution,
+                           int threads, std::vector<double>& sums,
+                           std::vector<double>& scratch) {
+    const std::size_t groups = static_cast<std::size_t>(std::max(0, idx.num_groups));
+    sums.assign(groups, 0.0);
+    if (groups == 0 || n <= 0) {
+        return;
+    }
+    [[maybe_unused]] const int team = std::max(1, threads);
+    const std::size_t by_memory =
+        std::max<std::size_t>(1U, kAutoMlsmrProbeScratchBytes / (groups * sizeof(double)));
+    const int chunks = static_cast<int>(std::min<std::size_t>(
+        static_cast<std::size_t>(detail::deterministic_parallel_chunk_count(n)), by_memory));
+    scratch.assign(groups * static_cast<std::size_t>(chunks), 0.0);
+    const int* const group_ids = idx.group_ids.data();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) if (team > 1)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        double* const mine = scratch.data() + static_cast<std::size_t>(chunk) * groups;
+        const int end = detail::deterministic_parallel_chunk_end(n, chunk, chunks);
+        for (int i = detail::deterministic_parallel_chunk_begin(n, chunk, chunks); i < end; ++i) {
+            mine[static_cast<std::size_t>(group_ids[i])] += contribution(i);
+        }
+    }
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+    for (long long g = 0; g < static_cast<long long>(groups); ++g) {
+        double total = 0.0;
+        for (int chunk = 0; chunk < chunks; ++chunk) {
+            total += scratch[static_cast<std::size_t>(chunk) * groups + static_cast<std::size_t>(g)];
+        }
+        sums[static_cast<std::size_t>(g)] = total;
+    }
+}
+
+// The block-sample probe (make_auto_mlsmr_probe_vector, apply_probe_sweep,
+// probe_fe_mean_norm) on all rows, with the team and fixed partitions, so the
+// contraction is bit-identical for any thread count. NaN when degenerate.
+double full_data_probe_rho(const std::vector<Eigen::VectorXi>& fes,
+                           const Eigen::VectorXd* weights,
+                           AbsorptionMethod sweep_method,
+                           int probe_sweeps,
+                           int threads,
+                           detail::ParallelWorkObserver* observer) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const int n = fes.empty() ? 0 : static_cast<int>(fes[0].size());
+    if (n <= 0 || probe_sweeps < 2) {
+        return nan;
+    }
+    [[maybe_unused]] const int team = std::max(1, threads);
+    std::vector<FeIndexerLite> indexers;
+    indexers.reserve(fes.size());
+    for (const auto& fe : fes) {
+        indexers.push_back(build_probe_indexer(fe, team, observer));
+    }
+    auto weight = [&](int i) { return weights ? (*weights)(i) : 1.0; };
+
+    // Probe vector: the same value per original row as the sample's,
+    // centred with a chunked sum added in chunk order.
+    Eigen::VectorXd v(n);
+    const int chunks = detail::deterministic_parallel_chunk_count(n);
+    std::vector<long double> chunk_sum(static_cast<std::size_t>(chunks), 0.0L);
+    std::vector<long double> chunk_weight(static_cast<std::size_t>(chunks), 0.0L);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        long double sum = 0.0L;
+        long double total = 0.0L;
+        const int end = detail::deterministic_parallel_chunk_end(n, chunk, chunks);
+        for (int i = detail::deterministic_parallel_chunk_begin(n, chunk, chunks); i < end; ++i) {
+            const double value = deterministic_probe_value(i);
+            v(i) = value;
+            sum += static_cast<long double>(weight(i)) * value;
+            total += static_cast<long double>(weight(i));
+        }
+        chunk_sum[static_cast<std::size_t>(chunk)] = sum;
+        chunk_weight[static_cast<std::size_t>(chunk)] = total;
+    }
+    long double weighted_sum = 0.0L;
+    long double weight_total = 0.0L;
+    for (int chunk = 0; chunk < chunks; ++chunk) {
+        weighted_sum += chunk_sum[static_cast<std::size_t>(chunk)];
+        weight_total += chunk_weight[static_cast<std::size_t>(chunk)];
+    }
+    if (weight_total > 0.0L) {
+        const double mean = static_cast<double>(weighted_sum / weight_total);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+        for (int i = 0; i < n; ++i) {
+            v(i) -= mean;
+        }
+    }
+
+    std::vector<std::vector<double>> denominators(indexers.size());
+    std::vector<double> sums;
+    std::vector<double> scratch;
+    for (std::size_t d = 0; d < indexers.size(); ++d) {
+        probe_level_sums_team(indexers[d], n, weight, team, denominators[d], scratch);
+    }
+    auto demean = [&](std::size_t d) {
+        probe_level_sums_team(indexers[d], n, [&](int i) { return weight(i) * v(i); }, team,
+                              sums, scratch);
+        const std::vector<double>& denom = denominators[d];
+        for (std::size_t g = 0; g < sums.size(); ++g) {
+            if (denom[g] > 0.0) {
+                sums[g] /= denom[g];
+            }
+        }
+        const int* const group_ids = indexers[d].group_ids.data();
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team) if (team > 1)
+#endif
+        for (int i = 0; i < n; ++i) {
+            v(i) -= sums[static_cast<std::size_t>(group_ids[i])];
+        }
+    };
+    auto sweep = [&]() {
+        for (std::size_t d = 0; d < indexers.size(); ++d) {
+            demean(d);
+        }
+        if (sweep_method == AbsorptionMethod::SymmetricGaussSeidel && indexers.size() > 1) {
+            for (std::size_t d = indexers.size(); d-- > 0;) {
+                demean(d);
+            }
+        }
+    };
+    auto violation = [&]() {
+        long double total = 0.0L;
+        long double denom_total = 0.0L;
+        for (std::size_t d = 0; d < indexers.size(); ++d) {
+            probe_level_sums_team(indexers[d], n, [&](int i) { return weight(i) * v(i); },
+                                  team, sums, scratch);
+            const std::vector<double>& denom = denominators[d];
+            for (std::size_t g = 0; g < sums.size(); ++g) {
+                if (denom[g] <= 0.0) {
+                    continue;
+                }
+                const double mean = sums[g] / denom[g];
+                total += static_cast<long double>(denom[g]) * mean * mean;
+                denom_total += static_cast<long double>(denom[g]);
+            }
+        }
+        return denom_total > 0.0L ? std::sqrt(static_cast<double>(total / denom_total)) : 0.0;
+    };
+    sweep();
+    const double first = violation();
+    if (!(first > 0.0) || !hdfe::detail::ieee_finite(first)) {
+        return nan;
+    }
+    for (int s = 1; s < probe_sweeps; ++s) {
+        sweep();
+    }
+    const double last = violation();
+    if (!(last >= 0.0) || !hdfe::detail::ieee_finite(last)) {
+        return nan;
+    }
+    return std::pow(std::max(0.0, last / std::max(first, 1.0e-300)),
+                    1.0 / static_cast<double>(probe_sweeps - 1));
+}
+
 struct AutoMlsmrSelectionDiagnostics {
     bool evaluated = false;
     double per_sweep_rho = std::numeric_limits<double>::quiet_NaN();
@@ -3974,7 +4362,10 @@ AbsorptionMethod select_auto_mlsmr_method(
     const HdfeOptions& options,
     int rhs_count,
     AbsorptionMethod sweep_fallback,
-    AutoMlsmrSelectionDiagnostics* diagnostics = nullptr) {
+    AutoMlsmrSelectionDiagnostics* diagnostics = nullptr,
+    int threads = 1,
+    detail::ParallelWorkObserver* observer = nullptr,
+    const std::vector<int>* full_levels_hint = nullptr) {
     if (diagnostics != nullptr) {
         *diagnostics = AutoMlsmrSelectionDiagnostics{};
     }
@@ -4079,32 +4470,8 @@ AbsorptionMethod select_auto_mlsmr_method(
         return sweep_fallback;
     }
     const double ratio = last_violation / std::max(first_violation, 1.0e-300);
-    const double per_sweep_rho =
+    const double sample_rho =
         std::pow(std::max(0.0, ratio), 1.0 / static_cast<double>(probe_sweeps - 1));
-    if (diagnostics != nullptr) {
-        diagnostics->evaluated = true;
-        diagnostics->per_sweep_rho = per_sweep_rho;
-    }
-    // Fast mode keeps the conservative rho threshold, but lets large,
-    // many-RHS, multi-way designs enter the moderate-rho band where MLSMR won
-    // the base-DGP difficult 1M/10M runs without catching Section 5 fast.
-    const bool fast_large_rhs_band =
-        fast_tolerance &&
-        n >= fast_min_rows &&
-        rhs_count >= fast_min_rhs &&
-        static_cast<int>(fes.size()) >= fast_min_fes &&
-        per_sweep_rho >= fast_rho_min &&
-        per_sweep_rho <= fast_rho_max;
-    // A moderate-contraction, low-RHS band is scientifically unsafe under the
-    // short fast polish and pathologically slow under strict MAP.  The same
-    // sampled contraction signal identifies all affected core designs; keep
-    // comparable mode on its established, tighter sweep rule.
-    const bool low_rhs_precision_band =
-        (fast_tolerance ||
-         options.tolerance_mode == ToleranceMode::StrictResidual) &&
-        n >= min_rows && n < parity_small_n_rows &&
-        rhs_count < parity_small_n_min_rhs && fes.size() >= 3 &&
-        per_sweep_rho >= precision_rho_threshold;
     const bool parity_small_low_rhs =
         parity_grade_tolerance &&
         n < parity_small_n_rows &&
@@ -4113,9 +4480,104 @@ AbsorptionMethod select_auto_mlsmr_method(
         parity_small_low_rhs
             ? std::max(rho_threshold, parity_small_n_rho_threshold)
             : rho_threshold;
-    const bool choose_mlsmr =
-        per_sweep_rho >= effective_rho_threshold || fast_large_rhs_band ||
-        low_rhs_precision_band;
+    struct Decision {
+        bool fast_large_rhs_band = false;
+        bool low_rhs_precision_band = false;
+        bool mlsmr = false;
+    };
+    auto decide = [&](double rho) {
+        Decision decision;
+        // Fast mode keeps the conservative rho threshold, but lets large,
+        // many-RHS, multi-way designs enter the moderate-rho band where MLSMR won
+        // the base-DGP difficult 1M/10M runs without catching Section 5 fast.
+        decision.fast_large_rhs_band =
+            fast_tolerance &&
+            n >= fast_min_rows &&
+            rhs_count >= fast_min_rhs &&
+            static_cast<int>(fes.size()) >= fast_min_fes &&
+            rho >= fast_rho_min &&
+            rho <= fast_rho_max;
+        // A moderate-contraction, low-RHS band is scientifically unsafe under the
+        // short fast polish and pathologically slow under strict MAP.  The same
+        // sampled contraction signal identifies all affected core designs; keep
+        // comparable mode on its established, tighter sweep rule.
+        decision.low_rhs_precision_band =
+            (fast_tolerance ||
+             options.tolerance_mode == ToleranceMode::StrictResidual) &&
+            n >= min_rows && n < parity_small_n_rows &&
+            rhs_count < parity_small_n_min_rhs && fes.size() >= 3 &&
+            rho >= precision_rho_threshold;
+        decision.mlsmr = rho >= effective_rho_threshold ||
+                         decision.fast_large_rhs_band ||
+                         decision.low_rhs_precision_band;
+        return decision;
+    };
+    Decision decision = decide(sample_rho);
+    double per_sweep_rho = sample_rho;
+
+    // Representation of the block sample (see kAutoMlsmrFullProbeMinRows):
+    // checked when the sample chose MLSMR on a large design; with the trace
+    // on, also computed for every evaluated fit, as a diagnostic only.
+    const bool full_probe_enabled =
+        read_env_bool("XHDFE_AUTO_MLSMR_FULL_PROBE").value_or(true);
+    const bool check_applies =
+        full_probe_enabled && decision.mlsmr && n >= kAutoMlsmrFullProbeMinRows;
+    std::vector<int> full_levels;
+    int largest_fe = -1;
+    double representation = std::numeric_limits<double>::quiet_NaN();
+    double full_rho = std::numeric_limits<double>::quiet_NaN();
+    double check_seconds = 0.0;
+    double probe_seconds = 0.0;
+    bool full_probe_ran = false;
+    const int team = std::max(1, threads);
+    // Level counts of the full data: those of the singleton scan when it ran
+    // on these rows, otherwise counted here.
+    const bool levels_from_scan =
+        full_levels_hint != nullptr && full_levels_hint->size() == fes.size() &&
+        std::all_of(full_levels_hint->begin(), full_levels_hint->end(),
+                    [](int levels) { return levels > 0; });
+    if (check_applies || trace) {
+        const auto check_t0 = std::chrono::steady_clock::now();
+        if (levels_from_scan) {
+            full_levels = *full_levels_hint;
+        } else {
+            full_levels.reserve(fes.size());
+            for (const auto& fe : fes) {
+                full_levels.push_back(count_levels_team(fe, team, observer));
+            }
+        }
+        largest_fe = static_cast<int>(
+            std::max_element(full_levels.begin(), full_levels.end()) - full_levels.begin());
+        const int sample_levels_largest =
+            sample.indexers[static_cast<std::size_t>(largest_fe)].num_groups;
+        const int full_levels_largest = full_levels[static_cast<std::size_t>(largest_fe)];
+        if (sample_levels_largest > 0 && full_levels_largest > 0) {
+            representation =
+                (static_cast<double>(sample.n) / static_cast<double>(sample_levels_largest)) /
+                (static_cast<double>(n) / static_cast<double>(full_levels_largest));
+        }
+        check_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - check_t0).count();
+    }
+    if (check_applies && representation < kAutoMlsmrRepresentationMin) {
+        const auto probe_t0 = std::chrono::steady_clock::now();
+        full_rho = full_data_probe_rho(fes, weights, sweep_fallback, probe_sweeps, team,
+                                       observer);
+        probe_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - probe_t0).count();
+        full_probe_ran = true;
+        if (hdfe::detail::ieee_finite(full_rho)) {
+            per_sweep_rho = full_rho;
+            decision = decide(full_rho);
+        }
+    }
+    if (diagnostics != nullptr) {
+        diagnostics->evaluated = true;
+        diagnostics->per_sweep_rho = per_sweep_rho;
+    }
+    const bool fast_large_rhs_band = decision.fast_large_rhs_band;
+    const bool low_rhs_precision_band = decision.low_rhs_precision_band;
+    const bool choose_mlsmr = decision.mlsmr;
     if (trace) {
         std::cerr << "auto_mlsmr"
                   << " n=" << n
@@ -4132,8 +4594,22 @@ AbsorptionMethod select_auto_mlsmr_method(
                   << " low_rhs_precision_band=" << (low_rhs_precision_band ? 1 : 0)
                   << " precision_rho_threshold=" << precision_rho_threshold
                   << " parity_small_low_rhs=" << (parity_small_low_rhs ? 1 : 0)
-                  << " selected=" << (choose_mlsmr ? "mlsmr" : method_name(sweep_fallback))
-                  << '\n';
+                  << " selected=" << (choose_mlsmr ? "mlsmr" : method_name(sweep_fallback));
+        std::cerr << " largest_fe=" << largest_fe << " full_levels=";
+        for (std::size_t d = 0; d < full_levels.size(); ++d) {
+            std::cerr << (d ? "," : "") << full_levels[d];
+        }
+        std::cerr << " sample_fe_levels=";
+        for (std::size_t d = 0; d < sample.indexers.size(); ++d) {
+            std::cerr << (d ? "," : "") << sample.indexers[d].num_groups;
+        }
+        std::cerr << " levels_source=" << (levels_from_scan ? "singleton_scan" : "counted")
+                  << " representation=" << representation
+                  << " check=" << (check_applies ? "applied" : "trace_only")
+                  << " full_probe=" << (full_probe_ran ? 1 : 0)
+                  << " sample_rho=" << sample_rho << " full_rho=" << full_rho
+                  << " full_rho_hex=" << std::hexfloat << full_rho << std::defaultfloat
+                  << " check_s=" << check_seconds << " probe_s=" << probe_seconds << '\n';
     }
     return choose_mlsmr ? AbsorptionMethod::Mlsmr : sweep_fallback;
 }
@@ -5351,7 +5827,11 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
                                                        int num_threads_hint,
                                                        int runtime_capacity,
                                                        bool explicit_thread_request,
-                                                       detail::ParallelWorkObserver* observer) {
+                                                       detail::ParallelWorkObserver* observer,
+                                                       std::vector<int>* levels_out = nullptr) {
+    if (levels_out) {
+        levels_out->clear();
+    }
     if (dropped_out) {
         *dropped_out = 0;
     }
@@ -5710,6 +6190,18 @@ std::vector<uint8_t> compute_keep_mask_drop_singletons(const std::vector<Eigen::
 
     if (dropped_out) {
         *dropped_out = dropped_total;
+    }
+    // Levels left per dimension after the drops: what the automatic selector
+    // would otherwise count again on the retained rows.
+    if (levels_out) {
+        levels_out->assign(indexers.size(), 0);
+        for (std::size_t d = 0; d < indexers.size(); ++d) {
+            int present = 0;
+            for (const int count : counts[d]) {
+                present += count > 0 ? 1 : 0;
+            }
+            (*levels_out)[d] = present;
+        }
     }
     return keep;
 }
@@ -8975,13 +9467,18 @@ void recompute_inference(Eigen::VectorXd& coefficients,
                          Eigen::VectorXd& pvalues,
                          Eigen::MatrixXd& conf_int,
                          double level_percent,
-                         double df_resid) {
+                         double df_resid,
+                         bool quantiles = true) {
     const int p = static_cast<int>(coefficients.size());
     const double nan = std::numeric_limits<double>::quiet_NaN();
     tvalues.resize(p);
     pvalues.resize(p);
     conf_int.resize(p, 2);
-    const bool df_ok = (df_resid > 0.0) && hdfe::detail::ieee_finite(df_resid);
+    // quantiles == false (HdfeOptions::inference_quantiles): an internal fit
+    // whose caller uses only the coefficients must neither depend on nor be
+    // refused by Student-t quantiles it never delivers (issue #18).
+    const bool df_ok = quantiles && (df_resid > 0.0) &&
+                       hdfe::detail::ieee_finite(df_resid);
     const double crit = df_ok ? student_t_critical_value(level_percent, df_resid) : nan;
     for (int j = 0; j < p; ++j) {
         const double se = std_errors(j);
@@ -9471,6 +9968,7 @@ void HdfeRegressorV11::clear_consumable_state() noexcept {
     gpu_attempted_ = false;
     gpu_absorption_converged_ = false;
     gpu_absorption_iterations_ = 0;
+    cuda_tail_code_ = 0;
     threads_used_ = 0;
     threads_requested_ = 0;
     threads_effective_ = 0;
@@ -9579,6 +10077,7 @@ HdfeRegressorV11::HdfeRegressorV11(const HdfeRegressorV11& other)
       gpu_attempted_(other.gpu_attempted_),
       gpu_absorption_converged_(other.gpu_absorption_converged_),
       gpu_absorption_iterations_(other.gpu_absorption_iterations_),
+      cuda_tail_code_(other.cuda_tail_code_),
       first_pair_component_stats_(other.first_pair_component_stats_) {
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
@@ -9613,6 +10112,7 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(
     gpu_attempted_ = other.gpu_attempted_;
     gpu_absorption_converged_ = other.gpu_absorption_converged_;
     gpu_absorption_iterations_ = other.gpu_absorption_iterations_;
+    cuda_tail_code_ = other.cuda_tail_code_;
     first_pair_component_stats_ = other.first_pair_component_stats_;
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
@@ -9644,6 +10144,7 @@ HdfeRegressorV11::HdfeRegressorV11(HdfeRegressorV11&& other) noexcept
       gpu_attempted_(other.gpu_attempted_),
       gpu_absorption_converged_(other.gpu_absorption_converged_),
       gpu_absorption_iterations_(other.gpu_absorption_iterations_),
+      cuda_tail_code_(other.cuda_tail_code_),
       first_pair_component_stats_(other.first_pair_component_stats_) {
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
@@ -9678,6 +10179,7 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(HdfeRegressorV11&& other) noexcept
     gpu_attempted_ = other.gpu_attempted_;
     gpu_absorption_converged_ = other.gpu_absorption_converged_;
     gpu_absorption_iterations_ = other.gpu_absorption_iterations_;
+    cuda_tail_code_ = other.cuda_tail_code_;
     first_pair_component_stats_ = other.first_pair_component_stats_;
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
@@ -9687,7 +10189,7 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(HdfeRegressorV11&& other) noexcept
 }
 
 HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
-    int n_rows, int num_fes) const {
+    int n_rows, int num_fes, bool legacy_density) const {
     ThreadResolution resolution;
     resolution.requested = options_.num_threads;
     if (options_.num_threads < 0) {
@@ -9712,9 +10214,12 @@ HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
         return resolution;
     }
 
+    // Fixed effects absorbed and not retained: the problem-size cap and the
+    // dense automatic rows per thread apply only here.
+    const bool capped_path = !options_.retain_fixed_effects && num_fes > 0;
     auto cap_for_problem_size = [&](int requested) {
         int capped = std::max(1, requested);
-        if (!options_.retain_fixed_effects && num_fes > 0) {
+        if (capped_path) {
             int problem_cap = 16;
             if (n_rows < 100000) {
                 problem_cap = 1;
@@ -9747,9 +10252,15 @@ HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
         resolution.limit_code = 2;
         resolution.limit_reason = "auto_policy";
     } else {
-        if (threading_.target_rows_per_thread > 0) {
+        int rows_per_thread = threading_.target_rows_per_thread;
+        if (rows_per_thread == 0) {
+            rows_per_thread = capped_path && !legacy_density
+                                  ? auto_rows_per_thread_absorb()
+                                  : kAutoRowsPerThreadUncapped;
+        }
+        if (rows_per_thread > 0) {
             const int by_rows =
-                std::max(1, n_rows / std::max(1, threading_.target_rows_per_thread));
+                std::max(1, n_rows / std::max(1, rows_per_thread));
             if (by_rows < threads_cap) {
                 threads_cap = by_rows;
                 resolution.limit_code = 2;
@@ -9775,6 +10286,7 @@ HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
 #else
     (void)n_rows;
     (void)num_fes;
+    (void)legacy_density;
     resolution.openmp_enabled = false;
     resolution.capacity = 1;
     resolution.effective = 1;
@@ -9786,6 +10298,49 @@ HdfeRegressorV11::ThreadResolution HdfeRegressorV11::resolve_threads(
     }
     return resolution;
 #endif
+}
+
+int HdfeRegressorV11::resolved_thread_count(int n_rows, int num_fes) const {
+    return resolve_threads(n_rows, num_fes).effective;
+}
+
+namespace {
+// thread_limit_code 6: the per-user team registry lowered an automatic team.
+constexpr int kThreadLimitAutoTeamCoordination = 6;
+constexpr const char* kThreadLimitAutoTeamCoordinationReason =
+    "auto_team_coordination";
+}  // namespace
+
+HdfeRegressorV11::ThreadResolution HdfeRegressorV11::coordinate_auto_team(
+    ThreadResolution resolution, int n_rows, int num_fes,
+    detail::AutoTeamRegistration& registration, bool lease) const {
+    if (!resolution.openmp_enabled ||
+        !detail::auto_team_coordination_enabled()) {
+        return resolution;
+    }
+    // An explicit request is recorded and never reduced. A positive
+    // targetrowsperthread() sizes the legacy team like the requested one, so
+    // it is never reduced either.
+    const bool explicit_request = options_.num_threads > 0;
+    const int legacy =
+        explicit_request
+            ? resolution.effective
+            : std::min(resolution.effective,
+                       resolve_threads(n_rows, num_fes, true).effective);
+    const detail::AutoTeamGrant grant =
+        lease ? registration.acquire_lease(resolution.effective, legacy,
+                                           resolution.capacity,
+                                           explicit_request)
+              : registration.acquire_intent(resolution.effective, legacy,
+                                            resolution.capacity,
+                                            explicit_request);
+    if (!explicit_request && grant.reduced &&
+        grant.team < resolution.effective) {
+        resolution.effective = std::max(1, grant.team);
+        resolution.limit_code = kThreadLimitAutoTeamCoordination;
+        resolution.limit_reason = kThreadLimitAutoTeamCoordinationReason;
+    }
+    return resolution;
 }
 
 void HdfeRegressorV11::begin_parallel_observation(
@@ -9915,10 +10470,15 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         throw std::runtime_error("X must have the same number of rows as y");
     }
     const int nobs_full = static_cast<int>(y.size());
+    // Released on every exit path; a nested fit() acts on this record.
+    detail::AutoTeamRegistration team_registration;
     // Resolve before validating large inputs so the fail-closed scans use the
     // same explicit/automatic thread contract as the remaining preprocessing.
     const ThreadResolution preprocessing_thread_resolution =
-        resolve_threads(nobs_full, static_cast<int>(fes.size()));
+        coordinate_auto_team(
+            resolve_threads(nobs_full, static_cast<int>(fes.size())),
+            nobs_full, static_cast<int>(fes.size()), team_registration,
+            false);
     const int validation_threads = preprocessing_thread_resolution.effective;
     require_finite_vector(y, "y", validation_threads);
     require_finite_matrix(X, "X", validation_threads);
@@ -9957,6 +10517,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     gpu_attempted_ = false;
     gpu_absorption_converged_ = false;
     gpu_absorption_iterations_ = 0;
+    cuda_tail_code_ = 0;
     first_pair_component_stats_ = FeComponentStats{};
     if (clusters) {
         for (const auto& c : *clusters) {
@@ -10050,6 +10611,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     };
 
     double singletons_dropped_effective = 0.0;
+    // Levels per fixed effect left by the singleton scan, for the automatic
+    // selector's representation check (empty when the scan did not run).
+    std::vector<int> singleton_scan_levels;
     detail::ParallelWorkObserver preprocessing_observer;
     int preprocessing_threads_used = 1;
     int preprocessing_parallel_workers_active = 1;
@@ -10094,9 +10658,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 "dropped as a singleton)");
         }
         const auto fit_t0 = std::chrono::steady_clock::now();
-        const ThreadResolution thread_resolution =
+        const ThreadResolution thread_resolution = coordinate_auto_team(
             resolve_threads(static_cast<int>(y_use.size()),
-                            static_cast<int>(fes_use.size()));
+                            static_cast<int>(fes_use.size())),
+            static_cast<int>(y_use.size()), static_cast<int>(fes_use.size()),
+            team_registration, true);
         begin_parallel_observation(thread_resolution);
         const int threads = thread_resolution.effective;
         ScopedParallelRuntime parallel_runtime(
@@ -10104,6 +10670,17 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
 
         HdfeOptions tuned = options_;
         tuned.from_auto = (options_.absorption_method == AbsorptionMethod::Auto);
+        tuned.auto_intent = (options_.absorption_method == AbsorptionMethod::Auto);
+        tuned.fast_intent = options_.tolerance_mode == ToleranceMode::XhdfeFast &&
+                            !options_.retain_fixed_effects;
+        tuned.comparable_intent =
+            options_.tolerance_mode == ToleranceMode::ReghdfeComparable;
+        // F2-A: the CPU route selector lent to the CUDA completion of the
+        // primary absorption (GPU branch of the Auto-MLSMR selection below). It
+        // lives as long as this fit and evaluates the selector at most once.
+        std::function<detail::AutoRouteAnswer()> cuda_tail_route;
+        std::optional<detail::AutoRouteAnswer> cuda_tail_route_answer;
+        int cuda_tail_route_evaluations = 0;
         tuned.num_threads_explicit = options_.num_threads > 0;
         tuned.parallel_observer = parallel_observer_.get();
         const std::optional<bool> env_krylov = read_env_bool("XHDFE_USE_KRYLOV");
@@ -10163,6 +10740,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             options_.ordinary_auto_routing_retry &&
             !suppress_auto_routing_retry_ && !has_slopes_use &&
             read_env_bool("XHDFE_AUTO_ROUTING_RETRY").value_or(true);
+        tuned.ordinary_auto_early_routing =
+            options_.ordinary_auto_early_routing && tuned.ordinary_auto_routing_retry &&
+            read_env_bool("XHDFE_AUTO_EARLY_ROUTING").value_or(true);
 
         MobilityHint mobility_hint;
         bool have_mobility_hint = false;
@@ -10395,7 +10975,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     auto_mlsmr_sweep_fallback(fes_use.size(), options_.symmetric_sweep);
                 const int rhs_count = static_cast<int>(X_use.cols());
                 const AbsorptionMethod picked = select_auto_mlsmr_method(
-                    fes_use, w_ptr, options_, rhs_count, sweep_fb);
+                    fes_use, w_ptr, options_, rhs_count, sweep_fb, nullptr,
+                    tuned.num_threads, tuned.parallel_observer,
+                    singleton_scan_levels.size() == fes_use.size() ? &singleton_scan_levels
+                                                                   : nullptr);
                 if (picked == AbsorptionMethod::Mlsmr) {
                     selected_method = AbsorptionMethod::Mlsmr;
                 } else {
@@ -10427,7 +11010,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         AutoMlsmrSelectionDiagnostics diagnostics;
                         (void)select_auto_mlsmr_method(
                             fes_use, w_ptr, options_, rhs_count,
-                            sweep_fallback, &diagnostics);
+                            sweep_fallback, &diagnostics, tuned.num_threads,
+                            tuned.parallel_observer,
+                            singleton_scan_levels.size() == fes_use.size()
+                                ? &singleton_scan_levels : nullptr);
                         const double rho_min = read_env_double(
                             "XHDFE_AUTO_MLSMR_FAST_RHO_MIN", 0.60,
                             0.0, 1.0);
@@ -10459,6 +11045,45 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     options_.absorption_method == AbsorptionMethod::Auto &&
                     options_.tolerance_mode == ToleranceMode::ReghdfeComparable &&
                     options_.convergence_criterion == ConvergenceCriterion::Auto;
+                if (gpu_backend_env_requested() && !has_slopes_use &&
+                    !options_.retain_fixed_effects) {
+                    // F2-A: without the GPU request the branch above would take
+                    // this fit's route from the selector. The CUDA three-FE
+                    // Comparable completion asks it the same question, with the
+                    // same arguments (design, public options, fallback, team,
+                    // level counts), only after it predicts a long device tail,
+                    // so short tails never pay the probe; once per fit, the
+                    // answer is remembered. Its full cost is recorded for the
+                    // trace only; no decision reads a clock.
+                    const int route_rhs = static_cast<int>(X_use.cols());
+                    const AbsorptionMethod route_fallback =
+                        auto_mlsmr_sweep_fallback(fes_use.size(), options_.symmetric_sweep);
+                    const int route_threads = tuned.num_threads;
+                    detail::ParallelWorkObserver* const route_observer =
+                        tuned.parallel_observer;
+                    cuda_tail_route = [&, this, route_rhs, route_fallback, route_threads,
+                                       route_observer]() {
+                        if (!cuda_tail_route_answer) {
+                            const auto route_t0 = std::chrono::steady_clock::now();
+                            ++cuda_tail_route_evaluations;
+                            AutoMlsmrSelectionDiagnostics diagnostics;
+                            const AbsorptionMethod picked = select_auto_mlsmr_method(
+                                fes_use, w_ptr, options_, route_rhs, route_fallback,
+                                &diagnostics, route_threads, route_observer,
+                                singleton_scan_levels.size() == fes_use.size()
+                                    ? &singleton_scan_levels : nullptr);
+                            detail::AutoRouteAnswer answer;
+                            answer.mlsmr = picked == AbsorptionMethod::Mlsmr;
+                            answer.rho = diagnostics.per_sweep_rho;
+                            answer.seconds = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - route_t0).count();
+                            cuda_tail_route_answer = answer;
+                        }
+                        detail::AutoRouteAnswer answer = *cuda_tail_route_answer;
+                        answer.evaluations = cuda_tail_route_evaluations;
+                        return answer;
+                    };
+                }
                 benchmark_methods = false;
             }
         }
@@ -10540,6 +11165,29 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             bool requested_backend_unavailable = false;
             std::optional<detail::ScopedGpuBackendOverride>
                 unavailable_backend_cpu_fallback;
+            // The half of the retry's eligibility known before the primary
+            // solve; finalize_backend_status adds the primary's outcome.
+            // Early routing applies only where it holds.
+            auto retry_statically_eligible = [&]() {
+                const bool in_band =
+                    !fes_use.empty() &&
+                    (fes_use.size() <= 3 ||
+                     (fes_use.size() == 4 && y_use.size() <= 2000000));
+                bool nested = false;
+#ifdef HDFE_USE_OPENMP
+                nested = omp_in_parallel() != 0;
+#endif
+                return tuned.ordinary_auto_routing_retry &&
+                       options_.absorption_method == AbsorptionMethod::Auto &&
+                       (requested_method == AbsorptionMethod::GaussSeidel ||
+                        requested_method == AbsorptionMethod::SymmetricGaussSeidel) &&
+                       in_band && !wants_iv && !has_instruments &&
+                       !cuda_backend_env_requested() &&
+                       tuned.tolerance_mode == ToleranceMode::ReghdfeComparable &&
+                       tuned.tol == 1.0e-8 && w_ptr == nullptr && slope_terms.empty() &&
+                       !tuned.retain_fixed_effects && !tuned.save_groupvar &&
+                       !tuned.use_sparse_solver && !tuned.use_krylov && !nested;
+            };
             auto finalize_backend_status = [&](detail::AbsorptionResult candidate) {
                 if (requested_backend_unavailable) {
                     candidate.gpu_used = false;
@@ -10548,11 +11196,35 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     candidate.gpu_absorption_converged = false;
                     candidate.gpu_absorption_iterations = 0;
                 }
+                if (candidate.auto_routing_retry_status == 4) {
+                    // The primary left early and the retry's MLSMR, run at
+                    // once, was certified: its diagnostics stand as set.
+                    if (early_routing_trace_on()) {
+                        std::ostringstream line;
+                        line.precision(10);
+                        line << "xhdfe early_routing_trace event=final static_eligible=1"
+                             << " eligible=1 requested=" << static_cast<int>(requested_method)
+                             << " primary="
+                             << candidate.auto_routing_retry_primary_method
+                             << " primary_iterations="
+                             << candidate.auto_routing_retry_primary_iterations
+                             << " primary_rel="
+                             << candidate.auto_routing_retry_primary_abs_residual_rel
+                             << " primary_converged=0 primary_certified=0 status=4"
+                             << " retry_iterations=" << candidate.auto_routing_retry_iterations
+                             << " retry_rel=" << candidate.auto_routing_retry_abs_residual_rel
+                             << " retry_s=" << candidate.auto_routing_retry_elapsed_seconds
+                             << " iterations=" << candidate.iterations
+                             << " mlsmr=" << (candidate.mlsmr_used ? 1 : 0)
+                             << " rel=" << candidate.abs_residual_rel << '\n';
+                        std::cerr << line.str();
+                    }
+                    return candidate;
+                }
                 constexpr double kOrdinaryAutoRoutingRetryTrigger = 1.0e-11;
                 AbsorptionMethod actual_primary_method = requested_method;
                 if (candidate.mlsmr_used) {
-                    actual_primary_method = candidate.gpu_used
-                        ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
+                    actual_primary_method = krylov_method_used(candidate);
                 } else if (candidate.schwarz_used) {
                     actual_primary_method = AbsorptionMethod::Schwarz;
                 }
@@ -10584,7 +11256,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     !candidate.gpu_attempted && candidate.gpu_status_code == 0 &&
                     candidate.converged && candidate.precision_certified &&
                     tuned.tolerance_mode == ToleranceMode::ReghdfeComparable &&
-                    tuned.tol == 1.0e-8 && w_ptr == nullptr &&
+                    tuned.tol == 1.0e-8 &&
+                    // P8 (CPU-W): weighted fits too, within the bounds of
+                    // cpu_weighted_retry_enabled (k <= 3, public Comparable,
+                    // Auto method and criterion).
+                    (w_ptr == nullptr ||
+                     (cpu_weighted_retry_enabled() && tuned.comparable_intent &&
+                      options_.convergence_criterion == ConvergenceCriterion::Auto &&
+                      fes_use.size() <= 3)) &&
                     slope_terms.empty() && !tuned.retain_fixed_effects &&
                     !tuned.save_groupvar && !tuned.use_sparse_solver &&
                     !tuned.use_krylov && !nested_parallel;
@@ -10592,6 +11271,34 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (eligible) {
                     candidate.auto_routing_retry_status = 1;
                 }
+                // Early-routing trace: the outcome of this solve and of the
+                // retry, with the static half of `eligible` (the conditions
+                // known before the primary solve).
+                auto trace_final = [&](const detail::AbsorptionResult& out) {
+                    if (!early_routing_trace_on()) {
+                        return;
+                    }
+                    const bool static_eligible = retry_statically_eligible();
+                    std::ostringstream line;
+                    line.precision(10);
+                    line << "xhdfe early_routing_trace event=final"
+                         << " static_eligible=" << (static_eligible ? 1 : 0)
+                         << " eligible=" << (eligible ? 1 : 0)
+                         << " requested=" << static_cast<int>(requested_method)
+                         << " primary=" << static_cast<int>(actual_primary_method)
+                         << " primary_iterations=" << candidate.iterations
+                         << " primary_rel=" << candidate.abs_residual_rel
+                         << " primary_converged=" << (candidate.converged ? 1 : 0)
+                         << " primary_certified=" << (candidate.precision_certified ? 1 : 0)
+                         << " status=" << out.auto_routing_retry_status
+                         << " retry_iterations=" << out.auto_routing_retry_iterations
+                         << " retry_rel=" << out.auto_routing_retry_abs_residual_rel
+                         << " retry_s=" << out.auto_routing_retry_elapsed_seconds
+                         << " iterations=" << out.iterations
+                         << " mlsmr=" << (out.mlsmr_used ? 1 : 0)
+                         << " rel=" << out.abs_residual_rel << '\n';
+                    std::cerr << line.str();
+                };
                 if (read_env_bool("XHDFE_AUTO_ROUTING_RETRY_DIAG").value_or(false)) {
                     std::cerr << "xhdfe auto_routing_retry"
                               << " policy=" << (tuned.ordinary_auto_routing_retry ? 1 : 0)
@@ -10601,12 +11308,24 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                               << " certified=" << (candidate.precision_certified ? 1 : 0)
                               << " rel=" << candidate.abs_residual_rel << '\n';
                 }
+                // P8 (CPU-W, its accounting; cpu_retry_accounting_enabled): a
+                // weighted retry runs within what the primary left of max_iter.
+                const bool retry_accounting = w_ptr != nullptr && cpu_retry_accounting_enabled();
+                const int retry_budget =
+                    std::max(0, tuned.max_iter - std::max(0, candidate.iterations));
+                if (retry_accounting && eligible && retry_budget <= 0 &&
+                    candidate.abs_residual_rel > kOrdinaryAutoRoutingRetryTrigger) {
+                    // Nothing left for the retry: the primary stands (status 3).
+                    candidate.auto_routing_retry_status = 3;
+                }
                 if (eligible && candidate.abs_residual_rel >
-                                    kOrdinaryAutoRoutingRetryTrigger) {
+                                    kOrdinaryAutoRoutingRetryTrigger &&
+                    (!retry_accounting || retry_budget > 0)) {
                     const auto retry_started = std::chrono::steady_clock::now();
                     HdfeOptions retry_options = tuned;
                     retry_options.absorption_method = AbsorptionMethod::Mlsmr;
                     retry_options.from_auto = false;
+                    if (retry_accounting) retry_options.max_iter = retry_budget;
                     detail::AbsorptionResult retry =
                         detail::absorb_fixed_effects_v6(
                             y_use, design, fes_use, w_ptr, retry_options,
@@ -10640,12 +11359,23 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     };
                     if (retry.converged && retry.precision_certified) {
                         diagnostics(retry, 2);
+                        // P8 (CPU-W): the published total counts the primary too.
+                        if (retry_accounting) retry.iterations += std::max(0, candidate.iterations);
                         retry.mlsmr_used = true;
                         method_used_ = AbsorptionMethod::Mlsmr;
+                        trace_final(retry);
                         return retry;
                     }
                     diagnostics(candidate, 3);
+                    if (retry_accounting) {
+                        // P8 (CPU-W): the trace shows the primary; the published
+                        // total counts the discarded retry's work too.
+                        trace_final(candidate);
+                        candidate.iterations += std::max(0, retry.iterations);
+                        return candidate;
+                    }
                 }
+                trace_final(candidate);
                 return candidate;
             };
             auto certify_public_contract = [&](detail::AbsorptionResult& candidate) {
@@ -10674,9 +11404,17 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         ConvergenceCriterion::Reghdfe;
                 }
             };
-            auto run_strict_cuda_repair = [&](int remaining = -1) {
+            // P3-fix (3'): the strict branch passes the strict provenance and
+            // whether its native attempt already used the one device LSMR
+            // restart of the sequence (RELATORIO_P3FIX_20261109.md 11.3); the
+            // weighted repair of the other modes passes neither (unchanged).
+            auto run_strict_cuda_repair = [&](int remaining = -1,
+                                              bool strict_provenance = false,
+                                              bool strict_lsmr_consumed = false) {
                 HdfeOptions strict_options = tuned;
                 if (remaining >= 0) strict_options.max_iter = remaining;
+                strict_options.strict_provenance = strict_provenance;
+                strict_options.strict_lsmr_consumed = strict_lsmr_consumed;
                 strict_options.tolerance_mode = ToleranceMode::StrictResidual;
                 strict_options.convergence_criterion =
                     ConvergenceCriterion::Auto;
@@ -10702,6 +11440,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 tuned.tolerance_mode == ToleranceMode::StrictResidual) {
                 HdfeOptions strict_gpu_options = tuned;
                 configure_native_cuda_repair(strict_gpu_options);
+                // P3-fix (3'), strict scope: a broken CG stage of this attempt
+                // restarts cold with the device LSMR and the strict check in the
+                // CUDA wrapper, never with its cold MAP (the sequence's one
+                // LSMR restart; cuda_strict_lsmr_restart in the result).
+                strict_gpu_options.strict_provenance = true;
                 detail::AbsorptionResult strict_gpu =
                     detail::absorb_fixed_effects_v6(
                         y_use, design, fes_use, w_ptr, strict_gpu_options,
@@ -10714,11 +11457,16 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 // A native CG proxy can break down or miss the independent
                 // certificate. Retry the strict device path with the remaining
                 // actual iteration budget; the public tolerance stays fixed.
+                // P3-fix (3'): this is the sequence's one strict repair, with
+                // the strict provenance and the state of its LSMR restart; a
+                // broken CG stage in it restarts with the device LSMR only if
+                // the native attempt did not use it, and is refused otherwise.
                 if ((strict_gpu.gpu_used || strict_gpu.gpu_status_code == 3) &&
                     strict_gpu.iterations < tuned.max_iter) {
                     detail::AbsorptionResult strict_retry =
                         run_strict_cuda_repair(
-                            tuned.max_iter - strict_gpu.iterations);
+                            tuned.max_iter - strict_gpu.iterations, true,
+                            strict_gpu.cuda_strict_lsmr_restart);
                     strict_retry.iterations += strict_gpu.iterations;
                     strict_retry.gpu_absorption_iterations =
                         strict_retry.iterations;
@@ -10752,8 +11500,18 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
 
+            // P3-fix (3'), scope addendum 2 (RELATORIO_P3FIX_20261109.md 11.10): a
+            // strict-residual primary on CUDA outside the strict branch above (an
+            // explicit criterion or method) carries the strict provenance, so a
+            // broken CG stage restarts with the device LSMR and the strict check,
+            // never with the cold MAP; its one strict repair follows below.
+            const bool strict_primary_provenance =
+                !primary_ready &&
+                tuned.tolerance_mode == ToleranceMode::StrictResidual &&
+                cuda_backend_env_requested();
             if (!primary_ready) {
                 HdfeOptions primary_options = tuned;
+                primary_options.strict_provenance = strict_primary_provenance;
                 if (bounded_four_fe_cuda_precision) {
                     primary_options.tol =
                         std::min(primary_options.tol, 1.0e-10);
@@ -10764,9 +11522,88 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 } else if (bounded_four_fe_cuda_fast) {
                     configure_native_cuda_repair(primary_options);
                 }
+                // Early routing on the retry's eligible CPU route: a primary
+                // that leaves early is replaced at once by the retry's MLSMR.
+                primary_options.early_routing =
+                    tuned.ordinary_auto_early_routing && retry_statically_eligible();
+                // F2-A: only the primary absorption may hand its CUDA tail to
+                // the host; repairs, retries and continuations never receive the
+                // selector, so auto_intent alone never re-enables a route there.
+                if (cuda_tail_route) {
+                    primary_options.cuda_tail_route = &cuda_tail_route;
+                }
+                if (early_routing_trace_on()) {
+                    std::ostringstream line;
+                    line.precision(10);
+                    line << "xhdfe early_routing_trace event=primary_begin"
+                         << " n=" << y_use.size() << " nfe=" << fes_use.size()
+                         << " cols=" << design.cols()
+                         << " requested=" << static_cast<int>(requested_method)
+                         << " policy=" << (tuned.ordinary_auto_routing_retry ? 1 : 0)
+                         << " early=" << (primary_options.early_routing ? 1 : 0)
+                         << " mode=" << static_cast<int>(tuned.tolerance_mode)
+                         << " tol=" << tuned.tol << '\n';
+                    std::cerr << line.str();
+                }
                 primary = detail::absorb_fixed_effects_v6(
                     y_use, design, fes_use, w_ptr, primary_options,
                     requested_method, slope_terms);
+                if (primary.early_routing_left != 0) {
+                    // The retry's MLSMR, exactly as finalize_backend_status
+                    // runs it (cold, full budget), reported as status 4 with
+                    // the primary's iterations and prediction.
+                    const auto routed_started = std::chrono::steady_clock::now();
+                    HdfeOptions retry_options = tuned;
+                    retry_options.absorption_method = AbsorptionMethod::Mlsmr;
+                    retry_options.from_auto = false;
+                    detail::AbsorptionResult routed =
+                        detail::absorb_fixed_effects_v6(
+                            y_use, design, fes_use, w_ptr, retry_options,
+                            AbsorptionMethod::Mlsmr, slope_terms);
+                    detail::certify_absorption_result(
+                        y_use, design, fes_use, w_ptr, tuned, slope_terms, routed);
+                    const double routed_seconds = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - routed_started).count();
+                    if (read_env_bool("XHDFE_TEST_AUTO_ROUTING_RETRY_FAIL").value_or(false)) {
+                        routed.converged = false;
+                        routed.precision_certified = false;
+                    }
+                    const bool routed_ok = routed.converged && routed.precision_certified;
+                    if (read_env_bool("XHDFE_AUTO_ROUTING_RETRY_DIAG").value_or(false)) {
+                        std::cerr << "xhdfe auto_routing_retry event=left_early"
+                                  << " rule="
+                                  << (primary.early_routing_left == 1 ? "predictive"
+                                                                      : "structural")
+                                  << " iter=" << primary.iterations
+                                  << " q=" << primary.early_routing_rate
+                                  << " kappa=" << primary.early_routing_kappa
+                                  << " predicted=" << primary.early_routing_prediction
+                                  << " retry_certified=" << (routed_ok ? 1 : 0) << '\n';
+                    }
+                    if (routed_ok) {
+                        routed.auto_routing_retry_policy_enabled = true;
+                        routed.auto_routing_retry_eligible = true;
+                        routed.auto_routing_retry_fired = true;
+                        routed.auto_routing_retry_status = 4;
+                        routed.auto_routing_retry_primary_method =
+                            static_cast<int>(requested_method);
+                        routed.auto_routing_retry_primary_iterations = primary.iterations;
+                        routed.auto_routing_retry_primary_abs_residual_rel =
+                            primary.early_routing_prediction;
+                        routed.auto_routing_retry_iterations = routed.iterations;
+                        routed.auto_routing_retry_abs_residual_rel = routed.abs_residual_rel;
+                        routed.auto_routing_retry_elapsed_seconds = routed_seconds;
+                        routed.mlsmr_used = true;
+                        method_used_ = AbsorptionMethod::Mlsmr;
+                        return finalize_backend_status(std::move(routed));
+                    }
+                    // MLSMR failed: the primary again with early routing off,
+                    // then today's route unchanged.
+                    primary_options.early_routing = false;
+                    primary = detail::absorb_fixed_effects_v6(
+                        y_use, design, fes_use, w_ptr, primary_options,
+                        requested_method, slope_terms);
+                }
                 if (bounded_four_fe_cuda_precision && primary.gpu_attempted &&
                     primary.gpu_status_code == 3 && !primary.converged &&
                     primary.iterations < primary_options.max_iter) {
@@ -10798,6 +11635,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
 
             if (primary.cg_restart_required) {
+                if (early_routing_trace_on()) {
+                    std::ostringstream line;
+                    line << "xhdfe early_routing_trace event=cg_restart"
+                         << " primary_iterations=" << primary.iterations
+                         << " primary_converged=" << (primary.converged ? 1 : 0)
+                         << " max_iter=" << tuned.max_iter << '\n';
+                    std::cerr << line.str();
+                }
                 // FE orthogonality alone cannot detect null-space drift from
                 // a broken CG recurrence. Reabsorbing its residual preserves
                 // that damage, so restart from the original RHS instead.
@@ -11193,6 +12038,29 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             // scientifically material coefficient drift that can still sit
             // inside the public 8x reporting envelope, without adding another
             // certificate pass.
+            // P3-fix (3'), scope addendum 2: the sequence's one strict repair after
+            // the strict primary's device LSMR restart was rejected with budget
+            // left (the strict branch's rule); a broken CG stage in it is refused.
+            if (strict_primary_provenance && primary.cuda_strict_lsmr_restart &&
+                !(primary.gpu_used && primary.converged && primary.precision_certified) &&
+                (primary.gpu_used || primary.gpu_status_code == 3)) {
+                if (primary.iterations >= tuned.max_iter) {
+                    primary.converged = false;
+                    primary.precision_certified = false;
+                    return finalize_backend_status(std::move(primary));
+                }
+                detail::AbsorptionResult strict_retry = run_strict_cuda_repair(
+                    tuned.max_iter - primary.iterations, true, true);
+                strict_retry.iterations += primary.iterations;
+                strict_retry.gpu_absorption_iterations = strict_retry.iterations;
+                if (strict_retry.gpu_used && strict_retry.converged &&
+                    strict_retry.precision_certified) {
+                    return finalize_backend_status(std::move(strict_retry));
+                }
+                strict_retry.converged = false;
+                strict_retry.precision_certified = false;
+                return finalize_backend_status(std::move(strict_retry));
+            }
             const bool primary_precision_gate_failed =
                 bounded_auto_gate_failed(primary);
             const bool repair_eligible = standard_auto_precision_repair &&
@@ -11250,6 +12118,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     strict_retry.converged = false;
                     strict_retry.precision_certified = false;
                     return finalize_backend_status(std::move(strict_retry));
+                }
+                // P3-fix (C): a repair that converged and passed the public
+                // certificate but missed the bounded xhdfe-fast target is
+                // refused as before; the message says so, not "did not converge".
+                if (tuned.tolerance_mode == ToleranceMode::XhdfeFast &&
+                    primary_precision_gate_failed && repaired.gpu_used &&
+                    repaired.converged && repaired.precision_certified) {
+                    repaired.fast_repair_target = bounded_precision_limit;
                 }
                 repaired.converged = false;
                 repaired.precision_certified = false;
@@ -11615,8 +12491,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 if (absorption.schwarz_used) {
                     method_used_ = AbsorptionMethod::Schwarz;  // adaptive gate diverted to Schwarz
                 } else if (absorption.mlsmr_used) {
-                    method_used_ = absorption.gpu_used
-                        ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
+                    method_used_ = krylov_method_used(absorption);
                 }
             }
             if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11668,8 +12543,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (absorption.schwarz_used) {
                         method_used_ = AbsorptionMethod::Schwarz;
                     } else if (absorption.mlsmr_used) {
-                        method_used_ = absorption.gpu_used
-                            ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
+                        method_used_ = krylov_method_used(absorption);
                     }
                 }
                 if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11724,8 +12598,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (absorption.schwarz_used) {
                             method_used_ = AbsorptionMethod::Schwarz;
                         } else if (absorption.mlsmr_used) {
-                            method_used_ = absorption.gpu_used
-                                ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
+                            method_used_ = krylov_method_used(absorption);
                         }
                     }
                     if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11776,8 +12649,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (absorption.schwarz_used) {
                             method_used_ = AbsorptionMethod::Schwarz;
                         } else if (absorption.mlsmr_used) {
-                            method_used_ = absorption.gpu_used
-                                ? AbsorptionMethod::Lsmr : AbsorptionMethod::Mlsmr;
+                            method_used_ = krylov_method_used(absorption);
                         }
                     }
                     if (allow_cache_write && !cache_hit && absorption.converged &&
@@ -11796,6 +12668,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         gpu_attempted_ = absorption.gpu_attempted;
         gpu_absorption_converged_ = absorption.gpu_absorption_converged;
         gpu_absorption_iterations_ = absorption.gpu_absorption_iterations;
+        cuda_tail_code_ = absorption.cuda_tail;
         require_accepted_absorption(tuned, absorption, "HDFE absorption");
         require_cuda_execution(cuda_execution_required, absorption);
         const auto stats_t0 = std::chrono::steady_clock::now();
@@ -12827,9 +13700,38 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                        results_.fe_recovery_max_delta, fe_recovery_method);
         }
 
+        // P7 (2.31.0): a Stata residuals() request keeps the fit's own residuals
+        // (HdfeOptions::stored_residuals_fit_state); refine_stored_residuals keeps
+        // its meaning for every other caller and for the opt-in prototypes above.
         const bool needs_refined_residuals =
-            options_.refine_stored_residuals && has_fes && !options_.retain_fixed_effects &&
+            options_.refine_stored_residuals && !options_.stored_residuals_fit_state &&
+            has_fes && !options_.retain_fixed_effects &&
             results_.residuals.size() == y_use.size();
+        // Trace only (diagnostic build cand_p3_trace_20261110, P7): with
+        // XHDFE_P7_REFINE_TRACE=1 every fit prints whether the stored residuals
+        // are refined and, when they are, the refinement's options, route and
+        // cost, and aggregates of the fit's own (internal) residuals against the
+        // refined (stored) ones of the same fit: norms, their relative distance
+        // and the largest |weighted group mean| over the absorbed FEs. With
+        // XHDFE_P7_REFINE_DUMP_DIR=<dir> as well, both vectors are written there
+        // as raw float64 files, for public fixtures only (never on confidential
+        // data). Off (the default), nothing is copied, timed or printed.
+        static const bool p7_refine_trace = [] {
+            const char* e = std::getenv("XHDFE_P7_REFINE_TRACE");
+            return e != nullptr && std::strcmp(e, "1") == 0;
+        }();
+        static std::atomic<int> p7_refine_sequence{0};
+        const int p7_seq = p7_refine_trace ? ++p7_refine_sequence : 0;
+        if (p7_refine_trace && !needs_refined_residuals) {
+            std::fprintf(stderr,
+                         "p7_refine_trace seq=%d refined=0 refine_flag=%d fit_state=%d "
+                         "has_fes=%d retain_fes=%d residuals=%lld rows=%lld\n",
+                         p7_seq, options_.refine_stored_residuals ? 1 : 0,
+                         options_.stored_residuals_fit_state ? 1 : 0, has_fes ? 1 : 0,
+                         options_.retain_fixed_effects ? 1 : 0,
+                         static_cast<long long>(results_.residuals.size()),
+                         static_cast<long long>(y_use.size()));
+        }
         if (needs_refined_residuals) {
             const int coef_size = static_cast<int>(results_.coefficients.size());
             const int expected_slope_cols =
@@ -12850,6 +13752,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
 
                 Eigen::MatrixXd empty_design(static_cast<int>(y_use.size()), 0);
+                Eigen::VectorXd p7_internal;
+                if (p7_refine_trace) {
+                    p7_internal = results_.residuals;
+                    std::fprintf(stderr, "p7_refine_begin seq=%d\n", p7_seq);
+                }
+                const auto p7_start = p7_refine_trace ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
                 detail::AbsorptionResult resid_absorption =
                     detail::absorb_fixed_effects_v6(partial,
                                                     empty_design,
@@ -12858,10 +13767,106 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                     resid_opts,
                                                     method_used_,
                                                     slope_terms);
+                const double p7_seconds =
+                    p7_refine_trace ? std::chrono::duration<double>(
+                                          std::chrono::steady_clock::now() - p7_start).count()
+                                    : 0.0;
+                const bool p7_applied = p7_refine_trace && resid_absorption.converged &&
+                                        resid_absorption.y_tilde.size() == partial.size();
                 if (resid_absorption.converged &&
                     resid_absorption.y_tilde.size() == partial.size()) {
                     results_.residuals = std::move(resid_absorption.y_tilde);
                 }
+                if (p7_refine_trace) {
+                    // The refined candidate: the stored vector when it was applied,
+                    // otherwise the refinement's own output (not stored).
+                    const Eigen::VectorXd& refined =
+                        p7_applied ? results_.residuals : resid_absorption.y_tilde;
+                    auto max_group_mean = [&](const Eigen::VectorXd& v) {
+                        double worst = 0.0;
+                        for (const auto& fe : fes_use) {
+                            if (fe.size() != v.size()) continue;
+                            Eigen::Index levels = 0;
+                            for (Eigen::Index i = 0; i < fe.size(); ++i) {
+                                levels = std::max<Eigen::Index>(levels, fe[i] + 1);
+                            }
+                            std::vector<long double> sum(static_cast<std::size_t>(levels), 0.0L);
+                            std::vector<long double> wsum(static_cast<std::size_t>(levels), 0.0L);
+                            for (Eigen::Index i = 0; i < fe.size(); ++i) {
+                                if (fe[i] < 0) continue;
+                                const long double wi = w_ptr ? (*w_ptr)[i] : 1.0;
+                                sum[static_cast<std::size_t>(fe[i])] += wi * v[i];
+                                wsum[static_cast<std::size_t>(fe[i])] += wi;
+                            }
+                            for (std::size_t g = 0; g < sum.size(); ++g) {
+                                if (wsum[g] > 0.0L) {
+                                    worst = std::max(worst, std::fabs(static_cast<double>(
+                                                                sum[g] / wsum[g])));
+                                }
+                            }
+                        }
+                        return worst;
+                    };
+                    const bool same_size = refined.size() == p7_internal.size();
+                    const double norm_internal = p7_internal.norm();
+                    const double norm_refined = refined.norm();
+                    const double refined_vs_internal_rel =
+                        same_size && norm_internal > 0.0
+                            ? (refined - p7_internal).norm() / norm_internal
+                            : std::numeric_limits<double>::quiet_NaN();
+                    std::fprintf(stderr,
+                                 "p7_refine_trace seq=%d refined=1 applied=%d method=%d mode=%d "
+                                 "criterion=%d tol=%.6e max_iter=%d threads=%d iterations=%d "
+                                 "converged=%d certified=%d abs_residual_rel=%.6e "
+                                 "gpu_attempted=%d gpu_used=%d gpu_status=%d cuda_tail=%s "
+                                 "seconds=%.6f rows=%lld weights=%d slopes=%d "
+                                 "norm_internal=%.17g norm_refined=%.17g "
+                                 "refined_vs_internal_rel=%.6e D_internal=%.6e D_refined=%.6e\n",
+                                 p7_seq, p7_applied ? 1 : 0, static_cast<int>(method_used_),
+                                 static_cast<int>(resid_opts.tolerance_mode),
+                                 static_cast<int>(resid_opts.convergence_criterion),
+                                 resid_opts.tol, resid_opts.max_iter, resid_opts.num_threads,
+                                 resid_absorption.iterations, resid_absorption.converged ? 1 : 0,
+                                 resid_absorption.precision_certified ? 1 : 0,
+                                 resid_absorption.abs_residual_rel,
+                                 resid_absorption.gpu_attempted ? 1 : 0,
+                                 resid_absorption.gpu_used ? 1 : 0,
+                                 resid_absorption.gpu_status_code,
+                                 detail::cuda_tail_name(resid_absorption.cuda_tail), p7_seconds,
+                                 static_cast<long long>(partial.size()), w_ptr ? 1 : 0,
+                                 slope_terms.empty() ? 0 : 1, norm_internal, norm_refined,
+                                 refined_vs_internal_rel, max_group_mean(p7_internal),
+                                 same_size ? max_group_mean(refined)
+                                           : std::numeric_limits<double>::quiet_NaN());
+                    const char* dump_dir = std::getenv("XHDFE_P7_REFINE_DUMP_DIR");
+                    if (dump_dir != nullptr && *dump_dir != '\0') {
+                        const long long stamp = static_cast<long long>(
+                            std::chrono::system_clock::now().time_since_epoch().count());
+                        auto dump = [&](const Eigen::VectorXd& v, const char* tag) {
+                            const std::string path = std::string(dump_dir) + "/p7_" + tag + "_" +
+                                                     std::to_string(stamp) + "_" +
+                                                     std::to_string(p7_seq) + ".f64";
+                            std::FILE* f = std::fopen(path.c_str(), "wb");
+                            if (f == nullptr) {
+                                std::fprintf(stderr, "p7_refine_dump seq=%d tag=%s error=open path=%s\n",
+                                             p7_seq, tag, path.c_str());
+                                return;
+                            }
+                            const std::size_t written = std::fwrite(
+                                v.data(), sizeof(double), static_cast<std::size_t>(v.size()), f);
+                            std::fclose(f);
+                            std::fprintf(stderr, "p7_refine_dump seq=%d tag=%s doubles=%zu path=%s\n",
+                                         p7_seq, tag, written, path.c_str());
+                        };
+                        dump(p7_internal, "internal");
+                        dump(refined, "refined");
+                    }
+                }
+            } else if (p7_refine_trace) {
+                std::fprintf(stderr,
+                             "p7_refine_trace seq=%d refined=0 reason=slope-columns "
+                             "expected_slope_cols=%d design_cols=%d\n",
+                             p7_seq, expected_slope_cols, static_cast<int>(X_use.cols()));
             }
         }
 
@@ -13317,19 +14322,43 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 results_.std_errors[intercept]=std::sqrt(std::max(0.0,variance));
                 intercept_cov_updated=true;
             } else {
-                const bool corrected_three_fe_cuda = n1_budget.used &&
-                    absorption.gpu_used && fes_use.size() == 3 &&
-                    (method_used_ == AbsorptionMethod::GaussSeidel ||
-                     method_used_ == AbsorptionMethod::SymmetricGaussSeidel) &&
-                    !wants_iv && !w_ptr && slope_terms.empty() &&
-                    !tuned.retain_fixed_effects &&
-                    tuned.tolerance_mode == ToleranceMode::ReghdfeComparable;
-                const bool cluster_residual_sums_zero = corrected_three_fe_cuda &&
-                    tuned.se_type == StandardErrorType::Cluster && c_ptr && c_ptr->size() == 1 &&
-                    (nested_dof_levels > 0 ||
-                     std::any_of(fes_use.begin(), fes_use.end(), [&](const Eigen::VectorXi& fe) {
-                        return fe_nested_within_cluster(fe, c_ptr->front());
-                    }));
+                // A cluster that is a union of the levels of an absorbed
+                // intercept dimension has an exactly zero weighted residual
+                // sum (the normal equations of those level dummies, with the
+                // fit weights), so the recovered constant's covariance is
+                // xbar'V_bb xbar and -V_bb xbar. Apply the identities on every
+                // route and backend instead of inference on the roundoff and
+                // iterative error left in those sums; with no regressors, or
+                // xbar = 0, that variance is exactly zero. Scope: one cluster
+                // dimension (CGM intersections need not vanish), no IV (wide
+                // intercept path), not xhdfe-fast (documented approximation),
+                // not Driscoll-Kraay (it rebuilds this row). The nested
+                // dimension must keep its level dummies: a plain FE or a slope
+                // term with include_intercept (i.d##c.z); a slope-only term
+                // (i.d#c.z) has none. Nestedness is exact on the estimation
+                // sample; the cluster DoF scan is reused when it ran. Saturated
+                // fits never reach this call and fewer than two clusters are
+                // marked unavailable afterwards, as before.
+                bool cluster_residual_sums_zero = false;
+                if (tuned.se_type == StandardErrorType::Cluster && c_ptr &&
+                    c_ptr->size() == 1 && !wants_iv && tuned.dkraay_bandwidth < 0 &&
+                    tuned.tolerance_mode != ToleranceMode::XhdfeFast) {
+                    const bool nesting_scanned = options_.dof_adjust_clusters &&
+                        results_.fe_nested.size() == fes_use.size();
+                    for (std::size_t d = 0; d < fes_use.size() && !cluster_residual_sums_zero; ++d) {
+                        const auto slope = std::find_if(slope_terms.begin(), slope_terms.end(),
+                            [&](const detail::HeterogeneousSlopeTerm& term) {
+                                return term.fe_index == static_cast<int>(d);
+                            });
+                        const bool level_dummies =
+                            slope == slope_terms.end() || slope->include_intercept;
+                        if (level_dummies) {
+                            cluster_residual_sums_zero = nesting_scanned
+                                ? results_.fe_nested[d] != 0
+                                : fe_nested_within_cluster(fes_use[d], c_ptr->front());
+                        }
+                    }
+                }
                 intercept_cov_updated = update_intercept_covariance(
                     results_, X_use, score_X_tilde_used, ols_result.residuals, w_ptr,
                     kept_slope_cols, ols_result, tuned.se_type, c_ptr, tuned.ssc_g_df,
@@ -13528,7 +14557,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 wants_iv ? &iv_dkraay_influences : nullptr);
         }
         recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
-                            results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
+                            results_.pvalues, results_.conf_int, tuned.level, results_.df_resid,
+                            tuned.inference_quantiles);
         normalize_nonfrequency_weighted_fit_stats(
             results_, tuned.weights_are_frequencies, w_ptr, sum_weights_for_stats);
         const bool fewer_than_two_clusters =
@@ -13694,7 +14724,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                                      preprocessing_thread_resolution.effective,
                                                      preprocessing_thread_resolution.capacity,
                                                      options_.num_threads > 0,
-                                                     &preprocessing_observer);
+                                                     &preprocessing_observer,
+                                                     &singleton_scan_levels);
             singletons_dropped_effective = static_cast<double>(singletons_dropped_rows);
         }
         preprocessing_threads_used =
@@ -13760,11 +14791,18 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     if (preprocessing_parallel_observed) {
         if (preprocessing_thread_resolution.effective > threads_effective_) {
+            // A registry-limited estimation team keeps its reason (code 6).
+            const bool estimation_coordinated =
+                thread_limit_code_ == kThreadLimitAutoTeamCoordination;
             threads_effective_ = preprocessing_thread_resolution.effective;
             thread_capacity_ = preprocessing_thread_resolution.capacity;
             openmp_enabled_ = preprocessing_thread_resolution.openmp_enabled;
             thread_limit_code_ = preprocessing_thread_resolution.limit_code;
             thread_limit_reason_ = preprocessing_thread_resolution.limit_reason;
+            if (estimation_coordinated) {
+                thread_limit_code_ = kThreadLimitAutoTeamCoordination;
+                thread_limit_reason_ = kThreadLimitAutoTeamCoordinationReason;
+            }
         }
         threads_used_ = std::max(threads_used_, preprocessing_threads_used);
         parallel_workers_active_ =
@@ -13892,7 +14930,8 @@ void HdfeRegressorV11::apply_importance_weights(
         results_.nobs_effective = kept_n;
         results_.nobs_full_effective = full_n;
         recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
-                            results_.pvalues, results_.conf_int, options_.level, results_.df_resid);
+                            results_.pvalues, results_.conf_int, options_.level, results_.df_resid,
+                            options_.inference_quantiles);
         if (!(new_df > 0.0)) mark_inference_unavailable(results_);
         if (!hdfe::detail::ieee_finite(results_.rss) ||
             !hdfe::detail::ieee_finite(results_.tss) ||
@@ -13921,8 +14960,13 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         throw std::runtime_error("X must have the same number of rows as y");
     }
     const int nobs_full = static_cast<int>(y.size());
+    // Released on every exit path; a nested partial_out() acts on this record.
+    detail::AutoTeamRegistration team_registration;
     const ThreadResolution preprocessing_thread_resolution =
-        resolve_threads(nobs_full, static_cast<int>(fes.size()));
+        coordinate_auto_team(
+            resolve_threads(nobs_full, static_cast<int>(fes.size())),
+            nobs_full, static_cast<int>(fes.size()), team_registration,
+            false);
     const int validation_threads = preprocessing_thread_resolution.effective;
     require_finite_vector(y, "y", validation_threads);
     require_finite_matrix(X, "X", validation_threads);
@@ -13961,6 +15005,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     gpu_attempted_ = false;
     gpu_absorption_converged_ = false;
     gpu_absorption_iterations_ = 0;
+    cuda_tail_code_ = 0;
     if (clusters) {
         for (const auto& c : *clusters) {
             if (c.size() != y.size()) {
@@ -14099,9 +15144,11 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                            const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) -> detail::AbsorptionResult {
         detail::additive_cell_projection::ScopedPublicAutoRequest additive_request(
             options_.absorption_method==AbsorptionMethod::Auto);
-        const ThreadResolution thread_resolution =
+        const ThreadResolution thread_resolution = coordinate_auto_team(
             resolve_threads(static_cast<int>(y_use.size()),
-                            static_cast<int>(fes_use.size()));
+                            static_cast<int>(fes_use.size())),
+            static_cast<int>(y_use.size()), static_cast<int>(fes_use.size()),
+            team_registration, true);
         begin_parallel_observation(thread_resolution);
         const int threads = thread_resolution.effective;
         ScopedParallelRuntime parallel_runtime(
@@ -14118,6 +15165,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         // partial_out/xfepout is explicitly outside the bounded Auto retry
         // product contract.
         tuned.ordinary_auto_routing_retry = false;
+        tuned.ordinary_auto_early_routing = false;
         const bool has_slopes_use = !slope_terms.empty();
         const bool cache_profile_enabled =
             !has_slopes_use &&
@@ -14398,6 +15446,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         gpu_attempted_ = absorption.gpu_attempted;
         gpu_absorption_converged_ = absorption.gpu_absorption_converged;
         gpu_absorption_iterations_ = absorption.gpu_absorption_iterations;
+        cuda_tail_code_ = absorption.cuda_tail;
 
         // Populate a minimal results_ object for Stata/Python consumers that expect e(df_a),
         // singleton counts, and convergence diagnostics.
@@ -14840,11 +15889,18 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
     require_cuda_execution(cuda_execution_required, absorption);
     if (preprocessing_parallel_observed) {
         if (preprocessing_thread_resolution.effective > threads_effective_) {
+            // A registry-limited absorption team keeps its reason (code 6).
+            const bool absorption_coordinated =
+                thread_limit_code_ == kThreadLimitAutoTeamCoordination;
             threads_effective_ = preprocessing_thread_resolution.effective;
             thread_capacity_ = preprocessing_thread_resolution.capacity;
             openmp_enabled_ = preprocessing_thread_resolution.openmp_enabled;
             thread_limit_code_ = preprocessing_thread_resolution.limit_code;
             thread_limit_reason_ = preprocessing_thread_resolution.limit_reason;
+            if (absorption_coordinated) {
+                thread_limit_code_ = kThreadLimitAutoTeamCoordination;
+                thread_limit_reason_ = kThreadLimitAutoTeamCoordinationReason;
+            }
         }
         threads_used_ = std::max(threads_used_, preprocessing_threads_used);
         parallel_workers_active_ =
@@ -15040,9 +16096,15 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     }
     const bool probe_constant = !constant_in_span;
 
-    const ThreadResolution thread_resolution =
+    // One resolution on this path: the lease is taken directly and released
+    // on every exit path.
+    detail::AutoTeamRegistration team_registration;
+    const ThreadResolution thread_resolution = coordinate_auto_team(
         resolve_threads(static_cast<int>(y_work.size()),
-                        static_cast<int>(standard_fes_work.size() + 1));
+                        static_cast<int>(standard_fes_work.size() + 1)),
+        static_cast<int>(y_work.size()),
+        static_cast<int>(standard_fes_work.size() + 1), team_registration,
+        true);
     begin_parallel_observation(thread_resolution);
     const int threads = thread_resolution.effective;
     ScopedParallelRuntime parallel_runtime(
@@ -15191,6 +16253,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     gpu_attempted_ = absorption.gpu_attempted;
     gpu_absorption_converged_ = absorption.gpu_absorption_converged;
     gpu_absorption_iterations_ = absorption.gpu_absorption_iterations;
+    cuda_tail_code_ = absorption.cuda_tail;
     require_accepted_absorption(tuned, absorption, "group/individual HDFE absorption",
         absorption.converged && absorption.precision_certified ? std::string{} :
         group_failure_criteria(y_work, design, standard_fes_work, gi_work, w_ptr, tuned, absorption));
@@ -16225,7 +17288,8 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
             X_work, w_ptr, c_ptr, kept_slope_cols, drop_intercept, tuned);
     }
     recompute_inference(results_.coefficients, results_.std_errors, results_.tvalues,
-                        results_.pvalues, results_.conf_int, tuned.level, results_.df_resid);
+                        results_.pvalues, results_.conf_int, tuned.level, results_.df_resid,
+                        tuned.inference_quantiles);
     normalize_nonfrequency_weighted_fit_stats(
         results_, tuned.weights_are_frequencies, w_ptr, sum_weights_for_stats);
     const bool fewer_than_two_clusters =
@@ -16358,9 +17422,15 @@ GroupIndividualFeEstimates HdfeRegressorV11::extract_group_individual_fes(
     }
 
     const Eigen::VectorXd* w_ptr = collapsed.weights ? &(*collapsed.weights) : nullptr;
-    const ThreadResolution extraction_thread_resolution =
+    // One resolution on this path: the lease is taken directly and released
+    // on every exit path.
+    detail::AutoTeamRegistration team_registration;
+    const ThreadResolution extraction_thread_resolution = coordinate_auto_team(
         resolve_threads(static_cast<int>(collapsed.y.size()),
-                        static_cast<int>(collapsed.standard_fes.size() + 1));
+                        static_cast<int>(collapsed.standard_fes.size() + 1)),
+        static_cast<int>(collapsed.y.size()),
+        static_cast<int>(collapsed.standard_fes.size() + 1), team_registration,
+        true);
     const int extraction_threads = extraction_thread_resolution.effective;
     ScopedParallelRuntime parallel_runtime(
         extraction_threads, extraction_thread_resolution.capacity);

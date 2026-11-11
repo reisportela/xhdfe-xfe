@@ -376,6 +376,7 @@ fi
 stplugin_src="${STPLUGIN_C}"
 srcs=( "${STATA_DIR}/src/xfe_plugin.cpp" )
 srcs+=( "${STATA_DIR}/src/hdfe_regressor_v11.cpp" )
+srcs+=( "${STATA_DIR}/src/auto_team_registry.cpp" )
 srcs+=( "${STATA_DIR}/src/fe_absorption.cpp" )
 srcs+=( "${STATA_DIR}/src/schwarz_demean.cpp" )
 srcs+=( "${STATA_DIR}/src/ols.cpp" )

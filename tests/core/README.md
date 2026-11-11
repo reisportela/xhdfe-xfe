@@ -95,7 +95,7 @@ reports all missing matrix cells.
 | DK covariance parity at `1e-12` between estimators | Retain the strict difference, then apply the existing diagonal-scaled `1e-8` V contract in this declared case; independent MP80/120 observed-period Bartlett oracle is mandatory |
 | Recovery defaults differ | Adapted tests request `fetolerance(1e-8)` explicitly; literal runs leave it unset; product defaults are unchanged |
 | Tighter tolerance always means more iterations | Check finite positive cumulative work within the existing budget; record non-monotonic counts. Cold restarts need not preserve reghdfe's iteration ordering. Independent OLS checks both original tolerances |
-| GPU repetition in `memory` and `singleton-and-fweights` | These strict failures also occur on published 2.29.1. Apply the existing scaled b `1e-9`, diagonal-scaled V `1e-8`, and scalar `1e-8` with floor 1 from `tests/stata/_helpers.do`; preserve strict differences and require half/twice-limit mutation controls. Counts, sample and DoF stay exact; no global relaxation |
+| GPU repetition in `memory`, `singleton-and-fweights` and `fvstrip` | The first two strict failures also occur on published 2.29.1; `fvstrip` differs by one ulp in e(V) in 1 of 20 repeats on the D1 candidate (07nov2026). Apply the existing scaled b `1e-9`, diagonal-scaled V `1e-8`, and scalar `1e-8` with floor 1 from `tests/stata/_helpers.do`; preserve strict differences and require half/twice-limit mutation controls. Counts, sample and DoF stay exact; no global relaxation |
 
 The independent `_core_results.ado` replaces Stata's proprietary snapshot
 utility in xhdfe translations. It tests long result names, scalar/matrix

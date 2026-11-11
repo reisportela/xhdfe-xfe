@@ -2484,6 +2484,12 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // thread requests are propagated unchanged to its operators.
         ho.absorption_method = AbsorptionMethod::Mlsmr;
         ho.tolerance_mode = ToleranceMode::StrictResidual;
+        // Only the coefficients and the convergence, certificate and omission
+        // flags of this fit are used below; xhdfeakm reports no control SE, t,
+        // p-value or CI.  Do not evaluate Student-t quantiles that no output
+        // carries (issue #18: on Windows hosts their inverse refused exact
+        // decompositions).  Convergence and precision checks are unchanged.
+        ho.inference_quantiles = false;
         vprog.say("partialling out %d control(s) (FWL absorber)...",
                   static_cast<int>(Xk.cols()));
         auto fit_fwl = [&](v11::HdfeRegressorV11& target) {
@@ -6159,6 +6165,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     res.gpu_attempted = regu.gpu_attempted();
     res.gpu_absorption_converged = regu.gpu_absorption_converged();
     res.gpu_absorption_iterations = regu.gpu_absorption_iterations();
+    res.cuda_tail_code = regu.cuda_tail_code();
     if (options.use_gpu && fes_in.empty()) {
         res.gpu_status_code = 6;
     } else if (options.use_gpu && !gelbach_cuda_available) {
@@ -6167,6 +6174,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
         res.gpu_attempted = false;
         res.gpu_absorption_converged = false;
         res.gpu_absorption_iterations = 0;
+        res.cuda_tail_code = 0;
         res.notes +=
             "GPU requested but unavailable; full-model absorption used CPU. ";
     }

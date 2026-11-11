@@ -1,6 +1,7 @@
 #pragma once
 
 #include "hdfe/ieee_bits.hpp"
+#include "hdfe/x87_precision.hpp"
 
 #include <algorithm>
 #include <array>
@@ -883,15 +884,97 @@ inline double inverse_survival_checked(double upper_tail, double df) {
         Real(2) * static_cast<Real>(upper_tail), static_cast<Real>(df));
 }
 
+// ---------------------------------------------------------------------------
+// Public entry points and host x87 precision (issue #18).  When WorkingReal is
+// the 80-bit x87 long double (MinGW-w64, Linux and macOS GCC/Clang on x86),
+// every stopping rule and certificate above assumes its 64-bit significand.
+// Windows x64 hosts (Stata, python.exe) run each thread with the x87
+// precision control at 53 bits: there the incomplete-beta fraction stops
+// early, forward probabilities lose accuracy (measured up to 4e-11 relative
+// at df <= 1e6 and 4e-5 at df = 1e12), and nearest_double_quantile refuses
+// ("root is not bracketed").
+// Reproduced with the distributed 2.30.1 Windows plugin and, on Linux, by
+// imposing the control word 0x027F.
+//
+// The three public entry points therefore evaluate under
+// x87::ScopedExtendedPrecision, which raises only the precision-control bits
+// and restores the caller's control word on every exit.  Threads already at
+// 64 bits (Linux, x86 macOS) write nothing and take the unchanged path.  If
+// 64-bit rounding still cannot be confirmed after raising the field, no
+// Student-t value is produced: the binary64 instantiation is not a
+// substitute, because it misses the public 5e-12 contract in measured
+// production builds (forward tails at df ~ 1e6 up to 1.6e-11 relative).  The
+// internal *_with_real/*_checked helpers keep assuming the advertised
+// precision and are not guarded.
+#ifdef XHDFE_X87_PRECISION_CONTROL
+inline void require_extended_working_precision() {
+#ifdef XHDFE_TEST_STUDENT_T_FORCE_PROBE_FAILURE
+    const bool active = false;  // test-only build: exercise the fail-closed branch
+#else
+    const bool active = x87::long_double_significand_active();
+#endif
+    if (!active) {
+        throw std::runtime_error(
+            "Student-t: the x87 precision control of this host could not be "
+            "raised to the 64-bit significand this routine requires; no "
+            "Student-t probability or quantile was produced");
+    }
+}
+
+// Out of line, so no long double work is scheduled before the control word
+// is raised or after it is restored.
+__attribute__((noinline)) inline double two_sided_probability_extended(
+    double t_abs, double df) {
+    return two_sided_probability_with_real<WorkingReal>(t_abs, df);
+}
+
+__attribute__((noinline)) inline double inverse_cdf_extended(
+    double p, double df) {
+    return inverse_cdf_checked<WorkingReal>(p, df);
+}
+
+__attribute__((noinline)) inline double inverse_survival_extended(
+    double upper_tail, double df) {
+    return inverse_survival_checked<WorkingReal>(upper_tail, df);
+}
+#endif
+
 inline double two_sided_probability(double t_abs, double df) {
+#ifdef XHDFE_X87_PRECISION_CONTROL
+    if constexpr (!std::is_same_v<WorkingReal, double>) {
+        const x87::ScopedExtendedPrecision scope;
+        if (scope.changed()) {
+            require_extended_working_precision();
+            return two_sided_probability_extended(t_abs, df);
+        }
+    }
+#endif
     return two_sided_probability_with_real<WorkingReal>(t_abs, df);
 }
 
 inline double inverse_cdf(double p, double df) {
+#ifdef XHDFE_X87_PRECISION_CONTROL
+    if constexpr (!std::is_same_v<WorkingReal, double>) {
+        const x87::ScopedExtendedPrecision scope;
+        if (scope.changed()) {
+            require_extended_working_precision();
+            return inverse_cdf_extended(p, df);
+        }
+    }
+#endif
     return inverse_cdf_checked<WorkingReal>(p, df);
 }
 
 inline double inverse_survival(double upper_tail, double df) {
+#ifdef XHDFE_X87_PRECISION_CONTROL
+    if constexpr (!std::is_same_v<WorkingReal, double>) {
+        const x87::ScopedExtendedPrecision scope;
+        if (scope.changed()) {
+            require_extended_working_precision();
+            return inverse_survival_extended(upper_tail, df);
+        }
+    }
+#endif
     return inverse_survival_checked<WorkingReal>(upper_tail, df);
 }
 

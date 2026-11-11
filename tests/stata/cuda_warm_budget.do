@@ -25,6 +25,7 @@ mata: st_numscalar("dv", max(abs(st_matrix("actual_V")-st_matrix("oracle_V")) :/
 assert db <= 1e-9
 assert dv <= 1e-8
 display "CUDA_WARM_BUDGET_NUMERICAL_PASS"
+display "CUDA_WARM_BUDGET_TAIL `e(cuda_tail)'"
 
 capture noisily xhdfe y x1 x2 x3 x4, absorb(worker firm year) vce(cluster worker) ///
     tolerance(1e-8) tolerancemode(reghdfe-comparable) maxiter(150) ///

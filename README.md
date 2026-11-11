@@ -2,17 +2,18 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.30.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.31.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-[Version 2.30.1.20261020](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.30.1.20261020)
-corrects an inherited CUDA Comparable covariance error in ordinary models
-with three fixed effects. Cooperative GPU reductions reduce the cost of the
-correction; the measured residual cost versus 2.29.1 is documented and accepted.
-It also fixes GPU repair iteration accounting and retains Tiago Tavares's
-macOS OpenMP isolation, CG precision, stored-version and categorical-interaction fixes.
-Fast and Comparable keep their distinct contracts. See the
-[release notes and validation](docs/releases/RELEASE_NOTES_2.30.1.20261020.md)
-for the exact tests and platform coverage.
+[Version 2.31.0.20261112](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.31.0.20261112)
+corrects Student-t inference on Windows, where an x87 precision-control
+incompatibility could reject valid fits with `r(198)`. Stata `residuals()` now
+stores the fit's own residuals in Fast and Comparable mode, without an extra
+absorption. Weighted reghdfe-comparable fits on CPU below the automatic
+selector's thresholds now take the bounded MLSMR retry.
+Unweighted CPU results are bit-for-bit unchanged, and Fast and Comparable keep
+their distinct contracts. See the
+[release notes and validation](docs/releases/RELEASE_NOTES_2.31.0.20261112.md)
+for the exact tests, known limitations and platform coverage.
 
 ---
 
@@ -57,7 +58,10 @@ CUDA limitations. Its timings and platform receipts identify the artifacts
 tested. The [2.29.1 validation record](docs/releases/VALIDATION_2.29.1.20261014.md)
 separately records the corrective release's tests and coverage, and the
 [2.30.1 validation record](docs/releases/VALIDATION_2.30.1.20261020.md) records
-the integrated fixes and the ready-only performance scope for this release.
+the integrated fixes and the ready-only performance scope of that release. The
+[2.31.0 validation record](docs/releases/VALIDATION_2.31.0.20261112.md) records
+this release's acceptance against `reghdfe` at a tight tolerance and against the
+previously validated build.
 GPU execution alone does not certify every output.
 
 ## Features
@@ -491,7 +495,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.30.1.
+> effects regression via a C++ backend.* Version 2.31.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

@@ -1,4 +1,4 @@
-*! version 1.6.1  20oct2026
+*! version 1.6.2  12nov2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -677,6 +677,9 @@ program define xhdfegelbach, rclass sortpreserve
     else if (scalar(__xgel_gpu_status_code) == 4) local gpu_status "failed"
     else if (scalar(__xgel_gpu_status_code) == 5) local gpu_status "cpu_cache"
     else if (scalar(__xgel_gpu_status_code) == 6) local gpu_status "not_applicable"
+    local cuda_tail "none"
+    if (scalar(__xgel_cuda_tail_code) == 1) local cuda_tail "device-lsmr"
+    else if (scalar(__xgel_cuda_tail_code) == 2) local cuda_tail "host-mlsmr"
     local gpu_backend = cond(scalar(__xgel_gpu_used) == 1, "cuda", "cpu")
     local backend_display = upper("`gpu_backend'")
     if ("`gpu'" != "" & "`gpu_status'" != "used") {
@@ -977,7 +980,7 @@ program define xhdfegelbach, rclass sortpreserve
         fullfit_threads_used recovery_threads_used threads_used ///
         thread_capacity openmp_enabled thread_limit_code gpu_used ///
         gpu_status_code gpu_attempted gpu_absorption_converged ///
-        gpu_absorption_iterations {
+        gpu_absorption_iterations cuda_tail_code {
         return scalar `name' = scalar(__xgel_`name')
         capture scalar drop __xgel_`name'
     }
@@ -1095,6 +1098,7 @@ program define xhdfegelbach, rclass sortpreserve
     return local mobility_component_scope "`xgel_mobility_component_scope'"
     return local gpu_backend "`gpu_backend'"
     return local gpu_status "`gpu_status'"
+    return local cuda_tail "`cuda_tail'"
     if (`nx2g' > 0) {
         return local regular_inference_status ///
             "`xgel_regular_inference_status'"

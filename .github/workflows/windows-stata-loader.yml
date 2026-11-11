@@ -94,6 +94,27 @@ jobs:
             --pe-binary artifacts/host/plugin_openmp_probe.exe --runtime-dir artifacts/empty `
             --write-runtime-ledger artifacts/host-closure.json --mingw-objdump $objdump
 
+      - name: Student-t under the Windows x64 host x87 precision (issue 18)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          # The test imposes the 53-bit start-up word with fldcw in every thread
+          # and fails unless read-back and an arithmetic probe confirm it.
+          $compiler = 'C:\Strawberry\c\bin\g++.exe'
+          $flags = @('-std=gnu++17', '-O3', '-ffast-math', '-fno-finite-math-only', '-funroll-loops',
+            '-ftree-vectorize', '-fomit-frame-pointer', '-fno-signed-zeros', '-fno-trapping-math',
+            '-fassociative-math', '-freciprocal-math', '-static', '-Iinclude', '-Ithird_party/eigen-3.4.0')
+          & $compiler @flags tests/student_t_x87_guard_contract.cpp -o artifacts/host/student_t_x87_guard.exe
+          & $compiler @flags -DXHDFE_TEST_STUDENT_T_FORCE_PROBE_FAILURE tests/student_t_x87_guard_contract.cpp `
+            -o artifacts/host/student_t_x87_fail_closed.exe
+          $guard = & artifacts/host/student_t_x87_guard.exe
+          if (-not (@($guard) -match 'STUDENT_T_X87_GUARD_PASS')) { throw "Student-t x87 guard contract failed: $guard" }
+          $closed = & artifacts/host/student_t_x87_fail_closed.exe
+          if (-not (@($closed) -match 'STUDENT_T_X87_GUARD_FAIL_CLOSED_PASS')) { throw "Student-t fail-closed contract failed: $closed" }
+          Write-Host $guard
+          Write-Host $closed
+
       - name: Plain LoadLibrary and real estimator workers with clean PATH
         shell: pwsh
         run: |

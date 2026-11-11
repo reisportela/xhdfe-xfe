@@ -736,7 +736,7 @@
       "zero_absorb": "CPU-only ordinary OLS controls are labelled explicitly in CUDA campaigns; every eligible CUDA call must report actual use",
       "cluster-after-expand": "Checks b/unscaledV invariance and independently derived finite-sample factors, while confirming the expected changes in N/RSS/SSC",
       "DK_cross_package_V": "Original1e-12comparison retained in literal source. Adaptedpart1DK uses the existing1e-8diagonal-scaled contract and records strict differences; MP80/120 independent oracle required. No solver tolerance changes.",
-      "GPU_repeat_contract": "Adapted CUDA memory and singleton/fweight repeats use existing b1e-9 scaled, V1e-8 diagonal-scaled and scalar1e-8 floor1 contracts; strict differences retained. Half/twice-limit mutation controls required. Published2.29.1 also fails the literal repeats.",
+      "GPU_repeat_contract": "Adapted CUDA memory, singleton/fweight and fvstrip repeats use existing b1e-9 scaled, V1e-8 diagonal-scaled and scalar1e-8 floor1 contracts; strict differences retained. Half/twice-limit mutation controls required. Published2.29.1 also fails the literal memory and singleton/fweight repeats; fvstrip differs by one ulp in e(V) in 1 of 20 D1 repeats.",
       "iteration_counts": "Options test checks finite positive cumulative iterations within max_iter. Strict monotonicity with tolerance is a reghdfe implementation expectation, not an xhdfe contract; record its failure and independently verify b/V at both original tolerances.",
       "other_numeric_assertions": "Preserved; no global tolerance relaxation",
       "reference_private_Mata": "Three files counted as reference internals, not xhdfe feature tests",

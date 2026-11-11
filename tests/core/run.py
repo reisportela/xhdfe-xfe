@@ -58,12 +58,14 @@ def prepare(args):
     artifacts += [candidate / 'tests/analytic_precision' / name for name in
                   ('fast_cg_mode_contract.py', 'cg_final_step_contract.py',
                    'cuda_three_fe_covariance_contract.py', 'cuda_warm_budget_contract.py',
+                   'cuda_tail_handover_contract.py',
                    'covariance_cache_generation_contract.py',
                    'fixtures/github_fast_aggregate_reference.json',
                    'fixtures/cg_seed1_2017.csv', 'fixtures/cg_seed1_2017_oracle.json')]
     artifacts += [candidate / 'tests/stata' / name for name in
                   ('cuda_ordinary_weak_graph_contract.do', 'cg_cold_restart_floor.do',
                    'cuda_three_fe_covariance.do', 'cuda_warm_budget.do',
+                   'cuda_tail_handover.do',
                    'xfepout_three_fe_covariance.do')]
     artifacts += [p for p in HERE.rglob('*') if p.is_file() and '__pycache__' not in p.parts]
     artifacts += [p for p in dependencies.rglob('*') if p.is_file()]
@@ -150,6 +152,10 @@ def run(args):
                 ROOT / 'tests/analytic_precision/cuda_warm_budget_contract.py',
                 '--module', module(ROOT, 'cuda'),
                 '--output', output / 'cuda_warm_budget.json'])
+            commands.append([sys.executable, '-B',
+                ROOT / 'tests/analytic_precision/cuda_tail_handover_contract.py',
+                '--module', module(ROOT, 'cuda'),
+                '--output', output / 'cuda_tail_handover.json'])
         elif stage == 'performance':
             if not all(config[k] for k in ('baseline', 'registry', 'scratch')):
                 status = 'NOT_CONFIGURED'

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.30.1 20oct2026}{...}
+{* *! version 2.31.0 12nov2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -151,7 +151,7 @@ or {it:strict-residual}{p_end}
 {synopt :{opt defaultthr:eads(#)}}default threads when auto-threading is enabled{p_end}
 {synopt :{opt maxthr:eads(#)}}maximum threads when auto-threading is enabled{p_end}
 {synopt :{opt minparallelr:ows(#)}}minimum rows to enable parallel absorption{p_end}
-{synopt :{opt targetrowsper:thread(#)}}target rows per thread{p_end}
+{synopt :{opt targetrowsper:thread(#)}}target rows per thread (0 = auto){p_end}
 
 {syntab:Reporting {help xhdfe##opt_reporting:[+]}}
 {synopt :{opt l:evel(#)}}set confidence level; default is {cmd:level(95)}{p_end}
@@ -267,15 +267,47 @@ available at runtime. If the plugin was rebuilt or switched during the current S
 (with no arguments) before rerunning the command.
 
 {phang}
-{bf:Version 2.30.1 validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
+{bf:CUDA validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
 For ordinary unweighted Comparable fits with three fixed effects and no saved effects,
 the CUDA path completes the remaining projection within the original iteration budget.
 This corrects an inherited covariance error; independent references check the complete coefficient and covariance output.
-The correction has a measured runtime cost relative to 2.29.1. The release validation record reports
-all eight execution variants on the ready specification and the accepted performance trade-off.
+This correction, made in version 2.30.1, has a measured runtime cost relative to 2.29.1. The 2.30.1 validation
+record reports all eight execution variants on the ready specification and the accepted performance trade-off.
 Ill-conditioned and {cmd:group()}/{cmd:individual()} cases can still require a precision refusal;
 use {cmd:gpubackend(cpu)} for those specifications. Old absorption caches are invalidated automatically.
 Fast and Comparable remain distinct approximation contracts; CUDA remains opt-in.
+
+{phang}
+{bf:Where the CUDA completion runs.} The completion described above normally runs on the GPU.
+On graphs that mix slowly the GPU solver for it can need thousands of iterations. A short GPU probe
+predicts its length; when the prediction is long and the CPU would itself absorb this fit with MLSMR,
+the CPU finishes the projection with MLSMR, from the state the GPU sweeps reached, at the same tolerance,
+within the same iteration budget and under the same precision certificate, using the thread team of the fit
+({cmd:numthreads()}). {cmd:e(cuda_tail)} names the completion: {cmd:device-lsmr} (GPU),
+{cmd:host-mlsmr} (CPU after the GPU sweeps; {cmd:e(gpu_used)} stays 1), or {cmd:none} when no completion ran.
+{cmd:e(absorption_method_used)} is then 5 (LSMR) or 6 (MLSMR).
+At tight tolerances the GPU sweeps can instead hand over to a conjugate-gradient stage; when that stage stops
+without converging, the fit restarts from the original data with GPU LSMR. The same probe and the same CPU
+decision apply to that restart: when both point to the CPU, the CPU solves the fit with MLSMR from the original
+data (never from the conjugate-gradient state) and {cmd:e(cuda_tail)} is {cmd:host-mlsmr}; a restart kept on
+the GPU reports {cmd:none}, as in version 2.30.1, so {cmd:none} also covers that GPU restart (the trace below
+names it {cmd:restart->device-lsmr}).
+{cmd:e(iterations)} and {cmd:e(gpu_absorption_iterations)} count all of it: the GPU sweeps (including those
+before a conjugate-gradient stage that is then restarted), the conjugate-gradient iterations, the GPU solver
+and the CPU iterations, all charged to one {cmd:maxiter()} budget that is never reset: the conjugate-gradient
+stage only receives what the sweeps left, and a fit whose sweeps and conjugate-gradient stage use the whole
+budget stops with no estimates, reporting {cmd:iterations=}{it:maxiter}{cmd:/}{it:maxiter}. One exception, on
+the CPU and on the GPU alike: when the conjugate-gradient stage converges (no restart), {cmd:e(iterations)}
+counts its iterations but not the sweeps before it. Setting the environment variable
+{cmd:XHDFE_CUDA_TAIL_HANDOVER=0} keeps the completion and the restart on the GPU, as in version 2.30.1, with its
+budget and iteration count (the sweeps before a conjugate-gradient stage are then neither charged to its budget
+nor counted).
+For diagnosis, {cmd:XHDFE_GI_LSMR_TRACE=1} writes the decision to standard error: one {cmd:cuda_tail_probe}
+line per checkpoint (the predicted remaining GPU work and the CPU route selector), one {cmd:cuda_tail_handover}
+line when the CPU completes (its iterations and time), one {cmd:cuda_it_to_cg} and one {cmd:cuda_cg_end} line
+around a conjugate-gradient stage, and one {cmd:cuda_tail_restart} line per restart (iterations and time of
+every stage, GPU and CPU apart). The same variable also traces the LSMR solves of the
+{cmd:group()}/{cmd:individual()} absorption. The decision uses solver quantities only, never elapsed time.
 
 {phang}
 Practical rule: after rebuilding {cmd:xhdfe.plugin}, after switching between CPU and CUDA plugin binaries, or after
@@ -879,7 +911,41 @@ It never reduces a positive {cmd:numthreads()} request.
 {opth minparallelr:ows(#)} minimum rows required to enable parallel absorption.
 
 {phang}
-{opth targetrowsper:thread(#)} heuristic target rows per thread.
+{opth targetrowsper:thread(#)} rows per thread when auto-threading sizes the team.
+The default, {cmd:targetrowsperthread(0)}, is automatic: one thread per 25,000 rows
+when the fixed effects are absorbed without being saved, within the problem-size
+cap (one thread below 100,000 rows, at most 8 below 250,000 and at most 16
+otherwise), and one thread per 500,000 rows when they are saved ({cmd:savefe},
+{cmd:savefes()}) or nothing is absorbed. A positive value applies that fixed
+number of rows per thread on every path; {cmd:targetrowsperthread(500000)}
+restores the automatic rule of version 2.30.1. Setting
+{cmd:XHDFE_AUTO_ROWS_PER_THREAD} to a positive integer before Stata starts
+replaces the 25,000.
+
+{phang}
+{bf:Simultaneous sessions:} on Linux and macOS, the automatic teams of one
+user's simultaneous fits share the machine. Each fit whose team has more than
+one thread records it in a small file of that user ({cmd:xhdfe-teams-}{it:uid}
+in {cmd:/dev/shm}, or in the temporary directory where {cmd:/dev/shm} does not
+exist) when it starts and again when its absorption starts. An automatic fit
+that absorbs fixed effects without saving them then takes the smallest of its
+automatic team, the logical processors divided by the number of fits running,
+and the processors not taken by the absorptions of the other fits, but never
+fewer threads than {cmd:targetrowsperthread(500000)} would give. A positive
+{cmd:numthreads()} is never reduced; it is recorded so that automatic fits
+leave room for it. A fit running alone keeps its automatic team. When the
+coordination lowered the team of at least one phase of the fit (its start or
+its absorption), {cmd:e(thread_limit_code)} is 6 and
+{cmd:e(thread_limit_reason)} is {cmd:auto_team_coordination}; the team then
+depends on what else the user is running, so the last bits of the estimates
+can differ from those of the same fit run alone. The parallel reading of the
+data precedes the fit and keeps its automatic team, so in a batch
+{cmd:e(threads_used)} can exceed {cmd:e(threads_effective)}. Other users and
+other programs are not seen. Setting {cmd:XHDFE_AUTO_TEAM_COORDINATION=0}
+before Stata starts turns the coordination off; it is not available on other
+platforms, such as Windows. {cmd:XHDFE_AUTO_TEAM_REGISTRY_DIR}, set to an
+absolute directory, moves the file there; it is meant for diagnostics and
+tests.
 
 {phang}
 {bf:OpenMP:} parallel absorption requires a plugin built with OpenMP support.
@@ -888,6 +954,10 @@ with an error rather than reporting fictitious parallelism. {cmd:e(threads_used)
 is the largest OpenMP team observed while executing a real xhdfe loop;
 {cmd:e(parallel_workers_active)} is the largest number of distinct workers
 that processed useful units in the same observed region.
+Both include the parallel reading of the data where the plugin uses it, whose
+sample selection scans the whole data range, so {cmd:e(threads_used)} can
+exceed {cmd:e(threads_effective)} when {cmd:if}/{cmd:in} or singleton dropping
+leaves the estimation sample much smaller than the data.
 On Linux, the build script will try OpenMP automatically; to force it (recommended for performance), from the repository root:
 
 {phang2}
@@ -1060,9 +1130,34 @@ Driscoll-Kraay option described under {help xhdfe##opt_vce:vce()}{p_end}
 {p2colreset}{...}
 
 {marker known_limitations}{...}
-{title:Known limitations (2.30.1)}
+{title:Known limitations (2.31.0)}
 
 {p2colset 8 12 12 2}{...}
+{p2col: -}Weighted ordinary three-FE fits on {cmd:gpubackend(cuda)} in {it:reghdfe-comparable} keep the 2.30.1
+sweep exit: converged and certified, but outside the comparable contract against {cmd:reghdfe} at tolerance
+1e-12 (public 240,000-row three-way fixture: coefficients up to 4.4e-7 and standard errors up to 2.3e-5
+relative). Use the CPU backend, where weighted fits are corrected in this release.{p_end}
+{p2col: -}{cmd:savefe}/{cmd:savefes} in {it:reghdfe-comparable} use the effect-capturing sweep, whose exit can
+leave coefficients and standard errors outside the comparable contract (in the measured cases up to 4.5e-7
+relative in coefficients and 1e-4 in the covariance). Fit without saving the effects when that contract
+matters.{p_end}
+{p2col: -}CUDA {it:strict-residual} with the automatic method and criterion and no weights may pass the relative
+certificate without the final strict check (public fixture: coefficients 1.5e-7 and standard errors 1.7e-4
+relative to an exact reference). Inherited, present in 2.28.1. Use the CPU backend for strict-residual
+results.{p_end}
+{p2col: -}Under CUDA {it:strict-residual}, the accuracy of the vector stored by {cmd:residuals()} can differ between
+runs (2.1e-6 or 1.4e-13 on the public three-way fixture).{p_end}
+{p2col: -}{cmd:residuals()} stores the fit's own within residuals. On CUDA they have the accuracy of the CUDA fit:
+on a path-like two-FE public fixture 8.4e-4 ({it:xhdfe-fast}) and 1.3e-6 ({it:reghdfe-comparable}) relative to
+an exact reference, against 4.5e-3 with the extra re-absorption of earlier versions (measured with 2.28.1); on
+the three-way public fixture at most 5e-10.{p_end}
+{p2col: -}{cmd:xhdfeakm} and the level of the outcome (issue #18): KSS-corrected variance components depend on
+outcome shifts for matches of unequal length under {cmd:leaveoutlevel(match)}; {cmd:se} and {cmd:ci} also depend
+on the outcome level under both {cmd:obs} and {cmd:match}. A correction is planned for the next version.{p_end}
+{p2col: -}Windows, near-perfect fits: near-perfect additive-cell fixtures returned exact coefficients and certified
+fits with relative covariance errors of 2.65e-9, 1.74e-4 and 1.82e+2 at relative residual noise of 2^-12, 2^-20
+and 2^-30; the same fixtures on Linux returned 2.2e-16. The exact additive-cell projection needs
+extended-precision arithmetic, which Windows hosts run at 53 bits.{p_end}
 {p2col: -}A fit that converges by the solver's stopping rule but does not pass the
 precision certificate returns no estimates (r(498)) in Stata, Python and R alike.
 Ill-conditioned specifications can still require a refusal. In {it:reghdfe-comparable}, heterogeneous slopes under
@@ -1240,11 +1335,14 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(auto_retry_policy_enabled)}}1 when the bounded CPU Auto retry policy is enabled{p_end}
 {synopt:{cmd:e(auto_retry_eligible)}}1 when all retry eligibility gates passed{p_end}
 {synopt:{cmd:e(auto_retry_fired)}}1 when the one cold MLSMR retry ran{p_end}
-{synopt:{cmd:e(auto_retry_status_code)}}0 ineligible/disabled, 1 below trigger, 2 retry used, 3 retry failed and primary returned{p_end}
-{synopt:{cmd:e(auto_retry_status)}}{cmd:ineligible}, {cmd:below_trigger}, {cmd:used}, or {cmd:failed}{p_end}
+{synopt:{cmd:e(auto_retry_status_code)}}0 ineligible/disabled, 1 below trigger, 2 retry used, 3 retry failed and primary returned,
+4 primary left early and retry used{p_end}
+{synopt:{cmd:e(auto_retry_status)}}{cmd:ineligible}, {cmd:below_trigger}, {cmd:used}, {cmd:failed}, or {cmd:left_early}{p_end}
 {synopt:{cmd:e(auto_retry_primary_method)}}primary concrete absorption-method code{p_end}
-{synopt:{cmd:e(auto_retry_primary_iterations)}}primary sweep iterations{p_end}
-{synopt:{cmd:e(auto_retry_primary_abs_res_rel)}}primary canonical certificate metric{p_end}
+{synopt:{cmd:e(auto_retry_primary_iterations)}}primary sweep iterations; with {cmd:left_early},
+the sweep or conjugate-gradient iterations done before leaving{p_end}
+{synopt:{cmd:e(auto_retry_primary_abs_res_rel)}}primary canonical certificate metric; with {cmd:left_early},
+the predicted final certificate that triggered the leave (0 when the leave was at the hand-off to a conjugate-gradient stage){p_end}
 {synopt:{cmd:e(auto_retry_iterations)}}cold MLSMR retry iterations{p_end}
 {synopt:{cmd:e(auto_retry_abs_res_rel)}}retry canonical certificate metric{p_end}
 {synopt:{cmd:e(auto_retry_elapsed_seconds)}}retry wall time in seconds{p_end}
@@ -1271,13 +1369,15 @@ only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise c
 {synopt:{cmd:e(parallel_workers_active)}}largest number of distinct workers processing useful work in one observed region{p_end}
 {synopt:{cmd:e(thread_capacity)}}logical processors available after the OpenMP runtime limit{p_end}
 {synopt:{cmd:e(openmp_enabled)}}1 when the loaded plugin was compiled with OpenMP{p_end}
-{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable{p_end}
+{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable,
+6 automatic team shared with the same user's simultaneous fits{p_end}
 {synopt:{cmd:e(thread_limit_reason)}}label corresponding to {cmd:e(thread_limit_code)}{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
 {synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
+{synopt:{cmd:e(cuda_tail_code)}}three-FE Comparable CUDA completion: 0 none, 1 GPU LSMR, 2 CPU MLSMR after the GPU sweeps{p_end}
 {synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto,
 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR,
 6 MLSMR, 7 auto-MLSMR{p_end}
@@ -1313,6 +1413,18 @@ convention already used for a saturated design. The displayed table therefore ma
 diagonal so that Stata's {cmd:sqrt(V[j,j])} evaluates to missing, whereas {helpb reghdfe} posts
 zero. Code reading {cmd:e(V)} directly in this situation will therefore see a negative variance;
 read {cmd:_se[]} or check {cmd:e(N_clust)} instead.{p_end}
+{phang} With absorbed fixed effects, {cmd:_cons} is the constant recovered by the FE normalisation,
+mean({it:y}) - mean({it:X})*{it:b}. When a one-way {cmd:vce(cluster)} nests an absorbed intercept
+dimension (every cluster is a union of its levels; a slope-only term {cmd:fe#c.x} has no levels,
+whereas {cmd:fe##c.x} keeps them), the cluster sums of the residuals are exactly zero, and the
+{cmd:_cons} row and column of {cmd:e(V)} are exactly {it:m}'{it:V}{it:m} and -{it:V}{it:m}, where
+{it:m} = mean({it:X}) and {it:V} is the slope block of {cmd:e(V)}; this applies on every absorption
+route and backend, but not with {cmd:tolerancemode(xhdfe-fast)}, instruments or {cmd:vce(dkraay)}.
+That variance is zero when {it:m} = 0 or there are no regressors: {cmd:_se[_cons]} is then 0,
+and the coefficient table shows the standard error, {it:t}, {it:p} and confidence interval of
+{cmd:_cons} as missing. This does
+not mean a structural parameter known without uncertainty; the constant is a normalisation of the
+absorbed effects. Saturated designs and fewer than two clusters keep the conventions above.{p_end}
 {phang} A converged fit never posts a non-finite coefficient, and never posts a non-finite
 standard error for a coefficient whose inference is identified; such a result is rejected with an
 error instead of being reported.{p_end}
@@ -1358,6 +1470,7 @@ or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end
 {synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
 {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
 {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(cuda_tail)}}label of {cmd:e(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
 {synoptline}
 
 {synoptset 24 tabbed}{...}
@@ -1439,7 +1552,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.30.1.
+regression via a C++ backend." Version 2.31.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

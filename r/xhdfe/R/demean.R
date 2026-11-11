@@ -188,6 +188,8 @@ xhdfe_demean <- function(fml, data = NULL, weights = NULL,
                  schwarz_used = res$schwarz_used,
                  mlsmr_used = res$mlsmr_used,
                  gpu_used = res$gpu_used,
+                 cuda_tail_code = res$cuda_tail_code,
+                 cuda_tail = res$cuda_tail,
                  threads_used = res$threads_used),
             class = "xhdfe_demean")
 }
