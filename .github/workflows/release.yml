@@ -691,16 +691,39 @@ jobs:
               assert receipt['loaded_runtime_sha256'] == record['sha256']
           PYCODE
 
+          # Every input below is pinned by hash. When an upstream host does not
+          # answer (Launchpad and Canonical's name servers were degraded on
+          # 11 November 2026), the same pinned bytes are taken from the
+          # corresponding-source bundle of the previous public release, itself
+          # pinned by hash. The caller verifies each file whichever source served it.
+          PREVIOUS_BUNDLE_URL="https://github.com/reisportela/xhdfe-xfe/releases/download/v2.30.1.20261020/xhdfe-2.30.1.20261020-corresponding-source.zip"
+          PREVIOUS_BUNDLE_SHA256="46685d524d2e89f7142b761d6d2a472fa1ffd89866d95468f796f18d4af5fda0"
+          PREVIOUS_BUNDLE="$RUNNER_TEMP/previous-corresponding-source.zip"
+          fetch_file() {
+            local url="$1" output="$2" member=""
+            if curl --fail --location --retry 3 --retry-all-errors \
+                 --connect-timeout 20 --max-time 600 --output "$output" "$url"; then
+              return 0
+            fi
+            echo "fetch of $url failed; using the pinned copy in the previous release's source bundle" >&2
+            if [ ! -f "$PREVIOUS_BUNDLE" ]; then
+              curl --fail --location --retry 5 --retry-all-errors \
+                --output "$PREVIOUS_BUNDLE" "$PREVIOUS_BUNDLE_URL"
+              echo "$PREVIOUS_BUNDLE_SHA256  $PREVIOUS_BUNDLE" | sha256sum --check --strict
+            fi
+            member="$(unzip -Z1 "$PREVIOUS_BUNDLE" \
+              | awk -F/ -v name="$(basename "$output")" '$NF == name { print; exit }')"
+            test -n "$member"
+            unzip -p "$PREVIOUS_BUNDLE" "$member" > "$output"
+          }
           fetch_sha256() {
             local url="$1" output="$2" expected="$3"
-            curl --fail --location --retry 5 --retry-all-errors \
-              --output "$output" "$url"
+            fetch_file "$url" "$output"
             echo "$expected  $output" | sha256sum --check --strict
           }
           fetch_sha512() {
             local url="$1" output="$2" expected="$3"
-            curl --fail --location --retry 5 --retry-all-errors \
-              --output "$output" "$url"
+            fetch_file "$url" "$output"
             echo "$expected  $output" | sha512sum --check --strict
           }
 
