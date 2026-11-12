@@ -9,8 +9,8 @@ explicit person-year-centred point estimator and full-model worker projection
 inference while retaining the legacy default. See [the option and its statistical limits](docs/akm-projection-inference.md)
 and [the validation record](docs/releases/VALIDATION_2.31.1.20261112.md).
 
-[Version 2.31.0.20261111](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.31.0.20261111)
-corrects Student-t inference on Windows, where an x87 precision-control
+This release also includes the [2.31.0 source changes](docs/releases/RELEASE_NOTES_2.31.0.20261111.md),
+which correct Student-t inference on Windows, where an x87 precision-control
 incompatibility could reject valid fits with `r(198)`. Stata `residuals()` now
 stores the fit's own residuals in Fast and Comparable mode, without an extra
 absorption. Weighted reghdfe-comparable fits on CPU below the automatic
@@ -65,7 +65,7 @@ separately records the corrective release's tests and coverage, and the
 [2.30.1 validation record](docs/releases/VALIDATION_2.30.1.20261020.md) records
 the integrated fixes and the ready-only performance scope of that release. The
 [2.31.0 validation record](docs/releases/VALIDATION_2.31.0.20261111.md) records
-this release's acceptance against `reghdfe` at a tight tolerance and against the
+that source base's acceptance against `reghdfe` at a tight tolerance and against the
 previously validated build.
 GPU execution alone does not certify every output.
 
