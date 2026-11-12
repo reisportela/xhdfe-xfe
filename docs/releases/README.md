@@ -1,5 +1,8 @@
 # Release notes
 
+Unpublished development candidate:
+[2.31.1.20261112 — invariant AKM components and worker projection inference](RELEASE_NOTES_2.31.1.20261112.md).
+
 Versioned release notes are kept here so the repository root remains focused
 on installation, build, and package metadata.
 

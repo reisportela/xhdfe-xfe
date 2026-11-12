@@ -2,8 +2,11 @@
 #define HDFE_AKM_KSS_HPP
 
 #include <Eigen/Dense>
+#include "hdfe/akm_projection.hpp"
 
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,6 +27,22 @@ enum class LeaveOutLevel { Match, Observation };
 // draws and deterministic seeding. Auto mirrors LeaveOutTwoWay: exact when
 // the input has <= exact_max_rows person-year rows, JLA otherwise.
 enum class LeverageMethod { Auto, Exact, Jla };
+
+// The legacy convention remains the default. PersonYear is an explicitly
+// different point estimator: invariant to location, not exactly unbiased
+// under arbitrary heteroskedasticity. Optional inference projects a
+// full-model, worker-cluster confidence region; see AkmProjectionResult.
+enum class SigmaCentering { LeaveOutTwoWay, PersonYear };
+
+inline SigmaCentering parse_sigma_centering(const std::string& value) {
+    if (value == "leaveouttwoway") return SigmaCentering::LeaveOutTwoWay;
+    if (value == "person_year" || value == "personyear") return SigmaCentering::PersonYear;
+    throw std::invalid_argument("sigma_centering must be leaveouttwoway or person_year");
+}
+
+inline const char* sigma_centering_name(SigmaCentering value) {
+    return value == SigmaCentering::PersonYear ? "person_year" : "leaveouttwoway";
+}
 
 struct AkmOptions {
     LeaveOutLevel leave_out_level = LeaveOutLevel::Match;
@@ -50,6 +69,7 @@ struct AkmOptions {
     int verbose = 0;                     //!< 0 = silent (default). 1 = phase announcements plus throttled intra-phase progress with elapsed time and an ETA on the long loops (JLA leverage draws, SE simulations). Output only — never changes any numeric result.
     void (*progress)(const char* line, void* user) = nullptr;  //!< Optional sink for the verbose lines (one line per call, no trailing newline). When null, lines go to stderr. Called only from the calling thread, never from inside a parallel region — a Stata plugin can route it to SF_display.
     void* progress_user = nullptr;       //!< Opaque pointer handed back to `progress`.
+    SigmaCentering sigma_centering = SigmaCentering::LeaveOutTwoWay;
 };
 
 // Options for the standalone leave-out connected-set utility.  The graph
@@ -206,6 +226,9 @@ struct AkmKssResult {
     long long solver_iterations = 0; //!< Total PCG iterations across all solves (0 when fully direct).
     bool converged = true;
     std::string notes;
+    // Appended so the existing result fields retain their layout. Empty on
+    // the legacy and point-only paths; no inference work is done there.
+    std::shared_ptr<const AkmProjectionResult> projection_inference;
 };
 
 // Largest leave-out connected set, matching LeaveOutTwoWay: largest

@@ -80,6 +80,30 @@ def akm_kss(y, worker, firm, X=None, **kwargs):
     See ``help(xhdfe.py_hdfe_v11.akm_kss)`` for the full argument list
     (leave_out_level, leverages, jla_draws, seed, prune, ...).
 
+    ``sigma_centering='leaveouttwoway'`` preserves the existing default.
+    Explicit ``sigma_centering='person_year'`` centres the transformed match
+    outcome using the person-year mean on the retained sample after FWL.
+    Its point components are invariant to a common outcome shift, including
+    with unequal match lengths. This is a different estimator: exact
+    finite-sample unbiasedness under arbitrary heteroskedasticity is not
+    guaranteed. The selected convention is returned as ``sigma_centering``.
+    With ``compute_se=True`` this option returns regular-case delta SEs and
+    simultaneous 95% projection intervals for firm variance and worker-firm
+    covariance in ``projection_inference``. The full-model calculation
+    includes control-estimation uncertainty and clusters by worker, leaving
+    the point correction's leave-out unit unchanged. Validity requires
+    independent workers, bounded moments/cluster sizes, a fixed number of
+    firms and diffuse identified contrasts. Intervals remain applicable at
+    weak signal; delta SEs require first-order regularity. The intervals need
+    not contain the corrected point. See the installed ``help/akm.md`` guide.
+    This inference supports 2--128 firms and unit weights; var(alpha)
+    inference, sigma-lowess and Z/lincom are unavailable. Legacy inference remains
+    available with the default convention and retains its known dependence
+    on the outcome level. Its SEs accompany ``component_se['theta_*']``,
+    which are distinct from the reported ``kss`` components.
+    Legacy inference treats the FWL-adjusted outcome as fixed and does not
+    propagate control-estimation uncertainty.
+
     Advanced performance environment variables (defaults are tuned; none
     changes the default numeric output):
 

@@ -752,3 +752,45 @@ para colegas, com as 21 qualificações explícitas, sem converter ganhos locais
 em aprovação global de performance. Relatório, decisão e hashes finais em
 `performance_report/FINAL_REPORT.md`, `FINAL_DECISION.json` e
 `ROOT_PACKAGE_READBACK.json` da mesma pasta.
+
+## 12nov2026 — issue 18: invariância e inferência com controlos
+
+O erro Windows de quantis numa decomposição pontual vinha da inferência
+auxiliar não solicitada; a base 2.31.0 deixa de calcular esses quantis. A
+centragem herdada do LeaveOutTwoWay permanece por omissão, com a alternativa
+explícita `person_year`. A estimativa pontual dessa alternativa é idêntica com
+e sem pedido de inferência. Os intervalos novos usam o modelo completo e
+clusters por trabalhador; as condições e a prova constam de
+`docs/akm-projection-inference.md`.
+
+Foram classificados e corrigidos na candidata, antes da publicação:
+
+- **Erro numérico demonstrado:** uma norma que elevava os termos ao quadrado
+  devolvia SE zero ao multiplicar y por 2^-500; a 2^500 recusava uma escala
+  representável. A inferência usa normas estáveis e normalização binária antes
+  do QR, com reposição das unidades e verificações de representabilidade dos
+  resultados. Não se alteraram tolerâncias nem alvos de convergência.
+- **Recusa indevida do verificador:** o teste aos valores próprios da
+  covariância rejeitava direções identificadas com ruído pequeno, por elevar
+  ao quadrado o condicionamento. O teste passou a usar os valores singulares
+  da raiz QR normalizada pelo desenho. O caso de ruído 1e-7 fica permanente.
+- **Limite aritmético herdado, isolado na opção nova:** o guard CUDA
+  `pAp < 1e300` recusava RHS grandes ainda representáveis. Apenas a opção
+  `person_year` normaliza RHS extremos por potências de dois e repõe os
+  efeitos, mantendo a tolerância relativa. A mesma opção usa finitude IEEE
+  efetiva nos componentes; a convenção legada continua disponível.
+- **Erros do harness:** um conversor Eigen automático do pybind11 2.11.1
+  falhava com NumPy 2 antes de entrar no estimador; o teste usa mapas explícitos,
+  como as interfaces de produção. Outro executável de teste usava alinhamento
+  Eigen genérico contra a biblioteca nativa; passou a usar a função CMake de
+  configuração nativa já existente. Não se alterou o estimador para esconder
+  qualquer destas falhas.
+
+Reprodutores permanentes: `tests/akm_projection_contract.cpp` (oráculo escalar
+fechado), `tests/analytic_precision/akm_projection_contract.py` (SVD do desenho
+completo, amostra podada, omissões, desequilíbrio, escalas e ruído baixo),
+`tests/stata/akm_projection_contract.do` e
+`tests/analytic_precision/akm_projection_r.R`. Os probes dos artefactos finais
+também exercitam esta inferência. As recusas esperadas são contadas à parte.
+A evidência original, os binários falhados e as quatro revisões Fable estão
+preservados em `Verifications/issue18_codex_20261111/`.

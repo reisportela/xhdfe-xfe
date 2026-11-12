@@ -69,6 +69,7 @@ def main() -> int:
         import numpy as np
         import xhdfe
         from xhdfe import py_hdfe_v11 as core
+        from akm_projection_release_probe import validate_projection
 
         package = Path(xhdfe.__file__).resolve(strict=True).parent
         module = Path(core.__file__).resolve(strict=True)
@@ -153,6 +154,7 @@ def main() -> int:
                 "thread_covariance_scaled_difference": parity_v,
                 "thread_rss_relative_difference": parity_rss,
             })
+        projection_receipt = validate_projection(core)
         receipt.update(
             status="PASS",
             package_path=str(package),
@@ -160,6 +162,7 @@ def main() -> int:
             module_path=str(module),
             module_sha256=sha256(module),
             rows=rows,
+            akm_projection=projection_receipt,
         )
     except Exception as error:
         receipt["reason"] = repr(error)

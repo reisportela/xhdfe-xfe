@@ -1,6 +1,6 @@
-*! version 1.8.2  11nov2026
+*! version 1.9.0  12nov2026
 *! AKM estimation + leave-out (KSS) variance decomposition on the xhdfe backend.
-*! Numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
+*! Default numerical semantics follow Saggio's LeaveOutTwoWay (Kline-Saggio-Soelvsten 2020);
 *! identical compiled core as the Python py_hdfe_v11.akm_kss and R xhdfe_akm_kss.
 
 program define xhdfeakm, rclass sortpreserve
@@ -11,9 +11,20 @@ program define xhdfeakm, rclass sortpreserve
           THREADS(integer 0) EXACTMAXrows(integer 10000)                             ///
           DIRECTMAXfirms(integer 50000) CGTOL(real 1e-10) FWLTOL(real 1e-10) ///
           SE SENSIM(integer 1000) CI EIGTRACENSIM(integer 100) SIGMALOWess GPU  ///
-          VERBose ]
+          VERBose SIGMACentering(string) ]
 
     local y `varlist'
+    if ("`sigmacentering'" == "") local sigmacentering "leaveouttwoway"
+    if ("`sigmacentering'" == "personyear") local sigmacentering "person_year"
+    if (!inlist("`sigmacentering'", "leaveouttwoway", "person_year")) {
+        di as err "sigmacentering() must be leaveouttwoway or personyear"
+        exit 198
+    }
+    if ("`sigmacentering'" == "person_year" & "`sigmalowess'" != "") {
+        di as err "sigmacentering(personyear) uses worker projection inference; sigmalowess is not supported"
+        exit 198
+    }
+    if ("`sigmacentering'" == "person_year" & "`se'" != "") local ci "ci"
     if (`threads' < 0) {
         di as err "threads() must be nonnegative"
         exit 198
@@ -118,6 +129,7 @@ program define xhdfeakm, rclass sortpreserve
     // Assemble the packed plugin config (task=akm_kss selects the AKM branch).
     local cfg "cfg=task=akm_kss;ncontrols=`ncontrols';store_effects=`store_effects';has_fweight=`has_fweight';"
     local cfg "`cfg'leave_out_level=`leaveoutlevel';leverages=`leverages';"
+    local cfg "`cfg'sigma_centering=`sigmacentering';"
     local cfg "`cfg'jla_draws=`draws';seed=`seed';prune=`do_prune';"
     local cfg "`cfg'exact_max_rows=`exactmaxrows';direct_max_firms=`directmaxfirms';"
     if ("`ci'" != "") {
@@ -189,6 +201,10 @@ program define xhdfeakm, rclass sortpreserve
     if (`rc') {
         exit `rc'
     }
+    if ("`xakm_sigma_centering'" != "`sigmacentering'") {
+        di as err "xhdfeakm: the loaded plugin does not confirm the requested sigma centring; rebuild or update the matching plugin"
+        exit 498
+    }
 
     // Collect the plugin scalars into r() and clean the hidden names up.
     local smap "gpu_requested gpu_used gpu_status_code fwl_gpu_attempted fwl_gpu_used fwl_gpu_fallback fwl_gpu_status_code fwl_iterations fwl_abs_residual_rel fwl_precision_certified plugin_var_alpha plugin_var_psi plugin_cov agsu_var_alpha agsu_var_psi agsu_cov kss_var_alpha kss_var_psi kss_cov var_y sigma2_ho n_obs n_obs_input n_obs_connected n_workers n_firms n_matches n_movers n_stayers n_rows max_pii mean_pii leverages_exact solver_direct threads_requested threads_effective solver_threads_effective fwl_threads_effective fwl_threads_used solver_threads_used threads_used thread_capacity openmp_enabled thread_limit_code jla_draws seed solver_iterations converged"
@@ -235,6 +251,28 @@ program define xhdfeakm, rclass sortpreserve
             }
         }
     }
+    if ("`sigmacentering'" == "person_year" & "`se'" != "") {
+        if ("`xakm_inference_method'" != "worker_projection") {
+            return clear
+            di as err "the loaded plugin does not confirm worker projection inference; load the matching release"
+            exit 198
+        }
+        return local inference_method "worker_projection"
+        return local inference_cluster "worker"
+        return local inference_backend "cpu"
+        return local se_method "regular_delta"
+        foreach nm in dimension rank clusters max_cluster controls degree critical factor ///
+            max_trace max_leverage cov_condition solver_gap bread_reused threads_used workers_active {
+            return scalar proj_`nm' = scalar(__xakm_proj_`nm')
+            capture scalar drop __xakm_proj_`nm'
+        }
+        foreach comp in psi cov {
+            foreach nm in nonlinear correction zero_gradient {
+                return scalar proj_`nm'_`comp' = scalar(__xakm_proj_`nm'_`comp')
+                capture scalar drop __xakm_proj_`nm'_`comp'
+            }
+        }
+    }
     // Derived summary per estimator table (pytwoway-style): correlation of
     // effects, var(alpha+psi) and the shares of var(y) explained.
     foreach est in plugin agsu kss {
@@ -251,6 +289,7 @@ program define xhdfeakm, rclass sortpreserve
         }
     }
     return local leave_out_level "`leaveoutlevel'"
+    return local sigma_centering "`xakm_sigma_centering'"
     return local cmd "xhdfeakm"
     if ("`xakm_notes'" != "") {
         return local notes "`xakm_notes'"
@@ -294,13 +333,17 @@ program define xhdfeakm, rclass sortpreserve
     di as txt %-14s "AGSU (ho)" as res %16.6f return(agsu_var_alpha) %16.6f return(agsu_var_psi) %16.6f return(agsu_cov)
     di as txt %-14s "KSS (he)" as res %16.6f return(kss_var_alpha) %16.6f return(kss_var_psi) %16.6f return(kss_cov)
     if ("`se'" != "") {
-        di as txt %-14s "  (SE)" as res %16.6f return(se_var_alpha) %16.6f return(se_var_psi) %16.6f return(se_cov)
+        local se_label "  (SE)"
+        if ("`sigmacentering'" == "person_year") local se_label "  (delta SE)"
+        di as txt %-14s "`se_label'" as res %16.6f return(se_var_alpha) %16.6f return(se_var_psi) %16.6f return(se_cov)
     }
     if ("`ci'" != "") {
         local ci_a = "[" + strofreal(return(ci_lb_alpha), "%8.4f") + "," + strofreal(return(ci_ub_alpha), "%8.4f") + "]"
         local ci_p = "[" + strofreal(return(ci_lb_psi), "%8.4f") + "," + strofreal(return(ci_ub_psi), "%8.4f") + "]"
         local ci_c = "[" + strofreal(return(ci_lb_cov), "%8.4f") + "," + strofreal(return(ci_ub_cov), "%8.4f") + "]"
-        di as txt %-14s "  AM 95% CI" as res %16s "`ci_a'" %16s "`ci_p'" %16s "`ci_c'"
+        local ci_label "  AM 95% CI"
+        if ("`sigmacentering'" == "person_year") local ci_label "  joint 95% CI"
+        di as txt %-14s "`ci_label'" as res %16s "`ci_a'" %16s "`ci_p'" %16s "`ci_c'"
     }
     di as txt "{hline 64}"
     di as txt "KSS: corr(a,psi) = " as res %7.4f return(kss_corr) ///

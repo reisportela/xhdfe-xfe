@@ -382,6 +382,7 @@ srcs+=( "${STATA_DIR}/src/auto_team_registry.cpp" )
 srcs+=( "${STATA_DIR}/src/fe_absorption.cpp" )
 srcs+=( "${STATA_DIR}/src/schwarz_demean.cpp" )
 srcs+=( "${STATA_DIR}/src/akm_kss.cpp" )
+srcs+=( "${STATA_DIR}/src/akm_projection.cpp" )
 srcs+=( "${STATA_DIR}/src/ols.cpp" )
 srcs+=( "${STATA_DIR}/src/iv.cpp" )
 

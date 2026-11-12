@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.8.2  11nov2026}{...}
+{* *! version 1.9.0  12nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -25,6 +25,7 @@
 {synopt :{opth firm(varname)}}numeric firm (establishment) identifier; {bf:required}{p_end}
 {synopt :{opth control:s(varlist)}}covariates partialled out (FWL) before the two-way step{p_end}
 {synopt :{opt leaveout:level(unit)}}leave-out unit: {cmd:match} (default) or {cmd:obs}{p_end}
+{synopt :{opt sigmac:entering(mode)}}{cmd:leaveouttwoway} (default) or invariant {cmd:personyear}, with optional worker projection inference{p_end}
 {synopt :{opt noprune}}skip the leave-out connected-set pruning{p_end}
 
 {syntab:Leverages (Pii, Bii)}
@@ -70,7 +71,7 @@ connected set and reports the wage-variance decomposition in three flavours:
 {it:plug-in} (the biased sample decomposition), {it:AGSU} (Andrews, Gill,
 Schank and Upward 2008, homoskedastic bias correction) and {it:KSS} (Kline,
 Saggio and Soelvsten 2020, heteroskedasticity-robust leave-out correction).
-Numerical semantics follow Saggio's {it:LeaveOutTwoWay} (the canonical KSS
+Default numerical semantics follow Saggio's {it:LeaveOutTwoWay} (the canonical KSS
 implementation this command is validated against): leave-a-match-out by
 default, person-year weighted components with denominator {it:n}-1, exact
 leverages on small samples and the Johnson-Lindenstrauss (JLA) approximation
@@ -172,12 +173,12 @@ exact path (default 10000, the LeaveOutTwoWay rule).
 
 {dlgtab:Inference}
 
-{phang}{opt se} computes component standard errors by KSS leave-out inference
+{phang}{opt se} under the default centring computes component standard errors by KSS leave-out inference
 (person-year block leave-out with a binned nonparametric sigma-tilde fit and a
 simulated quadratic term). {opt sensim(#)} sets the number of simulation draws
 for the quadratic part (default 1000).
 
-{phang}{opt ci} adds weak-identification diagnostics and the Andrews-Mikusheva
+{phang}{opt ci} under the default centring adds weak-identification diagnostics and the Andrews-Mikusheva
 q=1 confidence intervals for each component (the LeaveOutTwoWay
 {it:eigen_diagno} path): the top eigenvalue of Atilde and its share of the
 sum of squared eigenvalues, the weak-Lindeberg condition, gamma-squared, the
@@ -186,11 +187,43 @@ confidence bounds and the curvature. Implies {opt se}. {opt eigtracensim(#)}
 sets the Hutchinson draws for tr(Atilde^2) (default 100, the oracle
 default).
 
-{pstd}{bf:Known limitation (version 1.8.2; public issue #18).} Under {cmd:leaveoutlevel(match)},
+{pstd}{bf:Default convention (public issue #18).} Under {cmd:leaveoutlevel(match)},
 KSS-corrected variance components depend on outcome shifts when matches have unequal length: adding a
 constant to {depvar} changes them. The standard errors and confidence intervals of {opt se} and {opt ci}
-also depend on the outcome level, under both {cmd:obs} and {cmd:match}. A correction is planned for the
-next version.{p_end}
+also depend on the outcome level, under both {cmd:obs} and {cmd:match}. These default numerical conventions are retained.{p_end}
+
+{phang}{opt sigmacentering(personyear)} selects an alternative point estimator.
+For each match, the numerator is sqrt(match length) times the difference between
+its adjusted mean outcome and the weighted person-year mean. The mean is computed
+on the final retained sample after partialling out controls. This makes the point
+components invariant to a common shift in the outcome with unequal match lengths.
+The default {cmd:sigmacentering(leaveouttwoway)} reproduces the previous convention.{p_end}
+
+{pstd}{bf:Statistical limit.} Person-year centring uses an estimated mean and does
+not preserve exact finite-sample unbiasedness under arbitrary heteroskedasticity.
+It is an explicit statistical alternative. With {opt se} or {opt ci}, it returns
+regular-case delta standard errors and simultaneous 95% projection intervals for
+var(psi) and cov(alpha,psi). The full-model calculation includes uncertainty from
+estimating the controls and clusters by worker, allowing dependence across a
+worker's jobs. The point formula and its leave-out unit remain unchanged.
+{opt se} also prints the primary joint intervals in this mode.{p_end}
+
+{pstd}Projection coverage is asymptotic under independent workers, bounded cluster
+sizes and fourth moments, nondegenerate error covariance, a fixed firm count and
+diffuse identified full-model contrasts. The intervals apply at weak signal;
+the delta SEs require first-order regularity and a negligible point correction.
+They are conditional on the JLA seed. The intervals can be wider than point
++/- 1.96 SE and need not contain the corrected point. No preliminary test switches
+the interval. This mode supports 2--128 firms and unit weights. var(alpha)
+inference, {opt sigmalowess} and lincom are unavailable. Inference runs on CPU;
+{opt gpu} retains its existing meaning for the point and leverage solves.{p_end}
+
+{pstd}The default inference retains its existing semantics and limitations. Its
+standard errors accompany {cmd:r(theta_}{it:C}{cmd:)}, which are distinct from
+{cmd:r(kss_}{it:C}{cmd:)}. With estimated controls, that legacy calculation treats
+the adjusted outcome as fixed and does not propagate control-estimation uncertainty.
+The derivation and diagnostics of the new option are in
+{browse "https://github.com/reisportela/xhdfe-xfe/blob/main/docs/akm-projection-inference.md":the worker projection guide}.{p_end}
 
 {pstd}{bf:Version 1.8.2.} With {opt controls()}, the internal control-partialling fit no longer evaluates
 Student-t quantiles, which it never reported. On Windows this removes spurious {cmd:r(198)} refusals
@@ -327,7 +360,7 @@ precision certificate{p_end}
 
 {p2col 5 26 30 2: With {opt se} (component {it:C} in {cmd:var_psi}, {cmd:cov}, {cmd:var_alpha})}{p_end}
 {synopt:{cmd:r(se_}{it:C}{cmd:)}}standard error of the KSS component{p_end}
-{synopt:{cmd:r(theta_}{it:C}{cmd:)}}the KSS-corrected point estimate{p_end}
+{synopt:{cmd:r(theta_}{it:C}{cmd:)}}the leave_out_COMPLETE point estimate accompanied by the reported SE/CI; distinct from {cmd:r(kss_}{it:C}{cmd:)}{p_end}
 
 {p2col 5 26 30 2: With {opt ci} (component suffix {it:c} in {cmd:_psi}, {cmd:_cov}, {cmd:_alpha})}{p_end}
 {synopt:{cmd:r(lambda1_}{it:c}{cmd:)}}top eigenvalue of Atilde{p_end}
@@ -336,15 +369,32 @@ precision certificate{p_end}
 {synopt:{cmd:r(gammasq_}{it:c}{cmd:)}}gamma-squared{p_end}
 {synopt:{cmd:r(fstat_}{it:c}{cmd:)}}F statistic{p_end}
 {synopt:{cmd:r(theta1_}{it:c}{cmd:)}}curvature-adjusted point estimate{p_end}
-{synopt:{cmd:r(ci_lb_}{it:c}{cmd:)} {cmd:r(ci_ub_}{it:c}{cmd:)}}AM q=1 confidence bounds{p_end}
+{synopt:{cmd:r(ci_lb_}{it:c}{cmd:)} {cmd:r(ci_ub_}{it:c}{cmd:)}}AM q=1 bounds by default; simultaneous worker projection bounds with {cmd:personyear}{p_end}
 {synopt:{cmd:r(curvature_}{it:c}{cmd:)}}curvature{p_end}
 
 {p2col 5 26 30 2: Macros / matrices}{p_end}
 {synopt:{cmd:r(cmd)}}{cmd:xhdfeakm}{p_end}
 {synopt:{cmd:r(leave_out_level)}}the leave-out unit used{p_end}
+{synopt:{cmd:r(sigma_centering)}}{cmd:leaveouttwoway} or {cmd:person_year}{p_end}
+{synopt:{cmd:r(inference_method)}}{cmd:worker_projection} with invariant-mode inference{p_end}
+{synopt:{cmd:r(inference_cluster)}}{cmd:worker} for that inference{p_end}
+{synopt:{cmd:r(inference_backend)}}{cmd:cpu} for that inference{p_end}
+{synopt:{cmd:r(se_method)}}{cmd:regular_delta} for that inference{p_end}
 {synopt:{cmd:r(notes)}}any solver/identification notes{p_end}
 {synopt:{cmd:r(b)}}control coefficients (with {opt controls()}){p_end}
 {p2colreset}{...}
+
+{pstd}Worker projection additionally returns {cmd:r(proj_dimension)},
+{cmd:r(proj_rank)}, {cmd:r(proj_clusters)}, {cmd:r(proj_max_cluster)},
+{cmd:r(proj_controls)}, {cmd:r(proj_degree)}, {cmd:r(proj_critical)},
+{cmd:r(proj_factor)}, {cmd:r(proj_max_trace)}, {cmd:r(proj_max_leverage)},
+{cmd:r(proj_cov_condition)}, {cmd:r(proj_solver_gap)}, {cmd:r(proj_bread_reused)},
+{cmd:r(proj_threads_used)} and {cmd:r(proj_workers_active)}. These are diagnostics,
+not automatic certificates of modelling assumptions. For each {it:c} in
+{cmd:psi cov}, {cmd:r(proj_nonlinear_}{it:c}{cmd:)} is the linearisation index,
+{cmd:r(proj_correction_}{it:c}{cmd:)} is the absolute correction/SE ratio and
+{cmd:r(proj_zero_gradient_}{it:c}{cmd:)} flags when a zero gradient is not excluded.
+An infinite index is missing in Stata, with the flag set to one.{p_end}
 
 
 {title:Examples}

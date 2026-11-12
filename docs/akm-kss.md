@@ -62,6 +62,47 @@ fit <- xhdfe_akm_kss(d$y, d$i, d$j, leverages = "exact")
 print(fit)
 ```
 
+## Explicit location-invariant AKM point components
+
+The default remains the LeaveOutTwoWay convention. With unequal match lengths,
+its match-level KSS components can depend on the outcome's level. To select
+the person-year-centred alternative explicitly:
+
+```python
+r = akm.akm_kss(y, w, f, sigma_centering="person_year")
+```
+
+```stata
+xhdfeakm y, worker(i) firm(j) sigmacentering(personyear)
+```
+
+```r
+fit <- xhdfe_akm_kss(d$y, d$i, d$j, sigma_centering = "person_year")
+```
+
+This uses the frequency-weighted mean on the final retained person-year sample
+after control partialling. It preserves the sample, controls, leave-out unit,
+leverage draws, plugin components and effect normalisation. The selected
+convention is returned as `sigma_centering` (`r(sigma_centering)` in Stata).
+
+The alternative guarantees location invariance within floating-point error;
+it does not guarantee exact finite-sample unbiasedness under unrestricted
+heteroskedasticity. With `compute_se=True` (Stata: `se`), it returns regular-case
+delta SEs and simultaneous 95% worker-cluster projection intervals for firm
+variance and worker–firm covariance. Full-model control-estimation uncertainty
+is included. The intervals also apply at weak signal under explicit asymptotic
+conditions; they can be conservative and need not contain the corrected point.
+The point and its leave-out unit are unchanged by inference. See the
+[derivation, assumptions and diagnostics](akm-projection-inference.md).
+This inference supports 2–128 firms and unit weights. Worker-variance inference,
+sigma-lowess and lincom are unavailable in the new mode.
+Legacy inference remains available under the
+default convention, with its known dependence on the outcome level. Those
+standard errors and intervals concern `theta_*`, not the distinct `kss_*`
+point components. It treats a FWL-adjusted outcome as fixed and does not
+propagate control-estimation uncertainty. Changing the outcome's origin
+externally is not a validated general repair of that inference.
+
 ## Gelbach conditional decomposition (M9B companion)
 
 How much of the change in a coefficient between the base and the full

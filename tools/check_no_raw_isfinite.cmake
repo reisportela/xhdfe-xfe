@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 get_filename_component(repo_root "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(sources
     src/akm_kss.cpp
+    src/akm_projection.cpp
     src/fe_absorption.cpp
     src/hdfe_regressor_v11.cpp)
 set(pattern

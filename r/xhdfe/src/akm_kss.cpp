@@ -2313,6 +2313,16 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (options.jla_draws < 1) {
         throw std::runtime_error("jla_draws must be >= 1");
     }
+    const bool person_year_centering =
+        options.sigma_centering == SigmaCentering::PersonYear;
+    const bool projection_inference = person_year_centering &&
+        (options.compute_se || options.eigen_diagnostics);
+    if (person_year_centering &&
+        (options.se_sigma_lowess || (Z != nullptr && Z->cols() > 0))) {
+        throw std::runtime_error(
+            "person_year centring does not support sigma lowess or Z/lincom; "
+            "use leaveouttwoway for those legacy procedures");
+    }
 
     const SpecializedThreadResolution thread_resolution =
         resolve_specialized_threads(options.num_threads);
@@ -2347,6 +2357,12 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     }
 
     AkmKssResult res;
+    if (person_year_centering) {
+        res.notes =
+            "warning: person_year centring is a location-invariant point "
+            "estimator; exact finite-sample unbiasedness under arbitrary "
+            "heteroskedasticity is not guaranteed. ";
+    }
     AkmPhaseProfiler prof_;
     AkmProgress vprog;
     vprog.init(options);
@@ -2399,6 +2415,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     const std::size_t M = sb.m_w.size();
     const int N = sb.n_workers;
     const int J = sb.n_firms;
+    if (projection_inference && (N < 2 || J < 2 || J > 128))
+        throw std::runtime_error("worker projection requires at least two workers and 2 to 128 firms");
     const bool match_level = options.leave_out_level == LeaveOutLevel::Match;
     const std::size_t R = match_level ? M : n_kept;  // working rows
     double n_py_ll = 0.0;
@@ -2455,6 +2473,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
                 : (ystar.array() - mean_y).square().sum() / (n_py - 1.0);
     }
 
+    Eigen::MatrixXd projection_control_bread;
+    std::vector<int> projection_control_columns;
     // FWL: partial controls out at the person-year level via the absorber.
     if (X != nullptr && X->cols() > 0) {
         Eigen::MatrixXd Xk(static_cast<Eigen::Index>(n_kept), X->cols());
@@ -2568,6 +2588,37 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
             }
         }
         res.beta = reg.results().coefficients;
+        if (projection_inference) {
+            const auto& fitted = reg.results();
+            for (int c = 0; c < static_cast<int>(Xk.cols()); ++c) {
+                if (c >= static_cast<int>(fitted.omitted_reason.size()) ||
+                    fitted.omitted_reason[static_cast<std::size_t>(c)] == 0)
+                    projection_control_columns.push_back(c);
+            }
+            // Homoskedastic covariance and sigma2 carry the same df factor.
+            // Their quotient is the unscaled within-control bread. Require
+            // normal positive diagonals and scale: subnormal/zero cases use
+            // a design-only residualised-Gram fallback in the optional module.
+            const double normal_min = std::numeric_limits<double>::min();
+            bool reusable = hdfe::detail::ieee_finite(fitted.sigma2) &&
+                            fitted.sigma2 >= normal_min;
+            for (int c : projection_control_columns) {
+                const double diagonal = fitted.covariance(c,c);
+                reusable = reusable && hdfe::detail::ieee_finite(diagonal) &&
+                           diagonal >= normal_min;
+            }
+            if (reusable) {
+                const int p = static_cast<int>(projection_control_columns.size());
+                projection_control_bread.resize(p,p);
+                for (int j = 0; j < p; ++j) for (int k = 0; k < p; ++k) {
+                    const double entry = fitted.covariance(
+                        projection_control_columns[j],projection_control_columns[k]) / fitted.sigma2;
+                    projection_control_bread(j,k) = entry;
+                    reusable = reusable && hdfe::detail::ieee_finite(entry);
+                }
+                if (!reusable) projection_control_bread.resize(0,0);
+            }
+        }
         ystar.noalias() -= Xk * res.beta;
         prof_.mark("fwl_controls");
         vprog.say("controls partialled out (%d FWL thread%s)",
@@ -2639,9 +2690,30 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         }
         Eigen::VectorXd scr_w(N);
         Eigen::VectorXd scr_f(J);
+        int point_rhs_exponent = 0;
+        if (person_year_centering) {
+            // Preserve the legacy route. The optional estimator uses exact
+            // binary scaling only outside the ordinary RHS range, avoiding
+            // spurious CUDA curvature failures on representable rescalings.
+            // The linear system and its relative convergence tolerance stay
+            // unchanged; this is independent of the request for inference.
+            const double maximum = std::max(tw.cwiseAbs().maxCoeff(),tf.cwiseAbs().maxCoeff());
+            if (maximum > 0. && hdfe::detail::ieee_finite(maximum)) {
+                const int exponent = std::ilogb(maximum);
+                if (exponent > 256 || exponent < -256) point_rhs_exponent = exponent;
+            }
+            if (point_rhs_exponent != 0) {
+                for (Eigen::Index i=0;i<tw.size();++i) tw[i]=std::scalbn(tw[i],-point_rhs_exponent);
+                for (Eigen::Index i=0;i<tf.size();++i) tf[i]=std::scalbn(tf[i],-point_rhs_exponent);
+            }
+        }
         if (!solver.solve_K(tw, tf, alpha, psi, scr_w, scr_f, cg_iters, true)) {
             res.converged = false;
             res.notes += "two-way point-estimation solve did not converge. ";
+        }
+        if (point_rhs_exponent != 0) {
+            for (Eigen::Index i=0;i<alpha.size();++i) alpha[i]=std::scalbn(alpha[i],point_rhs_exponent);
+            for (Eigen::Index i=0;i<psi.size();++i) psi[i]=std::scalbn(psi[i],point_rhs_exponent);
         }
     }
     prof_.mark("point_solve");
@@ -3319,23 +3391,44 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     }
 
     // ---- sigma_i ------------------------------------------------------------
+    const double alternate_mean_ypy = person_year_centering && match_level
+        ? (has_fw ? kw.dot(ystar) / n_py : ystar.mean()) : 0.0;
     Eigen::VectorXd sigma(static_cast<Eigen::Index>(R));
     std::int64_t n_unit_leverage_nonstayer = 0;
-    for (Eigen::Index r = 0; r < static_cast<Eigen::Index>(R); ++r) {
-        if (match_level && row_stayer[static_cast<std::size_t>(r)]) {
-            sigma[r] = 0.0;  // replaced below
-            continue;
+    if (person_year_centering && match_level) {
+        for (Eigen::Index r = 0; r < static_cast<Eigen::Index>(R); ++r) {
+            if (row_stayer[static_cast<std::size_t>(r)]) {
+                sigma[r] = 0.0;  // replaced below
+                continue;
+            }
+            const double m = Mii[r];
+            if (m <= 1e-12) {
+                ++n_unit_leverage_nonstayer;
+                sigma[r] = 0.0;
+                continue;
+            }
+            // Centre on the retained person-year sample AFTER FWL. Subtract
+            // before multiplying by sqrt(match length) to reduce cancellation.
+            const double centred_y = std::sqrt(row_wgt[r]) *
+                (m_ysum[r] / row_wgt[r] - alternate_mean_ypy);
+            sigma[r] = sigma_row_product(centred_y, corr[r], eta[r], m);
         }
-        const double m = Mii[r];
-        if (m <= 1e-12) {
-            ++n_unit_leverage_nonstayer;
-            sigma[r] = 0.0;
-            continue;
+    } else {
+        // Keep the legacy loop free of per-row option selection.
+        for (Eigen::Index r = 0; r < static_cast<Eigen::Index>(R); ++r) {
+            if (match_level && row_stayer[static_cast<std::size_t>(r)]) {
+                sigma[r] = 0.0;  // replaced below
+                continue;
+            }
+            const double m = Mii[r];
+            if (m <= 1e-12) {
+                ++n_unit_leverage_nonstayer;
+                sigma[r] = 0.0;
+                continue;
+            }
+            // Preserve the shipped multiplication order.
+            sigma[r] = sigma_row_product(yt[r] - mean_yt, corr[r], eta[r], m);
         }
-        // sigma_row_product pins the multiplication order the shipped
-        // binaries realize (see XHDFE_AKM_STRICT_FN): bit-stable across
-        // builds where plain source is re-associated unpredictably.
-        sigma[r] = sigma_row_product(yt[r] - mean_yt, corr[r], eta[r], m);
     }
     if (n_unit_leverage_nonstayer > 0) {
         res.converged = false;
@@ -3350,7 +3443,8 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     if (match_level) {
         // Stayer sigma via the person-year formula (LeaveOutTwoWay
         // sigma_for_stayers): Pii = 1/T_i, collapsed back to match means.
-        const double mean_ypy = has_fw ? kw.dot(ystar) / n_py : ystar.mean();
+        const double mean_ypy = person_year_centering ? alternate_mean_ypy
+            : (has_fw ? kw.dot(ystar) / n_py : ystar.mean());
         Eigen::VectorXd acc = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(M));
         for (std::size_t k = 0; k < n_kept; ++k) {
             const int m = sb.row_match[k];
@@ -3443,7 +3537,7 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     // solve per tenure class; eta_h on stayer blocks uses the consistent
     // minimum-norm solution (their within-match OLS residuals sum to zero).
     const double kNaN = std::numeric_limits<double>::quiet_NaN();
-    if (options.compute_se) {
+    if (options.compute_se && !person_year_centering) {
         const std::size_t n_py_sz = n_kept;
         const double NTd = n_py;
         const int se_block = akm_se_block_env();
@@ -4810,6 +4904,56 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.solver_iterations = cg_iters + solver.cuda_iters;
     }
 
+    if (projection_inference) {
+        if (!res.converged || !hdfe::detail::ieee_finite(res.kss.var_psi) ||
+            !hdfe::detail::ieee_finite(res.kss.var_alpha) ||
+            !hdfe::detail::ieee_finite(res.kss.cov_alpha_psi))
+            throw std::runtime_error("worker projection requires converged point and leverage solves");
+        vprog.say("full-model worker-cluster projection inference...");
+        const int projection_team = options.num_threads > 0
+            ? thread_resolution.effective
+            : std::max(solver.team,res.fwl_threads_effective);
+        std::shared_ptr<AkmProjectionResult> inference;
+        {
+#ifdef _OPENMP
+            ScopedThreadState projection_threads(projection_team,thread_resolution.capacity);
+#endif
+            inference = std::make_shared<AkmProjectionResult>(
+                projection::worker_projection_inference(
+                    y, sb.rows, ystar, X, projection_control_columns,
+                    projection_control_bread, sb.row_w, sb.row_f, alpha, psi,
+                    projection_team));
+        }
+        res.se_var_psi = inference->se[0];
+        res.se_cov_alpha_psi = inference->se[1];
+        res.se_var_alpha = kNaN;
+        res.theta_c_var_psi = res.kss.var_psi;
+        res.theta_c_cov_alpha_psi = res.kss.cov_alpha_psi;
+        res.theta_c_var_alpha = kNaN;
+        for (double* values : {res.eig_lambda1,res.eig_share1,res.eig_share2,
+                res.eig_share3,res.lindeberg_max_x1bar_sq,res.gamma_sq,res.f_stat,
+                res.theta_1,res.ci_lb,res.ci_ub,res.curvature,res.b_1,
+                res.cov_r1_11,res.cov_r1_12,res.cov_r1_22})
+            for (int c = 0; c < 3; ++c) values[c] = kNaN;
+        const double correction[2] = {res.plugin.var_psi-res.kss.var_psi,
+            res.plugin.cov_alpha_psi-res.kss.cov_alpha_psi};
+        for (int c = 0; c < 2; ++c) {
+            res.ci_lb[c] = inference->ci_lb[c];
+            res.ci_ub[c] = inference->ci_ub[c];
+            inference->correction_over_se[c] = inference->se[c] > 0.
+                ? std::abs(correction[c])/inference->se[c]
+                : (correction[c] == 0. ? 0. : std::numeric_limits<double>::infinity());
+        }
+        res.projection_inference = std::move(inference);
+        res.notes += "worker projection: simultaneous 95% intervals for var(psi) "
+            "and cov(alpha,psi), assuming independent workers and diffuse "
+            "full-model contrasts with a fixed number of firms. Delta SEs "
+            "are regular-case only and conditional on the JLA seed; the "
+            "intervals need not contain the corrected point. var(alpha) "
+            "inference is unavailable in this mode. ";
+        prof_.mark("worker_projection_inference");
+    }
+
     // ---- Row-level outputs -----------------------------------------------
     res.row_worker.resize(static_cast<Eigen::Index>(R));
     res.row_firm.resize(static_cast<Eigen::Index>(R));
@@ -4963,8 +5107,13 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         res.psi[static_cast<Eigen::Index>(k)] = psi[sb.row_f[k]] - psi_bar;
     }
 
-    if (!guarded_finite(res.kss.var_psi) || !guarded_finite(res.kss.var_alpha) ||
-        !guarded_finite(res.kss.cov_alpha_psi)) {
+    const bool components_finite = person_year_centering
+        ? (hdfe::detail::ieee_finite(res.kss.var_psi) &&
+           hdfe::detail::ieee_finite(res.kss.var_alpha) &&
+           hdfe::detail::ieee_finite(res.kss.cov_alpha_psi))
+        : (guarded_finite(res.kss.var_psi) && guarded_finite(res.kss.var_alpha) &&
+           guarded_finite(res.kss.cov_alpha_psi));
+    if (!components_finite) {
         res.converged = false;
         res.notes += "non-finite corrected components. ";
     }
@@ -4977,6 +5126,11 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
     res.parallel_workers_active = std::max(
         {res.sample.parallel_workers_active, fwl_active_workers,
          res.solver_parallel_workers_active});
+    if (res.projection_inference) {
+        res.threads_used = std::max(res.threads_used,res.projection_inference->threads_used);
+        res.parallel_workers_active = std::max(res.parallel_workers_active,
+            res.projection_inference->parallel_workers_active);
+    }
     vprog.say("done: converged=%s, %lld solver iterations%s",
               res.converged ? "yes" : "NO", res.solver_iterations,
               res.gpu_used ? ", gpu_used=1" : "");

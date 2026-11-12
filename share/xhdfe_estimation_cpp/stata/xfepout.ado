@@ -1,4 +1,4 @@
-*! version 1.14.0 11nov2026
+*! version 1.14.0 12nov2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -1082,5 +1082,5 @@ end
 
 program define _xfepout_package_version, rclass
     version 16.0
-    return local package_version "1.14.0 11nov2026"
+    return local package_version "1.14.0 12nov2026"
 end

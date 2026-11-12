@@ -1791,7 +1791,8 @@ All weight-type flags require ``weights`` and are mutually exclusive.
             long long direct_max_nnz, double cg_tol, int cg_max_iter, int num_threads,
             double fwl_tol, int fwl_max_iter, bool compute_se, int se_nsim,
             bool eigen_diagnostics, int eig_trace_nsim, bool gpu,
-            py::object fweights_obj, bool se_sigma_lowess, int verbose) {
+            py::object fweights_obj, bool se_sigma_lowess, int verbose,
+            const std::string& sigma_centering) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
                 throw std::runtime_error("y must be a 1-D array");
@@ -1820,6 +1821,7 @@ All weight-type flags require ``weights`` and are mutually exclusive.
             }
 
             hdfe::akm::AkmOptions opt;
+            opt.sigma_centering = hdfe::akm::parse_sigma_centering(sigma_centering);
             opt.leave_out_level = parse_leave_out_level(leave_out_level);
             opt.leverage_method = parse_leverage_method(leverages);
             opt.jla_draws = jla_draws;
@@ -1920,7 +1922,44 @@ All weight-type flags require ``weights`` and are mutually exclusive.
                 se["theta_var_alpha"] = r.theta_c_var_alpha;
                 d["component_se"] = se;
             }
-            if (eigen_diagnostics) {
+            if (r.projection_inference) {
+                const auto& inference = *r.projection_inference;
+                py::dict projection;
+                projection["method"] = "worker_projection";
+                projection["cluster"] = "worker";
+                projection["backend"] = "cpu";
+                projection["confidence_level"] = 0.95;
+                projection["simultaneous"] = true;
+                projection["se_method"] = "regular_delta";
+                projection["conditional_on_jla_seed"] = true;
+                projection["dimension"] = inference.dimension;
+                projection["rank_diagnostic"] = inference.rank_diagnostic;
+                projection["clusters"] = inference.clusters;
+                projection["max_cluster_rows"] = inference.max_cluster_rows;
+                projection["control_rank"] = inference.control_rank;
+                projection["polynomial_degree"] = inference.polynomial_degree;
+                projection["critical_value"] = inference.critical_value;
+                projection["projection_factor"] = inference.projection_factor;
+                projection["max_cluster_leverage_trace"] = inference.max_cluster_leverage_trace;
+                projection["max_row_leverage"] = inference.max_row_leverage;
+                projection["covariance_condition"] = inference.covariance_condition;
+                projection["max_trust_region_gap"] = inference.max_trust_region_gap;
+                projection["control_bread_reused"] = inference.control_bread_reused;
+                projection["threads_used"] = inference.threads_used;
+                projection["parallel_workers_active"] = inference.parallel_workers_active;
+                const char* names[2] = {"var_psi", "cov_alpha_psi"};
+                for (int c = 0; c < 2; ++c) {
+                    py::dict component;
+                    component["ci_lb"] = inference.ci_lb[c];
+                    component["ci_ub"] = inference.ci_ub[c];
+                    component["linearisation_index"] = inference.linearisation_index[c];
+                    component["zero_gradient_not_excluded"] = !hdfe::detail::ieee_finite(inference.linearisation_index[c]);
+                    component["correction_over_se"] = inference.correction_over_se[c];
+                    projection[names[c]] = component;
+                }
+                d["projection_inference"] = projection;
+            }
+            if (eigen_diagnostics && !r.projection_inference) {
                 py::dict wk;
                 const char* names[3] = {"var_psi", "cov_alpha_psi", "var_alpha"};
                 for (int c = 0; c < 3; ++c) {
@@ -1989,6 +2028,7 @@ All weight-type flags require ``weights`` and are mutually exclusive.
             d["thread_limit_reason"] = r.thread_limit_reason;
             d["jla_draws_used"] = r.jla_draws_used;
             d["seed"] = r.seed_used;
+            d["sigma_centering"] = hdfe::akm::sigma_centering_name(opt.sigma_centering);
             d["solver_iterations"] = r.solver_iterations;
             d["converged"] = r.converged;
             d["notes"] = r.notes;
@@ -2006,10 +2046,16 @@ All weight-type flags require ``weights`` and are mutually exclusive.
         py::arg("eig_trace_nsim") = 100, py::arg("gpu") = false,
         py::arg("fweights") = py::none(), py::arg("se_sigma_lowess") = false,
         py::arg("verbose") = 0,
+        py::arg("sigma_centering") = "leaveouttwoway",
         "AKM two-way estimation with plug-in / AGSU (homoskedastic) / KSS "
         "(heteroskedastic leave-out) variance decomposition on the leave-out "
         "connected set, following LeaveOutTwoWay (KSS 2020) semantics. Controls "
-        "in X are partialled out with the xhdfe absorber (FWL). Opt-in: does "
+        "in X are partialled out with the xhdfe absorber (FWL). With "
+        "sigma_centering='person_year', compute_se returns regular-case "
+        "delta SEs and simultaneous 95% worker-cluster projection intervals "
+        "for firm variance and worker-firm covariance; see projection_inference "
+        "and docs/akm-projection-inference.md for assumptions and diagnostics. "
+        "The point estimate is unchanged by requesting inference. Opt-in: does "
         "not affect any existing estimation path. verbose=1 prints phase "
         "progress to stderr (leave-out set, FWL, solver, JLA draws d/D with "
         "elapsed time and ETA, SE sims, eigen diagnostics); output only, "

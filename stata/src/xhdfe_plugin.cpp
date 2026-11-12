@@ -2208,6 +2208,9 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
     }
 
     hdfe::akm::AkmOptions options;
+    if (auto val = args.get_optional("sigma_centering")) {
+        options.sigma_centering = hdfe::akm::parse_sigma_centering(*val);
+    }
     if (auto val = args.get_optional("leave_out_level")) {
         options.leave_out_level = parse_akm_leave_out_level(*val);
     }
@@ -2405,9 +2408,41 @@ ST_retcode run_akm_kss(const ParsedArgs& args) {
             akm_save_scalar(nm, res.curvature[c]);
         }
     }
+    SF_macro_save(const_cast<char*>("_xakm_inference_method"),
+                  const_cast<char*>(res.projection_inference ? "worker_projection" : "legacy"));
+    if (res.projection_inference) {
+        const auto& p = *res.projection_inference;
+        akm_save_scalar("__xakm_proj_dimension",p.dimension);
+        akm_save_scalar("__xakm_proj_rank",p.rank_diagnostic);
+        akm_save_scalar("__xakm_proj_clusters",p.clusters);
+        akm_save_scalar("__xakm_proj_max_cluster",p.max_cluster_rows);
+        akm_save_scalar("__xakm_proj_controls",p.control_rank);
+        akm_save_scalar("__xakm_proj_degree",p.polynomial_degree);
+        akm_save_scalar("__xakm_proj_critical",p.critical_value);
+        akm_save_scalar("__xakm_proj_factor",p.projection_factor);
+        akm_save_scalar("__xakm_proj_max_trace",p.max_cluster_leverage_trace);
+        akm_save_scalar("__xakm_proj_max_leverage",p.max_row_leverage);
+        akm_save_scalar("__xakm_proj_cov_condition",p.covariance_condition);
+        akm_save_scalar("__xakm_proj_solver_gap",p.max_trust_region_gap);
+        akm_save_scalar("__xakm_proj_bread_reused",p.control_bread_reused ? 1. : 0.);
+        akm_save_scalar("__xakm_proj_threads_used",p.threads_used);
+        akm_save_scalar("__xakm_proj_workers_active",p.parallel_workers_active);
+        const char* names[2] = {"psi","cov"};
+        char name[48];
+        for (int c = 0; c < 2; ++c) {
+            std::snprintf(name,sizeof(name),"__xakm_proj_nonlinear_%s",names[c]);
+            akm_save_scalar(name,p.linearisation_index[c]);
+            std::snprintf(name,sizeof(name),"__xakm_proj_correction_%s",names[c]);
+            akm_save_scalar(name,p.correction_over_se[c]);
+            std::snprintf(name,sizeof(name),"__xakm_proj_zero_gradient_%s",names[c]);
+            akm_save_scalar(name,hdfe::detail::ieee_finite(p.linearisation_index[c]) ? 0. : 1.);
+        }
+    }
     if (!res.notes.empty()) {
         SF_macro_save(const_cast<char*>("_xakm_notes"), const_cast<char*>(res.notes.c_str()));
     }
+    SF_macro_save(const_cast<char*>("_xakm_sigma_centering"),
+                  const_cast<char*>(hdfe::akm::sigma_centering_name(options.sigma_centering)));
 
     // Control coefficients into the caller-supplied matrix (1 x k).
     if (ncontrols > 0) {

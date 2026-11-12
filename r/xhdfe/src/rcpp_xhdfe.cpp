@@ -1125,6 +1125,10 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
     }
 
     hdfe::akm::AkmOptions options;
+    if (opts.containsElementNamed("sigma_centering")) {
+        options.sigma_centering = hdfe::akm::parse_sigma_centering(
+            Rcpp::as<std::string>(opts["sigma_centering"]));
+    }
     if (opts.containsElementNamed("leave_out_level")) {
         options.leave_out_level =
             parse_leave_out_level(Rcpp::as<std::string>(opts["leave_out_level"]));
@@ -1240,7 +1244,44 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
         cse["theta_var_alpha"] = res.theta_c_var_alpha;
         out["component_se"] = cse;
     }
-    if (options.eigen_diagnostics) {
+    if (res.projection_inference) {
+        const auto& p = *res.projection_inference;
+        Rcpp::List projection;
+        projection["method"] = "worker_projection";
+        projection["cluster"] = "worker";
+        projection["backend"] = "cpu";
+        projection["confidence_level"] = 0.95;
+        projection["simultaneous"] = true;
+        projection["se_method"] = "regular_delta";
+        projection["conditional_on_jla_seed"] = true;
+        projection["dimension"] = p.dimension;
+        projection["rank_diagnostic"] = p.rank_diagnostic;
+        projection["clusters"] = p.clusters;
+        projection["max_cluster_rows"] = p.max_cluster_rows;
+        projection["control_rank"] = p.control_rank;
+        projection["polynomial_degree"] = p.polynomial_degree;
+        projection["critical_value"] = p.critical_value;
+        projection["projection_factor"] = p.projection_factor;
+        projection["max_cluster_leverage_trace"] = p.max_cluster_leverage_trace;
+        projection["max_row_leverage"] = p.max_row_leverage;
+        projection["covariance_condition"] = p.covariance_condition;
+        projection["max_trust_region_gap"] = p.max_trust_region_gap;
+        projection["control_bread_reused"] = p.control_bread_reused;
+        projection["threads_used"] = p.threads_used;
+        projection["parallel_workers_active"] = p.parallel_workers_active;
+        const char* names[2] = {"var_psi","cov_alpha_psi"};
+        for (int c = 0; c < 2; ++c) {
+            Rcpp::List component;
+            component["ci_lb"] = p.ci_lb[c];
+            component["ci_ub"] = p.ci_ub[c];
+            component["linearisation_index"] = p.linearisation_index[c];
+            component["zero_gradient_not_excluded"] = !hdfe::detail::ieee_finite(p.linearisation_index[c]);
+            component["correction_over_se"] = p.correction_over_se[c];
+            projection[names[c]] = component;
+        }
+        out["projection_inference"] = projection;
+    }
+    if (options.eigen_diagnostics && !res.projection_inference) {
         const char* comps[3] = {"var_psi", "cov_alpha_psi", "var_alpha"};
         Rcpp::List wk;
         for (int c = 0; c < 3; ++c) {
@@ -1304,6 +1345,7 @@ Rcpp::List xhdfe_cpp_akm_kss(Rcpp::NumericVector y,
     out["solver_iterations"] = static_cast<double>(res.solver_iterations);
     out["converged"] = res.converged;
     out["notes"] = res.notes;
+    out["sigma_centering"] = hdfe::akm::sigma_centering_name(options.sigma_centering);
     return out;
 }
 

@@ -163,6 +163,11 @@ def validate(expected_version: str) -> None:
         f"xhdfe {expected_version}" in _read("xhdfe/help/gelbach.md"),
         "xhdfe/help/gelbach.md has a stale shared version",
     )
+    projection_guide = _read("docs/akm-projection-inference.md")
+    _require(f"Package documentation version: {expected_version}." in projection_guide,
+             "AKM projection guide has a stale shared version")
+    for relative in ("xhdfe/help/akm.md", "r/xhdfe/inst/doc/akm-projection-inference.md"):
+        _require(_read(relative) == projection_guide, f"{relative}: projection guide differs")
     _require(
         _capture("stata/xhdfe.pkg", r"^v\s+(\S+)") == base_version,
         "stata/xhdfe.pkg version is not aligned",

@@ -1,4 +1,4 @@
-*! version 1.0.2  11nov2026
+*! version 1.0.2  12nov2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve

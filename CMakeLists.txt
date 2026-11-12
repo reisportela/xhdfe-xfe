@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.31.0.20261111 LANGUAGES CXX)
+project(xhdfe VERSION 2.31.1.20261112 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -167,6 +167,7 @@ set(XHDFE_SOURCES
     src/fe_absorption.cpp
     src/schwarz_demean.cpp
     src/akm_kss.cpp
+    src/akm_projection.cpp
     src/iv.cpp
     src/ols.cpp
 )
@@ -389,6 +390,14 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME xhdfe_fail_closed_entrypoints
              COMMAND $<TARGET_FILE:xhdfe_fail_closed_entrypoints>)
+
+    add_executable(xhdfe_akm_projection_contract tests/akm_projection_contract.cpp)
+    target_link_libraries(xhdfe_akm_projection_contract PRIVATE xhdfe)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        xhdfe_enable_native_tuning(xhdfe_akm_projection_contract)
+    endif()
+    add_test(NAME xhdfe_akm_projection_contract
+             COMMAND $<TARGET_FILE:xhdfe_akm_projection_contract>)
 
     add_executable(xhdfe_student_t_precision
                    tests/student_t_precision.cpp)

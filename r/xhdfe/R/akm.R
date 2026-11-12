@@ -97,7 +97,7 @@ xhdfe_akm_leave_out_set <- function(worker, firm, fweights = NULL,
 #' X\beta + \epsilon} on the leave-out connected set and reports the variance
 #' decomposition in three flavours: plug-in (biased baseline), AGSU
 #' (Andrews et al. 2008, homoskedastic correction) and KSS (Kline, Saggio &
-#' Soelvsten 2020, heteroskedastic leave-out correction). Numerical semantics
+#' Soelvsten 2020, heteroskedastic leave-out correction). Default numerical semantics
 #' follow Saggio's LeaveOutTwoWay: leave-a-match-out by default (collapse to
 #' match means with sqrt(match-length) FGLS weighting), person-year weighted
 #' components with denominator (n - 1), and the JLA leverage approximation
@@ -148,6 +148,20 @@ xhdfe_akm_leave_out_set <- function(worker, firm, fweights = NULL,
 #' @param verbose Print phase progress to the console (leave-out set, FWL,
 #'   solver, JLA draws d/D with elapsed time and an ETA, SE simulations,
 #'   eigen diagnostics). Output only; results are unaffected.
+#' @param sigma_centering \code{"leaveouttwoway"} (default) preserves the
+#'   existing convention. Explicit \code{"person_year"} uses the weighted
+#'   person-year mean on the final sample after FWL to make point components
+#'   invariant to outcome shifts. It is not exactly unbiased under arbitrary
+#'   heteroskedasticity. With \code{compute_se=TRUE}, \code{$projection_inference}
+#'   contains simultaneous 95\% worker-cluster projection intervals for firm
+#'   variance and worker-firm covariance, including control-estimation
+#'   uncertainty. Delta SEs are regular-case only; intervals also cover weak
+#'   signals under the stated asymptotic assumptions. Requires independent
+#'   workers, bounded moments/cluster sizes, fixed firm count and diffuse
+#'   identified contrasts. Supported with 2--128 firms and unit weights;
+#'   worker-variance inference and sigma-lowess are unavailable in this mode.
+#'   The point formula and its leave-out unit do not change when SEs are requested.
+#'   The selected convention is returned as \code{$sigma_centering}.
 #' @section Advanced performance environment variables:
 #'   Defaults are tuned and none changes the default numeric output.
 #'   \code{XHDFE_AKM_TEAM} tunes the automatic
@@ -187,7 +201,8 @@ xhdfe_akm_leave_out_set <- function(worker, firm, fweights = NULL,
 #'   CPU reference path (\code{fwl_gpu_status = "cpu_reference"}); the
 #'   two-way solver remains independently eligible for CUDA.
 #'   With \code{compute_se = TRUE} a \code{component_se} list holds the
-#'   KSS component standard errors and corrected point estimates; with
+#'   standard errors for its \code{theta_*} point estimates, which differ
+#'   from the \code{kss} components; with
 #'   \code{eigen_diagnostics = TRUE} a \code{weak_id} list holds, per
 #'   component, the top eigenvalue and shares of Atilde, the Lindeberg
 #'   condition, \code{gamma_sq}, the F statistic, \code{theta_1}, the
@@ -227,7 +242,8 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                           se_sigma_lowess = FALSE,
                           gpu = FALSE,
                           fweights = NULL,
-                          verbose = FALSE) {
+                          verbose = FALSE,
+                          sigma_centering = "leaveouttwoway") {
   if (length(num_threads) != 1L || !is.numeric(num_threads) ||
       is.logical(num_threads) || is.na(num_threads) ||
       !is.finite(num_threads) || num_threads < 0 ||
@@ -251,7 +267,9 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
       stop("X contains missing values; supply complete cases", call. = FALSE)
     }
   }
+  sigma_centering <- match.arg(sigma_centering, c("leaveouttwoway", "person_year"))
   opts <- list(leave_out_level = as.character(leave_out_level),
+               sigma_centering = sigma_centering,
                leverages = as.character(leverages),
                jla_draws = as.integer(jla_draws),
                seed = as.double(seed),
@@ -281,6 +299,10 @@ xhdfe_akm_kss <- function(y, worker, firm, X = NULL,
                             .akm_id_codes(worker, "worker"),
                             .akm_id_codes(firm, "firm"),
                             X, opts, fweights)
+  if (!identical(out$sigma_centering, sigma_centering)) {
+    stop("the loaded backend does not confirm sigma_centering; rebuild the matching package",
+         call. = FALSE)
+  }
   class(out) <- "xhdfe_akm_kss"
   # Surface non-convergence loudly, matching the Stata front-end and the
   # Gelbach treatment (a silently returned non-converged decomposition is a

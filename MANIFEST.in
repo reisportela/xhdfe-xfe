@@ -4,6 +4,7 @@ include LICENSE
 include NOTICE
 recursive-include third_party/licenses *
 include README.md
+include docs/akm-projection-inference.md
 include QUICK_START.md
 include setup.py
 include pyproject.toml

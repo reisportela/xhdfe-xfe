@@ -6,6 +6,7 @@ cd "${repo_root}"
 
 sources=(
   src/akm_kss.cpp
+  src/akm_projection.cpp
   src/fe_absorption.cpp
   src/hdfe_regressor_v11.cpp
 )

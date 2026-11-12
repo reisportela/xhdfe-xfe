@@ -370,6 +370,63 @@ std::string configuration(bool xhdfe, int threads) {
     return result + "num_threads=" + std::to_string(threads) + ';';
 }
 
+// Independent scalar oracle for the exact plugin's new AKM inference path.
+double run_akm_projection(Call call, int threads, int exponent, const char* method) {
+    constexpr int workers=64,n=256;
+    state=SpiState{};
+    state.data=Columns(5,std::vector<double>(n,kMissing));
+    double vv=0.,fy=0.,vy=0.;
+    std::vector<double> y(n),v(n),fp(n),local_fy(workers,0.),local_vy(workers,0.);
+    for(int i=0;i<n;++i) {
+        const int w=i/4,f=(i%4)/2;
+        const double s=1.+w%3;
+        fp[i]=f==0 ? -.5:.5;v[i]=(i%2 ? -s:s);
+        const double x=5*fp[i]+v[i];
+        y[i]=.3*std::sin(.37*(w+1))+.7*fp[i]+.35*x+.1*std::sin(.73*(i+1));
+        vv+=v[i]*v[i];fy+=fp[i]*y[i];vy+=v[i]*y[i];
+        local_fy[w]+=fp[i]*y[i];local_vy[w]+=v[i]*y[i];
+        state.data[0][i]=std::ldexp(y[i],exponent);
+        state.data[1][i]=w;state.data[2][i]=f;state.data[3][i]=x;
+    }
+    const auto geometric=[](double x){return 1.+x+x*x+x*x*x+x*x*x*x;};
+    const double raw=fy/workers,gamma=vy/vv,lf=1./workers;
+    double variance=0.;
+    for(int w=0;w<workers;++w) {
+        const double s=1.+w%3,local_vv=4*s*s,lv=local_vv/vv;
+        const double score=-.5/workers*(geometric(lf)*(local_fy[w]-raw)+std::pow(lf,5)*local_fy[w])
+            +2.5*local_vv/vv*(geometric(lv)*(local_vy[w]/local_vv-gamma)+std::pow(lv,5)*local_vy[w]/local_vv);
+        variance+=score*score;
+    }
+    const double centre=std::abs(raw-5*gamma)/2.;
+    const double radius=std::sqrt(-2*std::log(.05)*variance);
+    const double expected[3]={2.*n/(n-1.)*centre*std::sqrt(variance),
+        n/(n-1.)*std::pow(std::max(0.,centre-radius),2),n/(n-1.)*std::pow(centre+radius,2)};
+    const Columns original=state.data;
+    state.matrices["probe_b"]=Matrix{1,1,std::vector<double>(1,kMissing)};
+    std::string config="cfg=task=akm_kss;ncontrols=1;store_effects=0;has_fweight=0;"
+        "sigma_centering=person_year;leave_out_level=match;compute_se=1;eigen_diagnostics=1;"
+        "use_gpu=0;jla_draws=200;seed=20261110;b=probe_b;num_threads="+std::to_string(threads)+
+        ";leverages="+method+";";
+    char* arguments[]={config.data()};
+    require(call(1,arguments)==0,"AKM projection fixture failed: "+state.errors);
+    require(state.scalars.at("__xakm_converged")==1,"AKM projection did not converge");
+    require(state.macros.at("_xakm_inference_method")=="worker_projection","AKM inference method mismatch");
+    require(state.scalars.at("__xakm_proj_dimension")==2 && state.scalars.at("__xakm_proj_clusters")==64,
+            "AKM projection dimensions mismatch");
+    require(state.scalars.at("__xakm_proj_threads_used")==threads &&
+            state.scalars.at("__xakm_proj_workers_active")==threads,"AKM inference workers not observed");
+    const char* keys[3]={"__xakm_se_var_psi","__xakm_ci_lb_psi","__xakm_ci_ub_psi"};
+    double maximum=0.;
+    for(int j=0;j<3;++j) {
+        const double actual=std::ldexp(state.scalars.at(keys[j]),-2*exponent);
+        const double error=std::abs(actual-expected[j]);maximum=std::max(maximum,error);
+        require(std::isfinite(actual) && error<=1e-9+1e-8*std::abs(expected[j]),"AKM projection closed-form mismatch");
+    }
+    for(int j=0;j<4;++j) require(state.data[j]==original[j],"AKM projection mutated input");
+    for(double keep:state.data[4]) require(keep==1,"AKM projection changed the sample");
+    return maximum;
+}
+
 struct Snapshot {
     int requested = 0, rc = -1;
     std::map<std::string, double> scalars;
@@ -541,6 +598,8 @@ int probe_main(int argc, char** argv) {
     double parity_error = 0;
     int dkraay_iv_cases = 0;
     double dkraay_iv_max_error = 0;
+    int akm_projection_cases = 0;
+    double akm_projection_max_error = 0;
     Snapshot one, two;
     try {
         require(argc == 4 || argc == 5,
@@ -601,6 +660,12 @@ int probe_main(int argc, char** argv) {
                     dkraay_iv_max_error = std::max(dkraay_iv_max_error, run_dkraay_iv(call, threads, mode));
                     ++dkraay_iv_cases;
                 }
+                for(int threads:{1,2}) for(int exponent:{-500,0,500})
+                    for(const char* method:{"exact","jla"}) {
+                        akm_projection_max_error=std::max(akm_projection_max_error,
+                            run_akm_projection(call,threads,exponent,method));
+                        ++akm_projection_cases;
+                    }
             }
             passed = true;
         }
@@ -619,6 +684,8 @@ int probe_main(int argc, char** argv) {
               << ",\"full_numeric_parity_max_error\":" << parity_error
               << ",\"dkraay_iv_cases\":" << dkraay_iv_cases
               << ",\"dkraay_iv_max_scaled_error\":" << dkraay_iv_max_error
+              << ",\"akm_projection_cases\":" << akm_projection_cases
+              << ",\"akm_projection_max_error\":" << akm_projection_max_error
               << ",\"thread1\":";
     print_snapshot(one); std::cout << ",\"thread2\":"; print_snapshot(two);
     std::cout << ",\"scope\":\"Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification\"}\n";

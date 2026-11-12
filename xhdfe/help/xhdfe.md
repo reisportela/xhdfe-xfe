@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.31.0.20261111. Use `python -m xhdfe --version`
+Package documentation version: 2.31.1.20261112. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 Version 2.31.0 corrects Student-t inference under the 53-bit x87 precision of
