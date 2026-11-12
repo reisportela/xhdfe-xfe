@@ -1,6 +1,22 @@
-# OpenMP release checklist — 2.31.0.20261111
+# OpenMP release checklist — 2.31.1.20261112
 
-## 2.31.0 release gates
+## 2.31.1 release gates
+
+The release adds explicit person-year-centred AKM components and full-model
+worker projection inference. The legacy default and ordinary fit sources are
+unchanged relative to the final 2.31.0 candidate.
+
+- [x] Final local CPU/CUDA builds: OpenMP, native CPU tuning, CUDA `sm_90`; CPU CTest 21/21, independent full-model oracles and Stata/R contracts pass.
+- [x] Final local plugin: actual-worker/native SPI gate, twelve new AKM cases, licensed Stata CPU/H100 runs and eight-million-row CPU smoke pass.
+- [x] Legacy numerical parity: twenty cases per backend remain bit-identical to the frozen 2.31.0 build. Scoped paired timings retain the existing performance within host resolution.
+- [ ] Preflight [43153369775](https://github.com/reisportela/xhdfe-xfe/actions/runs/43153369775), final version-tag builds and exact artifact receipts.
+- [ ] Exact version-tag Linux CPU/CUDA plugins exercised in licensed Stata on H100.
+- [ ] Publication, isolated public installation, byte readback and canonical reconciliation.
+- [ ] Licensed native Mac ARM/Intel Stata/MP checks: NOT_RUN. Native SPI/worker checks are separate; this remains an explicit coverage limit.
+
+Evidence and limits: [2.31.1 validation](../docs/releases/VALIDATION_2.31.1.20261112.md).
+
+## 2.31.0 release gates (history)
 
 The candidate adds the Windows Student-t correction (x87 precision guard), Stata
 `residuals()` from the fit's own state, and the weighted CPU MLSMR retry. Its

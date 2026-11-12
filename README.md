@@ -4,10 +4,10 @@
 
 `Version 2.31.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-Development candidate, not a published release: `xhdfeakm` 1.9.0 adds an
+Version 2.31.1: `xhdfeakm` 1.9.0 adds an
 explicit person-year-centred point estimator and full-model worker projection
 inference while retaining the legacy default. See [the option and its statistical limits](docs/akm-projection-inference.md)
-and [the candidate validation](docs/releases/VALIDATION_2.31.1.20261112.md).
+and [the validation record](docs/releases/VALIDATION_2.31.1.20261112.md).
 
 [Version 2.31.0.20261111](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.31.0.20261111)
 corrects Student-t inference on Windows, where an x87 precision-control

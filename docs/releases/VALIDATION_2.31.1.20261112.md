@@ -1,10 +1,11 @@
-# Validation — 2.31.1.20261112 development candidate
+# Validation — 2.31.1.20261112
 
 Scope: the explicit AKM/KSS person-year-centred point estimator and optional
 full-model worker projection inference, with the legacy default preserved.
-This is a local Linux candidate. No public release,
-installation, cross-repository promotion or whole-package certification is
-claimed. The candidate date is provisional.
+The local numerical and performance results below identify their exact scope.
+Public release, installation and canonical reconciliation require the final
+artifact gates recorded separately below. This is not whole-package
+certification.
 
 The base is private commit `dc42782af30a7d2725b89e27c8568e9fc01572c7`, the
 2.31.0 source line. Numerical comparisons use the authenticated frozen
@@ -56,6 +57,14 @@ workers. The exact local plugin passed the native SPI gate, including twelve
 new closed-form AKM cases. These tests are not a substitute for final remote
 platform-asset validation.
 
+Final legacy parity was checked against the frozen 2.31.0 CPU/CUDA modules:
+all 20 cases per backend are bit-identical, including 8,059 floating-point
+values per backend and the associated sample/diagnostic values. The final
+eight-million-row Stata CPU smoke retains identical coefficients, full
+covariance, sample and ten-iteration convergence with sixteen workers.
+Its 1.559 s versus 1.582 s baseline is a build diagnostic, not an independent
+performance claim (`final_legacy_parity.json`).
+
 The issue-sized Stata fixture passed with 149,058 observations and 1,000
 control columns. Against tight-tolerance reghdfe on the same retained sample,
 the continuous-coefficient gap was 6.3283e-15 and the maximum centred-firm-effect
@@ -102,7 +111,7 @@ or a new core24 performance certificate.
   and 1,000 control columns; the point and new inference completed with
   certified FWL convergence in 34 iterations and 16 observed workers. Its
   single elapsed time of 34.485 s is diagnostic, not performance acceptance.
-- Three actual Claude Code Fable 5.2/max reviews, algebraic counterexamples
+- Four actual Claude Code Fable 5.2/max reviews, algebraic counterexamples
   and an independent check of the final covariance/coverage argument are
   retained privately. The implementation-specific proof is public in the
   guide; it is not attributed to a published theorem for another estimator.
@@ -112,8 +121,11 @@ Evidence filenames include `candidate_projection_cpu_contract.json`,
 `projection_worker_holdout_20000.json` and
 `issue_sized_projection_cpu_diagnostic.json`. These are local scope claims.
 
-Final remote platform assets, publication, canonical alignment and public
-installation remain pending. Earlier point-only results below
+The preflight is [run 43153369775](https://github.com/reisportela/xhdfe-xfe/actions/runs/43153369775).
+Exact version-tag artifacts, publication, canonical alignment and public
+installation remain pending at this source checkpoint. Licensed native
+Stata/MP checks on macOS ARM/Intel are NOT_RUN; native SPI tests do not
+substitute for the full Stata host. Earlier point-only results below
 are historical evidence for their recorded binaries, not fresh passes for
 the integrated inference build.
 

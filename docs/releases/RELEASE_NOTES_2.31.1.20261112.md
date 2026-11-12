@@ -1,8 +1,8 @@
-# xhdfe 2.31.1.20261112 / xhdfeakm 1.9.0 — development candidate
+# xhdfe 2.31.1.20261112 / xhdfeakm 1.9.0
 
-Status: local candidate, not published. The date is provisional; publication
-is authorised after the remaining validation gates. This change keeps
-the existing AKM/KSS default and offer location invariance explicitly.
+This release addresses issue #18 with an explicit location-invariant
+AKM/KSS alternative while preserving the existing default. Publication
+requires the exact version-tag artifacts to pass the release gates.
 
 `xhdfeakm, sigmacentering(personyear)` selects a person-year-centred point
 estimator. Python and R use `sigma_centering="person_year"`. The default is
@@ -39,7 +39,14 @@ location and its treatment of the FWL-adjusted outcome as fixed. Its SE/CI
 concern `theta_*`, distinct from the main `kss_*` components.
 
 The Student-t repair from the 2.31.0 source base is retained. The auxiliary
-control fit does not evaluate unreported quantiles. Final issue-18 closure
-still depends on the remaining platform and performance gates.
-Validation and remaining publication gates are recorded in
-`VALIDATION_2.31.1.20261112.md` and the private issue-18 evidence directory.
+control fit does not evaluate unreported quantiles. Final local CPU/CUDA
+contracts, Stata and R tests, full-model oracle comparisons and the
+1,000-control reproducer passed. All 20 legacy cases in each backend retain
+bit-identical results against the frozen 2.31.0 build. Scoped paired timings
+support non-regression within host resolution; they are not a new whole-package
+performance certificate.
+
+Native macOS SPI checks are distinct from licensed Stata/MP host checks;
+the latter remain a documented coverage limit. Validation, platform results
+and publication evidence are recorded in
+[`VALIDATION_2.31.1.20261112.md`](VALIDATION_2.31.1.20261112.md).

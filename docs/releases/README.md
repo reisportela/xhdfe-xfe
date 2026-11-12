@@ -1,13 +1,11 @@
 # Release notes
 
-Unpublished development candidate:
-[2.31.1.20261112 — invariant AKM components and worker projection inference](RELEASE_NOTES_2.31.1.20261112.md).
-
 Versioned release notes are kept here so the repository root remains focused
 on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.31.1 | 12 November 2026 | [Invariant AKM components and worker projection inference](RELEASE_NOTES_2.31.1.20261112.md); [validation and scope](VALIDATION_2.31.1.20261112.md) |
 | 2.31.0 | 11 November 2026 | [Student-t on Windows, Stata residuals() from the fit, weighted Comparable retry on CPU](RELEASE_NOTES_2.31.0.20261111.md); [validation and scope](VALIDATION_2.31.0.20261111.md) |
 | 2.30.1 | 20 October 2026 | [CUDA covariance correction, cooperative projection and GPU repair accounting](RELEASE_NOTES_2.30.1.20261020.md); [validation and scope](VALIDATION_2.30.1.20261020.md) |
 | 2.30.0 | 20 October 2026 | [PR #15/#17 integration, CUDA precision and bounded CG recovery, preserved Fast policy, unified test core](RELEASE_NOTES_2.30.0.20261020.md); [validation and scope](VALIDATION_2.30.0.20261020.md) |
