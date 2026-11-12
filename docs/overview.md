@@ -25,7 +25,7 @@ estimation, and the degrees-of-freedom accounting all live in the same core.
 
 | Capability | Notes |
 | --- | --- |
-| Multiway HDFE | Any number of absorbed dimensions; two-way categorical interactions. |
+| Multiway HDFE | Any number of absorbed dimensions; categorical interactions with two or more components. |
 | Heterogeneous slopes | Group-specific slopes with or without the level FE. |
 | IV / 2SLS | Endogenous regressors instrumented after absorption. |
 | Weights | Analytic, frequency, probability, importance. |

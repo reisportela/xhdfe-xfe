@@ -2,16 +2,62 @@
 
 Scope: the explicit AKM/KSS person-year-centred point estimator and optional
 full-model worker projection inference, with the legacy default preserved.
-The local numerical and performance results below identify their exact scope.
-Public release, installation and canonical reconciliation require the final
-artifact gates recorded separately below. This is not whole-package
-certification.
+The release was published on 12 November 2026 at 06:15:41 UTC. Exact artifact,
+public-installation and canonical-runtime gates passed as recorded below.
+The numerical and performance results identify their scope; this is not
+whole-package certification.
 
 The base is private commit `dc42782af30a7d2725b89e27c8568e9fc01572c7`, the
 2.31.0 source line. Numerical comparisons use the authenticated frozen
 `cand_2310_lean_r2` CPU/CUDA modules. No solver or tolerance changes were made.
 Private evidence is in `Verifications/issue18_codex_20261111/` in the canonical
 development repository; `BASE_STATE.json` records the original identities.
+
+## Published artifacts and canonical closure
+
+[Preflight 43153369775](https://github.com/reisportela/xhdfe-xfe/actions/runs/43153369775)
+and [version-tag 43158637224](https://github.com/reisportela/xhdfe-xfe/actions/runs/43158637224)
+passed. All thirteen version-tag assets match their GitHub digests and
+SHA256SUMS. Ten final plugin/platform receipts, two installed-wheel receipts
+and four macOS serial negative controls are bound to the exact attached bytes.
+The new AKM fixture passed on Windows and both native macOS universal slices;
+Windows also passed the Student-t x87 host-regime guard and negative control.
+
+The exact downloaded Linux CPU/CUDA plugins passed licensed Stata tests on
+the H100: ordinary Fast/Comparable and partial-out analytic outputs, new
+centering/projection inference, response scales 2^+-500, the 1,000-control
+reproducer and the eight-million-row CPU smoke. Actual CUDA use was asserted.
+The installed Linux wheel passed the full point and projection contracts.
+CI additionally passed all 97 formula/frontend checks and rebuilt the source
+distribution. R package tests and the actual-worker probe passed, with two
+warnings and four notes retained: unusual source-file extensions and the GCC
+Eigen P=1 assignment warning in the unchanged OLS path. The warning was not
+silently declared a proved false positive.
+
+[Publication 43166835168](https://github.com/reisportela/xhdfe-xfe/actions/runs/43166835168)
+published those same assets and the certified net-install snapshot. A fresh
+installation from the public URL matched all 49 site files and 37 installed
+or ancillary files, then passed ordinary, centering and projection tests.
+Both canonical main checkouts were reconciled without discarding existing
+local work. All four CPU/CUDA builds passed 21/21 CTests, full new projection
+contracts and useful-worker requests 1, 2, 8, 16, 24 and 48. Fresh processes
+confirmed the active Python/Stata paths. All 816 common files in the recorded
+source/interface/build scope are byte-identical. Both rebuilt CUDA modules
+retain twenty legacy cases, including 8,059 floating-point values, bit-for-bit
+against the frozen Claude base; their distinct binary hashes are recorded.
+
+Native SPI checks are separate from a licensed Stata host. Final native Mac
+ARM/Intel Stata/MP remains NOT_RUN under the documented publication limit;
+its packaged OpenMP runtime is byte-identical to 2.30.1. Windows CI likewise
+tests native loading and the host precision regime, not licensed Windows
+Stata. Linux CPU/H100 licensed Stata execution is verified. No new full core24
+performance certificate is claimed.
+
+Final receipts include `FINAL_ASSETS_AUTHENTICATED_2311.json`,
+`FINAL_NATIVE_PLATFORM_RECEIPTS_2311.json`,
+`EXACT_VERSION_ASSET_ACCEPTANCE_2311.json`, `FINAL_CANONICAL_BUILDS_2311.json`
+and `PUBLIC_INSTALL_ACCEPTANCE_2311.json`. The generated local active-checkout
+seal follows the final documentation commits; it is not a source-code change.
 
 ## Statistical contract
 
@@ -121,11 +167,8 @@ Evidence filenames include `candidate_projection_cpu_contract.json`,
 `projection_worker_holdout_20000.json` and
 `issue_sized_projection_cpu_diagnostic.json`. These are local scope claims.
 
-The preflight is [run 43153369775](https://github.com/reisportela/xhdfe-xfe/actions/runs/43153369775).
-Exact version-tag artifacts, publication, canonical alignment and public
-installation remain pending at this source checkpoint. Licensed native
-Stata/MP checks on macOS ARM/Intel are NOT_RUN; native SPI tests do not
-substitute for the full Stata host. Earlier point-only results below
+Final artifact and publication results are recorded above. Earlier
+point-only results below
 are historical evidence for their recorded binaries, not fresh passes for
 the integrated inference build.
 
@@ -168,12 +211,12 @@ An initially occupied GPU and utilisation-sampling lag are recorded as timing
 coverage/harness issues, not estimator failures. No other user's process was
 modified or terminated.
 
-Windows and macOS execution of the new alternative: **NOT_RUN**. R package
-installation/distribution, final CI assets, public source synchronisation,
-net-install readback and canonical-checkout reconciliation: **NOT_RUN**.
-Alternative-mode inference: **local CPU/CUDA/Stata/R contracts passed;
-remote final-platform assets pending**.
-Legacy inference location sensitivity: **not repaired by this candidate**.
+Native Windows/macOS execution of the new alternative, R package checks,
+final CI assets, public source synchronisation, net-install readback and
+canonical reconciliation passed within the scopes stated above. Licensed
+Mac/Windows Stata host coverage is distinct and remains unexecuted here.
+Legacy inference location sensitivity is intentionally retained by default;
+the invariant alternative requires explicit selection and its stated conditions.
 
 ## Harness findings
 
@@ -188,5 +231,6 @@ Legacy inference location sensitivity: **not repaired by this candidate**.
   notation for coefficient and covariance arrays. The accepted baseline was
   not rerun for formatting.
 
-All old outputs remain preserved. The public issue must not be closed as a
-fully validated release on the strength of these local scoped results alone.
+Old outputs and failed harness attempts remain preserved. Release conclusions
+use the final artifact and public-installation receipts, with the statistical
+and platform coverage limits above.

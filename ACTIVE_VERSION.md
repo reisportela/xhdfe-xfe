@@ -1,20 +1,35 @@
 # Pastas locais ativas do xhdfe
 
-## Candidata 2.31.1.20261112 — issue #18
+## Release ativa 2.31.1.20261112 — publicada
 
-Worktree privada `build-worktrees/issue18-optin-20261111` e staging público
-`build-worktrees/issue18-public-20261112`, ambos dentro da raiz privada.
+[Publicada em 12nov2026, às 06:15:41 UTC](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.31.1.20261112).
+Os pontos de entrada são os dois checkouts canónicos `xhdfe` e `xhdfe-xfe`,
+ambos em `main`. As quatro builds CPU/CUDA `sm_90` passaram 21/21 CTests,
+os contratos da nova inferência e as provas de trabalhadores efetivos.
+O carregamento Stata/Python foi confirmado em processos novos.
 `xhdfeakm` 1.9.0 acrescenta `sigmacentering(personyear)` e inferência por
 projeção com clusters de trabalhador, preservando o comportamento por omissão.
 O âmbito estatístico e as provas estão em
 `docs/releases/VALIDATION_2.31.1.20261112.md`.
 
-O utilizador autorizou commit, push, integração nos dois `main` e release
-após validação. As provas locais finais CPU/CUDA, Stata e R passaram;
-o preflight remoto é `43153369775`. A publicação exige os artefactos exatos
-do tag, validação H100, reconciliação dos pontos de entrada canónicos e
-readback da instalação pública. Uma worktree validada não atualiza por si
-só os dois checkouts canónicos. O manifesto é selado apenas no fim.
+Os 13 anexos do tag foram autenticados e os plugins Linux exatos passaram
+os testes Stata CPU/H100, incluindo 1.000 controlos e oito milhões de
+observações sintéticas. A instalação pública nova confirmou 49 ficheiros
+do site e 37 ficheiros instalados/auxiliares. Preflight `43153369775`, tag
+`43158637224`, publicação `43166835168`.
+
+A inferência nova cobre variância da firma e covariância trabalhador–firma,
+com 2–128 firmas, pesos unitários e as condições estatísticas documentadas.
+Stata/MP licenciado em Mac ARM/Intel continua em NOT_RUN; os testes SPI
+nativos dos dois plugins passaram e o runtime OpenMP é idêntico ao da
+2.30.1. O R mantém dois avisos e quatro notas de check. Não se reivindica
+uma nova certificação de desempenho core24.
+
+Evidência e recuperação: `Verifications/issue18_codex_20261111/`, incluindo
+`canonical_before_2311/`, `closure_docs_before_2311/` e o manifesto final.
+As worktrees da candidata são históricas; não substituem estes pontos de
+entrada. Sessões Stata/Python já abertas devem ser reiniciadas para carregar
+os módulos atualizados.
 
 ## Histórico: candidata 2.31.0.20261111 — integrada na 2.31.1
 
@@ -26,8 +41,8 @@ Construção final `cand_2310_lean_r2` (worktree `build-worktrees/perf-fereg-gap
 
 `xfepout` passa a 1.14.0, `xhdfegelbach` a 1.6.2, `xhdfegelbachbootstrap` a 1.0.2 e `xhdfeakm` a 1.8.2.
 Validação em `docs/releases/VALIDATION_2.31.0.20261111.md`. O tag 2.31.0
-permanece draft na verificação de 12nov2026; a última release publicada
-continua a ser a 2.30.1 até ao fecho dos gates da 2.31.1.
+permanece draft na verificação de 12nov2026; as suas alterações foram
+integradas na release pública 2.31.1.
 
 ## Histórico: release 2.30.1.20261020 — publicada
 
