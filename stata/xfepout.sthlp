@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.13.5 20oct2026}{...}
+{* *! version 1.14.0 12nov2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -156,7 +156,19 @@ limited only by the logical processors/OpenMP limit visible to the process.{p_en
 {phang}{opt defaultthreads(#)} default auto-thread count when {opt numthreads(0)}.{p_end}
 {phang}{opt maxthreads(#)} cap for auto-thread selection (0=no cap).{p_end}
 {phang}{opt minparallelrows(#)} minimum rows before parallelization is considered.{p_end}
-{phang}{opt targetrowsperthread(#)} target row budget per thread in auto-threading.{p_end}
+{phang}{opt targetrowsperthread(#)} target row budget per thread in auto-threading.
+The default, 0, is automatic: one thread per 25,000 rows within the problem-size
+cap (one thread below 100,000 rows, at most 8 below 250,000 and at most 16
+otherwise). A positive value applies that fixed budget; 500000 restores the
+automatic rule of package version 2.30.1. Setting {cmd:XHDFE_AUTO_ROWS_PER_THREAD}
+to a positive integer before Stata starts replaces the 25,000.{p_end}
+{phang}On Linux and macOS the automatic teams of one user's simultaneous fits
+share the machine as described under {help xhdfe##opt_parallel:parallel execution}
+in {help xhdfe}: an automatic team never exceeds the rule above nor falls below
+that of {cmd:targetrowsperthread(500000)}, a positive {opt numthreads()} is never
+reduced, and {cmd:e(thread_limit_code)} 6 reports a team lowered by the
+coordination. {cmd:XHDFE_AUTO_TEAM_COORDINATION=0} before Stata starts turns it
+off.{p_end}
 
 {dlgtab:GPU}
 {phang}{opt gpubackend(str)} backend selector: {it:cpu}, {it:cuda}, or {it:metal}.
@@ -260,13 +272,15 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(parallel_workers_active)}}largest number of workers doing useful work in one observed region{p_end}
 {synopt:{cmd:e(thread_capacity)}}runtime-visible logical processor capacity{p_end}
 {synopt:{cmd:e(openmp_enabled)}}1 when the plugin has OpenMP support{p_end}
-{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable{p_end}
+{synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable,
+6 automatic team shared with the same user's simultaneous fits{p_end}
 {synopt:{cmd:e(thread_limit_reason)}}label corresponding to the limit code{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
 {synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
+{synopt:{cmd:e(cuda_tail_code)}}three-FE Comparable CUDA completion: 0 none, 1 GPU LSMR, 2 CPU MLSMR after the GPU sweeps (see {help xhdfe}){p_end}
 {synopt:{cmd:e(method_used)}}numeric method code: 0 auto, 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR, 6 MLSMR, 7 auto-MLSMR{p_end}
 
 {synoptset 24 tabbed}{...}
@@ -279,6 +293,7 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
 {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
 {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{synopt:{cmd:e(cuda_tail)}}label of {cmd:e(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
 {synopt:{cmd:e(version)}}xfepout version string{p_end}
 {synopt:{cmd:e(cmd)}}{cmd:xfepout}{p_end}
 {synopt:{cmd:e(cmdline)}}command line used to invoke xfepout{p_end}

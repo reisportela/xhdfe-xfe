@@ -1,4 +1,4 @@
-*! version 1.13.5 20oct2026
+*! version 1.14.0 12nov2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -123,7 +123,7 @@ program define xfepout, eclass sortpreserve
         DEFAULTThreads(integer 0) ///
         MAXThreads(integer 0) ///
         MINParallelRows(integer 20000) ///
-        TARGETRowsPerThread(integer 500000) ///
+        TARGETRowsPerThread(integer 0) ///
         GPUBACKEND(string) ///
         ABSORPTIONMethod(string) ///
         SYMmetricSweep ///
@@ -187,7 +187,7 @@ program define xfepout, eclass sortpreserve
     local absorptionmethod = lower(strtrim("`absorptionmethod'"))
     if ("`absorptionmethod'" == "") local absorptionmethod "symmetric-gauss-seidel"
     if ("`minparallelrows'" == "") local minparallelrows 20000
-    if ("`targetrowsperthread'" == "") local targetrowsperthread 500000
+    if ("`targetrowsperthread'" == "") local targetrowsperthread 0
 
     if (`tolerance' <= 0 | `tolerance' >= 1) {
         di as err "tolerance() must be in (0, 1)"
@@ -213,8 +213,8 @@ program define xfepout, eclass sortpreserve
         di as err "minparallelrows() must be positive"
         exit 198
     }
-    if (`targetrowsperthread' <= 0) {
-        di as err "targetrowsperthread() must be positive"
+    if (`targetrowsperthread' < 0) {
+        di as err "targetrowsperthread() must be >= 0"
         exit 198
     }
     if (`jacobirelaxation' < 0) {
@@ -767,7 +767,7 @@ program define xfepout, eclass sortpreserve
     // Prepare scalars to receive plugin outputs.
     tempname sN sNfull sNs sDfa sDfaL sDfaE sDfaN sIt sConv ///
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
-        sGpuUsed sGpuStatus sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth
+        sGpuUsed sGpuStatus sGpuAttempted sGpuAbsConv sGpuAbsIter sCudaTail sMeth
     scalar `sN' = .
     scalar `sNfull' = .
     scalar `sNs' = .
@@ -781,6 +781,7 @@ program define xfepout, eclass sortpreserve
     scalar `sGpuUsed' = 0
     scalar `sGpuStatus' = 0
     scalar `sGpuAttempted' = 0
+    scalar `sCudaTail' = 0
     scalar `sGpuAbsConv' = .
     scalar `sGpuAbsIter' = .
     scalar `sMeth' = .
@@ -847,6 +848,7 @@ program define xfepout, eclass sortpreserve
     local cfg "`cfg's_gpu_used=`sGpuUsed';"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
+    local cfg "`cfg's_cuda_tail_code=`sCudaTail';"
     local cfg "`cfg's_method_used=`sMeth';"
 
     // Bind the plugin to the same directory as the active xfepout.ado so we do not
@@ -1037,12 +1039,14 @@ program define xfepout, eclass sortpreserve
     else if (scalar(`sThrLimitCode') == 2) local thread_limit_reason "auto_policy"
     else if (scalar(`sThrLimitCode') == 3) local thread_limit_reason "auto_max_threads"
     else if (scalar(`sThrLimitCode') == 4) local thread_limit_reason "openmp_unavailable"
+    else if (scalar(`sThrLimitCode') == 6) local thread_limit_reason "auto_team_coordination"
     ereturn local thread_limit_reason "`thread_limit_reason'"
     ereturn scalar gpu_used = scalar(`sGpuUsed')
     ereturn scalar gpu_status_code = scalar(`sGpuStatus')
     ereturn scalar gpu_attempted = scalar(`sGpuAttempted')
     ereturn scalar gpu_absorption_converged = scalar(`sGpuAbsConv')
     ereturn scalar gpu_absorption_iterations = scalar(`sGpuAbsIter')
+    ereturn scalar cuda_tail_code = scalar(`sCudaTail')
     ereturn scalar method_used = scalar(`sMeth')
     ereturn scalar df_a_levels = scalar(`sDfaL')
     ereturn scalar df_a_exact = scalar(`sDfaE')
@@ -1054,6 +1058,10 @@ program define xfepout, eclass sortpreserve
     ereturn local absvars "`absorb_display'"
     ereturn local extended_absvars "`absorb_display'"
     ereturn local absorption_method "`method_name'"
+    local cuda_tail "none"
+    if (scalar(`sCudaTail') == 1) local cuda_tail "device-lsmr"
+    else if (scalar(`sCudaTail') == 2) local cuda_tail "host-mlsmr"
+    ereturn local cuda_tail "`cuda_tail'"
     ereturn local gpu_status "`gpu_status'"
     if ("`gpu_backend'" != "") {
         ereturn local gpu_backend_requested "`gpu_backend'"
@@ -1074,5 +1082,5 @@ end
 
 program define _xfepout_package_version, rclass
     version 16.0
-    return local package_version "1.13.5 20oct2026"
+    return local package_version "1.14.0 12nov2026"
 end
