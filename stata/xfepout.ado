@@ -1,4 +1,4 @@
-*! version 1.14.0 12nov2026
+*! version 1.14.5 21nov2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -122,11 +122,11 @@ program define xfepout, eclass sortpreserve
         NUMThreads(integer 0) ///
         DEFAULTThreads(integer 0) ///
         MAXThreads(integer 0) ///
-        MINParallelRows(integer 20000) ///
-        TARGETRowsPerThread(integer 0) ///
+        MINParallelrows(integer 20000) ///
+        TARGETRowsperthread(integer 0) ///
         GPUBACKEND(string) ///
         ABSORPTIONMethod(string) ///
-        SYMmetricSweep ///
+        SYMmetricsweep ///
         JACOBIRelaxation(real 0) ///
         KEEPsingletons ///
         DOFAdjustments(string asis) ///
@@ -135,7 +135,7 @@ program define xfepout, eclass sortpreserve
         MOBfile(string) ///
         ABSORPTIONCache(string) ///
         ABSCACHEMode(string) ///
-        FESTructureCache ///
+        FESTructurecache ///
         FESCache(string) ///
         FECACHEMODE(string) ///
         ]
@@ -185,6 +185,9 @@ program define xfepout, eclass sortpreserve
 
     // Defaults and aliases.
     local absorptionmethod = lower(strtrim("`absorptionmethod'"))
+    local allow_mlsmr_repair = "`weight'" == "aweight" & ///
+        inlist("`absorptionmethod'", "", "auto") & ///
+        "`transform'" == "" & "`symmetricsweep'" == ""
     if ("`absorptionmethod'" == "") local absorptionmethod "symmetric-gauss-seidel"
     if ("`minparallelrows'" == "") local minparallelrows 20000
     if ("`targetrowsperthread'" == "") local targetrowsperthread 0
@@ -728,40 +731,35 @@ program define xfepout, eclass sortpreserve
         timer on 99
     }
 
-    // Output variables (residualized vars).
+    // Validate public names together and stage outputs until the plugin succeeds.
     local k : word count `varlist'
-    local out_vars
+    local output_names
     if ("`generate'" != "") {
         foreach v of local varlist {
-            local out "`generate'`v'"
-            confirm new variable `out'
-            quietly gen double `out' = .
-            local out_vars "`out_vars' `out'"
+            local output_names "`output_names' `generate'`v'"
         }
     }
-    else {
-        foreach v of local varlist {
-            tempvar out
-            quietly gen double `out' = .
-            local out_vars "`out_vars' `out'"
-        }
+    local public_outputs `output_names' `groupvar' `sample'
+    local duplicate_outputs : list dups public_outputs
+    if ("`duplicate_outputs'" != "") {
+        di as err "output variable(s) requested more than once: `duplicate_outputs'"
+        exit 110
     }
-
-    local store_groupvar 0
-    if ("`groupvar'" != "") {
-        confirm new variable `groupvar'
-        quietly gen long `groupvar' = .
-        local store_groupvar 1
+    foreach name of local public_outputs {
+        confirm new variable `name'
     }
-
-    // e(sample)-style marker (prefilled with candidate sample).
-    local esample "`sample'"
-    if ("`esample'" != "") {
-        confirm new variable `esample'
+    local out_vars
+    foreach v of local varlist {
+        tempvar out
+        quietly gen double `out' = .
+        local out_vars "`out_vars' `out'"
     }
-    else {
-        tempvar esample
+    local store_groupvar = "`groupvar'" != ""
+    if (`store_groupvar') {
+        tempvar group_out
+        quietly gen long `group_out' = .
     }
+    tempvar esample
     quietly gen byte `esample' = `touse'
 
     // Prepare scalars to receive plugin outputs.
@@ -790,7 +788,7 @@ program define xfepout, eclass sortpreserve
     local plugin_varlist "`varlist' `fe_ids' `clust_ids'"
     if (`has_weight') local plugin_varlist "`plugin_varlist' `wvar'"
     local plugin_varlist "`plugin_varlist' `out_vars'"
-    if (`store_groupvar') local plugin_varlist "`plugin_varlist' `groupvar'"
+    if (`store_groupvar') local plugin_varlist "`plugin_varlist' `group_out'"
     local plugin_varlist "`plugin_varlist' `esample'"
 
     // Build packed plugin args.
@@ -810,6 +808,7 @@ program define xfepout, eclass sortpreserve
     local cfg "`cfg'drop_singletons=`drop_singletons';"
     local cfg "`cfg'symmetric_sweep=`symmetric_sweep';"
     local cfg "`cfg'absorption_method=`absorptionmethod';"
+    if (`allow_mlsmr_repair') local cfg "`cfg'partial_out_allow_mlsmr_repair=1;"
     local cfg "`cfg'jacobi_relaxation=`jacobirelaxation';"
     local cfg "`cfg'default_threads=`defaultthreads';"
     local cfg "`cfg'max_threads=`maxthreads';"
@@ -975,6 +974,16 @@ program define xfepout, eclass sortpreserve
         exit 430
     }
 
+    if ("`public_outputs'" != "") {
+        local staged_outputs
+        if ("`generate'" != "") local staged_outputs "`out_vars'"
+        if (`store_groupvar') local staged_outputs "`staged_outputs' `group_out'"
+        if ("`sample'" != "") local staged_outputs "`staged_outputs' `esample'"
+        quietly rename (`staged_outputs') (`public_outputs')
+        if ("`generate'" != "") local out_vars "`output_names'"
+        if ("`sample'" != "") local esample "`sample'"
+    }
+
     // Copy residualized values back to original vars in clear mode.
     if ("`clear'" != "") {
         local i = 0
@@ -1055,6 +1064,8 @@ program define xfepout, eclass sortpreserve
     if (scalar(`sMeth') == 1) local method_name "gauss-seidel"
     else if (scalar(`sMeth') == 2) local method_name "symmetric-gauss-seidel"
     else if (scalar(`sMeth') == 3) local method_name "jacobi"
+    else if (scalar(`sMeth') == 5) local method_name "lsmr"
+    else if (scalar(`sMeth') == 6) local method_name "mlsmr"
     ereturn local absvars "`absorb_display'"
     ereturn local extended_absvars "`absorb_display'"
     ereturn local absorption_method "`method_name'"
@@ -1082,5 +1093,5 @@ end
 
 program define _xfepout_package_version, rclass
     version 16.0
-    return local package_version "1.14.0 12nov2026"
+    return local package_version "1.14.5 21nov2026"
 end

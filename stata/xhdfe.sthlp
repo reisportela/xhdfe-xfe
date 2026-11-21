@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.31.1 12nov2026}{...}
+{* *! version 2.34.1 21nov2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -11,6 +11,7 @@
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
+{vieweralsosee "Public-data examples" "help xhdfe_examples"}{...}
 {vieweralsosee "" "--"}{...}
 {viewerjumpto "Syntax" "xhdfe##syntax"}{...}
 {viewerjumpto "Absorb syntax" "xhdfe##absorb"}{...}
@@ -19,7 +20,7 @@
 {viewerjumpto "Group FEs" "xhdfe##group_fes"}{...}
 {viewerjumpto "Options" "xhdfe##options"}{...}
 {viewerjumpto "Postestimation Syntax" "xhdfe##postestimation"}{...}
-{viewerjumpto "Missing Features" "xhdfe##missing_features"}{...}
+{viewerjumpto "Known limitations" "xhdfe##known_limitations"}{...}
 {viewerjumpto "Examples" "xhdfe##examples"}{...}
 {viewerjumpto "Stored results" "xhdfe##results"}{...}
 {viewerjumpto "Authors" "xhdfe##contact"}{...}
@@ -35,7 +36,7 @@
 {title:Syntax}
 
 {pstd}
-{bf:Least-square regressions (no fixed effects):}
+{bf:Least-squares regression without fixed effects:}
 
 {p 8 15 2} {cmd:xhdfe}
 {it:depvar} [{it:indepvars}]
@@ -65,11 +66,11 @@
 {ifin} {it:{weight}} {cmd:,} {opt g:roup(groupvar)} {opt i:ndividual(indvar)} [{opth a:bsorb(xhdfe##absorb:absvars)} {help xhdfe##options_table:options}]{p_end}
 
 {pstd}
-{bf:IV/2SLS with absorbed fixed effects:}
+{bf:IV/2SLS with optional fixed effects:}
 
 {p 8 15 2} {cmd:xhdfe}
 {it:depvar} [{it:exogvars}] {it:endogvars}
-{ifin} {it:{weight}} {cmd:,} {opth a:bsorb(xhdfe##absorb:absvars)}
+{ifin} {it:{weight}} {cmd:,} [{opth a:bsorb(xhdfe##absorb:absvars)}]
 {opt endog:enous(endogvars)} {opt instr:uments(instvars)} [{help xhdfe##options_table:options}]{p_end}
 
 {pstd}
@@ -83,7 +84,7 @@
 {synopthdr}
 {synoptline}
 {syntab:Standard FEs {help xhdfe##opt_absorb:[+]}}
-{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labeled absorbs, categorical interactions, and heterogeneous slopes{p_end}
+{synopt: {opth a:bsorb(xhdfe##absorb:absvars)}}categorical fixed effects, labelled absorbs, categorical interactions, and heterogeneous slopes{p_end}
 {synopt: {cmdab:a:bsorb(}{it:label}{cmd:=}{it:absvar}{cmd:)}}label an absorbed effect and use {it:label} as the saved-FE base name{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:#c.}{it:x}{cmd:)}}absorb group-specific slopes without a level FE{p_end}
 {synopt: {cmdab:a:bsorb(}{it:fe}{cmd:##c.}{it:x}{cmd:)}}absorb a level FE plus group-specific slopes{p_end}
@@ -104,8 +105,8 @@ within a group: {it:mean} (default), {it:sum}; {it:avg}/{it:average} are aliases
 
 {syntab:Model {help xhdfe##opt_model:[+]}}
 {synopt : {opth vce:(xhdfe##opt_vce:vcetype)}}{it:vcetype} may be
-{opt un:adjusted} (default), {opt r:obust}, {opt cl:uster} {help fvvarlist} (multiway), or {opt dk:raay} [{it:#}]{p_end}
-{synopt : {opt r:obust}}equivalent to {cmd:vce(robust)}{p_end}
+{opt unadjusted} (default), {opt robust}, {opt cl:uster} {help fvvarlist} (multiway), or {opt dk:raay} [{it:#}]{p_end}
+{synopt : {opt rob:ust}}equivalent to {cmd:vce(robust)}{p_end}
 {synopt : {opth cl:uster(varlist)}}equivalent to {cmd:vce(cluster ...)};
 multiway clustering allowed; supports categorical interactions with {cmd:#}
 (two or more components) and two-component {cmd:##}{p_end}
@@ -125,48 +126,51 @@ multiway clustering allowed; supports categorical interactions with {cmd:#}
 {synopt :{opt dof:adjustments(list)}}select absorbed-DoF adjustment rules; default is {cmd:all}{p_end}
 {synopt :{opt ssc(str)}}fixest-style small-sample corrections (K/G/t.df){p_end}
 {synopt :{opt statstyle(str)}}fit-statistics style: {it:reghdfe} (default) or {it:legacy} (pre-change xhdfe){p_end}
-{synopt: {opth groupv:ar(newvar)}}identifier for the first mobility group{p_end}
+{synopt: {opth groupvar(newvar)}}identifier for the first mobility group{p_end}
 
 {syntab:Optimization {help xhdfe##opt_optimization:[+]}}
 {synopt :{opt tol:erance(#)}}convergence tolerance (default 1e-8){p_end}
 {synopt :{opt tolerancemode(str)}}absorber convergence mode:
 {it:reghdfe-comparable} (default since 2.7.0), {it:xhdfe-fast} (pre-2.7.0 fast trigger),
 or {it:strict-residual}{p_end}
-{synopt :{opt convergence(str)}}stopping criterion for heterogeneous-slope absorption
-({cmd:absorb(fe#c.x)}): {it:auto} (default; follows {cmd:tolerancemode()}),
+{synopt :{opt convergence(str)}}stopping criterion for iterative sweeps:
+{it:auto} (default; follows {cmd:tolerancemode()}),
 {it:normchange}, {it:reghdfe}, or {it:both}{p_end}
 {synopt :{opt fetol:erance(#)}}fixed-effect recovery tolerance for {cmd:savefe}/{cmd:savefes} MAP fallback (default 1e-6){p_end}
 {synopt :{opt ferecoverym:ethod(str)}}fixed-effect recovery method: {it:hybrid} (default) or {it:map}{p_end}
 {synopt :{opt maxit:er(#)}}maximum absorber iterations (default 100000){p_end}
-{synopt :{opt iter:ate(#)}}alias of {cmd:maxiter(#)} accepted for reghdfe compatibility{p_end}
+{synopt :{opt iterate(#)}}alias of {cmd:maxiter(#)} for reghdfe compatibility; so are {cmd:iter(#)} and {cmd:iterations(#)}{p_end}
 {synopt :{opt absorptionm:ethod(str)}}absorption method (auto, gauss-seidel, symmetric-gauss-seidel, jacobi, mlsmr, lsmr, auto-mlsmr; aliases supported){p_end}
+{synopt :{opt reducedpcg(on|off)}}reduced-system tier for this fit; default: the global, then the environment variable {cmd:XHDFE_REDUCED_PCG}, else on{p_end}
+{synopt :{opt reducedpcgcuda(on|off)}}experimental CUDA variant of the tier for this fit, on CUDA fits only;
+default: the global, then the environment variable {cmd:XHDFE_REDUCED_PCG_CUDA}, else off{p_end}
 {synopt :{opt sym:metricsweep}}forward + backward sweep per iteration{p_end}
 {synopt :{opt jacobirel:axation(#)}}Jacobi relaxation parameter (0 = default){p_end}
 
 {syntab:GPU {help xhdfe##opt_gpu:[+]}}
 {synopt :{opt gpubackend(str)}}backend selector: {it:cpu}, {it:cuda}, or {it:metal}; errors if a requested non-CPU backend is unavailable{p_end}
+{synopt :{opt weightedcpuroute(on|off)}}request CPU for eligible weighted CUDA fits; default {cmd:off}{p_end}
 
 {syntab:Parallel execution {help xhdfe##opt_parallel:[+]}}
 {synopt :{opt numthr:eads(#)}}threads used by the absorber (0 = auto){p_end}
 {synopt :{opt defaultthr:eads(#)}}default threads when auto-threading is enabled{p_end}
 {synopt :{opt maxthr:eads(#)}}maximum threads when auto-threading is enabled{p_end}
-{synopt :{opt minparallelr:ows(#)}}minimum rows to enable parallel absorption{p_end}
-{synopt :{opt targetrowsper:thread(#)}}target rows per thread (0 = auto){p_end}
+{synopt :{opt minparallelrows(#)}}minimum rows for automatic parallel absorption{p_end}
+{synopt :{opt targetrowsperthread(#)}}target rows per thread (0 = auto){p_end}
 
 {syntab:Reporting {help xhdfe##opt_reporting:[+]}}
-{synopt :{opt l:evel(#)}}set confidence level; default is {cmd:level(95)}{p_end}
+{synopt :{opt level(#)}}set confidence level; default is {cmd:level(95)}; {cmd:l(#)} is accepted as a shorthand{p_end}
 {synopt :{opt noheader}}suppress the header block; forwarded to the xhdfe display layer for reghdfe compatibility{p_end}
-{synopt :{opt notable}}suppress the coefficient table; header/footnote behavior follows Stata e-class display conventions{p_end}
+{synopt :{opt notable}}suppress the coefficient table; header/footnote behaviour follows Stata e-class display conventions{p_end}
 {synopt :{opt nofootnote}}suppress the absorbed-DoF footnote table{p_end}
 {synopt :{opt noomitted}}hide omitted coefficients in the coefficient table{p_end}
 {synopt :{opt noempty}}hide empty cells in factor-variable displays{p_end}
 {synopt :{opt baselevels}}show base levels in factor-variable displays{p_end}
 {synopt :{opt allbaselevels}}show all base levels in factor-variable displays{p_end}
-{synopt :{opt cformat(fmt)}}coefficient display format; forwarded to {cmd:ereturn display}{p_end}
+{synopt :{opt cformat(fmt)}}display format for coefficients, standard errors and confidence limits{p_end}
 {synopt :{opt pformat(fmt)}}p-value display format; forwarded to {cmd:ereturn display}{p_end}
-{synopt :{opt sformat(fmt)}}standard-error display format; forwarded to {cmd:ereturn display}{p_end}
+{synopt :{opt sformat(fmt)}}display format for the t or z statistic{p_end}
 {synopt :{opt fvwrap(#)}}factor-variable wrapping option; forwarded to {cmd:ereturn display}{p_end}
-{synopt :{opt fvwrapon(style)}}factor-variable wrapping style; forwarded to {cmd:ereturn display}{p_end}
 {synopt :{opt vsquish}}compact vertical display; forwarded to {cmd:ereturn display}{p_end}
 {synopt :{opt nolstretch}}disable line stretching in table display; forwarded to {cmd:ereturn display}{p_end}
 {synopt :{opt nofvlabel}}suppress factor-value labels in table display; forwarded to {cmd:ereturn display}{p_end}
@@ -176,18 +180,10 @@ or {it:strict-residual}{p_end}
 {synopt :{opt nowarn}}suppress singleton and compatibility notes; estimation is unchanged{p_end}
 
 {syntab:Compatibility}
-{synopt :{opt timeit}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt verbose(#)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt technique(str)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt acceleration(str)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt transform(str)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt preconditioner(str)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt prune}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt fastregress}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt poolsize(#)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt compact}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt version(#)}}accepted for reghdfe compatibility; currently ignored{p_end}
-{synopt :{opt parallel(str)}}accepted for reghdfe compatibility; currently ignored{p_end}
+{synopt :{opt timeit}, {opt verbose(#)}, {opt parallel(str)}}accepted for reghdfe compatibility{p_end}
+{synopt :{opt technique(str)}, {opt acceleration(str)}, {opt transform(str)}, {opt preconditioner(str)}}accepted for reghdfe compatibility{p_end}
+{synopt :{opt prune}, {opt fastregress}, {opt poolsize(#)}, {opt compact}, {opt version(#)}}accepted for reghdfe compatibility{p_end}
+{synopt :{opt fvwrapon(style)}}accepted for display compatibility{p_end}
 
 {syntab:Diagnostics {help xhdfe##opt_diagnostics:[+]}}
 {synopt :{opt mobilityprofile}}compute mobility profile and save to {cmd:xhdfe_mobility_profile.txt}{p_end}
@@ -202,7 +198,11 @@ at an explicit path (aliases: {cmd:festructurecache()}, {cmd:festructurecachefil
 {synopt : }{bf:- note:} FE structure caches speed up repeated runs with the same {cmd:absorb()} structure; use {cmd:fescache()} for a fixed path{p_end}
 
 {synoptline}
-{p 4 6 2}{it:depvar} and {it:indepvars} may contain {help tsvarlist:factor variables} and time-series operators.
+{p 4 6 2}The compatibility options in the table leave estimation unchanged.
+{cmd:xhdfe, version} (without a number) reports the package version. Use {opt numthreads()} to control
+in-process OpenMP parallelism.{p_end}
+{p 4 6 2}The dependent variable permits time-series operators. The regressors permit
+{help fvvarlist:factor variables} and {help tsvarlist:time-series operators}.
 Factor-variable prefixes are supported in slopes. In {cmd:absorb()}, categorical interactions with
 {cmd:#}/{cmd:##} are supported, as are heterogeneous slopes of the form {cmd:fe#c.x}
 (group-specific slopes) and {cmd:fe##c.x} (group intercepts plus group-specific slopes).
@@ -212,117 +212,56 @@ factor-variable operators in the slope list are not supported.{p_end}
 {p 4 6 2}Supported weights are {cmd:aweight}, {cmd:fweight}, {cmd:pweight}, and {cmd:iweight}.
 With {cmd:pweight} and no {cmd:vce()}, xhdfe defaults to robust SEs; probability weights cannot
 be combined with {cmd:vce(unadjusted)}. Negative importance weights are rejected; zero-weight
-rows are excluded. For supported nonnegative importance weights, xhdfe follows {cmd:regress}:
-{cmd:e(N)}, residual degrees of freedom, sums of squares, and Root MSE use the sum of weights.{p_end}
+rows are excluded. For unadjusted importance-weighted fits, the reported observation count and residual degrees of
+freedom follow the Stata importance-weight convention. See {help xhdfe##opt_vce:weights and VCE}.{p_end}
 
 {marker opt_gpu}{...}
-{title:GPU option}
+{title:Backend selection}
 
 {phang}
-{opt gpubackend(str)} selects the backend used by the fixed-effect absorber.
-
-{phang2}
-{it:cpu} forces the CPU backend.
-
-{phang2}
-{it:cuda} requests the CUDA backend when the plugin was built with CUDA support and a CUDA device is available;
-otherwise xhdfe stops with an error instead of silently falling back to CPU.
-
-{phang2}
-{it:metal} is reserved for Metal-enabled builds. In builds where Metal is not available, requesting it
-stops with an error instead of silently falling back to CPU.
+{opt gpubackend(cpu|cuda|metal)} selects the absorption backend for this fit.
+With the option omitted, selection follows {cmd:XHDFE_GPU_BACKEND}, then the
+build default (CPU on standard builds). CUDA requires a CUDA-enabled plugin and
+a supported NVIDIA device. Metal is reserved. A required CUDA result that is
+unavailable, fails, or would reuse CPU absorption returns error 498, subject to
+the explicitly requested weighted route below.
 
 {phang}
-The online net-install ships {bf:CPU-only} plugins. Separate Linux CUDA release bundles are available;
-they must support the installed GPU. To build for a Linux machine with an NVIDIA GPU, use the companion command
-{helpb xhdfegpu}: run it once after {cmd:net install} and it detects the GPU, compiles a plugin for the local
-architecture, and installs it over the CPU plugin in place (no file renaming). On a machine without internet
-access, download the source zip and pass it in with {cmd:xhdfegpu, zip(}{it:path}{cmd:)}.
+Check {cmd:e(gpu_used)}, {cmd:e(gpu_backend)} and {cmd:e(gpu_status)}.
+A value of 1 for {cmd:e(gpu_used)} confirms device work. Inspect {cmd:e(cuda_tail)}
+for the completion: {cmd:device-lsmr} on the device, {cmd:host-mlsmr} after CUDA
+sweeps or on a restart, or {cmd:none} when no separately labelled completion was
+reported. Host completion preserves the requested tolerance and shares the
+iteration budget with the CUDA stages.
+
+{marker gpu_weighted_cpu_route}{...}
+{phang}
+{opt weightedcpuroute(on|off)} defaults to {cmd:off}. With {cmd:on}, a fit
+requesting available CUDA runs on CPU if it uses weights and at least two
+distinct absorbed terms in {it:reghdfe-comparable} or {it:strict-residual} mode.
+This includes unit weights and the collapsed {cmd:group()} fit. Combined
+{cmd:group()}/{cmd:individual()} fits and {it:xhdfe-fast} retain their own
+routing. As an example of how terms are counted, {cmd:absorb(a a)} is one term
+and {cmd:absorb(g##c.z)} is one combined term. The routed fit uses CPU cache
+and profile rules. It reports {cmd:e(gpu_used)} = 0, {cmd:e(gpu_status_code)} =
+7, {cmd:e(gpu_status)} = {cmd:weighted_cpu_route}, {cmd:e(gpu_backend)} =
+{cmd:cpu} and {cmd:e(gpu_backend_requested)} = {cmd:cuda}.
 
 {phang}
-To build the plugin by hand instead (Linux + NVIDIA only), first read your GPU's
-compute capability:
-
-{phang2}
-{cmd:. nvidia-smi --query-gpu=compute_cap --format=csv,noheader}
-
-{phang}
-Drop the dot to get {cmd:XHDFE_CUDA_ARCH} (for example {cmd:9.0} maps to {cmd:90}, {cmd:8.6} to {cmd:86}; minimum
-{it:75}). Then, from the xhdfe repository root:
-
-{phang2}
-{cmd:. XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-plugin.sh --linux --openmp}
+Ordinary weighted CUDA fits with two to four categorical effects and
+unweighted fits with four categorical effects have a per-column FE-moment
+check in Comparable and Strict modes. For Comparable analytic, probability
+and importance weights, the correction applies up to 2,000,000 estimation
+rows. A failed check can trigger device LSMR within the remaining
+{cmd:maxiter()} budget. Ordinary unweighted three-effect Comparable fits
+have their own completion path. See {help xhdfe##known_limitations:limitations}
+and {help xhdfe##opt_reducedpcgcuda:reducedpcgcuda()} for the opt-in reduced tier.
 
 {phang}
-CUDA builds require NVCC and compute capability {it:sm_75} or newer. Use {cmd:XHDFE_CUDA_ARCH} to set a single
-target SM for your card (minimum: 75), or {cmd:XHDFE_CUDA_ARCHS} to set a multi-target list (comma/space/semicolon
-separated), for example {cmd:"75,80,86,89,90"} for a shareable multi-GPU binary.
-
-{phang}
-After estimation, check {cmd:e(gpu_used)}, {cmd:e(gpu_backend)}, and {cmd:e(gpu_status)} to confirm whether CUDA
-was actually used. If {cmd:gpubackend(cuda)} was requested but CUDA is unavailable, fails before a converged
-absorption result, or returns a CPU cache/profile result, xhdfe exits with error 498 rather than silently returning
-CPU results. Rebuild the plugin with CUDA support for the intended architecture and ensure the requested backend is
-available at runtime. If the plugin was rebuilt or switched during the current Stata session, run {cmd:discard}
-(with no arguments) before rerunning the command.
-
-{phang}
-{bf:CUDA validation scope.} {cmd:e(gpu_used)} proves GPU execution, not universal numerical equivalence.
-For ordinary unweighted Comparable fits with three fixed effects and no saved effects,
-the CUDA path completes the remaining projection within the original iteration budget.
-This corrects an inherited covariance error; independent references check the complete coefficient and covariance output.
-This correction, made in version 2.30.1, has a measured runtime cost relative to 2.29.1. The 2.30.1 validation
-record reports all eight execution variants on the ready specification and the accepted performance trade-off.
-Ill-conditioned and {cmd:group()}/{cmd:individual()} cases can still require a precision refusal;
-use {cmd:gpubackend(cpu)} for those specifications. Old absorption caches are invalidated automatically.
-Fast and Comparable remain distinct approximation contracts; CUDA remains opt-in.
-
-{phang}
-{bf:Where the CUDA completion runs.} The completion described above normally runs on the GPU.
-On graphs that mix slowly the GPU solver for it can need thousands of iterations. A short GPU probe
-predicts its length; when the prediction is long and the CPU would itself absorb this fit with MLSMR,
-the CPU finishes the projection with MLSMR, from the state the GPU sweeps reached, at the same tolerance,
-within the same iteration budget and under the same precision certificate, using the thread team of the fit
-({cmd:numthreads()}). {cmd:e(cuda_tail)} names the completion: {cmd:device-lsmr} (GPU),
-{cmd:host-mlsmr} (CPU after the GPU sweeps; {cmd:e(gpu_used)} stays 1), or {cmd:none} when no completion ran.
-{cmd:e(absorption_method_used)} is then 5 (LSMR) or 6 (MLSMR).
-At tight tolerances the GPU sweeps can instead hand over to a conjugate-gradient stage; when that stage stops
-without converging, the fit restarts from the original data with GPU LSMR. The same probe and the same CPU
-decision apply to that restart: when both point to the CPU, the CPU solves the fit with MLSMR from the original
-data (never from the conjugate-gradient state) and {cmd:e(cuda_tail)} is {cmd:host-mlsmr}; a restart kept on
-the GPU reports {cmd:none}, as in version 2.30.1, so {cmd:none} also covers that GPU restart (the trace below
-names it {cmd:restart->device-lsmr}).
-{cmd:e(iterations)} and {cmd:e(gpu_absorption_iterations)} count all of it: the GPU sweeps (including those
-before a conjugate-gradient stage that is then restarted), the conjugate-gradient iterations, the GPU solver
-and the CPU iterations, all charged to one {cmd:maxiter()} budget that is never reset: the conjugate-gradient
-stage only receives what the sweeps left, and a fit whose sweeps and conjugate-gradient stage use the whole
-budget stops with no estimates, reporting {cmd:iterations=}{it:maxiter}{cmd:/}{it:maxiter}. One exception, on
-the CPU and on the GPU alike: when the conjugate-gradient stage converges (no restart), {cmd:e(iterations)}
-counts its iterations but not the sweeps before it. Setting the environment variable
-{cmd:XHDFE_CUDA_TAIL_HANDOVER=0} keeps the completion and the restart on the GPU, as in version 2.30.1, with its
-budget and iteration count (the sweeps before a conjugate-gradient stage are then neither charged to its budget
-nor counted).
-For diagnosis, {cmd:XHDFE_GI_LSMR_TRACE=1} writes the decision to standard error: one {cmd:cuda_tail_probe}
-line per checkpoint (the predicted remaining GPU work and the CPU route selector), one {cmd:cuda_tail_handover}
-line when the CPU completes (its iterations and time), one {cmd:cuda_it_to_cg} and one {cmd:cuda_cg_end} line
-around a conjugate-gradient stage, and one {cmd:cuda_tail_restart} line per restart (iterations and time of
-every stage, GPU and CPU apart). The same variable also traces the LSMR solves of the
-{cmd:group()}/{cmd:individual()} absorption. The decision uses solver quantities only, never elapsed time.
-
-{phang}
-Practical rule: after rebuilding {cmd:xhdfe.plugin}, after switching between CPU and CUDA plugin binaries, or after
-changing the active {cmd:adopath} entry that provides {cmd:xhdfe.ado}/{cmd:xhdfe.plugin}, restart Stata
-to ensure that the intended native code is loaded. {cmd:discard} takes no command-name argument.
-
-{phang}
-Ordinary repeated calls in the same Stata session do {bf:not} require {cmd:discard} when the plugin binary itself
-has not changed; for example, rerunning {cmd:xhdfe} first on CPU and then with {cmd:gpubackend(cuda)} now reuses the
-same loaded plugin correctly.
-
-{phang}
-Advanced: {cmd:XHDFE_GPU_BACKEND} can be set in the environment (cpu|cuda|metal), but {opt gpubackend()} is
-recommended.
-
+The standard online install supplies CPU plugins. See {helpb xhdfegpu} to
+build the Linux CUDA plugins. After replacing a plugin or changing its
+{cmd:adopath} entry, run {cmd:discard} with no arguments or restart Stata.
+See {help xhdfe_examples##cuda:a CUDA example with public data}.
 
 {marker description}{...}
 {title:Description}
@@ -330,7 +269,9 @@ recommended.
 {pstd}
 {cmd:xhdfe} estimates linear models with high-dimensional fixed effects (HDFE) using a C++ backend.
 It mirrors the reporting and defaults of {cmd:reghdfe} where possible, while exposing fixest-style
-small-sample corrections and ideas from pyfixest and FixedEffectModels.jl. The command supports multiway fixed
+small-sample corrections and ideas from pyfixest, FixedEffectModels.jl, the {it:within} solvers of Fischer
+and Schroeder, and {cmd:fereg} by Schmieder (see {help xhdfe##acknowledgements:Acknowledgements}).
+The command supports multiway fixed
 effects, weights, robust and multiway-cluster inference, reghdfe-style singleton dropping and
 DoF adjustments, and (optionally) the group()/individual() machinery.
 
@@ -348,20 +289,9 @@ Additional features include:{p_end}
 {title:Development process}
 
 {pstd}
-{cmd:xhdfe} was developed through an AI-assisted optimization workflow. The
-project used AI coding tools to study existing HDFE packages, review relevant
-literature, inspect the mixed Stata/C++/Python codebase, draft and revise
-patches, instrument slow paths, and improve performance. No AI tool or system
-is named or credited as a contributor.{p_end}
-
-{pstd}
-The listed human authors did not write the package line by line. Their role was
-to define the econometric target, set numerical and performance guardrails,
-choose the benchmark and validation criteria, direct the optimization process,
-decide which AI-assisted changes to keep, and retain responsibility for the
-package. No software tool or AI system is credited as an author or co-author.
-{p_end}
-
+The authors directed an AI-assisted development and validation process and
+are responsible for the econometric specifications, validation criteria and
+released code.{p_end}
 
 {marker group_fes}{...}
 {title:Description of individual fixed effects in group setting}
@@ -384,7 +314,7 @@ CPU path explicitly. If an automatic LSMR solve cannot pass its independent cert
 always identifies the result actually used. On CUDA, {cmd:auto} retains the GPU group/individual
 solver and accepts it only when the authoritative certificate passes. Explicit LSMR with CUDA
 is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-seidel} and
-{cmd:symmetric-gauss-seidel} remain available; {cmd:jacobi}, {cmd:schwarz}, {cmd:mlsmr}, and
+{cmd:symmetric-gauss-seidel} remain available; {cmd:jacobi}, {cmd:mlsmr}, and
 {cmd:auto-mlsmr} are not supported in group/individual mode.{p_end}
 
 
@@ -394,8 +324,16 @@ is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-se
 {p2col 8 10 10 2: -}{browse "https://github.com/reisportela/xhdfe-xfe":xhdfe repository}{p_end}
 {p2col 8 10 10 2: -}{browse "https://github.com/sergiocorreia/reghdfe":reghdfe repository}{p_end}
 {p2col 8 10 10 2: -}{browse "https://github.com/lrberge/fixest":fixest repository}{p_end}
+{p2col 8 10 10 2: -}{browse "https://pyfixest.org/":pyfixest documentation}{p_end}
 {p2col 8 10 10 2: -}{browse "https://github.com/py-econometrics/pyfixest":pyfixest repository}{p_end}
 {p2col 8 10 10 2: -}{browse "https://github.com/FixedEffects/FixedEffectModels.jl":FixedEffectModels.jl repository}{p_end}
+{p2col 8 10 10 2: -}{browse "https://github.com/py-econometrics/within":within repository}{p_end}
+{p2col 8 10 10 2: -}{browse "https://github.com/py-econometrics/within-paper":Fischer and Schroeder (2026), within paper}{p_end}
+{p2col 8 10 10 2: -}{browse "https://github.com/johannes-schmieder/fereg":fereg repository (Johannes F. Schmieder)}{p_end}
+{p2col 8 10 10 2: -}{browse "https://cepr.org/publications/dp22170":Schmieder (2026), fereg paper (CEPR DP22170)}{p_end}
+{p2col 8 10 10 2: -}{browse "https://johannes-schmieder.com/papers/fereg.pdf":Schmieder (2026), fereg paper (author's copy)}{p_end}
+{p2col 8 10 10 2: -}{browse "https://github.com/leoliu0/fereg":fereg repository (Leo Liu; a different package)}{p_end}
+{p2col 8 10 10 2: -}{browse "https://github.com/droodman/reghdfejl":reghdfejl repository}{p_end}
 
 
 {marker absorb}{...}
@@ -415,9 +353,11 @@ is rejected because this LSMR implementation is CPU-only. Explicit {cmd:gauss-se
 compatibility, categorical-only {cmd:##} terms are treated as one joint absorbed FE, not expanded into
 main effects plus the interaction. Specify {cmd:var1 var2 var1#var2} explicitly if all three absorbed
 components are intended.
-Interaction FEs are materialized with {cmd:egen group()} over all their components after the
-estimation sample is defined. Plain numeric FE identifiers are passed directly to the plugin;
-string identifiers are encoded by Stata before the plugin call.{p_end}
+Interaction FEs are coded after the estimation sample is defined: with {cmd:egen group()} over their
+components when all of them are numeric; when a component is a string, by sorting only the identifier
+columns of the estimation sample in a temporary frame, which leaves the order of the data untouched,
+with {cmd:egen group()} as the fallback. Plain numeric FE identifiers are passed directly to the plugin;
+string identifiers are coded by the same frame sort before the plugin call.{p_end}
 {p 4 6 2}- Heterogeneous slopes require exactly one categorical component and one continuous
 component. Use {cmd:fe#c.x} for group-specific slopes only, or {cmd:fe##c.x} for a level FE plus
 group-specific slopes. Continuous-only interactions, and slope terms with more than two components,
@@ -448,8 +388,10 @@ This is equivalent to including an indicator/dummy for each category of each abs
 {pmore}
 Categorical interactions with two or more components can be specified with {cmd:#} or {cmd:##}; categorical-only {cmd:##}
 is canonicalized to the same joint FE as {cmd:#}, matching reghdfe's absorbed-DoF presentation.
-Interaction FEs are materialized with {cmd:egen group()} after the estimation sample is defined.
-Plain numeric FE identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
+Interaction FEs are coded after the estimation sample is defined, with {cmd:egen group()} when all their
+components are numeric and, when a component is a string, by sorting only the identifier columns in a
+temporary frame ({cmd:egen group()} is the fallback). Plain numeric FE identifiers are passed directly to the
+plugin; string identifiers are coded by the same frame sort.
 
 {pmore}
 For example, {cmd:absorb(a#b#c)} absorbs one effect for each observed joint category,
@@ -462,14 +404,34 @@ additive effects; grouping them changes that model. Named effects such as
 Heterogeneous slopes can be specified as {cmd:fe#c.x} or {cmd:fe##c.x}. The first absorbs
 group-specific slopes only; the second absorbs both the FE intercept and the group-specific slopes.
 They are not supported with {cmd:group()}/{cmd:individual()} or with {cmd:absorptionmethod(lsmr/mlsmr)}.
+In {it:reghdfe-comparable} with heterogeneous slopes, the slope-block certificate judges a regressor omitted
+as collinear with the absorbed effects in its input scale, so that its rounding residue is not a precision
+target and does not cause a refusal; the estimates are those of the fit without that regressor up to the
+accuracy of the mode (to rounding when both solves stop at the same iteration).
+{cmd:XHDFE_SLOPE_ABSORBED_INPUT_SCALE=0}, read once per process, judges it in its absorbed scale, as every
+other column.
 
 {pmore}
-Absorb entries can be labeled as {it:label}={it:var} to control FE names in output and saved-FE names;
+Set {cmd:XHDFE_EXPERIMENT_SLOPE_SCHUR=1} to enable the optional secondreg solver for
+eligible unweighted OLS with two ordinary fixed effects and two slopes on the same
+carrier with an intercept. It applies to automatic absorption and convergence in
+{it:reghdfe-comparable} mode without saved effects. An accepted solve reports method
+code 9 and passes the original slope certificate. Ineligible fits use the standard
+absorber. {cmd:XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1} enables parallel sparse matrix
+assembly. {cmd:XHDFE_EXPERIMENT_NETWORK_SCORES=1} enables eligible two-way cluster
+score reuse when the cluster partitions match the worker and firm effects.
+On a CUDA fit this solver opens cuBLAS and cuSPARSE at its first use, from the folders recorded in
+the plugin; loading the plugin does not need them. If they cannot be opened, the fit stops with an
+error and leaves no estimates. The failure is remembered until the Stata session ends, and CPU fits
+keep working.
+
+{pmore}
+Absorb entries can be labelled as {it:label}={it:var} to control FE names in output and saved-FE names;
 for {cmd:##}, label the joint term as one absorb entry or specify separate components explicitly.
 Labels also instruct xhdfe to store FE contributions even without {cmd:savefe}/{cmd:savefes}. For
 categorical FEs the output variable is {it:label}; for heterogeneous slopes {it:label} is the base
 name and xhdfe adds {cmd:Slope1} to slope contributions. Generated names must not already exist.
-Only the labeled terms are saved: unlabeled terms in the same {cmd:absorb()} (e.g. {cmd:year} in
+Only the labelled terms are saved: unlabelled terms in the same {cmd:absorb()} (e.g. {cmd:year} in
 {cmd:absorb(year wfe=worker ffe=firm)}) are absorbed as usual but leave no variable behind.
 
 {pmore}
@@ -489,6 +451,19 @@ With {cmd:ferecoverymethod(hybrid)} (default), xhdfe accumulates FE alphas durin
 so savefe/savefes typically avoids a second recovery sweep. {cmd:fetolerance()} applies only to the
 fallback MAP recovery.
 
+{pmore}
+In {it:reghdfe-comparable} with {cmd:absorptionmethod(auto)}, saved effects ({cmd:savefe}, {cmd:savefes()} or
+labelled {cmd:absorb()} terms) come from an effect-capturing sweep, whose exit is looser than the route of the
+mode. When that sweep is certified but stopped above the floor of the mode (the Krylov parity floor,
+{cmd:1e-11} at the default tolerance, the target of MLSMR and of the
+{help xhdfe##reduced_pcg:reduced-system tier}), the projection is computed again without capture by that route
+(eligible for the tier), and the coefficients, covariance, standard errors, residuals and constant are those of
+that projection, the same as those of the fit without saved effects; {cmd:e(iterations)} then counts both
+solves. At or below that floor the sweep itself is published. When the projection is published, the residuals
+are those of the accurate fit, so {it:y} = {it:xb} + constant + saved effects + residuals holds only to the
+accuracy of the saved effects (see {help xhdfe##known_limitations:Known limitations}).
+{cmd:XHDFE_SAVEFE_ACCURATE_PROJECTION=0}, read once per process, publishes the capturing sweep in every case.
+
 {marker opt_savefes}{...}
 {phang}
 {opt savefes(prefix)} saves fixed effect contributions into new variables named
@@ -503,6 +478,8 @@ Saving FE contributions is not supported when both {cmd:group()} and {cmd:indivi
 {phang}
 {opth g:roup(xhdfe##opt_groupvar:groupvar)} categorical variable representing each group (e.g. patent_id).
 If only {cmd:group()} is specified, the regression is run on one observation per group.
+A string {it:groupvar} is coded by the same frame sort as string FE identifiers ({cmd:egen group()} is the
+fallback); a float or double one is coded with {cmd:egen group()}.
 
 {marker opt_indvar}{...}
 {phang}
@@ -533,10 +510,11 @@ Valid options are {cmd:mean} (default; aliases {cmd:avg}/{cmd:average}) and {cmd
 {opth vce:(xhdfe##opt_vce:vcetype)} specifies the type of standard error reported.
 
 {pmore}
-{opt un:adjusted} (aliases: {cmd:ols}, {cmd:homoskedastic}, {cmd:classical}, {cmd:unadj}) estimates conventional standard errors (default).
+{opt unadjusted} (aliases: {cmd:ols}, {cmd:homoskedastic}, {cmd:classical}) estimates conventional standard errors (default).
 
 {pmore}
-{opt r:obust} (aliases: {cmd:hc1}, {cmd:heteroskedastic}) estimates heteroskedasticity-consistent standard errors (HC1-style).
+{opt robust} (alias: {cmd:hc1}) estimates heteroskedasticity-consistent standard errors (HC1-style).
+Inside {cmd:vce()}, {cmd:unadjusted}, {cmd:robust} and their aliases must be written in full.
 
 {pmore}
 {opt cl:uster} (alias: {cmd:clustered}) {it:clustervars} estimates standard errors clustered by one or more variables.
@@ -562,8 +540,10 @@ interaction; {cmd:##} with more than two components is rejected (list the cluste
 Note that {cmd:reghdfe} (6.14.1) treats {cmd:a##b} in {cmd:vce(cluster)} as one joint cluster factor,
 exactly like {cmd:a#b}; {cmd:xhdfe} keeps its documented expansion, so {cmd:vce(cluster a##b)} is
 three-way clustering here and one-way clustering there. Use {cmd:a#b} for the joint factor in both.
-Interaction clusters are materialized with {cmd:egen group()} after sample marking. Plain numeric
-cluster identifiers are passed directly to the plugin; string identifiers are encoded by Stata.
+Interaction clusters are coded after sample marking, with {cmd:egen group()} when all their components
+are numeric and, when a component is a string, by sorting only the identifier columns in a temporary
+frame ({cmd:egen group()} is the fallback). Plain numeric cluster identifiers are passed directly to the
+plugin; string identifiers are coded by the same frame sort.
 
 {pmore}
 {cmd:robust} and {cmd:cluster()} are equivalent to {cmd:vce(robust)} and {cmd:vce(cluster ...)}; do not combine them with {cmd:vce()}.
@@ -683,7 +663,7 @@ parameter.
 {dlgtab:Degrees-of-Freedom Adjustments}
 
 {phang}
-{opt dof:adjustments(list)} selects how the DoF lost due to absorbed FEs are adjusted.
+{opt dof:adjustments(list)}, also accepted as {opt dof(list)}, sets the absorbed DoF adjustments.
 Tokens can be combined and separated by spaces or commas. If {cmd:dofadjustments()} is omitted,
 the default is {cmd:all}. When supplied, only the listed tokens are enabled (reghdfe-style).
 Valid tokens (case-insensitive) are {cmd:all}, {cmd:none}, {cmd:firstpair} ({cmd:first}),
@@ -691,7 +671,11 @@ Valid tokens (case-insensitive) are {cmd:all}, {cmd:none}, {cmd:firstpair} ({cmd
 {cmd:all} enables the full reghdfe logic. {cmd:none} disables FE DoF correction. {cmd:firstpair}
 and {cmd:pairwise} select the FE DoF method. {cmd:clusters} enables adjustments for clusters
 nested within absorbed FEs. {cmd:continuous} enables reghdfe-compatible checks for redundant
-continuous-interaction slopes.
+continuous-interaction slopes. One further token, {cmd:exact}, is accepted only with both {cmd:group()} and
+{cmd:individual()}: it computes the exact rank of the absorbed design (see
+{help xhdfe##known_limitations:Known limitations}). The calculation is bounded: a design above its size limit
+returns an error and no estimates, never an approximate count. Without {cmd:group()} and {cmd:individual()},
+{cmd:dofadjustments(exact)} is an error.
 
 {phang}
 {opt ssc(str)} fixest-style small-sample corrections. Tokens are case-insensitive; separators may
@@ -718,7 +702,7 @@ be spaces or commas; parentheses are optional. Supported tokens:{p_end}
 {cmd:legacy} reproduces the pre-change xhdfe statistics.{p_end}
 
 {phang}
-{opth groupv:ar(newvar)} identifier for the first mobility group (1-based IDs). Requires at least
+{opth groupvar(newvar)} identifier for the first mobility group (1-based IDs). Requires at least
 two absorbed FEs and {cmd:dofadjustments(all/firstpair/pairwise)}.
 
 
@@ -735,20 +719,43 @@ stops when one full sweep moves the working data by less than {cmd:tolerance()} 
 the same meaning {helpb reghdfe} attaches to its tolerance — so coefficients match reghdfe at the
 same nominal tolerance (down to the conditioning of the problem). Ordinary no-slope LSMR/MLSMR
 paths use {cmd:min(effective tolerance,1e-11)} in comparable and strict-residual modes; requested
-tolerances already at or below {cmd:1e-11} are unchanged. Comparable CUDA {cmd:auto}
+tolerances already at or below {cmd:1e-11} are unchanged. The {help xhdfe##reduced_pcg:reduced-system tier}
+uses a confirmed acceptance-quantity target of {cmd:1e-12} when the requested tolerance is at least
+{cmd:1.25e-12}; smaller requested tolerances retain its former stopping rule. Comparable CUDA {cmd:auto}
 uses device LSMR on sparse ordinary unweighted two-FE graphs, with the same Krylov floor
-and ordinary degrees of freedom. MAP/sweep, fast, group()/individual(),
-heterogeneous-slope, and savefe retain their established stopping rules.
+and ordinary degrees of freedom. MAP/sweep, fast, group()/individual() and heterogeneous-slope routes, and the
+effect-capturing sweep of savefe, retain their established stopping rules (a savefe fit can publish instead the
+projection by the route of the mode; see {help xhdfe##opt_absorb:absorb()}).
 {cmd:tolerancemode(xhdfe-fast)} restores the pre-2.7.0 stopping rule: typically ~1.5-3x fewer
-absorber iterations, with an effective precision that is data-dependent and can be looser than the
-nominal tolerance on ill-conditioned (e.g. sparse bipartite) designs — appropriate for exploration
-and for speed benchmarking (state the mode when citing timings).
+absorber iterations than the comparable rule on the same route, with an effective precision that is
+data-dependent and can be looser than the nominal tolerance on ill-conditioned (e.g. sparse bipartite)
+designs — appropriate for exploration and for speed benchmarking (state the mode when citing timings).
 For combined {cmd:group()}/{cmd:individual()} CUDA fits, xhdfe nevertheless applies an internal
-{cmd:min(tolerance(),1e-12)} floor before certification; fast mode never authorizes the materially
-inaccurate early GS stop that this release fixes.
-{cmd:tolerancemode(strict-residual)} is a heavier audit mode: it treats the final absolute maximum
-group-mean residual check as authoritative, may use additional iterations up to {cmd:maxiter()}, and
-reports non-convergence if that check is not met. The mode used is returned in {cmd:e(tolerance_mode)}.
+{cmd:min(tolerance(),1e-12)} floor before certification; fast mode never authorizes a materially
+inaccurate early GS stop there.
+{cmd:tolerancemode(strict-residual)} is a heavier audit mode: it treats a final absolute check as
+authoritative, may use additional iterations up to {cmd:maxiter()}, and reports non-convergence if that check
+is not met. On the CPU the check is the largest absolute group mean of the absorbed outcome and of every
+absorbed regressor for sweep methods, for fits with both {cmd:group()} and {cmd:individual()}, and for
+ordinary LSMR or MLSMR projections without saved effects. In the latter case, a failed absolute check can trigger one
+continuation in the same solver within the remaining {cmd:maxiter()} budget. Cached projections
+are also checked. For the sparse direct and Krylov-PCG solvers, the solver's stopping rule and the
+relative certificate apply.
+An ordinary categorical CUDA fit checks the largest absolute group mean of the residuals it delivers,
+using the fit's weights. With instruments it reads the structural residuals. With {cmd:savefe}
+it reads the reconstruction from the saved effects. An unweighted fit in the automatic Comparable-based
+Strict route can continue from its projected state. Other ordinary CUDA fits can take one device LSMR
+projection on the original columns when the absolute check fails. Both continuations use the remaining
+{cmd:maxiter()} budget. An eligible fit with {cmd:weightedcpuroute(on)} uses the CPU's strict fit.
+Fits with both {cmd:group()} and {cmd:individual()} use their grouped-absorption checks.
+The check of the delivered residuals is absolute, in the units of the dependent variable. When the residuals are
+so large in those units that the tolerance is within a few units of roundoff of them (observed on one synthetic
+panel, with {cmd:tolerance(1e-8)}, from residuals of about 2e7 to 4e7), the check may be unattainable in double
+precision: the fit can then use iterations up to {cmd:maxiter()} and reports non-convergence, in some runs well
+before that limit, and close to that point the same fit can be accepted in one run and refused in the next.
+Rescale the dependent variable, raise {cmd:tolerance()}, or use {cmd:tolerancemode(reghdfe-comparable)}, whose
+criteria are relative.
+The mode used is returned in {cmd:e(tolerance_mode)}.
 When ordinary no-slope LSMR/MLSMR runs, {cmd:e(krylov_internal_tolerance)} records
 that internal value. {cmd:e(krylov_max_final_backward_error)},
 {cmd:e(krylov_max_condition)}, and
@@ -758,7 +765,9 @@ running estimate observed by each solve before RHS aggregation. All four are
 zero on non-Krylov paths. A nonfinite/DBL_MAX diagnostic is returned as Stata
 missing rather than as a finite-looking extreme value.
 The separate Krylov-PCG path is not covered by this parity floor and continues
-to report zeros in these fields. This release does not impose an additional PCG work target.
+to report zeros in these fields. No additional PCG work target is imposed.
+The {help xhdfe##reduced_pcg:reduced-system tier} is a different conjugate-gradient solver with the
+stopping rule described below; it leaves these four fields at zero itself.
 
 {phang}
 Independently of the stopping mode, xhdfe verifies the returned within transform against the
@@ -791,29 +800,19 @@ Explicit {cmd:convergence()} choices keep their stopping rule and receive the ho
 without adaptive continuation. Slope-free absorption is unchanged.
 
 {phang}
-When a fit stops with {cmd:e(precision_certified)} equal to zero, xhdfe now says so in the output
-instead of leaving the diagnostic to be looked up. On badly conditioned absorption graphs the
-stopping rule can be satisfied while the coefficients are still materially further from the exact
-within solution than the nominal tolerance suggests, so treat the warning as a prompt to inspect
-{cmd:e(abs_residual_rel)} and, if needed, rerun with {cmd:tolerancemode(strict-residual)} or a
-tighter {cmd:tolerance()}. The warning changes no estimate: the stopping rule, the tolerances and
-the certificate itself are unchanged.
+Estimation returns error 498 if absorption lacks convergence or fails the
+required precision checks. Unsuccessful recovery of explicitly saved effects
+also returns error 498.
 
 {phang}
-New in version 2.11.0: in {cmd:tolerancemode(reghdfe-comparable)} (the default), absorbers on
-ill-conditioned, poorly connected multi-way fixed-effect graphs — where the accelerated
-alternating-projections iteration would otherwise stall and fall back to many thousands of plain
-sweeps — are automatically handed off to a stable per-column conjugate-gradient solver on the
-symmetric demeaning operator. This is transparent: coefficients, standard errors, default output, and
-convergence behavior are unchanged (and typically tighter against {helpb reghdfe}), it applies on both
-the CPU and CUDA backends, and well-conditioned problems are unaffected and numerically identical to
-previous versions. It can cut runtime by an order of magnitude on such designs (e.g. a 540k-observation
-3-way graph: Stata CPU ~54s to ~7s, CUDA ~5.5s to ~0.85s) at equal or better precision.
+Comparable mode can select conjugate gradients or a Krylov solver for
+poorly connected multiway FE graphs. The accepted route and convergence
+diagnostics are available under {help xhdfe##results:stored results}.
 
 {phang}
-{opt convergence(str)} selects the stopping criterion used by the heterogeneous-slope absorber
-(active when {cmd:absorb()} contains {cmd:fe#c.x} / {cmd:fe##c.x} terms; standard absorption follows
-{cmd:tolerancemode()}). {cmd:auto} (default) follows {cmd:tolerancemode()}: under
+{opt convergence(str)} selects the stopping criterion for iterative sweeps in ordinary and
+heterogeneous-slope absorption. Direct and Krylov solvers use their own stopping tests.
+{cmd:auto} (default) follows {cmd:tolerancemode()}: under
 {it:reghdfe-comparable} the slope absorber stops on the reghdfe-style update criterion at the nominal
 {cmd:tolerance()}, and under {it:xhdfe-fast} it uses the historical norm-change trigger. For Auto
 requests in {it:reghdfe-comparable}, this trigger produces a candidate only: the independent
@@ -829,6 +828,9 @@ for those designs. Within supported tolerance modes, explicit values override th
 {cmd:normchange} stops on the relative change in transformed-vector norms; {cmd:reghdfe} uses the
 reghdfe-style vector update criterion based on the maximum weighted mean relative difference between
 successive transformed {it:y}/{it:X} columns; {cmd:both} requires both criteria.
+Aliases are {cmd:norm}, {cmd:norm_change}, {cmd:current} and {cmd:xhdfe} for
+{cmd:normchange}; {cmd:vector}, {cmd:vectors}, {cmd:reghdfe-style} and
+{cmd:reghdfe_style} for {cmd:reghdfe}.
 
 {phang}
 {opth fetol:erance(#)} specifies the tolerance criterion for fixed-effect recovery (savefe); default is {cmd:fetolerance(1e-6)}.
@@ -844,7 +846,9 @@ forces recovery sweeps on the partial residual.
 
 {phang}
 {opth maxit:er(#)} specifies the maximum number of absorber iterations; default is {cmd:maxiter(100000)}.
-{cmd:iterate(#)} is accepted as a reghdfe-compatible alias for {cmd:maxiter(#)}.
+{cmd:iterate(#)} is accepted as a reghdfe-compatible alias for {cmd:maxiter(#)}. The
+{help xhdfe##reduced_pcg:reduced-system tier} runs at most {cmd:min(maxiter(),1500)} iterations; a declined
+attempt is not charged to the budget of the route that follows it.
 
 {phang}
 {opt absorptionm:ethod(str)} sets the absorption method. Valid values (case-insensitive) are
@@ -865,8 +869,9 @@ effects stay on the full-data gate/sweep path so the 200k-sample probe cannot ov
 many-way graphs (raise the cap with {cmd:XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}; {cmd:absorptionmethod(auto-mlsmr)}
 is uncapped). Comparable CUDA {cmd:auto} selects device LSMR for ordinary unweighted
 two-FE graphs identified by the existing low group-occupancy detector; it reports {cmd:lsmr}
-as the method used. Fast, explicit methods/convergence, savefe and heterogeneous-slope
-paths retain their primary routing. A broken ordinary Comparable CG recurrence
+as the method used. Fast, explicit methods/convergence and heterogeneous-slope paths, and the effect-capturing
+sweep of savefe, retain their primary routing (a savefe fit can publish instead the projection by the route of
+the mode; see {help xhdfe##opt_absorb:absorb()}). A broken ordinary Comparable CG recurrence
 restarts with device LSMR within the remaining iteration budget.
 Combined {cmd:group()}/{cmd:individual()} fits use their dedicated routing:
 joint LSMR for CPU {cmd:auto}, the existing certified solver for CUDA {cmd:auto}, and an optional
@@ -875,7 +880,114 @@ promotions with {cmd:XHDFE_MLSMR_AUTO_GATE=0}. {cmd:absorptionmethod(mlsmr)} for
 runs the same probe-based selector explicitly. For standard FE designs,
 {cmd:mlsmr}/{cmd:lsmr}/{cmd:auto-mlsmr} do not support {cmd:savefe} or heterogeneous slopes.
 In group/individual mode only plain {cmd:lsmr} is supported, and only on CPU; explicit
-{cmd:mlsmr}/{cmd:auto-mlsmr}/{cmd:schwarz}/{cmd:jacobi} requests are rejected.
+{cmd:mlsmr}/{cmd:auto-mlsmr}/{cmd:jacobi} requests are rejected. The Schwarz/CG solver
+({cmd:e(absorption_method_used)} = 4) is selected internally and cannot be requested:
+{cmd:absorptionmethod(schwarz)} is an error.
+{cmd:gs}/{cmd:gauss_seidel}, {cmd:sym}/{cmd:symgs}/{cmd:symmetric}/{cmd:symmetric_gauss_seidel},
+{cmd:plain-lsmr}/{cmd:plain_lsmr}, {cmd:modified-lsmr}/{cmd:modified_lsmr}/{cmd:within}/{cmd:within-additive}/{cmd:within_additive},
+and {cmd:auto_mlsmr}/{cmd:mlsmr-auto}/{cmd:mlsmr_auto} are aliases for the corresponding methods above.
+
+{marker reduced_pcg}{...}
+{pmore}
+{it:Reduced-system tier} ({cmd:reduced-pcg}), on by default. Before the route chosen above runs, an ordinary
+fit with {cmd:absorptionmethod(auto)}, {cmd:tolerancemode(reghdfe-comparable)}, the default {cmd:convergence()},
+two to five absorbed fixed effects and no CUDA or Metal backend request ({cmd:gpubackend()} or
+{cmd:XHDFE_GPU_BACKEND}), and without weights, instruments, heterogeneous slopes, saved fixed effects
+({cmd:savefe}, {cmd:savefes()} or labelled {cmd:absorb()} terms), {cmd:groupvar()}, {cmd:group()} or the
+writing of a mobility profile, first eliminates exactly the fixed effect with the most levels and solves for
+the others by preconditioned conjugate gradients on the CPU, with the fit's threads, in at most
+{cmd:min(maxiter(),1500)} iterations. For a requested tolerance of at least {cmd:1.25e-12}, a column stops
+when its reduced-system acceptance quantity is at most {cmd:1e-12}, confirmed after recomputing the
+reduced residual. Existing exits for trivial or compatible systems remain available. Below that
+tolerance the former stopping criterion is unchanged. Passing this fixed stopping target does not
+replace the independent final precision certificate.
+The result is published only if it passes the certificate the other routes pass, including the requested
+tolerance, and the unchanged acceptance trigger, with a verified relative residual
+({cmd:e(abs_residual_rel)}) of at most 1e-11. A published fit reports {cmd:e(absorption_method_used)} = 8,
+{cmd:e(reduced_pcg_status)} = 1 and the tier's iterations in {cmd:e(iterations)} (plus those of a normal-equation
+correction, should one follow); the CPU {cmd:auto} retry does not run ({cmd:e(auto_retry_status)} is
+{cmd:ineligible}). The method is reported, not requested: {cmd:absorptionmethod(reduced-pcg)} is an error.
+With saved fixed effects the tier does not replace the effect-capturing sweep; under the conditions above it
+can publish the projection that follows a certified sweep stopped above the floor of the mode (see
+{help xhdfe##opt_absorb:absorb()}), and {cmd:e(iterations)} then also counts the sweep's.
+The design follows {cmd:fereg} 0.6.0 (Schmieder 2026); see {help xhdfe##acknowledgements:Acknowledgements}.
+
+{pmore}
+Otherwise the attempt declines: {cmd:e(reduced_pcg_status)} = 2, {cmd:e(reduced_pcg_reason)} names the reason
+(for example {cmd:stall}, {cmd:ceiling}, {cmd:projected}, {cmd:memory}, {cmd:certificate} or {cmd:trigger}) and
+{cmd:e(reduced_pcg_discarded_iterations)} counts its iterations. Its work is discarded and the route runs from
+the original data with its own {cmd:maxiter()} budget, so the estimates, {cmd:e(iterations)},
+{cmd:e(absorption_method_used)} and the thread diagnostics are those of the route, as with the tier off. The
+attempt needs working memory besides the data: it declines with reason {cmd:memory} when its estimate exceeds
+the larger of 1 GiB and 16 bytes per observation for each of the outcome, the regressors and the absorbed
+fixed effects, or when an allocation fails. A fit outside the conditions above, or whose solver a matching
+mobility profile forces, reports {cmd:e(reduced_pcg_status)} = 0 and the condition in {cmd:e(reduced_pcg_reason)}.
+
+{pmore}
+With an absorption cache, an entry the tier published is read back as such ({cmd:e(reduced_pcg_status)} = 1,
+reason {cmd:none}); another route's entry gives reason {cmd:cache}; while the tier is on for a fit, entries
+written with it off or by an earlier version are not read, and while it is off, entries written with it on are
+not read. For diagnosis, {cmd:XHDFE_REDUCED_PCG_TRACE=1} writes the tier's plan and decision to standard error
+({cmd:2} adds the verified residual of each column of a published fit). {helpb xfepout} and the internal
+regressions of {helpb xhdfeakm} and {helpb xhdfegelbach} never enter the tier.
+
+{marker reduced_pcg_cuda}{...}
+{pmore}
+{it:CUDA variant} (experimental, off by default). The one exception to the condition of no CUDA request above: a
+fit on CUDA ({cmd:gpubackend(cuda)} or {cmd:XHDFE_GPU_BACKEND=cuda}) that requests the variant with
+{help xhdfe##opt_reducedpcgcuda:reducedpcgcuda(on)}, meets the other conditions and uses no mobility profile,
+absorption cache or fixed-effect structure cache attempts the tier with the products of the reduced system
+computed on the GPU. The recurrence, the stopping rule, the
+acceptance trigger and the certificate are those described above, computed on the CPU. A published fit reports
+{cmd:e(absorption_method_used)} = 8, {cmd:e(reduced_pcg_status)} = 1, {cmd:e(gpu_used)} = 1 and
+{cmd:e(gpu_status)} = {cmd:used}; requesting CUDA alone does not prove entry, so check all of them. A declined
+attempt runs the CUDA route that the fit takes without the request. A CUDA fit without the request reports
+{cmd:e(reduced_pcg_reason)} = {cmd:gpu}; with the request, a fit kept out by a mobility profile or a cache
+reports {cmd:mobility_profile}, {cmd:absorption_cache} or {cmd:fe_structure_cache} (the first that applies, in
+that order; a file {cmd:xhdfe_mobility_profile.txt} in the working directory is a mobility profile) and runs that
+same route. An attempt that cannot obtain device memory, or cannot page-lock the rows it exchanges with the GPU,
+declines with {cmd:e(reduced_pcg_reason)} = {cmd:memory} or {cmd:pinned} and runs that same route.
+Where that confirmed stopping rule is in force (a requested tolerance of at least {cmd:1.25e-12} and
+{cmd:XHDFE_REDUCED_PCG_CHAT_STOP} not {cmd:0}), the product used to recompute the reduced residual is computed on
+the GPU as well; the stopping decisions stay on the CPU. {cmd:XHDFE_REDUCED_PCG_CUDA_REPLACEMENT=0}, set before
+starting Stata (read once per process), keeps that product on the CPU. The acceptance trigger and the certificate,
+computed on the CPU, are unchanged.
+
+{pmore}
+For comparison with the former stopping rule, set {cmd:XHDFE_REDUCED_PCG_CHAT_STOP=0} before starting
+Stata. This process switch restores the former stopping criterion; it does not switch the tier off or change its
+acceptance trigger or certificate. If the confirmed target is not reached, the attempt declines to the
+unchanged route. The switch is read once per process; requested tolerances below {cmd:1.25e-12} retain
+the former rule with either setting.
+
+{marker opt_reducedpcg}{...}
+{pmore}
+{opt reducedpcg(on|off)} switches the tier on or off for this fit, inside the session. Without the option,
+the Stata global macro {cmd:XHDFE_REDUCED_PCG} decides: {cmd:global XHDFE_REDUCED_PCG 0} turns the tier off
+for the following fits, {cmd:global XHDFE_REDUCED_PCG 1} turns it on, and {cmd:macro drop XHDFE_REDUCED_PCG}
+(or any other value) leaves the decision to the process default. The process default is the environment
+variable {cmd:XHDFE_REDUCED_PCG}, read once per Stata session ({cmd:0} turns the tier off for every fit that
+the option and the global leave undecided, which is convenient for scripts), and otherwise on. The order is
+therefore: the option, the global, the environment variable, on. A fit with the tier switched off reports
+{cmd:e(reduced_pcg_status)} = 0 and {cmd:e(reduced_pcg_reason)} = {cmd:off}, and gives the results of the
+tier switched off for the whole session. The auxiliary first-stage regressions of {cmd:first}, {cmd:ffirst}
+and {cmd:estat firststage} follow the global and the environment variable, not the {cmd:reducedpcg()} option of
+the IV command (whose own absorption never enters the tier). {helpb xfepout} has no such option.
+
+{marker opt_reducedpcgcuda}{...}
+{pmore}
+{opt reducedpcgcuda(on|off)} requests the experimental {help xhdfe##reduced_pcg_cuda:CUDA variant} of the tier
+for this fit, inside the session. It acts only on a fit on CUDA ({cmd:gpubackend(cuda)} or
+{cmd:XHDFE_GPU_BACKEND=cuda}) and is ignored otherwise;
+{cmd:reducedpcg(off)}, its global or its environment variable keeps both the tier and its CUDA variant off.
+Without the option, the Stata global macro {cmd:XHDFE_REDUCED_PCG_CUDA} decides: {cmd:1} requests the variant
+for the following fits, {cmd:0} does not, and {cmd:macro drop XHDFE_REDUCED_PCG_CUDA} (or any other value)
+leaves the decision to the process default. The process default is the environment variable
+{cmd:XHDFE_REDUCED_PCG_CUDA}, read once per Stata session ({cmd:1} requests the variant for every fit that the
+option and the global leave undecided), and otherwise off. The order is therefore: the option, the global, the
+environment variable, off. The auxiliary first-stage regressions of {cmd:first}, {cmd:ffirst} and
+{cmd:estat firststage} follow the global and the environment variable, not the {cmd:reducedpcgcuda()} option of
+the IV command. {helpb xfepout} has no such option.
 
 {phang}
 {opt sym:metricsweep} performs a forward + backward sweep per iteration for Gauss-Seidel methods
@@ -884,12 +996,6 @@ and can influence {cmd:absorptionmethod(auto)} selection when multiple FEs are p
 {phang}
 {opt jacobirel:axation(#)} Jacobi relaxation parameter (<= 0 uses default 2/(J+1), where J is the
 number of FE dimensions; values above 1 are capped at 1).
-
-{p 4 6 2}For reghdfe script compatibility, xhdfe also accepts {cmd:technique()}, {cmd:acceleration()},
-{cmd:transform()}, {cmd:preconditioner()}, {cmd:prune}, {cmd:fastregress}, {cmd:poolsize()}, {cmd:compact},
-{cmd:timeit}, {cmd:verbose()}, {cmd:version()}, and {cmd:parallel()}. These are currently accepted as
-compatibility options but do not change xhdfe's estimator or backend selection.{p_end}
-
 
 {marker opt_parallel}{...}
 {dlgtab:Parallel execution}
@@ -908,10 +1014,13 @@ and OpenMP runtime limit visible to the process.
 It never reduces a positive {cmd:numthreads()} request.
 
 {phang}
-{opth minparallelr:ows(#)} minimum rows required to enable parallel absorption.
+{opth minparallelrows(#)} minimum number of estimation rows for an automatic thread team; the default is
+{cmd:minparallelrows(20000)} and # must be positive. Without a positive {cmd:numthreads()}, a fit with fewer
+rows runs on one thread ({cmd:e(thread_limit_code)} 2, {cmd:auto_policy}); a positive {cmd:numthreads()} is not
+affected. The first-stage fits of IV estimation use the same value.
 
 {phang}
-{opth targetrowsper:thread(#)} rows per thread when auto-threading sizes the team.
+{opth targetrowsperthread(#)} rows per thread when auto-threading sizes the team.
 The default, {cmd:targetrowsperthread(0)}, is automatic: one thread per 25,000 rows
 when the fixed effects are absorbed without being saved, within the problem-size
 cap (one thread below 100,000 rows, at most 8 below 250,000 and at most 16
@@ -968,7 +1077,8 @@ On Linux, the build script will try OpenMP automatically; to force it (recommend
 {dlgtab:Reporting}
 
 {phang}
-{opt l:evel(#)} sets confidence level; default is {cmd:level(95)}. Values must be between 0 and 100.
+{opt level(#)} sets confidence level; default is {cmd:level(95)}. Values must be between 0 and 100.
+{cmd:l(#)} is accepted as a shorthand.
 
 {phang}
 {opt noheader}, {opt notable}, and {opt nofootnote} suppress the header block, coefficient table,
@@ -976,9 +1086,10 @@ and absorbed-DoF footnote table, respectively. These affect display only; estima
 
 {phang}
 {opt noomitted}, {opt noempty}, {opt baselevels}, {opt allbaselevels}, {opt cformat()},
-{opt pformat()}, {opt sformat()}, {opt fvwrap()}, {opt fvwrapon()}, {opt vsquish},
+{opt pformat()}, {opt sformat()}, {opt fvwrap()}, {opt vsquish},
 {opt nolstretch}, {opt nofvlabel}, {opt noci}, and {opt nopvalues} are forwarded to Stata's
-{cmd:ereturn display} layer to keep the coefficient table behavior close to {cmd:reghdfe}.
+{cmd:ereturn display} layer to keep the coefficient table behaviour close to {cmd:reghdfe}.
+{opt fvwrapon()} is accepted for compatibility and has no effect on display.
 
 {phang}
 {opt nosample} prevents {cmd:xhdfe} from posting {cmd:e(sample)}. This reduces memory use, but
@@ -986,104 +1097,76 @@ postestimation commands that rely on {cmd:e(sample)} may not be available afterw
 
 
 {marker opt_diagnostics}{...}
-{dlgtab:Diagnostics}
+{dlgtab:Profiles and caches}
 
 {phang}
-{opt mobilityprofile} computes mobility diagnostics (connected components, sweep order) once and
-saves a profile file to {cmd:xhdfe_mobility_profile.txt} in the current working directory.
-Version-2 profiles record an explicit {cmd:standard} or {cmd:group_individual} scope. Standard
-profiles retain FE-structure signatures. For {cmd:group()} / {cmd:individual()} models, two
-domain-separated signatures must both match and cover the post-singleton
-standard FEs, group-individual incidence and aggregation scale, weights and frequency-weight
-semantics, RHS count, threads, tolerance, backend, and solver-selection flags. A profile is a
-method-selection hint, not a transformed-data cache, and may therefore be reused across outcomes
-only when the applicable signature contract and scope match. Legacy version-1 profiles and any
-scope/signature mismatch are safe misses.
+{opt mobilityprofile} writes a method-selection profile for the FE structure.
+The default path is {cmd:xhdfe_mobility_profile.txt} in the working directory.
+{opth mobfile(filename)} sets the path and enables reuse of a matching profile
+unless {opt mobilityprofile} requests a new one. Aliases are {opt mobilityfile()}
+and {opt mobilityprofilefile()}. A profile may guide a fit with another outcome
+if the relevant signature matches. Writing a profile can make the reduced-system
+tier ineligible. Group/individual profiles have their own scope. They keep CPU
+Auto on the joint LSMR route and CUDA Auto on the grouped device solver.
 
 {phang}
-On a matching {cmd:group()} / {cmd:individual()} run, a profile never promotes Gauss-Seidel or
-symmetric Gauss-Seidel into {cmd:absorptionmethod(auto)}. CPU Auto remains joint LSMR and CUDA Auto
-remains the grouped GPU solver; explicitly requested GS/SGS methods remain available. Profile
-write/auto does not benchmark sweep methods. A profile is written only after the requested route
-converges and certifies; it suggests LSMR only after safe CPU LSMR and otherwise records Auto, so an
-explicit GS/SGS diagnostic run cannot promote that method later. A CPU-only LSMR suggestion is never
-forced when CUDA is selected.
-When {cmd:mobilityfile()} is set, xhdfe computes or reuses the mobility profile at that path. If an
-absorption cache is also enabled and its signature matches, xhdfe can skip the absorption step on
-later identical model specifications (the cache file can be large).
+{opth absorptioncache(filename)} specifies a cache of transformed outcome and
+regressors. With a profile path and caching enabled, the default cache path is
+the profile path with {cmd:.absorption_cache} appended. Reuse requires matching
+inputs, sample, weights, intercept handling, FE structure and solver contract,
+including backend, requested tolerance, methods and threads. CUDA absorption,
+heterogeneous slopes and combined group/individual fits skip transform-cache
+reuse.
 
 {phang}
-{opth mobfile(filename)} points to a profile file (aliases: {cmd:mobilityfile()}, {cmd:mobilityprofilefile()}).
-If the file exists and the FE signature matches, xhdfe reuses it; otherwise it computes a new
-profile and overwrites the file. To disable reuse, remove or rename the profile or its
-{cmd:.absorption_cache} companion file, or set {cmd:absorptioncachemode(off)}.
+{opth fescache(filename)} caches only the FE structure and singleton filter.
+Aliases are {opt festructurecache()} and {opt festructurecachefile()}.
+The bare flag {opt festructurecache} instead selects the default path beside
+{cmd:xhdfe.ado}. Specify one form. The structure may be reused when the
+outcome or regressors change if the marked sample and FE signature still match.
+This cache is unavailable with heterogeneous slopes or combined
+{cmd:group()}/{cmd:individual()}. Use distinct files when combining the
+two caches. Combined fits use their own absorption-cache signature, based
+on the original FE identifiers and singleton policy. To refresh older
+entries in this mode, use {cmd:abscachemode(auto)} or {cmd:abscachemode(write)}.
 
 {phang}
-{opth absorptioncache(filename)} stores the transformed outcome/regressors for reuse across
-identical model specifications (same {cmd:y}, {cmd:X}, {cmd:absorb()}, weights, and intercept handling).
-When the cache signature matches, xhdfe skips the absorption step. The cache can be large, and it
-does not apply when regressors or weights change. This option overrides the default
-{cmd:<profile>.absorption_cache} path associated with {cmd:mobilityfile()}.
+{opt abscachemode(mode)} (alias {opt absorptioncachemode()}) and
+{opt fecachemode(mode)} (aliases {opt fescachemode()} and
+{opt festructurecachemode()}) control the corresponding cache.
+{cmd:off} disables that cache, {cmd:read} uses a valid entry without writing,
+{cmd:write} computes and saves a fresh entry, and {cmd:auto} reads a valid
+entry or computes and can replace a missing, stale or invalid entry.
+An absorption-cache write requires a successful, certified result.
+Disabling the absorption cache leaves mobility profile selection active.
+See {help xhdfe_examples##caches:a cache example}.
 
 {phang}
-{opt absorptioncachemode(str)} controls how absorption caches are used: {cmd:off} disables caching
-entirely (even if {cmd:mobilityfile()} is used), {cmd:read} only reuses existing caches, {cmd:write}
-always overwrites, and {cmd:auto} reads when possible and writes only when the cache is missing.
-If no explicit {cmd:absorptioncache()} is provided, the mode applies to the {cmd:mobilityfile()}
-companion cache when available. {cmd:abscachemode()} is accepted as a shorter alias.
-
-{phang}
-{cmd:XHDFE_FE_DIAG_FILE} (environment variable) appends fixed-effect diagnostics for each run
-(partial residual stats, FE totals, residual consistency, recovery method) to the specified file.
-
-{phang}
-{cmd:XHDFE_PROFILE_SAVEFE} (environment variable) enables savefe timing traces to standard error.
-When set to a nonzero value, xhdfe reports stage-level timings for fixed-effect recovery
-({cmd:savefe_partial}, cached-hybrid reconstruction/checks, and MAP-fallback stages such as
-{cmd:savefe_recover_setup}, {cmd:savefe_recover_loop}, and {cmd:savefe_recover_expand}) and, in
-the Stata plugin path, the FE writeback stage ({cmd:plugin_writeback_*}). Disabled by default;
-when unset, there is no extra output and no change in default behavior.
-
-{phang}
-{opt festructurecache} builds or reuses a fixed-effect structure cache stored alongside {cmd:xhdfe.ado}.
-The cache stores normalized FE group ids and singleton filters, so repeated runs with the same
-{cmd:absorb()} structure can skip FE indexing and singleton detection even when regressors or
-clusters change. It is ignored when the FE signature changes (different absorb variables or
-singleton policy) and is not used in {cmd:group()/individual()} mode. This cache is separate from
-the absorption cache and does not store transformed {cmd:y} or {cmd:X}.
-
-{phang}
-{opth fescache(filename)} uses a specific cache file. {cmd:festructurecache()} and
-{cmd:festructurecachefile()} are accepted as aliases for {cmd:fescache()}; bare
-{cmd:festructurecache} is the flag form that selects the default cache path alongside
-{cmd:xhdfe.ado}. Use an absolute path when the working directory changes or when the ado folder is
-read-only.
-
-{phang}
-{opt fescachemode(str)} controls how FE structure caches are used: {cmd:off}, {cmd:auto}, {cmd:read},
-or {cmd:write}. It requires either {cmd:fescache()} or {cmd:festructurecache} to define the cache path.
-{cmd:fecachemode()} and {cmd:festructurecachemode()} are accepted as aliases.
-
+For debugging, {cmd:XHDFE_FE_DIAG_FILE} appends FE and residual diagnostics
+to its path, and {cmd:XHDFE_PROFILE_SAVEFE} enables stage timings for saved FE
+recovery and writeback.
 
 {marker postestimation}{...}
 {title:Postestimation Syntax}
 
 {pstd}
-{cmd:xhdfe} is an {cmd:eclass} command. Standard commands such as {cmd:estimates store},
-{cmd:estimates table}, {cmd:test}, {cmd:lincom}, and {cmd:nlcom} should work.
-The {cmd:margins} command uses {cmd:predict} or {cmd:score}; {cmd:predict, score} is mapped to
-residuals for compatibility.
+{cmd:xhdfe} stores estimation results for commands such as {cmd:estimates store},
+{cmd:estimates table}, {cmd:test}, {cmd:lincom} and {cmd:nlcom}.
+{cmd:margins} uses the default {cmd:xb} prediction. Its disallowed prediction
+types include {cmd:residuals} and {cmd:score}.
 
 {pstd}
-Implemented {cmd:estat} subcommands are {cmd:estat summarize}, {cmd:estat vce}, and
-{cmd:estat ic}, plus {cmd:estat firststage} after IV estimation.
+Use {cmd:estat summarize} for sample summaries, {cmd:estat vce} for the posted
+covariance matrix and {cmd:estat ic} for Stata's information criteria with
+{cmd:df(e(df_m)+1)}. IV fits also support {cmd:estat firststage}.
 
 {pstd}
 {cmd:estat firststage} reports the first-stage summary and returns its matrix in
 {cmd:r(first)} without replacing the IV estimates. It reuses {cmd:e(first)} when
 available, or estimates the auxiliary regressions on {cmd:e(sample)} otherwise.
 {cmd:r(first_gpu_used)} reports GPU use in the unrestricted and restricted first stages.
-{cmd:estat firststage, first} also displays the full first-stage regressions.
+{cmd:estat firststage, first} refits and displays the full first-stage regressions.
+{opt level(#)} sets the confidence level of those displays.
 With {cmd:nosample}, request {cmd:first} or {cmd:ffirst} during estimation to retain
 the summary for later use; re-estimating full first stages requires the sample.
 Replay with {cmd:xhdfe, ffirst} or {cmd:xhdfe, first} is also supported.
@@ -1115,173 +1198,79 @@ The syntax of {it:predict} is:
 {p 4 6 2}although {cmd:predict} {help data_types:type} {help newvar} is allowed,
 the resulting variable will always be of type {it:double}.{p_end}
 {p 4 6 2}Except for {cmd:xb} and {cmd:stdp}, all implemented prediction statistics require that
-you estimated the model with {cmd:residuals(newvar)}.{p_end}
+you requested saved residuals at estimation. Use {cmd:if e(sample)} when only estimation
+rows are wanted, especially for {cmd:xb}, {cmd:stdp} or {cmd:dresiduals}.{p_end}
 
 
 {marker missing_features}{...}
-{title:Missing Features}
-
-{p2colset 8 12 12 2}{...}
-{p2col: -}Heterogeneous slopes with {cmd:group()}/{cmd:individual()} are not supported{p_end}
-{p2col: -}{cmd:savefe}/{cmd:savefes} with both {cmd:group()} and {cmd:individual()} are not supported{p_end}
-{p2col: -}IV/2SLS with factor-variable slope syntax or with {cmd:group()}/{cmd:individual()} is not supported{p_end}
-{p2col: -}General HAC kernels and bandwidth selectors beyond the Bartlett
-Driscoll-Kraay option described under {help xhdfe##opt_vce:vce()}{p_end}
-{p2colreset}{...}
-
 {marker known_limitations}{...}
-{title:Known limitations (2.31.0)}
+{title:Restrictions and numerical qualifications}
 
 {p2colset 8 12 12 2}{...}
-{p2col: -}Weighted ordinary three-FE fits on {cmd:gpubackend(cuda)} in {it:reghdfe-comparable} keep the 2.30.1
-sweep exit: converged and certified, but outside the comparable contract against {cmd:reghdfe} at tolerance
-1e-12 (public 240,000-row three-way fixture: coefficients up to 4.4e-7 and standard errors up to 2.3e-5
-relative). Use the CPU backend, where weighted fits are corrected in this release.{p_end}
-{p2col: -}{cmd:savefe}/{cmd:savefes} in {it:reghdfe-comparable} use the effect-capturing sweep, whose exit can
-leave coefficients and standard errors outside the comparable contract (in the measured cases up to 4.5e-7
-relative in coefficients and 1e-4 in the covariance). Fit without saving the effects when that contract
-matters.{p_end}
-{p2col: -}CUDA {it:strict-residual} with the automatic method and criterion and no weights may pass the relative
-certificate without the final strict check (public fixture: coefficients 1.5e-7 and standard errors 1.7e-4
-relative to an exact reference). Inherited, present in 2.28.1. Use the CPU backend for strict-residual
-results.{p_end}
-{p2col: -}Under CUDA {it:strict-residual}, the accuracy of the vector stored by {cmd:residuals()} can differ between
-runs (2.1e-6 or 1.4e-13 on the public three-way fixture).{p_end}
-{p2col: -}{cmd:residuals()} stores the fit's own within residuals. On CUDA they have the accuracy of the CUDA fit:
-on a path-like two-FE public fixture 8.4e-4 ({it:xhdfe-fast}) and 1.3e-6 ({it:reghdfe-comparable}) relative to
-an exact reference, against 4.5e-3 with the extra re-absorption of earlier versions (measured with 2.28.1); on
-the three-way public fixture at most 5e-10.{p_end}
-{p2col: -}{cmd:xhdfeakm} and the level of the outcome (issue #18): KSS-corrected variance components depend on
-outcome shifts for matches of unequal length under {cmd:leaveoutlevel(match)}; {cmd:se} and {cmd:ci} also depend
-on the outcome level under both {cmd:obs} and {cmd:match}. A correction is planned for the next version.{p_end}
-{p2col: -}Windows, near-perfect fits: near-perfect additive-cell fixtures returned exact coefficients and certified
-fits with relative covariance errors of 2.65e-9, 1.74e-4 and 1.82e+2 at relative residual noise of 2^-12, 2^-20
-and 2^-30; the same fixtures on Linux returned 2.2e-16. The exact additive-cell projection needs
-extended-precision arithmetic, which Windows hosts run at 53 bits.{p_end}
-{p2col: -}A fit that converges by the solver's stopping rule but does not pass the
-precision certificate returns no estimates (r(498)) in Stata, Python and R alike.
-Ill-conditioned specifications can still require a refusal. In {it:reghdfe-comparable}, heterogeneous slopes under
-an explicit {cmd:convergence(reghdfe)} used to: the reghdfe stopping rule leaves the slope block
-above the certificate; the explicit rule is now continued once at tighter internal tolerances
-and the first certified stage is returned ({cmd:e(slope_accuracy_retry_stages)} counts them),
-refusing only if none certifies. {cmd:savefe}/{cmd:savefes} on designs where the
-effect-capturing sweep stops above the tolerance likewise no longer refuses: the projection is
-recomputed without effect capture by the route of the mode, certified, and the effects are
-recovered from it.{p_end}
-{p2col: -}{cmd:aggregation(sum)} without an ordinary absorbed FE: the constant is in the
-span of the membership columns only for a uniform team size or through a data-dependent
-combination of individual columns; xhdfe decides this by projecting the ones vector on the
-absorbed effects as one separate right-hand side. When the constant is not spanned, the fit has no intercept and is reported as
-one, as {cmd:regress, noconstant} would: no {cmd:_cons} row, {cmd:e(report_constant)}=0,
-uncentered {cmd:e(tss)} and {cmd:e(r2_a)}, and {cmd:predict, d} equal to the summed
-individual effects. Coefficients, RSS and residuals are unchanged from earlier versions.{p_end}
-{p2col: -}{cmd:gpubackend(cuda)} with small, ill-conditioned {cmd:group()}/{cmd:individual()}
-designs (condition number above about 1e7): the device solver can leave residuals at the 1e-6
-relative level where the CPU backend's direct projection is exact to rounding. On designs small
-enough for that projection (at most about 1,500 absorbed columns) the device result is compared
-with it and refused with an informative error (r(498), no estimates) when a retained column
-deviates by more than ten times the forward tolerance of the mode; use the CPU backend for such
-designs.{p_end}
-{p2col: -}{cmd:gpubackend(cuda)} with {cmd:tolerancemode(reghdfe-comparable)} on ill-conditioned
-ordinary designs: unweighted OLS without saved effects also checks the normal equations
-against the original regressors. A failed check receives one bounded correction,
-preserving the requested tolerance and total iteration budget. A persistent failure returns
-no estimates; it does not substitute CPU estimates. The previously reported directors
-and difficult 10M-row 3-FE cases have passed independent CPU/CUDA validation after their
-corrections. Other ill-conditioned specifications can still require a refusal.
-The opt-in accuracy-retry environment settings remain available, but cannot bypass
-this necessary check.{p_end}
-{p2col: -}Degrees of freedom of the individual block: one exact redundancy against an
-ordinary absorbed FE is subtracted whenever the constant is provably in the span of the
-membership columns ({cmd:aggregation(mean)}; {cmd:aggregation(sum)} with a uniform team size);
-other redundancies are not detected by default and the footnote marks the count with "?".
-{cmd:dofadjustments(exact)} computes the exact rank.{p_end}
+{p2col: -}Combined {cmd:group()}/{cmd:individual()} cannot be used with saved effects
+or heterogeneous slopes. IV/2SLS cannot be used with {cmd:group()} and uses plain
+numeric variables in the slope list.
+The HAC option is the Bartlett {help xhdfe##opt_vce:Driscoll-Kraay VCE}.{p_end}
+{p2col: -}With labelled absorbs, {cmd:savefe} or {cmd:savefes}, the accuracy of published
+coefficients and of recovered effects can differ. When Comparable publishes a separate
+within projection, the saved effects may reconstruct the outcome only to the FE recovery
+accuracy. A fit that publishes the effect-capturing sweep carries that error in its
+residuals. Explicit methods, IV, heterogeneous slopes and grouped fits can take this
+route. See {help xhdfe##opt_absorb:absorb()} for the applicable rules.{p_end}
+{p2col: -}{cmd:residuals()} stores the within-fit residual. In Strict mode CUDA stores
+the residual used for its check, including reconstruction from saved effects when
+applicable. On CPU without saved effects a further absorption at {opt tolerance()}
+may form the stored residual.{p_end}
+{p2col: -}Ill-conditioned CUDA fits may fail the precision check with error 498 and
+return no estimates. This includes small, difficult group/individual designs for which
+the CUDA result can be checked against a direct CPU projection. Ordinary unweighted
+Comparable CUDA OLS without saved effects checks the original normal equations and
+can apply one bounded correction. Use {opt gpubackend(cpu)} when the device fit is
+refused.{p_end}
+{p2col: -}Windows uses 53-bit intermediate arithmetic for an extended-precision
+additive-cell projection. Its covariance can be inaccurate in near-perfect fits
+(residual below a millionth of the signal), as in 2.31.1, even when the coefficients
+and reported certificate agree.{p_end}
+{p2col: -}When the {help xhdfe##reduced_pcg:reduced-system tier} does not reach its target,
+the fit continues on the previous route after paying for the attempt. Against 2.31.1
+this was measured on one hard three-effect design of ten million rows as 1.24 times
+the time with 16 threads and 1.47 times with 4. {cmd:reducedpcg(off)} avoids the
+attempt.{p_end}
+{p2col: -}The reduced-system tier gains most with many threads. With one thread it can
+be slower than 2.31.1 on panels where it needs tens of iterations.{p_end}
+{p2col: -}An explicit thread request above the number of physical cores can be slower
+than in 2.31.1 on the same panels; the request is honoured and reported, not
+capped.{p_end}
+{p2col: -}{cmd:savefe} with weights can take about three times the time and twice the
+memory of 2.31.1 on sparse panels, as the price of the correction.{p_end}
+{p2col: -}Weighted {it:reghdfe-comparable} fits on CUDA: the repair of 2.33 covers
+analytic, probability and importance weights within a size band; outside it a
+weighted fit on CUDA can still be certified outside the contract.
+{cmd:weightedcpuroute(on)} avoids this at the cost of running on the CPU.{p_end}
+{p2col: -}A CUDA library that fails to load is remembered for the life of the process;
+recovering needs a new Stata session.{p_end}
+{p2col: -}Building from source with {cmd:BUILD_SHARED_LIBS=ON} is not a supported
+configuration in this release.{p_end}
+{p2col: -}With {cmd:aggregation(sum)} and no ordinary absorbed effect, a separate
+projection determines whether the membership columns span a constant. If they do
+not, the model reports no {cmd:_cons} and uses the uncentred fit statistics.
+By default the grouped absorbed-DoF count adjusts for the known constant
+redundancy when applicable. Use {cmd:dofadjustments(exact)} to compute the
+exact grouped rank within its size bound.{p_end}
+{p2col: -}AKM/KSS centring and outcome-shift behaviour are described in
+{helpb xhdfeakm}.{p_end}
 {p2colreset}{...}
-
 
 {marker examples}{...}
 {title:Examples}
 
-{hline}
-{pstd}Setup{p_end}
-{phang2}{cmd:. sysuse auto}{p_end}
+{pstd}Firm and year fixed effects with firm-clustered standard errors.{p_end}
+{phang2}{cmd:. use "https://www.stata-press.com/data/r19/grunfeld.dta", clear}{p_end}
+{phang2}{cmd:. xhdfe invest mvalue kstock, absorb(company year) vce(cluster company)}{p_end}
 
-{pstd}Simple case - one fixed effect{p_end}
-{phang2}{cmd:. xhdfe price weight length, absorb(rep78)}{p_end}
-{hline}
-
-{pstd}As above, but also compute clustered standard errors{p_end}
-{phang2}{cmd:. xhdfe price weight length, absorb(rep78) vce(cluster rep78)}{p_end}
-{hline}
-
-{pstd}CUDA backend (requires a CUDA-enabled plugin){p_end}
-{phang2}{cmd:. xhdfe price weight length, absorb(rep78) gpubackend(cuda)}{p_end}
-{phang2}{cmd:. display e(gpu_used)}{p_end}
-{phang2}{cmd:. display "`e(gpu_backend)'"}{p_end}
-{hline}
-
-{pstd}Two and three sets of fixed effects{p_end}
-{phang2}{cmd:. webuse nlswork, clear}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year)}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade age ttl_exp tenure not_smsa south, absorb(idcode year occ_code)}{p_end}
-{hline}
-
-{title:Advanced examples}
-
-{pstd}Save the FEs as variables{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year, savefe)}{p_end}
-
-{pstd}Save residuals and FE contributions (prefix-based){p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) vce(cluster idcode) residuals(u) savefes(fe_)}{p_end}
-
-{pstd}Heterogeneous slopes{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade union, absorb(idcode##c.ttl_exp year) vce(cluster idcode)}{p_end}
-
-{pstd}Two-stage least squares after absorbing FEs{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south)}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode year) endogenous(union) instruments(south) vce(cluster idcode) ffirst}{p_end}
-{phang2}{cmd:. matrix list e(first)}{p_end}
-{phang2}{cmd:. estat firststage}{p_end}
-
-{pstd}Side-by-side comparison with reghdfe (user example){p_end}
-{phang2}{cmd:. webuse nlswork, clear}{p_end}
-{phang2}{cmd:. reghdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) vce(robust)}{p_end}
-{phang2}{cmd:. est store reghdfe_rob}{p_end}
-{phang2}{cmd:. reghdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) vce(cluster idcode)}{p_end}
-{phang2}{cmd:. est store reghdfe_cl}{p_end}
-{phang2}{cmd:. reghdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year, savefe) vce(robust)}{p_end}
-{phang2}{cmd:. est store reghdfe3}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) vce(robust)}{p_end}
-{phang2}{cmd:. est store xhdfe_rob}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) vce(cluster idcode)}{p_end}
-{phang2}{cmd:. est store xhdfe_cl}{p_end}
-{phang2}{cmd:. xhdfe ln_wage grade ttl_exp union, absorb(idcode ind_code occ_code year) savefes(fe_) vce(cluster idcode)}{p_end}
-{phang2}{cmd:. est tab reghdfe_rob xhdfe_rob reghdfe_cl xhdfe_cl, b(%15.13f) se(%15.13f)}{p_end}
-
-{title:Group Examples}
-
-{hline}
-{pstd}Setup (long format with group and individual ids){p_end}
-{phang2}{cmd:. clear}{p_end}
-{phang2}{cmd:. set obs 40}{p_end}
-{phang2}{cmd:. gen patent_id = ceil(_n/2)}{p_end}
-{phang2}{cmd:. bysort patent_id: gen inventor_id = mod(patent_id + _n, 10) + 1}{p_end}
-{phang2}{cmd:. gen year = 2020 + mod(patent_id, 3)}{p_end}
-{phang2}{cmd:. gen funding = mod(patent_id, 2)}{p_end}
-{phang2}{cmd:. gen citations = 5 + 0.4*funding + patent_id/10}{p_end}
-
-{pstd}Individual and group fixed effects{p_end}
-{phang2}{cmd:. xhdfe citations funding, absorb(inventor_id) group(patent_id) individual(inventor_id)}{p_end}
-{hline}
-
-{pstd}Individual and group fixed effects with aggregation(sum){p_end}
-{phang2}{cmd:. xhdfe citations funding, absorb(inventor_id) group(patent_id) individual(inventor_id) aggregation(sum)}{p_end}
-{hline}
-
-{pstd}Group-level estimation without individual fixed effects{p_end}
-{phang2}{cmd:. xhdfe citations funding, absorb(year) group(patent_id)}{p_end}
-{hline}
-
+{pstd}See {helpb xhdfe_examples} for runnable public-data examples of OLS, multiple
+fixed effects, weights, heterogeneous slopes, group outcomes, IV, postestimation,
+caches, CUDA and companion commands.{p_end}
 
 {marker results}{...}
 {title:Stored results}
@@ -1291,11 +1280,11 @@ other redundancies are not detected by default and the footnote marks the count 
 
 {synoptset 24 tabbed}{...}
 {syntab:Scalars}
-{synopt:{cmd:e(N)}}number of observations{p_end}
+{synopt:{cmd:e(N)}}estimation observations; frequency weights count literal replicas{p_end}
 {synopt:{cmd:e(N_full)}}observations before singleton dropping{p_end}
-{synopt:{cmd:e(num_singletons)}}number of singleton observations dropped{p_end}
+{synopt:{cmd:e(num_singletons)}}singleton count; frequency weights count literal replicas{p_end}
 {synopt:{cmd:e(sumweights)}}sum of weights (or {cmd:e(N)} if unweighted){p_end}
-{synopt:{cmd:e(drop_singletons)}}1 if singletons were dropped, 0 otherwise{p_end}
+{synopt:{cmd:e(drop_singletons)}}1 if the singleton-removal policy is enabled, 0 with {cmd:keepsingletons}{p_end}
 {synopt:{cmd:e(df_r)}}residual degrees of freedom (post-SSC){p_end}
 {synopt:{cmd:e(df_r_unadj)}}unadjusted residual df (n - k - df_a){p_end}
 {synopt:{cmd:e(df_m)}}model degrees of freedom{p_end}
@@ -1323,8 +1312,11 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(p)}}model F p-value{p_end}
 {synopt:{cmd:e(ll)}}log-likelihood{p_end}
 {synopt:{cmd:e(ll_0)}}log-likelihood at zeroed regressors (within){p_end}
-{synopt:{cmd:e(iterations)}}absorption iterations{p_end}
-{synopt:{cmd:e(ic)}}alias of {cmd:e(iterations)} for {cmd:estat ic}{p_end}
+{synopt:{cmd:e(iterations)}}absorption iterations; with {cmd:e(absorption_method_used)} = 8, those of the
+reduced-system tier and of any correction after it (a declined attempt's are in
+{cmd:e(reduced_pcg_discarded_iterations)}); with {cmd:savefe}/{cmd:savefes} in {it:reghdfe-comparable}, when the
+projection is published, also those of the effect-capturing sweep that precedes it{p_end}
+{synopt:{cmd:e(ic)}}alias of {cmd:e(iterations)}{p_end}
 {synopt:{cmd:e(converged)}}1 if converged, 0 otherwise{p_end}
 {synopt:{cmd:e(abs_residual)}}verified absolute normal-equation residual after absorption{p_end}
 {synopt:{cmd:e(abs_residual_rel)}}verified relative normal-equation residual after absorption{p_end}
@@ -1335,9 +1327,9 @@ other redundancies are not detected by default and the footnote marks the count 
 {synopt:{cmd:e(auto_retry_policy_enabled)}}1 when the bounded CPU Auto retry policy is enabled{p_end}
 {synopt:{cmd:e(auto_retry_eligible)}}1 when all retry eligibility gates passed{p_end}
 {synopt:{cmd:e(auto_retry_fired)}}1 when the one cold MLSMR retry ran{p_end}
-{synopt:{cmd:e(auto_retry_status_code)}}0 ineligible/disabled, 1 below trigger, 2 retry used, 3 retry failed and primary returned,
-4 primary left early and retry used{p_end}
-{synopt:{cmd:e(auto_retry_status)}}{cmd:ineligible}, {cmd:below_trigger}, {cmd:used}, {cmd:failed}, or {cmd:left_early}{p_end}
+{synopt:{cmd:e(auto_retry_status_code)}}0 ineligible/disabled (also when the reduced-system tier published the fit),
+1 below trigger, 2 retry used, 3 retry failed and primary returned, 4 primary left early and retry used;
+its label is the macro {cmd:e(auto_retry_status)}{p_end}
 {synopt:{cmd:e(auto_retry_primary_method)}}primary concrete absorption-method code{p_end}
 {synopt:{cmd:e(auto_retry_primary_iterations)}}primary sweep iterations; with {cmd:left_early},
 the sweep or conjugate-gradient iterations done before leaving{p_end}
@@ -1370,21 +1362,30 @@ only meaningful when {cmd:e(slope_block_checked)} is 1 (block fields otherwise c
 {synopt:{cmd:e(thread_capacity)}}logical processors available after the OpenMP runtime limit{p_end}
 {synopt:{cmd:e(openmp_enabled)}}1 when the loaded plugin was compiled with OpenMP{p_end}
 {synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable,
-6 automatic team shared with the same user's simultaneous fits{p_end}
-{synopt:{cmd:e(thread_limit_reason)}}label corresponding to {cmd:e(thread_limit_code)}{p_end}
+5 automatic request made inside an active OpenMP region, 6 automatic team shared with the same user's
+simultaneous fits; its label is the macro {cmd:e(thread_limit_reason)}{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
-{synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
+{synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result,
+7 weighted fit run on the CPU by design (see {help xhdfe##gpu_weighted_cpu_route:weighted fits on CUDA}){p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
-{synopt:{cmd:e(cuda_tail_code)}}three-FE Comparable CUDA completion: 0 none, 1 GPU LSMR, 2 CPU MLSMR after the GPU sweeps{p_end}
+{synopt:{cmd:e(cuda_tail_code)}}CUDA completion: 0 none, 1 GPU LSMR, 2 CPU MLSMR after the GPU sweeps{p_end}
 {synopt:{cmd:e(absorption_method_used)}}absorption method code: 0 auto,
 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR,
-6 MLSMR, 7 auto-MLSMR{p_end}
+6 MLSMR, 7 auto-MLSMR, 8 reduced-PCG (published by the reduced-system tier; never a request),
+9 Krylov-PCG (reported when the Krylov-PCG route is forced, for example by a mobility profile that
+suggests it; never a request). Codes 1 to 3 name the sweep selected for the fit; they are also reported
+when a route without a code of its own served it: the exact projections of weighted designs whose
+effects have few levels, the exact sparse solve and the conjugate-gradient accelerator of small path-like two-way
+graphs, and the conjugate-gradient stage that can follow the GPU sweeps{p_end}
+{synopt:{cmd:e(reduced_pcg_status)}}reduced-system tier: 0 not applicable (off, ineligible, not reached, or
+another route's absorption read from the cache), 1 accepted (the tier published this fit, fresh or read back
+from the absorption cache), 2 declined (the route ran from the original data){p_end}
+{synopt:{cmd:e(reduced_pcg_discarded_iterations)}}iterations of a declined tier attempt; 0 otherwise{p_end}
 {synopt:{cmd:e(N_clust)}}minimum number of clusters (if clustered){p_end}
 {synopt:{cmd:e(dkraay_bw)}}effective Driscoll-Kraay bandwidth (lags + 1){p_end}
-{synopt:{cmd:e(dkraay_lags)}}number of Driscoll-Kraay lags{p_end}
-{synopt:{cmd:e(dkraay_timevar)}}tsset/xtset time variable; {cmd:e(N_clust)} counts observed periods{p_end}
+{synopt:{cmd:e(dkraay_lags)}}number of Driscoll-Kraay lags; with {cmd:vce(dkraay)}, {cmd:e(N_clust)} counts observed periods{p_end}
 {synopt:{cmd:e(N_clustervars)}}number of cluster dimensions{p_end}
 {synopt:{cmd:e(N_clust#)}}cluster counts by dimension{p_end}
 {synopt:{cmd:e(cluster_scale)}}cluster scaling factor (SSC){p_end}
@@ -1413,7 +1414,7 @@ convention already used for a saturated design. The displayed table therefore ma
 diagonal so that Stata's {cmd:sqrt(V[j,j])} evaluates to missing, whereas {helpb reghdfe} posts
 zero. Code reading {cmd:e(V)} directly in this situation will therefore see a negative variance;
 read {cmd:_se[]} or check {cmd:e(N_clust)} instead.{p_end}
-{phang} With absorbed fixed effects, {cmd:_cons} is the constant recovered by the FE normalisation,
+{phang} With absorbed fixed effects, {cmd:_cons} is the constant recovered by the FE normalization,
 mean({it:y}) - mean({it:X})*{it:b}. When a one-way {cmd:vce(cluster)} nests an absorbed intercept
 dimension (every cluster is a union of its levels; a slope-only term {cmd:fe#c.x} has no levels,
 whereas {cmd:fe##c.x} keeps them), the cluster sums of the residuals are exactly zero, and the
@@ -1423,7 +1424,7 @@ route and backend, but not with {cmd:tolerancemode(xhdfe-fast)}, instruments or 
 That variance is zero when {it:m} = 0 or there are no regressors: {cmd:_se[_cons]} is then 0,
 and the coefficient table shows the standard error, {it:t}, {it:p} and confidence interval of
 {cmd:_cons} as missing. This does
-not mean a structural parameter known without uncertainty; the constant is a normalisation of the
+not mean a structural parameter known without uncertainty; the constant is a normalization of the
 absorbed effects. Saturated designs and fewer than two clusters keep the conventions above.{p_end}
 {phang} A converged fit never posts a non-finite coefficient, and never posts a non-finite
 standard error for a coefficient whose inference is identified; such a result is rejected with an
@@ -1443,15 +1444,19 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(endogenous)}}endogenous regressor list after IV estimation{p_end}
 {synopt:{cmd:e(exogenous)}}included exogenous regressor list after IV estimation{p_end}
 {synopt:{cmd:e(instruments)}}excluded instrument list after IV estimation{p_end}
+{synopt:{cmd:e(firststage_options)}}options passed to the first-stage fits after IV estimation{p_end}
+{synopt:{cmd:e(wtype)}}weight type, when weights are specified{p_end}
+{synopt:{cmd:e(wexp)}}weight expression ({cmd:=} {it:exp}), when weights are specified{p_end}
 {synopt:{cmd:e(absorb)}}absorbed FE list{p_end}
 {synopt:{cmd:e(absvars)}}alias for absorbed FE list (reghdfe compatibility){p_end}
 {synopt:{cmd:e(extended_absvars)}}extended absorbed FE list (reghdfe compatibility){p_end}
 {synopt:{cmd:e(absorb_labels)}}labels shown for absorbed effects in output/savefes(){p_end}
-{synopt:{cmd:e(dofmethod)}}DoF adjustment tokens applied{p_end}
+{synopt:{cmd:e(dofmethod)}}DoF adjustment tokens applied; empty with {cmd:dofadjustments(exact)}{p_end}
 {synopt:{cmd:e(dof_labels)}}labels used in the absorbed-DoF table, when posted{p_end}
 {synopt:{cmd:e(clustvar)}}cluster variable list (if clustered){p_end}
 {synopt:{cmd:e(vce)}}vcetype specified in {cmd:vce()}{p_end}
 {synopt:{cmd:e(vcetype)}}title used to label Std. Err.{p_end}
+{synopt:{cmd:e(dkraay_timevar)}}tsset/xtset time variable used by {cmd:vce(dkraay)}{p_end}
 {synopt:{cmd:e(resid)}}residuals variable name (if requested){p_end}
 {synopt:{cmd:e(group)}}group variable name (if requested){p_end}
 {synopt:{cmd:e(individual)}}individual variable name (if requested){p_end}
@@ -1464,13 +1469,26 @@ slope as collinear; rescale the dependent variable and/or regressors before fitt
 {synopt:{cmd:e(version)}}xhdfe version string{p_end}
 {synopt:{cmd:e(tolerance_mode)}}absorber tolerance mode used by the command{p_end}
 {synopt:{cmd:e(nowarn)}}posted when {cmd:nowarn} was specified{p_end}
-{synopt:{cmd:e(gpu_backend_requested)}}requested backend from {cmd:gpubackend()} or the {cmd:XHDFE_GPU_BACKEND} environment variable, when provided{p_end}
+{synopt:{cmd:e(auto_retry_status)}}label of {cmd:e(auto_retry_status_code)}: {cmd:ineligible}, {cmd:below_trigger},
+{cmd:used}, {cmd:failed}, or {cmd:left_early}{p_end}
+{synopt:{cmd:e(thread_limit_reason)}}label of {cmd:e(thread_limit_code)}: {cmd:none}, {cmd:runtime_capacity},
+{cmd:auto_policy}, {cmd:auto_max_threads}, {cmd:openmp_unavailable}, {cmd:active_openmp_region}, or
+{cmd:auto_team_coordination}{p_end}
+{synopt:{cmd:e(gpu_backend_requested)}}requested backend from {cmd:gpubackend()} or the {cmd:XHDFE_GPU_BACKEND} environment variable, when provided;
+{cmd:cuda} for a weighted fit run on the CPU by design ({cmd:e(gpu_status_code)} = 7){p_end}
 {synopt:{cmd:e(gpu_backend)}}effective backend when {cmd:gpubackend()} is supplied,
-or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}; otherwise not posted{p_end}
+or when the GPU was used via {cmd:XHDFE_GPU_BACKEND}, or {cmd:cpu} when {cmd:e(gpu_status_code)} = 7; otherwise not posted{p_end}
 {synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
 {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
-{cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
+{cmd:gpu_backend_failed}, {cmd:cpu_cache_or_profile_result}, or {cmd:weighted_cpu_route}{p_end}
 {synopt:{cmd:e(cuda_tail)}}label of {cmd:e(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
+{synopt:{cmd:e(reduced_pcg_reason)}}reason behind {cmd:e(reduced_pcg_status)}: {cmd:none} when accepted; the
+ineligibility (e.g. {cmd:weights}, {cmd:iv}, {cmd:gpu}; {cmd:mobility_profile}, {cmd:absorption_cache} or
+{cmd:fe_structure_cache} when a profile or a cache keeps a {cmd:reducedpcgcuda()} request out) or decline (e.g.
+{cmd:stall}, {cmd:trigger}) reason;
+{cmd:off} when switched off; {cmd:not_reached} when the fit took a path that never reaches the tier;
+{cmd:cache} when another route's absorption was read from the absorption cache
+(a tier result read back reports {cmd:none}, like the fit that wrote it){p_end}
 {synoptline}
 
 {synoptset 24 tabbed}{...}
@@ -1526,9 +1544,70 @@ online Stata site published by {cmd:xhdfe-xfe}:
 xhdfe is a reimplementation built to validate against and interoperate with prior work. Full credit goes to:
 {p_end}
 {phang2}{bf:reghdfe} by Sergio Correia (Stata) - {browse "https://github.com/sergiocorreia/reghdfe":Github}{p_end}
-{phang2}{bf:fixest} by Laurent Berge (R) - {browse "https://github.com/lrberge/fixest":Github}{p_end}
-{phang2}{bf:pyfixest} by Alexander Fischer and collaborators (Python) - {browse "https://github.com/py-econometrics/pyfixest":Github}{p_end}
+{phang2}{bf:fixest} by Laurent Berge and contributors (R) - {browse "https://github.com/lrberge/fixest":Github}{p_end}
+{phang2}{bf:pyfixest} by Alexander Fischer and collaborators (Python) - {browse "https://pyfixest.org/":pyfixest.org},
+{browse "https://github.com/py-econometrics/pyfixest":Github}{p_end}
 {phang2}{bf:FixedEffectModels.jl} by Matthieu Gomez and collaborators (Julia) - {browse "https://github.com/FixedEffects/FixedEffectModels.jl":Github}{p_end}
+{phang2}{bf:within} by Alexander Fischer and Kristof Schroeder (Rust and Python) - {browse "https://github.com/py-econometrics/within":Github}{p_end}
+{phang2}{bf:fereg} by Johannes F. Schmieder (Stata) - {browse "https://github.com/johannes-schmieder/fereg":Github}{p_end}
+{phang2}{bf:fereg} by Leo Liu (Stata, Python and R; a different package with the same name) -
+{browse "https://github.com/leoliu0/fereg":Github}{p_end}
+{phang2}{bf:reghdfejl} by David Roodman (Stata front end to FixedEffectModels.jl) -
+{browse "https://github.com/droodman/reghdfejl":Github}{p_end}
+
+{pstd}
+The {it:within} materials of Fischer and Schroeder, with their 2026 paper, were the direct starting point for
+xhdfe's graph-preconditioned MLSMR/additive-Schwarz route: the factor-pair graph decomposition, the
+bipartite-Laplacian representation, the approximate-Cholesky local solves and the additive-Schwarz
+preconditioner inside modified LSMR are their contribution.{p_end}
+
+{pstd}
+The {help xhdfe##reduced_pcg:reduced-system tier} of version 2.32 ({cmd:reduced-pcg}) follows the design
+implemented in {cmd:fereg} 0.6.0 and described in Schmieder (2026), and cites it as such: with two to five fixed
+effects, it eliminates exactly the effect with the most levels and solves the remaining system by
+Jacobi-preconditioned conjugate gradients. Which effect is eliminated, the range of two to five effects, the
+joint treatment of up to eight columns per pass, the limit of 1,500 iterations for that stage and the form of
+its stall test (the residual must halve within each window of iterations) follow {cmd:fereg}. As Schmieder
+(2026) notes, the elimination is the block reduction of Somaini and Wolak (2016), and iterative solutions
+have precedents in Abowd, Creecy and Kramarz (2002) and in Mittag (2019). xhdfe does not implement what
+Schmieder (2026) presents as {cmd:fereg}'s distinguishing contribution in this step, the escalation to
+stronger preconditioners, including combinatorial multigrid, on poorly connected data: where the
+Jacobi-preconditioned iteration stalls, xhdfe hands the fit to its previous routes. xhdfe's part is an
+independent C++ implementation inside its own routing, acceptance certificate, fallbacks, diagnostics and
+Stata, Python and R front ends. xhdfe contains no {cmd:fereg} source code; its C++ implementation was
+written after studying the paper and {cmd:fereg}'s public source. Two changes of version 2.31.0 followed benchmarks against {cmd:fereg}: reading the Stata
+data in parallel on qualified hosts, as {cmd:fereg} does, and larger automatic thread teams (one thread per
+25,000 rows instead of 500,000), where {cmd:fereg} by default uses all logical processors and sizes the
+parallel work of each stage by its amount of work. {cmd:fereg} credits the precedent of parallel copying
+from Stata to David Roodman's {cmd:julia} package (Roodman 2025).{p_end}
+
+{pstd}
+The performance work of November 2026 (versions 2.32 to 2.34) was measured against successive releases of
+Schmieder's {cmd:fereg}, from 0.6.0 to 0.6.7, on public benchmark datasets and on large linked panels. In the
+same month we studied {cmd:fereg} by Leo Liu, a different package with the same name for Stata, Python and R,
+whose solver, in its author's words, "eliminates the largest fixed effect exactly and solves the remaining
+system with a preconditioned conjugate-gradient method on cell-compressed sufficient statistics". We compared
+it with xhdfe's reduced-system tier on a large panel to learn where the time of that tier goes. Version 2.34.1
+contains no source code and no algorithmic change taken from that package; anything a later version adopts
+from that study will be credited here. {cmd:reghdfejl}, by David Roodman, runs {cmd:FixedEffectModels.jl}
+from Stata through his {cmd:julia} package and is a comparison engine in the Stata benchmarks.{p_end}
+
+{pstd}
+The numerical methods that xhdfe exposes are established ones and are cited as such in the
+{help xhdfe##references:References}: partialling out by the Frisch-Waugh-Lovell theorem, alternating
+projections as applied to fixed effects by Guimaraes and Portugal (2010) and Gaure (2013) and as implemented
+in {cmd:reghdfe} (Correia 2017), conjugate gradients (Hestenes and Stiefel 1952), LSMR (Fong and Saunders
+2011) and the Irons-Tuck acceleration (Irons and Tuck 1969). The approximate-Cholesky local solves of the
+graph-preconditioned route are those that Fischer and Schroeder take from the Laplacian-solver literature
+(Spielman and Teng 2014; Gao, Kyng and Spielman 2026). Multiway clustering follows Cameron, Gelbach and Miller
+(2011) and {cmd:vce(dkraay)} follows Driscoll and Kraay (1998).{p_end}
+
+{pstd}
+Comparison packages, current releases checked at their sources on 21 November 2026: {cmd:reghdfe} 6.14.1
+(8 July 2026), {cmd:fixest} 0.14.2 (CRAN, 26 June 2026), {cmd:pyfixest} 0.70.0 (8 November 2026),
+{cmd:FixedEffectModels.jl} 2.2.1 (16 November 2026), {cmd:fereg} by Schmieder 0.6.7 (20 November 2026) and
+{cmd:fereg} by Liu 0.5.0 (21 November 2026). {cmd:reghdfejl} was benchmarked at 1.1.9, its GitHub release of
+12 October 2026.{p_end}
 
 {pstd}
 We thank Paulo Guimaraes (Banco de Portugal), Marta Silva
@@ -1552,7 +1631,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.31.1.
+regression via a C++ backend." Version 2.34.1.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
@@ -1576,6 +1655,16 @@ Correia, Sergio. 2016. "{cmd:reghdfe}: Estimating linear models with multi-way f
 {browse "https://EconPapers.repec.org/RePEc:boc:scon16:24":https://EconPapers.repec.org/RePEc:boc:scon16:24}.{p_end}
 
 {phang}
+Correia, Sergio. 2017. "Linear models with high-dimensional fixed effects: An efficient and feasible
+estimator." Working paper (the estimator that {cmd:reghdfe} implements).
+{browse "http://scorreia.com/research/hdfe.pdf":http://scorreia.com/research/hdfe.pdf}.{p_end}
+
+{phang}
+Constantine, Noah, and Sergio Correia. 2021. "{cmd:reghdfe}: Stata module for linear and
+instrumental-variable/GMM regression absorbing multiple levels of fixed effects."
+{browse "https://ideas.repec.org/c/boc/bocode/s457874.html":https://ideas.repec.org/c/boc/bocode/s457874.html}.{p_end}
+
+{phang}
 Correia, Sergio, Paulo Guimaraes, and Tom Zylkin. 2020. "Fast Poisson estimation with
 high-dimensional fixed effects." {it:Stata Journal} 20(1): 95-115.
 {browse "https://doi.org/10.1177/1536867X20909691":doi:10.1177/1536867X20909691}.{p_end}
@@ -1586,14 +1675,111 @@ econometrics estimations: The R package {cmd:fixest}." {it:arXiv preprint} arXiv
 {browse "https://doi.org/10.48550/arXiv.2601.21749":doi:10.48550/arXiv.2601.21749}.{p_end}
 
 {phang}
-Fischer, Alexander, and collaborators. "{cmd:pyfixest}: Fast high-dimensional fixed-effects
-regression in Python." Python package.
+The PyFixest Authors. "{cmd:pyfixest}: Fast high-dimensional fixed effect estimation in
+Python." Python package.
+{browse "https://pyfixest.org/":https://pyfixest.org/} and
 {browse "https://github.com/py-econometrics/pyfixest":https://github.com/py-econometrics/pyfixest}.{p_end}
 
 {phang}
 FixedEffects.jl contributors. 2025. "{cmd:FixedEffectModels.jl}: Fast Estimation of Linear
 Models with IV and High Dimensional Categorical Variables." Julia package.
 {browse "https://github.com/FixedEffects/FixedEffectModels.jl":https://github.com/FixedEffects/FixedEffectModels.jl}.{p_end}
+
+{phang}
+Abowd, John M., Robert H. Creecy, and Francis Kramarz. 2002. "Computing person and firm effects using linked
+longitudinal employer-employee data." Longitudinal Employer-Household Dynamics Technical Paper TP-2002-06,
+U.S. Census Bureau.{p_end}
+
+{phang}
+Mittag, Nikolas. 2019. "A simple method to estimate large fixed effects models applied to wage determinants."
+{it:Labour Economics} 61: 101766.
+{browse "https://doi.org/10.1016/j.labeco.2019.101766":doi:10.1016/j.labeco.2019.101766}.{p_end}
+
+{phang}
+Somaini, Paulo, and Frank A. Wolak. 2016. "An algorithm to estimate the two-way fixed effects model."
+{it:Journal of Econometric Methods} 5(1): 143-152.
+{browse "https://doi.org/10.1515/jem-2014-0008":doi:10.1515/jem-2014-0008}.{p_end}
+
+{phang}
+Roodman, David. 2025. "Julia as a universal platform for statistical software development."
+{it:Stata Journal} 25(2): 255-284.
+{browse "https://doi.org/10.1177/1536867X251341105":doi:10.1177/1536867X251341105}.{p_end}
+
+{phang}
+Fischer, Alexander, and Kristof Schroeder. 2026. "Graph Preconditioning for High-Dimensional Fixed Effects
+Regression." Mimeo, draft of June 2026.
+{browse "https://github.com/py-econometrics/within-paper":https://github.com/py-econometrics/within-paper}.{p_end}
+
+{phang}
+Fischer, Alexander, and Kristof Schroeder. "{cmd:within}: Fast solvers for high-dimensional fixed effects."
+Rust crate and Python package.
+{browse "https://github.com/py-econometrics/within":https://github.com/py-econometrics/within}.{p_end}
+
+{phang}
+Schmieder, Johannes F. 2026. "{cmd:fereg}: Fast high-dimensional fixed-effects regressions in Stata."
+CEPR Discussion Paper No. 22170. CEPR Press, Paris & London.
+{browse "https://cepr.org/publications/dp22170":https://cepr.org/publications/dp22170}. Author's copy,
+November 2026:
+{browse "https://johannes-schmieder.com/papers/fereg.pdf":https://johannes-schmieder.com/papers/fereg.pdf}.
+Software:
+{browse "https://github.com/johannes-schmieder/fereg":https://github.com/johannes-schmieder/fereg}.{p_end}
+
+{phang}
+Liu, Leo. "{cmd:fereg}: Fast high-dimensional fixed-effects regressions for Stata, Python and R, on one
+Rust core." {browse "https://github.com/leoliu0/fereg":https://github.com/leoliu0/fereg}.{p_end}
+
+{phang}
+Roodman, David. "{cmd:reghdfejl}: High-dimensional fixed-effect estimation in Stata using Julia."
+{browse "https://github.com/droodman/reghdfejl":https://github.com/droodman/reghdfejl}.{p_end}
+
+{pstd}
+Numerical methods and inference:{p_end}
+
+{phang}
+Frisch, Ragnar, and Frederick V. Waugh. 1933. "Partial time regressions as compared with individual
+trends." {it:Econometrica} 1(4): 387-401.
+{browse "https://doi.org/10.2307/1907330":doi:10.2307/1907330}.{p_end}
+
+{phang}
+Lovell, Michael C. 1963. "Seasonal adjustment of economic time series and multiple regression analysis."
+{it:Journal of the American Statistical Association} 58(304): 993-1010.
+{browse "https://doi.org/10.1080/01621459.1963.10480682":doi:10.1080/01621459.1963.10480682}.{p_end}
+
+{phang}
+Hestenes, Magnus R., and Eduard Stiefel. 1952. "Methods of conjugate gradients for solving linear
+systems." {it:Journal of Research of the National Bureau of Standards} 49(6): 409-436.
+{browse "https://doi.org/10.6028/jres.049.044":doi:10.6028/jres.049.044}.{p_end}
+
+{phang}
+Irons, Bruce M., and Robert C. Tuck. 1969. "A version of the Aitken accelerator for computer iteration."
+{it:International Journal for Numerical Methods in Engineering} 1(3): 275-277.
+{browse "https://doi.org/10.1002/nme.1620010306":doi:10.1002/nme.1620010306}.{p_end}
+
+{phang}
+Fong, David Chin-Lung, and Michael Saunders. 2011. "LSMR: An iterative algorithm for sparse least-squares
+problems." {it:SIAM Journal on Scientific Computing} 33(5): 2950-2971.
+{browse "https://doi.org/10.1137/10079687X":doi:10.1137/10079687X}.{p_end}
+
+{phang}
+Spielman, Daniel A., and Shang-Hua Teng. 2014. "Nearly linear time algorithms for preconditioning and
+solving symmetric, diagonally dominant linear systems."
+{it:SIAM Journal on Matrix Analysis and Applications} 35(3): 835-885.
+{browse "https://doi.org/10.1137/090771430":doi:10.1137/090771430}.{p_end}
+
+{phang}
+Gao, Yuan, Rasmus Kyng, and Daniel A. Spielman. 2026. "AC(k): Robust solution of Laplacian equations by
+randomized approximate Cholesky factorization." {it:SIAM Journal on Scientific Computing} 48(3):
+A1643-A1684. {browse "https://doi.org/10.1137/24M1673577":doi:10.1137/24M1673577}.{p_end}
+
+{phang}
+Cameron, A. Colin, Jonah B. Gelbach, and Douglas L. Miller. 2011. "Robust inference with multiway
+clustering." {it:Journal of Business & Economic Statistics} 29(2): 238-249.
+{browse "https://doi.org/10.1198/jbes.2010.07136":doi:10.1198/jbes.2010.07136}.{p_end}
+
+{phang}
+Driscoll, John C., and Aart C. Kraay. 1998. "Consistent covariance matrix estimation with spatially
+dependent panel data." {it:Review of Economics and Statistics} 80(4): 549-560.
+{browse "https://doi.org/10.1162/003465398557825":doi:10.1162/003465398557825}.{p_end}
 
 {pstd}
 Worker-firm (AKM) leave-out layer (see {helpb xhdfeakm} and {helpb xhdfegelbach}):{p_end}
