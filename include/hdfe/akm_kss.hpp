@@ -301,6 +301,7 @@ struct GelbachOptions {
     int verbose = 0;                     //!< 0 = silent; 1 = phase progress. Output only.
     void (*progress)(const char* line, void* user) = nullptr;
     void* progress_user = nullptr;
+    bool weighted_cpu_route = false;      //!< Request the CPU route for an eligible weighted full-model fit.
 };
 
 struct GelbachResult {

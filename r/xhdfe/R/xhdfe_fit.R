@@ -19,7 +19,9 @@ xhdfe_fit <- function(y, X, fes = NULL,
                       level = 95,
                       threads = 0, default_threads = 0, max_threads = 0,
                       min_parallel_rows = 20000, target_rows_per_thread = 0,
-                      backend = c("default", "cpu", "cuda", "metal")) {
+                      backend = c("default", "cpu", "cuda", "metal"),
+                      reduced_pcg = NULL, reduced_pcg_cuda = NULL,
+                      weighted_cpu_route = FALSE) {
   cl <- match.call()
   backend <- match.arg(backend)
   weights_type <- match.arg(weights_type)
@@ -155,7 +157,9 @@ xhdfe_fit <- function(y, X, fes = NULL,
                      drop_singletons, keep_singletons, save_fe,
                      symmetric_sweep, absorption_method, jacobi_relaxation,
                      level, dof, ssc, tolerance_mode, fe_tolerance,
-                     fe_recovery_method, stats_style, weights_type, groupvar)
+                     fe_recovery_method, stats_style, weights_type, groupvar,
+                     reduced_pcg = reduced_pcg, reduced_pcg_cuda = reduced_pcg_cuda,
+                     weighted_cpu_route = weighted_cpu_route)
 
   res <- run_with_backend(backend, function() {
     .xhdfe_cpp_fit(y, X, fes_use, weights, cluster_use, Z,

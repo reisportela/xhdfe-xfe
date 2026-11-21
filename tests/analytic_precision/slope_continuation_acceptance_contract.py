@@ -231,7 +231,7 @@ def main():
     args.out.mkdir(parents=True, exist_ok=False)
     harness = args.out/'contract.cpp'
     executable = args.out/'contract'
-    harness.write_text('#include <algorithm>\n#include <cmath>\n#include <iostream>\n'
+    harness.write_text('#include <algorithm>\n#include <chrono>\n#include <cmath>\n#include <iostream>\n'
                        '#include <limits>\n#include <sstream>\n#include <stdexcept>\n'
                        '#include "fe_absorption.hpp"\n'
                        '#include "hdfe/audit_environment.hpp"\n'+FIXTURE+SEED_ADAPTER+

@@ -22,7 +22,8 @@ xhdfe(fml, data = NULL,
       threads = 0, default_threads = 0, max_threads = 0,
       min_parallel_rows = 20000, target_rows_per_thread = 0,
       backend = c("default", "cpu", "cuda", "metal"),
-      na.action = c("omit", "fail"))
+      na.action = c("omit", "fail"),
+      reduced_pcg = NULL, reduced_pcg_cuda = NULL, weighted_cpu_route = FALSE)
 }
 \arguments{
 \item{fml}{a model formula with up to three \code{|}-separated parts:
@@ -212,9 +213,35 @@ recorded in the \code{tolerance_mode} field (Stata
   \item \code{"strict-residual"} (aliases \code{"strict"},
     \code{"residual-certificate"}, \code{"strict_residual"},
     \code{"residual_certificate"}): a heavier audit mode that treats
-    the final absolute maximum group-mean residual check as
-    authoritative; it may use extra iterations up to \code{maxiter}
-    and reports non-convergence if the check is not met. Not
+    a final absolute check as authoritative; it may use extra
+    iterations up to \code{maxiter} and reports non-convergence if the
+    check is not met. On the CPU the check is the largest absolute
+    group mean of the absorbed outcome and of every absorbed regressor
+    for sweeps, for fits with both \code{group} and \code{individual}, and
+    for ordinary LSMR or MLSMR projections without saved effects, including cached projections.
+    A failed LSMR or MLSMR absolute check can trigger one continuation in
+    the same solver within the remaining \code{maxiter} budget. For the
+    sparse direct and Krylov-PCG solvers, the solver's stopping rule and
+    the relative certificate apply.
+    An ordinary categorical CUDA fit checks the largest absolute group
+    mean of its reported residuals, using the fit's weights. This includes
+    the structural residual for IV and the reconstruction with saved
+    effects. The automatic unweighted Comparable-based Strict route can
+    continue from its projected state. Other ordinary CUDA fits can use
+    one device LSMR projection within the remaining \code{maxiter} budget.
+    An eligible fit with \code{weighted_cpu_route = TRUE} applies the CPU
+    checks. Fits with both \code{group} and \code{individual} use their
+    grouped-absorption checks. The absolute check is in the units of the dependent
+    variable. When the residuals are so large in those units that the
+    tolerance is within a few units of roundoff of them (observed on
+    one synthetic panel, with \code{tol = 1e-8}, from residuals of
+    about 2e7 to 4e7), the check may be unattainable in double
+    precision: the fit can then use iterations up to \code{maxiter} and
+    reports non-convergence, in some runs well before that limit, and
+    close to that point the same fit can be accepted in one run and
+    refused in the next. Rescale the
+    dependent variable, raise \code{tol}, or use
+    \code{"reghdfe-comparable"}, whose criteria are relative. Not
     supported with heterogeneous slopes (an error is raised before
     estimation).
 }
@@ -309,7 +336,47 @@ on CPU; \code{"mlsmr"}, \code{"auto-mlsmr"}, \code{"schwarz"}, and
 \code{"jacobi"} are rejected. The method effectively used is
 reported in the \code{absorption_method_used} and
 \code{absorption_method_code} fields (same code table as Stata's
-\code{e(absorption_method_used)}).}
+\code{e(absorption_method_used)}).
+The reduced-system tier is on by default; its method,
+\code{"reduced-pcg"} (code 8), is reported but cannot be requested.
+\code{"krylov-pcg"} (code 9) is reported, never requested, when the
+Krylov-PCG route is forced, for example by a mobility profile that
+suggests it. Codes 1 to 3 name the sweep selected for the fit; they are
+also reported when a route without a code of its own served it: the
+exact projections of weighted designs whose effects have few levels, the exact
+sparse solve and the conjugate-gradient accelerator of small path-like
+two-way graphs, and the conjugate-gradient stage that can follow the GPU
+sweeps.
+Before the route chosen by \code{"auto"} runs, an ordinary fit with
+\code{tolerance_mode = "reghdfe-comparable"}, \code{convergence = "auto"},
+two to five fixed effects and no CUDA or Metal request (\code{backend}
+or \code{XHDFE_GPU_BACKEND}), and without weights, instruments,
+heterogeneous slopes, \code{save_fe}, \code{groupvar}, \code{group} or
+the writing of a mobility profile, eliminates exactly the fixed effect
+with the most levels and solves for the others by preconditioned
+conjugate gradients on the CPU, in at most \code{min(maxiter, 1500)}
+iterations. When the requested tolerance is at least \code{1.25e-12},
+a column stops once its reduced-system acceptance quantity is at most
+\code{1e-12}, confirmed after recomputing the reduced residual. Existing
+exits for trivial or compatible systems remain available. Smaller
+requested tolerances retain the former stopping criterion. Passing this
+fixed stopping target does not replace the independent final precision
+certificate. The result is
+published only if it passes the precision certificate, including the
+requested tolerance, and the unchanged acceptance trigger, with a verified relative residual of
+at most \code{1e-11}; otherwise the attempt is discarded and the route
+runs from the original data with its own \code{maxiter} budget, as with
+the tier off. The attempt also declines (reason \code{"memory"}) when its
+working-memory estimate exceeds the larger of 1 GiB and 16 bytes per
+observation for each of the outcome, the regressors and the fixed
+effects. The \code{reduced_pcg_*} result fields report what happened;
+\code{reduced_pcg = FALSE} turns the tier off for a fit, and
+\code{XHDFE_REDUCED_PCG=0} for the process. The one exception to the
+condition of no CUDA request is the tier's experimental CUDA variant,
+off by default (see \code{reduced_pcg_cuda}). \code{xhdfe_demean()}
+and the internal fits of the AKM and Gelbach functions never enter it.
+The design follows \code{fereg} 0.6.0 (Schmieder 2026); see the
+Acknowledgements of \code{\link{xhdfe-package}}.}
 
 \item{symmetric_sweep}{logical; if \code{TRUE}, use a forward plus a
 backward sweep per iteration for the Gauss-Seidel methods (the analogue
@@ -452,9 +519,10 @@ before the first fit turns this off.}
 absorber), or \code{"metal"} (reserved for Metal builds; errors where
 unavailable). Requesting \code{"cuda"} or \code{"metal"} is
 \emph{fail-closed}: if the GPU is not effectively used the fit stops
-with an error instead of silently returning CPU results, mirroring the
-Stata plugin's error 498 contract. See the \emph{GPU backends} section
-for the build recipe and the diagnostics to check.}
+with an error, mirroring the Stata plugin's error 498 contract. With
+\code{weighted_cpu_route = TRUE}, eligible fits run on the CPU and report
+\code{gpu_status_code} 7. See the \emph{GPU backends} section for the rule, the
+build recipe and the diagnostics to check.}
 
 \item{na.action}{\code{"omit"} (default): rows with missing values in any
 estimation variable (outcome, regressors, instruments, fixed-effect
@@ -462,6 +530,54 @@ ids, slope variables, clusters, weights, group/individual ids) are
 dropped before estimation, and full-length outputs (residuals,
 prediction caches) are \code{NA} on those rows. \code{"fail"}: raise an
 error if any such missing value is present.}
+
+\item{reduced_pcg}{the reduced-system tier for this fit (see
+\code{absorption_method}): \code{TRUE} on, \code{FALSE} off, \code{NULL}
+(default) the process default, which is the environment variable
+\code{XHDFE_REDUCED_PCG} (read once per process; \code{0} turns the tier
+off) and otherwise on. It allows fits with and without the tier in the
+same R session. A fit with the tier switched off reports
+\code{reduced_pcg_status} 0 and \code{reduced_pcg_reason} \code{"off"},
+and gives the results of the tier switched off for the whole process.}
+
+\item{weighted_cpu_route}{Logical scalar, default \code{FALSE}. With
+\code{TRUE}, request CPU for eligible weighted CUDA fits and report
+\code{gpu_status_code} 7. See \emph{GPU backends}.}
+
+\item{reduced_pcg_cuda}{the experimental CUDA variant of the reduced-system
+tier for this fit, which acts only on a fit on CUDA (\code{backend =
+"cuda"}, or \code{"default"} with \code{XHDFE_GPU_BACKEND=cuda}):
+\code{TRUE} requests it, \code{FALSE} does not, \code{NULL} (default) the
+process default, which is the environment variable
+\code{XHDFE_REDUCED_PCG_CUDA} (read once per process; \code{1} requests
+it) and otherwise off. A \code{"reghdfe-comparable"} fit that meets the
+tier's other conditions and uses no mobility profile, absorption cache or
+FE-structure cache then attempts the tier with the products of the
+reduced system computed on the GPU; the recurrence, the stopping rule,
+the acceptance trigger and the certificate are the tier's, computed on
+the CPU. A published fit reports \code{absorption_method_code} 8,
+\code{reduced_pcg_status} 1, \code{gpu_used} 1 and \code{gpu_status}
+\code{"used"}; requesting CUDA alone does not prove entry, so check all of
+them. A declined attempt runs the CUDA route that the fit takes without
+the request. With the request, a fit kept out by a mobility profile or a
+cache reports \code{reduced_pcg_reason} \code{"mobility_profile"},
+\code{"absorption_cache"} or \code{"fe_structure_cache"} (the first that
+applies, in that order) instead of \code{"gpu"} and runs that same route.
+A file \code{xhdfe_mobility_profile.txt} in the working directory is a
+mobility profile. An attempt that cannot obtain device memory, or cannot
+page-lock the rows it exchanges with the GPU, declines with
+\code{reduced_pcg_reason} \code{"memory"} or \code{"pinned"} and runs that
+same route. Where that confirmed stopping rule is in force (a requested
+tolerance of at least \code{1.25e-12} and
+\code{XHDFE_REDUCED_PCG_CHAT_STOP} not \code{0}), the product used to
+recompute the reduced residual is computed on the GPU as well; the
+stopping decisions stay on the CPU.
+\code{XHDFE_REDUCED_PCG_CUDA_REPLACEMENT=0}, set in the environment
+before the first fit (read once per process), keeps that product on the
+CPU. The acceptance trigger and the certificate, computed on the CPU, are
+unchanged. \code{reduced_pcg = FALSE} keeps
+both the tier and its CUDA variant off; on the CPU the argument has no
+effect.}
 }
 \section{Fail-closed input and output contracts}{
 Estimation inputs are validated before any work is done. Non-finite
@@ -633,7 +749,10 @@ dimension, mirroring \code{reghdfe}'s degrees-of-freedom footnote table,
     sides; \code{krylov_max_condition} is the maximum running condition
     estimate. These fields are zero when that Krylov path was not used.}
   \item{Krylov-PCG scope}{The separate PCG path is not covered by this
-    parity floor and reports zeros; a PCG floor remains future reviewed work.}
+    parity floor and reports zeros; a PCG floor remains future reviewed work.
+    The reduced-system tier is a different conjugate-gradient solver with
+    the stopping rule described under \code{absorption_method}; it leaves
+    these four fields at zero itself.}
   \item{\code{precision_certified}}{whether the verified relative residual
     meets the numerical certificate limit. In the combined
     \code{group}/\code{individual} path this check is authoritative:
@@ -642,11 +761,27 @@ dimension, mirroring \code{reghdfe}'s degrees-of-freedom footnote table,
   \item{\code{absorption_method_used}}{name of the method effectively
     used (\code{"auto"}, \code{"gauss-seidel"},
     \code{"symmetric-gauss-seidel"}, \code{"jacobi"}, \code{"schwarz"},
-    \code{"lsmr"}, \code{"mlsmr"}, \code{"auto-mlsmr"}).}
+    \code{"lsmr"}, \code{"mlsmr"}, \code{"auto-mlsmr"},
+    \code{"reduced-pcg"} when the reduced-system tier published the fit, or
+    \code{"krylov-pcg"} when the forced Krylov-PCG route did).}
   \item{\code{absorption_method_code}}{numeric code with the same table
     as Stata's \code{e(absorption_method_used)}: 0 auto, 1 gauss-seidel,
     2 symmetric-gauss-seidel, 3 jacobi, 4 schwarz, 5 lsmr, 6 mlsmr,
-    7 auto-mlsmr.}
+    7 auto-mlsmr, 8 reduced-pcg, 9 krylov-pcg.}
+  \item{\code{reduced_pcg_status}, \code{reduced_pcg_reason},
+    \code{reduced_pcg_discarded_iterations}}{the reduced-system tier (see
+    \code{absorption_method}): status 0 not applicable (off, ineligible,
+    not reached, or another route's transform read from the absorption
+    cache), 1 the tier published the fit (fresh or read back from the
+    cache), 2 the attempt declined and the route ran from the original
+    data; the reason (\code{"none"} when published, otherwise the
+    ineligibility or decline reason, such as \code{"weights"} or
+    \code{"stall"}, or \code{"off"}, \code{"not_reached"} or
+    \code{"cache"}); and the iterations of a declined attempt, 0 otherwise.
+    With status 1, \code{iterations} counts the tier's iterations (plus
+    those of a normal-equation correction, should one follow)
+    (\code{e(reduced_pcg_status)}, \code{e(reduced_pcg_reason)},
+    \code{e(reduced_pcg_discarded_iterations)}).}
   \item{\code{threads_requested}, \code{threads_effective}}{raw request
     (0 means auto) and the request after runtime/automatic limits.}
   \item{\code{threads_used}}{largest OpenMP team observed executing a real
@@ -660,7 +795,7 @@ dimension, mirroring \code{reghdfe}'s degrees-of-freedom footnote table,
     (\code{e(tolerance_mode)}).}
   \item{\code{gpu_used}}{1 if the GPU backend was effectively used, 0 if
     the CPU path was used (\code{e(gpu_used)}).}
-  \item{\code{gpu_status_code}, \code{gpu_status}}{status code 0-5 and
+  \item{\code{gpu_status_code}, \code{gpu_status}}{status code 0-5 or 7 and
     its label (\code{e(gpu_status_code)}, \code{e(gpu_status)}); see the
     \emph{GPU backends} section for the taxonomy.}
   \item{\code{gpu_attempted}}{1 if GPU absorption was attempted
@@ -831,6 +966,16 @@ Notes:
     absorbed dimension per slope variable, with the intercept (if
     requested) riding on the first -- exactly like Stata expands
     \code{absorb(fe##c.x1 fe#c.x2)}.
+  \item \emph{Optional secondreg solver.} Set
+    \code{XHDFE_EXPERIMENT_SLOPE_SCHUR=1} for eligible unweighted OLS with
+    two ordinary fixed effects and two slopes on the same carrier with
+    an intercept. It applies to automatic absorption and convergence
+    in \code{"reghdfe-comparable"} mode without saved effects.
+    Accepted fits report method code 9 and pass the original slope
+    certificate. \code{XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1} enables
+    parallel sparse matrix assembly. \code{XHDFE_EXPERIMENT_NETWORK_SCORES=1}
+    enables eligible two-way cluster score reuse when the cluster
+    partitions match the worker and firm effects.
   \item \emph{Id encoding.} Integer id vectors are passed to the core
     verbatim (level handling is the core's job); factors use their level
     codes; character, logical, and non-integral numeric vectors are
@@ -859,10 +1004,13 @@ the mode used. Combined group/individual CUDA fits nevertheless use an
 internal \code{min(tol, 1e-12)} floor before certification, so fast mode
 cannot re-enable a materially inaccurate early GS stop.
 \code{"strict-residual"} is a heavier audit mode that
-treats the final absolute maximum group-mean residual check as
-authoritative, may use extra iterations up to \code{maxiter}, and reports
-non-convergence when the check is not met; it is not supported with
-heterogeneous slopes.
+treats a final absolute check as authoritative, may use extra iterations
+up to \code{maxiter}, and reports non-convergence when the check is not
+met; it is not supported with heterogeneous slopes. On CUDA with the
+automatic method and criterion, without weights, \code{save_fe} or
+\code{group}, the check is the largest absolute group mean of the
+delivered residuals in the units of the dependent variable (see
+\code{tolerance_mode}).
 
 New in 2.11.0: under the default mode, absorption on ill-conditioned,
 poorly connected multiway fixed-effect graphs is transparently handed off
@@ -891,7 +1039,8 @@ stata/tools/build-plugin.sh --linux --openmp}.
 \code{"metal"}) never silently falls back to the CPU: if the backend is
 unavailable, fails, does not converge on the GPU, or a CPU cache/profile
 result would be returned, the fit stops with an error -- mirroring the
-Stata command, which exits with error 498 in the same situations.
+Stata command, which exits with error 498 in the same situations. The one
+exception is reported: see \strong{Weighted fits on CUDA} below.
 After a successful GPU fit, validate real GPU use through the
 diagnostics on the result object: \code{gpu_used} must be \code{1} and
 \code{gpu_status} must be \code{"used"} (Stata: \code{e(gpu_used)==1},
@@ -902,7 +1051,8 @@ taxonomy (\code{gpu_status_code} / \code{gpu_status}) is:
 not universal numerical equivalence. Validation identifies the tested data,
 specifications and exact artifacts. A failed convergence or precision check
 raises an informative error and returns no estimates. Explicit CUDA requests
-cannot substitute CPU estimates, and Metal requests are rejected until that
+do not substitute CPU estimates for a device result, except the reported
+weighted CPU route below (\code{gpu_status_code} 7), and Metal requests are rejected until that
 backend is implemented. Poor conditioning can amplify a small residual;
 no fixed tolerance guarantees arbitrary coefficient accuracy on every model.
 
@@ -938,17 +1088,58 @@ old absorption caches are invalidated automatically. The release record
 documents the accepted runtime cost relative to 2.29.1. Fast retains its
 separate approximation contract.
 
-Known limitations (2.31.0). Weighted ordinary three-fixed-effect fits on
-CUDA in \code{reghdfe-comparable} keep the 2.30.1 sweep exit, outside the
-comparable contract against reghdfe at tolerance 1e-12 (coefficients up to
-4.4e-7 and standard errors up to 2.3e-5 relative on a public fixture); use
-the CPU backend, where weighted fits are corrected in this release.
-\code{retain_fes = TRUE} in \code{reghdfe-comparable} uses the
-effect-capturing sweep, whose exit can leave coefficients and standard
-errors outside that contract. CUDA \code{strict-residual} with the
-automatic method and criterion and no weights may pass the relative
-certificate without the final strict check (public fixture: coefficients
-1.5e-7 and standard errors 1.7e-4 relative); inherited, present in 2.28.1.
+\strong{Weighted fits on CUDA.} With \code{weighted_cpu_route = TRUE},
+a fit with weights (any type, all ones
+and zero weights included) and two or more absorbed effect dimensions in
+\code{reghdfe-comparable} or \code{strict-residual}, whose effective
+backend is CUDA (\code{backend = "cuda"}, \code{XHDFE_GPU_BACKEND=cuda},
+or a build whose default backend is CUDA), is absorbed on the CPU and says
+so: \code{gpu_used} 0 and \code{gpu_status_code} 7
+(\code{"weighted_cpu_route"}). \code{xhdfe_demean()} keeps its CUDA
+partial-out route with weights. \code{backend_requested} stays \code{"default"} for a request made by the
+environment. On CUDA such fits could pass the certificate and still lie
+outside the comparable contract against reghdfe at tolerance 1e-12
+(coefficients up to 4.5e-7 and standard errors up to 2.8e-5 relative on a
+public fixture). The dimensions are counted as the fit receives them,
+before redundant ones are removed. A weighted fit with \code{group} and
+without \code{individual} is the collapsed weighted fit and is routed too;
+its CPU fit runs, as before, without the routing retry and without the
+saved-effects projection (the \code{group} entry turns both off). With
+\code{individual} a fit keeps the GPU route and was not measured against
+the contract on CUDA; \code{xhdfe-fast}, unweighted fits and fits with one
+absorbed effect keep the GPU route. A routed fit takes the time of the CPU
+backend. Its results other than the GPU status code are bit for bit those
+of the same fit with \code{backend = "cpu"}, with the same package build,
+threads and initial cache and profile state, wherever that CPU fit repeats
+itself (an automatic fit that benchmarks methods by time while writing a
+mobility profile from empty does not); the identity is stated for builds
+whose default backend is the CPU (all released ones). In the ordinary
+weighted Auto CPU path, the published Comparable projection may use
+the ordinary selector with four effects and \code{save_fe}, or for
+just-identified IV with three effects. For ordinary weighted CPU fits with
+three fixed effects and without saved effects, explicit
+\code{absorption_method = "gauss-seidel"} in Comparable mode checks each
+column's fixed-effect moments and can perform one Gauss--Seidel block
+correction within \code{maxiter}. A routed \code{strict-residual} fit
+is the CPU's strict fit. An explicit \code{absorption_method = "schwarz"}
+with weights gets the CPU's answer, which for an ordinary fit is a refusal.
+A routed fit is the CPU fit also for the optional absorption cache and
+mobility profile, so in a session that writes profiles a later fit may read
+what a routed fit wrote, as it reads what a CPU fit wrote.
+\code{weighted_cpu_route = FALSE} selects the ordinary device route for
+a fit that requests CUDA.
+
+\strong{Known limitations.}
+With \code{retain_fes = TRUE} in Comparable mode, a fit can publish a
+separate certified within projection and recover the effects afterwards.
+Its outcome reconstruction is then limited by FE recovery accuracy.
+Explicit methods, IV, heterogeneous slopes and grouped fits can publish
+the effect-capturing sweep, whose accuracy is design-dependent.
+Ordinary CUDA fits with two to four weighted
+categorical effects or four unweighted effects check the fixed-effect moments.
+A measured failure can trigger one device LSMR projection within the budget.
+For analytic, probability and importance weights, the Comparable
+correction covers up to 2,000,000 estimation rows.
 On CUDA, residuals have the accuracy of the CUDA fit. On Windows,
 near-perfect additive-cell fixtures returned exact coefficients and
 certified fits with relative covariance errors of 2.65e-9, 1.74e-4 and
@@ -962,10 +1153,7 @@ In \code{reghdfe-comparable}, heterogeneous slopes under an explicit
 \code{convergence = "reghdfe"} can require continuation at tighter internal
 tolerances, returning the first certified stage. The default \code{"auto"}
 checks the slope block; \code{xhdfe-fast} keeps its aggregate certificate
-without the Comparable block continuation. \code{retain_fes = TRUE} on designs where the
-effect-capturing sweep stops above the tolerance no longer refuses: the
-projection is recomputed without effect capture, certified, and the effects
-are recovered from it. \code{aggregation = "sum"} without an ordinary
+without the Comparable block continuation. \code{aggregation = "sum"} without an ordinary
 absorbed fixed effect spans the constant only for a uniform team size or
 through a data-dependent combination of individual columns, decided by
 projecting the ones vector on the absorbed effects as one separate
@@ -1002,6 +1190,8 @@ columns (mean aggregation, or sum with a uniform team size);
   4 \tab \code{gpu_backend_failed} \tab GPU backend failed \cr
   5 \tab \code{cpu_cache_or_profile_result} \tab a CPU cache/profile
     result was produced \cr
+  7 \tab \code{weighted_cpu_route} \tab weighted fit with two or more
+    absorbed effects run on the CPU by design \cr
 }
 
 As an alternative to the \code{backend} argument, the environment
@@ -1123,6 +1313,30 @@ The C++ core reads the following runtime knobs:
     \code{absorption_method = "auto"}.}
   \item{\code{XHDFE_MLSMR_AUTO_GATE}}{set to \code{0} to disable MLSMR
     promotions by the automatic gate entirely.}
+  \item{\code{XHDFE_REDUCED_PCG}}{the process default of the
+    reduced-system tier (see \code{absorption_method}): \code{0}, set before
+    the first fit of the R session, turns it off for every fit that leaves
+    \code{reduced_pcg = NULL}; it is read once per process. The argument
+    \code{reduced_pcg} overrides it fit by fit. While the tier is on for a
+    fit, absorption-cache entries written with it off or by an earlier
+    version are not read, and while it is off, entries written with it on
+    are not read.}
+  \item{\code{XHDFE_REDUCED_PCG_CUDA}}{the process default of the
+    experimental CUDA variant of the tier (see \code{reduced_pcg_cuda}):
+    \code{1}, set before the first fit of the R session, requests it for
+    every CUDA fit that leaves \code{reduced_pcg_cuda = NULL}; it is read
+    once per process. The argument \code{reduced_pcg_cuda} overrides it fit
+    by fit.}
+  \item{\code{XHDFE_REDUCED_PCG_TRACE}}{\code{1} writes the tier's plan and
+    decision to stderr; \code{2} adds the verified residual of each column
+    of a published fit.}
+  \item{\code{XHDFE_REDUCED_PCG_CHAT_STOP}}{\code{0}, set before the
+    first fit of the R session, restores the tier's former
+    stopping criterion. It is read once per process and
+    changes neither the acceptance trigger nor the certificate. If the
+    confirmed target is not reached, the attempt declines to the unchanged
+    route. Requested tolerances below \code{1.25e-12} retain the former
+    rule with either setting.}
   \item{\code{XHDFE_MOBILITY_PROFILE}, \code{XHDFE_MOBILITY_MODE}}{path
     and mode (\code{off}|\code{read}|\code{write}|\code{auto}) of the
     mobility-diagnostics profile -- the R route to the Stata
@@ -1135,7 +1349,10 @@ The C++ core reads the following runtime knobs:
     joint LSMR and CUDA retains the grouped GPU solver. Profile write/auto
     does not benchmark sweep methods. A profile is written only after the
     requested route certifies; it suggests LSMR only after safe CPU LSMR and
-    otherwise records Auto. The group/individual gate uses
+    otherwise records Auto. Writing a profile (mode \code{write}, or
+    \code{auto} without a matching profile) keeps the fit out of the
+    reduced-system tier, as does a matching profile that suggests a
+    Krylov or sparse solver. The group/individual gate uses
     the preconditioned operator \eqn{A=W^{1/2}DC}, weighted residuals,
     moments \eqn{CD'Wr}, and active normalized columns. Every right-hand
     side must pass either the consistent-system residual ratio or the
@@ -1149,7 +1366,9 @@ The C++ core reads the following runtime knobs:
     \code{XHDFE_FE_STRUCTURE_MODE}}{path and mode of the fixed-effect
     structure cache (normalized group ids and singleton filters) reused
     across runs with the same absorb structure (Stata
-    \code{festructurecache}/\code{fescache()}/\code{fescachemode()}).}
+    \code{festructurecache}/\code{fescache()}/\code{fescachemode()}).
+    Use separate files when combining the caches. Use \code{auto} or
+    \code{write} to refresh older combined absorption entries.}
   \item{\code{XHDFE_FE_DIAG_FILE}}{appends per-run fixed-effect
     diagnostics (partial-residual statistics, fixed-effect totals,
     residual consistency, recovery method) to the given file.}
@@ -1286,7 +1505,7 @@ stopifnot(mg$gpu_used == 1, mg$gpu_status == "used")
 }
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.31.1.
+effects regression via a C++ backend." Version 2.34.1.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way
@@ -1303,6 +1522,10 @@ to fit models with high-dimensional fixed effects." Stata Journal 10(4):
 Berge, Laurent, Kyle Butts, and Grant McDermott. 2026. "Fast and
 user-friendly econometrics estimations: The R package fixest."
 arXiv:2601.21749.
+
+Schmieder, Johannes. 2026. "fereg: Fast high-dimensional fixed-effects
+regressions in Stata." CEPR Discussion Paper No. 22170. CEPR Press, Paris
+& London. \url{https://cepr.org/publications/dp22170}
 
 See \code{\link{xhdfe-package}} for the complete reference list.
 }

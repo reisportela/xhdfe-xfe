@@ -64,12 +64,35 @@ not measured here (NOT_EXERCISED_WEIGHTED_GENERIC_REPAIR).
 Strict envelope (round 20, condition 5; Verifications/perf_fereg_gap_20261106/p3fix/
 ENVELOPE_STRICT_20261109.json, sha256 ENVELOPE_STRICT_SHA256): per tolerance, the maxima of 40
 accepted 2.28.1 strict CUDA fits; embedded below.
+Package B (18nov2026; pre-registered in Verifications/corrigir_erros_20261117/b/DESENHO_B.md section 9 and
+b/stage2b/PRE_REGISTO_2B_20261118.md): a strict-residual CUDA fit with the automatic method and criterion, no
+weights, no saved effects and no group() is now in scope of the strict acceptance of the delivered residual: it
+takes the reghdfe-comparable route (on cov240k no CG stage: sweeps and the device LSMR completion), and the strict
+sequence above no longer runs for it. The automatic entry is graded from each process's own trace
+(XHDFE_STRICT_ACCEPT_TRACE=1): the reported iterations equal the last strict pass line's, pass 2 = pass 1 + the
+continuation's sweeps, a refusal before the check equals its stage lines; no cuda_strict_restart line; the
+cold-MAP ban is lifted for these rows (the comparable route's own MAP stage). natural, forced, late and B2: accepted
+inside the envelope (the hooks do not fire: NOT_EXERCISED for this entry); budgets 30, 31, 119 and 120: refused at
+B/B; polish: accepted after the continuation, then exhausted at pass-1 iterations + 2: refused after reaching the
+continuation; B3: accepted (device LSMR); B4: three successes. New in scope with the hook firing: cgseed_iv (the
+public CG counterexample, its IV case, hook 3): the comparable tail restart to the device LSMR, accepted, graded
+against its MP120 oracle at the package-B limits. The explicit-criterion rows and the negative control are
+unchanged. Stata: session 1 accepted / refused 31/31 / accepted with no strict restart; session 2 (automatic entry)
+stores the fit's own residuals (p7_refine_trace refined=0), inside the envelope: the label
+KNOWN_DEFECT_STATA_RESIDUALS_CUDA_REFINE is a failure there; session 3 (the same with convergence(reghdfe)) keeps
+that label inside its band. --v3-npz names the public oracle file (default unchanged).
+Stage 2c (b/RESPOSTA_2B_B.md): the earlier strict branch still ships, so the hooks keep a route that fires them:
+the legacy entry, the automatic entry under XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE=1, graded exactly as HEAD graded
+the automatic entry (forced, late, the four budgets 30/31/119/120 with their outcomes, the polish and its
+exhaustion, B2, B3, B4, and HEAD's two Stata sessions: A and C at 120 with lsmr-strict, lsmr-stopped, lsmr-strict;
+the strict MAP session with its P7 band). Where the legacy entry fired the hook, the in-scope "the hook does not
+fire" is reported as a note, not a label.
 Exit code 0 PASS, 1 FAIL, 3 only labels of missing coverage, 4 a known defect (KNOWN_DEFECT inside the
 declared band of its known occurrence; missing coverage listed apart in not_exercised): never a clean PASS.
 usage: cuda_strict_restart_contract.py --module PATH.so [--natural 40] [--forced 8] [--late 8]
        [--budget-fits 2] [--polish-fits 2] [--sequence-fits 3] [--tolerances 1e-8,1e-8+1ulp,2e-8]
        [--reference-module PATH.so] [--reference-fits 8] [--stata-package DIR] [--output result.json]
-       [--keep DIR]
+       [--keep DIR] [--v3-npz PATH] [--cgseed-fits 2]
 """
 import argparse
 import hashlib
@@ -110,12 +133,18 @@ ENVELOPE_STRICT = {
     '2e-8': dict(b_scaled=5.000185621805129e-07, V_scaled=8.797758689474726e-07,
                  se_rel=2.810373187500659e-07, resid_rel=8.919289432472049e-08)}
 METRICS = ('b_scaled', 'V_scaled', 'se_rel', 'resid_rel')
+ORACLE_NPZ = [V3_NPZ]  # the public cov240k oracle; --v3-npz replaces it
+# Package B: the limits of a fit in scope against an oracle (DESENHO_B.md section 9).
+SCOPE_LIMITS = dict(b_scaled=1e-8, se_rel=1e-7, V_scaled=1e-8)
 # Declared band of the known P7 occurrence in the Stata strict MAP session (reviewer round 24): the values
 # reproduced on 9 nov 2026 (stored residuals 2.07788e-6 to 2.07792e-6, D 9.99528e-9 to 9.99546e-9 in 2.28.1,
 # 2.30.1 and the candidate) with a +-0.5 % margin; an aggravation beyond it is a new failure.
 P7_STRICT_BAND = dict(resid=(2.067e-6, 2.089e-6), D=(9.945e-9, 1.0045e-8))
 APPROVED = ('lsmr-strict', 'lsmr-polished')
 STRICT_RESTART = re.compile(r'^cuda_strict_restart (.*)$', re.M)
+STRICT_ACCEPT = re.compile(r'^strict_accept_trace (.*)$', re.M)
+TAIL_RESTART_LINE = re.compile(r'^cuda_tail_restart (.*)$', re.M)
+CGSEED_HOOK = 3  # package B: the cgseed_iv case's CG stage breaks naturally at 7 in comparable
 WEIGHTED_LABEL = ('NOT_EXERCISED_WEIGHTED_GENERIC_REPAIR: the generic CUDA repair of weighted xhdfe-fast/'
                   'reghdfe-comparable fits calls run_strict_cuda_repair without the strict provenance; its '
                   'path-like CG can break and fall into the 2.30.1 cold MAP; not measured')
@@ -210,6 +239,41 @@ def worker(job_path):
     elif job['fixture'] == 'pathlike':
         y, x, fes = pathlike_fixture()
         out = fit_record(regressor(core, tol, job['max_iter'], 'unadjusted', conv), y, x, fes)
+    elif job['fixture'] == 'cgseed_iv':
+        # Package B: the public CG counterexample (tests/analytic_precision/fixtures/cg_seed1_2017.csv), its IV
+        # case with the options of cg_final_step_contract.py, graded against its MP120 oracle.
+        import pandas as pd
+        fixtures = HERE / 'fixtures'
+        oracle = json.loads((fixtures / 'cg_seed1_2017_oracle.json').read_text())
+        data_path = fixtures / 'cg_seed1_2017.csv'
+        assert hashlib.sha256(data_path.read_bytes()).hexdigest() == oracle['csv_sha256']
+        frame = pd.read_csv(data_path, float_precision='round_trip').sort_values(['sid', 'year'])
+        y, x, z = frame.dagg.to_numpy(), frame['expo'].to_numpy(), frame['z'].to_numpy()
+        fes = [pd.factorize(frame[k], sort=True)[0].astype(np.int32) for k in ('sid', 'year', 'entry_age')]
+        clusters = pd.factorize(frame.did, sort=True)[0].astype(np.int32)
+        reg = core.HdfeRegressor(se_type='cluster', num_threads=1, stats_style='legacy', ssc_k_adj=False,
+                                 ssc_g_adj=False, tolerance_mode='strict-residual', tol=tol, max_iter=job['max_iter'])
+        t0 = time.perf_counter()
+        try:
+            reg.fit(y, x[:, None], fes=fes, clusters=clusters[:, None], instruments=z[:, None], endogenous_idx=[0])
+        except RuntimeError as error:
+            m = re.search(r'iterations=(\d+)/(\d+)', str(error))
+            out = dict(refused=True, error=str(error)[:800], message_iterations=int(m.group(1)) if m else None,
+                       message_max_iter=int(m.group(2)) if m else None)
+        else:
+            ref = oracle['references']['iv']
+            ob = np.array([float(v) for v in ref['b']])
+            oV = np.array([[float(v) for v in row] for row in ref['V']])
+            b, V = np.asarray(reg.coef_, np.float64), np.asarray(reg.covariance_, np.float64)
+            e = np.asarray(reg.residuals_, np.float64).ravel()
+            out = dict(refused=False, iterations=int(reg.num_iterations_), converged=bool(reg.converged_),
+                       certified=bool(reg.precision_certified_), gpu_used=bool(reg.gpu_used_),
+                       gpu_status_code=int(reg.gpu_status_code_),
+                       group_mean_max=group_mean_max(e, fes) if e.shape == y.shape else None,
+                       b_scaled=float(np.max(np.abs(b - ob) / np.maximum(1.0, np.abs(ob)))),
+                       se_rel=float(np.max(np.abs(np.sqrt(np.diag(V)) / np.sqrt(np.diag(oV)) - 1.0))),
+                       V_scaled=float(np.max(np.abs(V - oV) / np.sqrt(np.outer(np.diag(oV), np.diag(oV))))))
+        out.update(seconds=time.perf_counter() - t0, estimates_left=estimates_left(reg))
     else:  # session: easy, path-like, easy on one regressor object
         reg = regressor(core, tol, job['max_iter'], 'unadjusted', conv)
         fits = []
@@ -228,14 +292,15 @@ def trace_env(hooks):
            if not k.startswith('XHDFE_') and k not in ('LD_LIBRARY_PATH', 'OMP_NUM_THREADS')}
     env.update(XHDFE_GPU_BACKEND='cuda', XHDFE_ABSORPTION_CACHE_MODE='off', XHDFE_MOBILITY_MODE='off',
                XHDFE_FE_STRUCTURE_MODE='off', XHDFE_GI_LSMR_TRACE='1', XHDFE_ACCEL_DEBUG='1',
-               XHDFE_CUDA_ACCEL_TRACE='1', OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
+               XHDFE_CUDA_ACCEL_TRACE='1', XHDFE_STRICT_ACCEPT_TRACE='1', OPENBLAS_NUM_THREADS='1',
+               MKL_NUM_THREADS='1')
     env.update(hooks)
     return env
 
 
 def run_fit(module, directory, label, case, fixture, tol_name, max_iter, hooks, convergence='auto'):
     job = dict(module=str(module), tol_hex=TOLERANCES[tol_name].hex(), max_iter=max_iter, fixture=fixture,
-               oracle_npz=str(V3_NPZ), out=str(directory / f'{label}.json'), convergence=convergence)
+               oracle_npz=str(ORACLE_NPZ[0]), out=str(directory / f'{label}.json'), convergence=convergence)
     (directory / f'{label}.job.json').write_text(json.dumps(job))
     t0 = time.time()
     try:
@@ -253,7 +318,9 @@ def run_fit(module, directory, label, case, fixture, tol_name, max_iter, hooks, 
                rc=rc, wall_seconds=time.time() - t0, record=rec, breakdowns=trace['breakdowns'],
                cg_end=trace['cg_end'], accel=trace['accel'], lsmr=trace['lsmr'],
                other_restarts=len(trace['fast_restart']) + trace['tail_restart_lines'] + len(trace['strict_handback']),
-               strict_restart=[fields(m.group(1)) for m in STRICT_RESTART.finditer(stderr)])
+               strict_restart=[fields(m.group(1)) for m in STRICT_RESTART.finditer(stderr)],
+               strict_accept=[fields(m.group(1)) for m in STRICT_ACCEPT.finditer(stderr)],
+               tail_restart=[fields(m.group(1)) for m in TAIL_RESTART_LINE.finditer(stderr)])
     if rc != 0:
         row['stderr_tail'] = stderr[-3000:]
     return row
@@ -282,6 +349,35 @@ def invariant_problems(row, rec, tol):
     reported = rec.get('message_iterations') if rec.get('refused') else rec.get('iterations')
     if reported != stage_sum:
         p.append(f'iterations {reported} != the stage lines {stage_sum}')
+    if reported is not None and reported > row['max_iter']:
+        p.append(f"{reported} iterations exceed max_iter {row['max_iter']}")
+    return p
+
+
+def scope_invariant_problems(row, rec, allow_tail_restart=False):
+    """Package B, the automatic entry (in scope): no strict restart, the iterations exact from the process's own
+    trace (the last strict pass line; pass 2 = pass 1 + the continuation's sweeps; a refusal before the check:
+    the stage lines), within max_iter. The comparable route's own MAP stage may print honest=1."""
+    p = []
+    if row['strict_restart']:
+        p.append(f"{len(row['strict_restart'])} cuda_strict_restart lines (the strict sequence ran in scope)")
+    if row['other_restarts'] - (len(row['tail_restart']) if allow_tail_restart else 0):
+        p.append('a Fast, Comparable-tail or strict hand-back restart ran')
+    reported = rec.get('message_iterations') if rec.get('refused') else rec.get('iterations')
+    passes = [a for a in row['strict_accept'] if 'pass' in a and 'D' in a]
+    cont = [a for a in row['strict_accept'] if a.get('refinement') == 'continuation']
+    if passes:
+        if reported != int(passes[-1]['iterations']):
+            p.append(f"iterations {reported} != the last strict pass line's {passes[-1]['iterations']}")
+        firsts = [a for a in passes if a.get('pass') == '1']
+        seconds = [a for a in passes if a.get('pass') == '2']
+        if seconds and cont and int(seconds[0]['iterations']) != int(firsts[0]['iterations']) + int(cont[0]['sweeps']):
+            p.append('pass 2 iterations != pass 1 + the continuation sweeps')
+    else:
+        stage_sum = (sum(int(a.get('iterations', 0)) for a in row['accel'])
+                     + sum(int(x.get('iterations', 0)) for x in row['lsmr']))
+        if reported != stage_sum:
+            p.append(f'iterations {reported} != the stage lines {stage_sum} (no strict pass line)')
     if reported is not None and reported > row['max_iter']:
         p.append(f"{reported} iterations exceed max_iter {row['max_iter']}")
     return p
@@ -326,25 +422,15 @@ def forced_problems(row, iteration, outcomes):
     return p
 
 
-def run_stata(package, workdir):
-    import pandas as pd
-    folder = workdir / 'stata'
+def stata_session(folder, package, data, oracle_do, convergence, hooks, script_args=''):
+    """One fresh stata-mp session of cuda_strict_restart_stata_fit.do (the strict MAP route: hook 30 and the
+    reject hook) with the P7 trace; returns the session's result line fields and its trace."""
+    fit_do = HERE / 'cuda_strict_restart_stata_fit.do'
     folder.mkdir()
-    o = np.load(V3_NPZ)
-    y, x, fes = structure('3fe')
-    data = folder / 'cov240k_strict.dta'
-    pd.DataFrame(dict(y=y, x1=x[:, 0], x2=x[:, 1], x3=x[:, 2], x4=x[:, 3], worker=fes[0], firm=fes[1],
-                      year=fes[2], e_oracle=o['e'])).to_stata(data, write_index=False, version=118)
-    oracle_do = folder / 'oracle.do'
-    oracle_do.write_text('matrix oracle_b = (' + ', '.join(format(v, '.17g') for v in o['b']) + ')\n'
-                         'matrix oracle_V = (' + ' \\ '.join(', '.join(format(v, '.17g') for v in r)
-                                                            for r in o['V']) + ')\n' +
-                         ''.join(f'scalar envelope_{k} = {ENVELOPE_STRICT["1e-8"][k]!r}\n' for k in METRICS))
-    script = HERE / 'cuda_strict_restart_stata.do'
-    (folder / 'driver.do').write_text(f'capture noisily do "{script}" "{Path(package).resolve()}" "{data}" '
-                                      f'"{oracle_do}"\nlocal driver_rc = _rc\ndisplay "DRIVER_RC " `driver_rc\'\n'
-                                      'exit, clear\n')
-    env = trace_env({'XHDFE_TEST_CUDA_CG_BREAKDOWN': f'{FORCED}:all'})
+    (folder / 'driver.do').write_text(f'capture noisily do "{fit_do}" "{Path(package).resolve()}" "{data}" '
+                                      f'"{oracle_do}" 1e-08 {MAX_ITER} strict-residual {convergence}\n'
+                                      'display "DRIVER_RC " _rc\nexit, clear\n')
+    env = trace_env(dict(hooks, XHDFE_P7_REFINE_TRACE='1'))
     env.pop('XHDFE_GPU_BACKEND', None)
     env['STATATMP'] = str(folder)
     stata = shutil.which('stata-mp') or '/usr/local/stata/stata-mp'
@@ -355,10 +441,51 @@ def run_stata(package, workdir):
         except subprocess.TimeoutExpired:
             rc = 'timeout'
     text = (folder / 'driver.log').read_text(errors='replace') if (folder / 'driver.log').is_file() else ''
-    trace_text = (folder / 'process.log').read_text(errors='replace')
-    outcomes = [fields(m.group(1)).get('outcome') for m in STRICT_RESTART.finditer(trace_text)]
-    lines = text.splitlines()
+    trace = (folder / 'process.log').read_text(errors='replace')
+    head = re.search(r'^P3S_STATA (.*)$', text, re.M)
+    metrics = re.search(r'^P3S_STATA_M (.*)$', text, re.M)
+    res = None
+    if rc == 0 and head and metrics:
+        res = dict(re.findall(r'(\w+)=\s*(\S+)', head.group(1)), **dict(re.findall(r'(\w+)=\s*(\S+)', metrics.group(1))))
+    return dict(returncode=rc, result=res, trace=trace,
+                outcomes=[fields(m.group(1)).get('outcome') for m in STRICT_RESTART.finditer(trace)],
+                p7=[fields(m.group(1)) for m in re.finditer(r'^p7_refine_trace (.*)$', trace, re.M)])
+
+
+def p7_label(resid, dmax, problems, labels, where):
+    """The known P7 occurrence (reviewer round 24): a label inside its declared band, a failure outside it."""
+    if P7_STRICT_BAND['resid'][0] <= resid <= P7_STRICT_BAND['resid'][1] and \
+            P7_STRICT_BAND['D'][0] <= dmax <= P7_STRICT_BAND['D'][1]:
+        labels.append(f'KNOWN_DEFECT_STATA_RESIDUALS_CUDA_REFINE (strict, {where}): the refinement of the '
+                      'stored residuals (Stata residuals(), CUDA) re-absorbs y - Xb by MAP at the public tolerance and '
+                      f'returns {resid:.6g} against the oracle (strict envelope {ENVELOPE_STRICT["1e-8"]["resid_rel"]:.3g}; '
+                      f'D {dmax:.6g}); inside the band of the known occurrence')
+    else:
+        problems.append(f'{where}: stored residuals {resid:.6g} (D {dmax:.6g}) outside the envelope and outside the '
+                        f'band of the known P7 occurrence {P7_STRICT_BAND}')
+
+
+def stata_session1(folder, package, data, oracle_do, extra_env):
+    """One fresh stata-mp session of cuda_strict_restart_stata.do with the hook 30:all (A, B with maxiter(31), C)."""
+    script = HERE / 'cuda_strict_restart_stata.do'
+    folder.mkdir()
+    (folder / 'driver.do').write_text(f'capture noisily do "{script}" "{Path(package).resolve()}" "{data}" '
+                                      f'"{oracle_do}"\nlocal driver_rc = _rc\ndisplay "DRIVER_RC " `driver_rc\'\n'
+                                      'exit, clear\n')
+    env = trace_env(dict(extra_env, XHDFE_TEST_CUDA_CG_BREAKDOWN=f'{FORCED}:all'))
+    env.pop('XHDFE_GPU_BACKEND', None)
+    env['STATATMP'] = str(folder)
+    stata = shutil.which('stata-mp') or '/usr/local/stata/stata-mp'
+    with (folder / 'process.log').open('x') as log:
+        try:
+            rc = subprocess.run([stata, '-q', '-b', 'do', 'driver.do'], cwd=folder, env=env, stdout=log,
+                                stderr=subprocess.STDOUT, timeout=3600).returncode
+        except subprocess.TimeoutExpired:
+            rc = 'timeout'
+    text = (folder / 'driver.log').read_text(errors='replace') if (folder / 'driver.log').is_file() else ''
+    trace = (folder / 'process.log').read_text(errors='replace')
     problems = []
+    lines = text.splitlines()
     if rc != 0 or not re.search(r'^DRIVER_RC 0\s*$', text, re.M):
         problems.append(f'Stata run failed (returncode {rc})')
     for marker in ('P3S_STATA_A_OK', 'P3S_STATA_B_REFUSED', 'P3S_STATA_C_OK', 'P3S_STATA_PASS'):
@@ -366,70 +493,100 @@ def run_stata(package, workdir):
             problems.append(f'marker {marker} missing')
     if 'iterations=31/31' not in text:
         problems.append('the refusal does not report iterations=31/31')
-    if outcomes != ['lsmr-strict', 'lsmr-stopped', 'lsmr-strict']:
-        problems.append(f'cuda_strict_restart outcomes {outcomes}')
-    if any(fields(m.group(1)).get('honest') == '1' for m in re.finditer(r'^cuda_accel_trace (.*)$', trace_text, re.M)):
-        problems.append('a cold MAP ran')
-    # The strict MAP route through Stata (the LSMR state rejected by the test hook, so the strict
-    # repair delivers): the flow and b, V, SE must hold; the residuals() variable is re-absorbed by
-    # refine_stored_residuals with the fit's strict options at the public tolerance (code older than
-    # 2.28.1) and missed the strict envelope on 9 nov 2026 (2.08e-6 against 9.6e-8):
-    # KNOWN_DEFECT_STATA_RESIDUALS_CUDA_REFINE, neither a PASS nor a failure of the P3-fix (the
-    # same refinement runs after every strict CUDA Stata fit with residuals() whose route is not the LSMR
-    # one, in 2.28.1, 2.30.1 and the candidate alike; hypothesis P7).
-    fit_do = HERE / 'cuda_strict_restart_stata_fit.do'
-    folder2 = workdir / 'stata_strict_map'
-    folder2.mkdir()
-    (folder2 / 'driver.do').write_text(f'capture noisily do "{fit_do}" "{Path(package).resolve()}" "{data}" '
-                                       f'"{oracle_do}" 1e-08 {MAX_ITER} strict-residual auto\n'
-                                       'display "DRIVER_RC " _rc\nexit, clear\n')
-    env2 = trace_env({'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED), 'XHDFE_TEST_CUDA_STRICT_LSMR_REJECT': '1'})
-    env2.pop('XHDFE_GPU_BACKEND', None)
-    env2['STATATMP'] = str(folder2)
-    with (folder2 / 'process.log').open('x') as log:
-        try:
-            rc2 = subprocess.run([stata, '-q', '-b', 'do', 'driver.do'], cwd=folder2, env=env2, stdout=log,
-                                 stderr=subprocess.STDOUT, timeout=3600).returncode
-        except subprocess.TimeoutExpired:
-            rc2 = 'timeout'
-    text2 = (folder2 / 'driver.log').read_text(errors='replace') if (folder2 / 'driver.log').is_file() else ''
-    trace2 = (folder2 / 'process.log').read_text(errors='replace')
-    head = re.search(r'^P3S_STATA (.*)$', text2, re.M)
-    metrics = re.search(r'^P3S_STATA_M (.*)$', text2, re.M)
-    strict_map = dict(returncode=rc2, outcomes=[fields(m.group(1)).get('outcome')
-                                                for m in STRICT_RESTART.finditer(trace2)])
-    labels = []
-    if rc2 != 0 or not head or not metrics:
-        problems.append(f'strict MAP Stata session failed (returncode {rc2})')
+    return dict(returncode=rc, text=text, trace=trace, lines=lines, problems=problems,
+                outcomes=[fields(m.group(1)).get('outcome') for m in STRICT_RESTART.finditer(trace)],
+                iterations={m.group(1): int(m.group(2))
+                            for m in re.finditer(r'^P3S_STATA_(A|C) iterations=(\d+)', text, re.M)})
+
+
+def strict_map_head_problems(s, where, problems, labels):
+    """HEAD's grading of the strict MAP session (hook 30 and the reject hook): the rejected LSMR, the e()
+    diagnostics, b, V and SE inside the envelope; the stored residuals inside it or inside the P7 band (a label)."""
+    if s['result'] is None:
+        problems.append(f"{where} failed (returncode {s['returncode']})")
+        return
+    res = s['result']
+    if s['outcomes'] != ['lsmr-rejected-by-test-hook']:
+        problems.append(f"{where} outcomes {s['outcomes']}")
+    if not (res.get('converged') == '1' and res.get('certified') == '1' and res.get('gpu_used') == '1'
+            and res.get('gpu_status') == 'used'):
+        problems.append(f'{where} e() diagnostics {res}')
+    for key, short in (('b_scaled', 'b'), ('V_scaled', 'V'), ('se_rel', 'se')):
+        if not float(res[short]) <= ENVELOPE_STRICT['1e-8'][key]:
+            problems.append(f'{where} {key} {res[short]} outside the strict envelope')
+    if not float(res['resid']) <= ENVELOPE_STRICT['1e-8']['resid_rel']:
+        p7_label(float(res['resid']), float(res['D']), problems, labels, where)
+
+
+def run_stata(package, workdir):
+    import pandas as pd
+    folder = workdir / 'stata'
+    folder.mkdir()
+    o = np.load(ORACLE_NPZ[0])
+    y, x, fes = structure('3fe')
+    data = folder / 'cov240k_strict.dta'
+    pd.DataFrame(dict(y=y, x1=x[:, 0], x2=x[:, 1], x3=x[:, 2], x4=x[:, 3], worker=fes[0], firm=fes[1],
+                      year=fes[2], e_oracle=o['e'])).to_stata(data, write_index=False, version=118)
+    oracle_do = folder / 'oracle.do'
+    oracle_do.write_text('matrix oracle_b = (' + ', '.join(format(v, '.17g') for v in o['b']) + ')\n'
+                         'matrix oracle_V = (' + ' \\ '.join(', '.join(format(v, '.17g') for v in r)
+                                                            for r in o['V']) + ')\n' +
+                         ''.join(f'scalar envelope_{k} = {ENVELOPE_STRICT["1e-8"][k]!r}\n' for k in METRICS))
+    problems, labels = [], []
+    # Session 1, in scope (automatic entry): no strict restart; A's and C's iterations equal their trace's
+    # strict pass lines (the first and the last of the session; B is refused before the check).
+    s1 = stata_session1(folder / 'session1', package, data, oracle_do, {})
+    problems += s1['problems']
+    if s1['outcomes']:
+        problems.append(f"cuda_strict_restart outcomes {s1['outcomes']} (the strict sequence ran in scope)")
+    passes = [fields(m.group(1)) for m in STRICT_ACCEPT.finditer(s1['trace'])]
+    passes = [a for a in passes if 'pass' in a and 'D' in a and a.get('decision') == 'accept']
+    its = s1['iterations']
+    if len(passes) != 2 or its.get('A') != int(passes[0]['iterations']) or its.get('C') != int(passes[1]['iterations']):
+        problems.append(f"session 1 iterations {its} against the trace's accepting pass lines "
+                        f"{[a.get('iterations') for a in passes]}")
+    # Session 1 on the legacy entry (XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE=1), graded as HEAD graded the automatic
+    # entry: the LSMR restarts lsmr-strict, lsmr-stopped, lsmr-strict; A and C at 30 + 90 = 120; no cold MAP.
+    legacy = {'XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE': '1'}
+    s1l = stata_session1(folder / 'session1_legacy', package, data, oracle_do, legacy)
+    problems += [f'legacy session 1: {q}' for q in s1l['problems']]
+    if s1l['outcomes'] != ['lsmr-strict', 'lsmr-stopped', 'lsmr-strict']:
+        problems.append(f"legacy session 1: cuda_strict_restart outcomes {s1l['outcomes']}")
+    if s1l['iterations'] != {'A': 120, 'C': 120}:
+        problems.append(f"legacy session 1: iterations {s1l['iterations']} (expected A and C at 120)")
+    if any(fields(m.group(1)).get('honest') == '1' for m in re.finditer(r'^cuda_accel_trace (.*)$', s1l['trace'], re.M)):
+        problems.append('legacy session 1: a cold MAP ran')
+    # Session 2: the strict MAP hooks on the automatic entry, now in scope: the comparable route, the fit's own
+    # residuals stored (refined=0), inside the strict envelope; the P7 label is a failure here.
+    hooks2 = {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED), 'XHDFE_TEST_CUDA_STRICT_LSMR_REJECT': '1'}
+    s2 = stata_session(workdir / 'stata_strict_map', package, data, oracle_do, 'auto', hooks2)
+    if s2['result'] is None:
+        problems.append(f"session 2 failed (returncode {s2['returncode']})")
     else:
-        res = dict(re.findall(r'(\w+)=\s*(\S+)', head.group(1)), **dict(re.findall(r'(\w+)=\s*(\S+)', metrics.group(1))))
-        strict_map['result'] = res
-        if strict_map['outcomes'] != ['lsmr-rejected-by-test-hook']:
-            problems.append(f"strict MAP session outcomes {strict_map['outcomes']}")
+        res = s2['result']
+        if s2['outcomes']:
+            problems.append(f"session 2 outcomes {s2['outcomes']} (the strict sequence ran in scope)")
         if not (res.get('converged') == '1' and res.get('certified') == '1' and res.get('gpu_used') == '1'
                 and res.get('gpu_status') == 'used'):
-            problems.append(f'strict MAP session e() diagnostics {res}')
-        for key, short in (('b_scaled', 'b'), ('V_scaled', 'V'), ('se_rel', 'se')):
+            problems.append(f'session 2 e() diagnostics {res}')
+        for key, short in (('b_scaled', 'b'), ('V_scaled', 'V'), ('se_rel', 'se'), ('resid_rel', 'resid')):
             if not float(res[short]) <= ENVELOPE_STRICT['1e-8'][key]:
-                problems.append(f'strict MAP session {key} {res[short]} outside the strict envelope')
-        resid, dmax = float(res['resid']), float(res['D'])
-        if not resid <= ENVELOPE_STRICT['1e-8']['resid_rel']:
-            # Only the known occurrence is a known defect (reviewer round 24): inside the declared band
-            # around the values reproduced on 9 nov 2026; any other excess is a new failure.
-            if P7_STRICT_BAND['resid'][0] <= resid <= P7_STRICT_BAND['resid'][1] and \
-                    P7_STRICT_BAND['D'][0] <= dmax <= P7_STRICT_BAND['D'][1]:
-                labels.append('KNOWN_DEFECT_STATA_RESIDUALS_CUDA_REFINE (strict): the refinement of the stored '
-                              'residuals (Stata residuals(), CUDA) re-absorbs y - Xb by MAP at the public '
-                              f'tolerance and returns {resid:.6g} against the oracle (strict envelope '
-                              f"{ENVELOPE_STRICT['1e-8']['resid_rel']:.3g}; D {dmax:.6g} meets the documented "
-                              "criterion), less exact than the fit's own state; inside the band of the known "
-                              'occurrence; reproduced in 2.28.1 and 2.30.1, present at least since 2.28.1, CUDA '
-                              'only; not caused by the P3-fix; hypothesis P7')
-            else:
-                problems.append(f'strict MAP session stored residuals {resid:.6g} (D {dmax:.6g}) outside the '
-                                f'envelope and outside the band of the known P7 occurrence {P7_STRICT_BAND}')
-    return dict(case='stata', returncode=rc, problems=problems, outcomes=outcomes, labels=labels,
-                strict_map=strict_map, result_lines=[line for line in lines if line.startswith('P3S_STATA')])
+                problems.append(f'session 2 {key} {res[short]} outside the strict envelope (a failure in scope)')
+        if not s2['p7'] or s2['p7'][-1].get('refined') != '0':
+            problems.append(f"session 2 p7_refine_trace {s2['p7'][-1:]} (expected refined=0)")
+    # Session 2 on the legacy entry: HEAD's grading, the P7 label inside its band.
+    s2l = stata_session(workdir / 'stata_strict_map_legacy', package, data, oracle_do, 'auto', dict(hooks2, **legacy))
+    strict_map_head_problems(s2l, 'legacy session 2 (automatic entry, legacy switch)', problems, labels)
+    # Session 3: the explicit control (convergence reghdfe): unchanged, the P7 label inside its band.
+    s3 = stata_session(workdir / 'stata_strict_map_reghdfe', package, data, oracle_do, 'reghdfe', hooks2)
+    strict_map_head_problems(s3, 'session 3, explicit criterion', problems, labels)
+    return dict(case='stata', returncode=s1['returncode'], problems=problems, outcomes=s1['outcomes'], labels=labels,
+                legacy_session1=dict(outcomes=s1l['outcomes'], iterations=s1l['iterations'],
+                                     returncode=s1l['returncode']),
+                strict_map={k: v for k, v in s2.items() if k != 'trace'},
+                strict_map_legacy={k: v for k, v in s2l.items() if k != 'trace'},
+                strict_map_reghdfe={k: v for k, v in s3.items() if k != 'trace'},
+                result_lines=[line for line in s1['lines'] + s1l['lines'] if line.startswith('P3S_STATA')])
 
 
 def main():
@@ -454,12 +611,15 @@ def main():
     ap.add_argument('--stata-package', type=Path)
     ap.add_argument('--output', type=Path)
     ap.add_argument('--keep', type=Path)
+    ap.add_argument('--v3-npz', type=Path, default=V3_NPZ, help='the public cov240k oracle (sha256 checked)')
+    ap.add_argument('--cgseed-fits', type=int, default=2, help='package B: cgseed_iv in scope with hook 3')
     args = ap.parse_args()
     if not cuda_device_visible():
         print(json.dumps(dict(status='SKIP', reason='no visible CUDA device')))
         return 0
-    if hashlib.sha256(V3_NPZ.read_bytes()).hexdigest() != V3_NPZ_SHA256:
+    if hashlib.sha256(args.v3_npz.read_bytes()).hexdigest() != V3_NPZ_SHA256:
         raise SystemExit('v3 oracle npz sha256 mismatch')
+    ORACLE_NPZ[0] = args.v3_npz.resolve()
     source = ROOT / ENVELOPE_STRICT_SOURCE
     if source.is_file():
         if hashlib.sha256(source.read_bytes()).hexdigest() != ENVELOPE_STRICT_SHA256:
@@ -491,24 +651,24 @@ def main():
     started = time.time()
     apps = gpu_apps()
     natural_breakdowns = 0
+    # Package B: the automatic entry is in scope (module docstring); graded from each process's own trace.
     for i in range(args.natural):
         row = run_fit(module, workdir, f'natural_{i:02d}', 'natural', 'cov240k', '1e-8', MAX_ITER, {})
         rec = row['record']
-        p = accepted_problems(row, rec, '1e-8') + invariant_problems(row, rec, 1e-8)
+        p = accepted_problems(row, rec, '1e-8') + scope_invariant_problems(row, rec)
         if row['breakdowns']:
             natural_breakdowns += 1
-            if [s.get('outcome') for s in row['strict_restart']] not in ([o] for o in APPROVED):
-                p.append('a natural breakdown without an approved LSMR restart')
         record(row, p)
     if args.natural and not natural_breakdowns:
         labels.append('NOT_EXERCISED_ROUTE: no natural breakdown among the natural fits')
+    hook_unfired = 0
     for name in tolerances:
         for i in range(args.forced):
             row = run_fit(module, workdir, f"forced_{name.replace('+', 'p')}_{i:02d}", 'forced', 'cov240k', name,
                           MAX_ITER, {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED)})
             rec = row['record']
-            record(row, forced_problems(row, FORCED, [[o] for o in APPROVED]) + accepted_problems(row, rec, name)
-                   + invariant_problems(row, rec, TOLERANCES[name]))
+            hook_unfired += 0 if [b for b in row['breakdowns'] if b['stage'] == 'test-forced'] else 1
+            record(row, accepted_problems(row, rec, name) + scope_invariant_problems(row, rec))
     reghdfe_breakdowns = 0
     for i in range(args.reghdfe_natural):
         row = run_fit(module, workdir, f'reghdfe_natural_{i:02d}', 'reghdfe_natural', 'cov240k', '1e-8', MAX_ITER,
@@ -532,42 +692,50 @@ def main():
         row = run_fit(module, workdir, f'late_{i:02d}', 'late', 'cov240k', '1e-8', MAX_ITER,
                       {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(LATE)})
         rec = row['record']
-        if not row['breakdowns'] and not row['strict_restart']:
-            labels.append(f"NOT_EXERCISED: {row['label']} (the CG converged before iteration {LATE})")
-            record(row, accepted_problems(row, rec, '1e-8') + invariant_problems(row, rec, 1e-8))
-            continue
-        record(row, forced_problems(row, LATE, [[o] for o in APPROVED]) + accepted_problems(row, rec, '1e-8')
-               + invariant_problems(row, rec, 1e-8))
-    for max_iter, outcome in ((30, 'budget-exhausted'), (31, 'lsmr-stopped'), (119, 'lsmr-stopped'), (120, None)):
+        hook_unfired += 0 if [b for b in row['breakdowns'] if b['stage'] == 'test-forced'] else 1
+        record(row, accepted_problems(row, rec, '1e-8') + scope_invariant_problems(row, rec))
+    # Package B, stage 2c: a label only if the legacy entry below does not fire the hook either; otherwise a note.
+    scope_unfired = []
+    if hook_unfired:
+        scope_unfired.append(f'the CG hook did not fire in {hook_unfired} forced/late fits of the automatic '
+                             'entry (in scope: the comparable route of cov240k has no CG stage)')
+    # In scope the route needs its sweeps and the device LSMR (176-178 on cov240k): every budget below refuses.
+    for max_iter in (30, 31, 119, 120):
         for i in range(args.budget_fits):
             row = run_fit(module, workdir, f'budget_{max_iter}_{i:02d}', f'budget_{max_iter}', 'cov240k', '1e-8',
                           max_iter, {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED)})
             rec = row['record']
-            if outcome is None:
-                p = forced_problems(row, FORCED, [[o] for o in APPROVED]) + accepted_problems(row, rec, '1e-8')
-            else:
-                p = forced_problems(row, FORCED, [[outcome]]) + refusal_problems(rec, max_iter, max_iter)
-            record(row, p + invariant_problems(row, rec, 1e-8))
-    polish_iterations = None
+            record(row, refusal_problems(rec, max_iter, max_iter) + scope_invariant_problems(row, rec))
+    # The continuation (y x 2^17): accepted after it; then exhausted at that process's pass-1 iterations + 2.
+    polish_primary = None
     for i in range(args.polish_fits):
         row = run_fit(module, workdir, f'polish_{i:02d}', 'polish', 'cov240k_scaled', '1e-8', MAX_ITER,
                       {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED)})
         rec = row['record']
-        record(row, forced_problems(row, FORCED, [['lsmr-polished']]) + accepted_problems(row, rec, '1e-8')
-               + invariant_problems(row, rec, 1e-8))
-        if row['strict_restart'] and row['strict_restart'][0].get('outcome') == 'lsmr-polished' and polish_iterations is None:
-            polish_iterations = int(row['strict_restart'][0]['polish_iterations'])
-            lsmr_iterations = int(row['strict_restart'][0]['lsmr_iterations'])
+        p = accepted_problems(row, rec, '1e-8') + scope_invariant_problems(row, rec)
+        passes = [a for a in row['strict_accept'] if 'pass' in a and 'D' in a]
+        if not (len(passes) == 2 and float(passes[0]['D']) > TOLERANCES['1e-8']
+                and any(a.get('refinement') == 'continuation' for a in row['strict_accept'])):
+            p.append(f"expected pass 1 above the tolerance, the continuation and pass 2: {[a.get('D') for a in passes]}")
+        elif polish_primary is None:
+            polish_primary = int(passes[0]['iterations'])
+        record(row, p)
     if args.polish_fits:
-        if polish_iterations is None:
-            labels.append('NOT_EXERCISED: the strict polish (no lsmr-polished fit to calibrate its exhaustion)')
+        if polish_primary is None:
+            labels.append('NOT_EXERCISED: the continuation (no polish fit to calibrate its exhaustion)')
         else:
-            short = FORCED + lsmr_iterations + polish_iterations - 1
-            row = run_fit(module, workdir, 'polish_exhausted', 'polish_exhausted', 'cov240k_scaled', '1e-8', short,
-                          {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED)})
-            rec = row['record']
-            record(row, forced_problems(row, FORCED, [['polish-stopped']]) + refusal_problems(rec, short, short)
-                   + invariant_problems(row, rec, 1e-8))
+            short = polish_primary + 2
+            for attempt in range(3):
+                row = run_fit(module, workdir, f'polish_exhausted_{attempt}', 'polish_exhausted', 'cov240k_scaled',
+                              '1e-8', short, {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(FORCED)})
+                rec = row['record']
+                cont = [a for a in row['strict_accept'] if a.get('refinement') == 'continuation']
+                if cont or attempt == 2:
+                    break
+            p = refusal_problems(rec, short, short) + scope_invariant_problems(row, rec)
+            if not cont or cont[0].get('exit') != 'budget':
+                p.append(f'the refusal did not come after the continuation ended by its budget: {cont}')
+            record(row, p)
     reject = {'XHDFE_TEST_CUDA_STRICT_LSMR_REJECT': '1'}
     for i in range(args.sequence_fits):
         # The explicit-criterion entry (scope addendum 2): B2 and B3 with convergence reghdfe.
@@ -589,28 +757,117 @@ def main():
         if cg != [SEQUENCE_HOOK_ITERATION] * 2 or len(lsmr) != 1:
             p.append(f'CG stages {cg}, LSMR {lsmr}')
         record(row, p + invariant_problems(row, rec, 1e-8))
+    # Package B: the automatic entry of B2, B3 and B4 is in scope (pre-registered expectations).
+    scope_b2_unfired = []
     for i in range(args.sequence_fits):
         row = run_fit(module, workdir, f'B2_{i:02d}', 'B2', 'cov240k', '1e-8', MAX_ITER,
                       dict(reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
         rec = row['record']
+        if not [b for b in row['breakdowns'] if b['stage'] == 'test-forced']:
+            scope_b2_unfired.append(f"{row['label']} (in scope: no CG stage on cov240k, the hook did not fire)")
+        record(row, accepted_problems(row, rec, '1e-8') + scope_invariant_problems(row, rec))
+        row = run_fit(module, workdir, f'B3_{i:02d}', 'B3', 'pathlike', '1e-8', MAX_ITER,
+                      dict(reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
+        rec = row['record']
+        p = scope_invariant_problems(row, rec)
+        if rec.get('refused') is not False:
+            p.append(f"refused or no result: {str(rec.get('error'))[:200]}")
+        elif not (rec.get('converged') and rec.get('certified') and rec.get('gpu_used') and rec.get('gpu_status_code') == 1
+                  and rec.get('group_mean_max') is not None and rec['group_mean_max'] <= TOLERANCES['1e-8']):
+            p.append(f"not converged, certified, on the GPU with D <= tol: D {rec.get('group_mean_max')}")
+        record(row, p)
+        row = run_fit(module, workdir, f'B4_{i:02d}', 'B4', 'session', '1e-8', MAX_ITER,
+                      dict(reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
+        fits = row['record'].get('fits', [])
+        p = []
+        if [f.get('refused') for f in fits] != [False, False, False]:
+            p.append(f"sequence {[f.get('refused') for f in fits]} (expected three successes)")
+        else:
+            b0, b2 = np.array(fits[0]['coef']), np.array(fits[2]['coef'])
+            if not np.max(np.abs(b0 - b2) / np.maximum(1.0, np.abs(b0))) <= SCOPE_LIMITS['b_scaled']:
+                p.append('the third fit differs from the first beyond 1e-8 max(1,|b|)')
+            for f in fits:
+                if not (f.get('converged') and f.get('certified') and f.get('gpu_used') and f.get('gpu_status_code') == 1):
+                    p.append(f"{f['name']} not converged, certified and on the GPU")
+        if row['strict_restart']:
+            p.append('the strict sequence ran in scope')
+        record(row, p)
+    # Package B, stage 2c: the legacy entry, the automatic entry under XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE=1 (the
+    # earlier strict branch, which still ships), graded exactly as HEAD graded the automatic entry: forced, late,
+    # the four budgets, the polish and its exhaustion, B2, B3, B4 (the Stata sessions in run_stata).
+    legacy = {'XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE': '1'}
+    legacy_fired = dict(forced=0, b2=0)
+    for name in tolerances:
+        for i in range(args.forced):
+            row = run_fit(module, workdir, f"legacy_forced_{name.replace('+', 'p')}_{i:02d}", 'legacy_forced',
+                          'cov240k', name, MAX_ITER, dict(legacy, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
+            rec = row['record']
+            legacy_fired['forced'] += 1 if [b for b in row['breakdowns'] if b['stage'] == 'test-forced'] else 0
+            record(row, forced_problems(row, FORCED, [[o] for o in APPROVED]) + accepted_problems(row, rec, name)
+                   + invariant_problems(row, rec, TOLERANCES[name]))
+    for i in range(args.late):
+        row = run_fit(module, workdir, f'legacy_late_{i:02d}', 'legacy_late', 'cov240k', '1e-8', MAX_ITER,
+                      dict(legacy, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(LATE)))
+        rec = row['record']
+        if not row['breakdowns'] and not row['strict_restart']:
+            labels.append(f"NOT_EXERCISED: {row['label']} (the CG converged before iteration {LATE})")
+            record(row, accepted_problems(row, rec, '1e-8') + invariant_problems(row, rec, 1e-8))
+            continue
+        legacy_fired['forced'] += 1
+        record(row, forced_problems(row, LATE, [[o] for o in APPROVED]) + accepted_problems(row, rec, '1e-8')
+               + invariant_problems(row, rec, 1e-8))
+    for max_iter, outcome in ((30, 'budget-exhausted'), (31, 'lsmr-stopped'), (119, 'lsmr-stopped'), (120, None)):
+        for i in range(args.budget_fits):
+            row = run_fit(module, workdir, f'legacy_budget_{max_iter}_{i:02d}', f'legacy_budget_{max_iter}',
+                          'cov240k', '1e-8', max_iter, dict(legacy, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
+            rec = row['record']
+            if outcome is None:
+                p = forced_problems(row, FORCED, [[o] for o in APPROVED]) + accepted_problems(row, rec, '1e-8')
+            else:
+                p = forced_problems(row, FORCED, [[outcome]]) + refusal_problems(rec, max_iter, max_iter)
+            record(row, p + invariant_problems(row, rec, 1e-8))
+    polish_iterations = None
+    for i in range(args.polish_fits):
+        row = run_fit(module, workdir, f'legacy_polish_{i:02d}', 'legacy_polish', 'cov240k_scaled', '1e-8', MAX_ITER,
+                      dict(legacy, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
+        rec = row['record']
+        record(row, forced_problems(row, FORCED, [['lsmr-polished']]) + accepted_problems(row, rec, '1e-8')
+               + invariant_problems(row, rec, 1e-8))
+        if row['strict_restart'] and row['strict_restart'][0].get('outcome') == 'lsmr-polished' and polish_iterations is None:
+            polish_iterations = int(row['strict_restart'][0]['polish_iterations'])
+            lsmr_iterations = int(row['strict_restart'][0]['lsmr_iterations'])
+    if args.polish_fits:
+        if polish_iterations is None:
+            labels.append('NOT_EXERCISED: the legacy strict polish (no lsmr-polished fit to calibrate its exhaustion)')
+        else:
+            short = FORCED + lsmr_iterations + polish_iterations - 1
+            row = run_fit(module, workdir, 'legacy_polish_exhausted', 'legacy_polish_exhausted', 'cov240k_scaled',
+                          '1e-8', short, dict(legacy, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
+            rec = row['record']
+            record(row, forced_problems(row, FORCED, [['polish-stopped']]) + refusal_problems(rec, short, short)
+                   + invariant_problems(row, rec, 1e-8))
+    for i in range(args.sequence_fits):
+        row = run_fit(module, workdir, f'legacy_B2_{i:02d}', 'legacy_B2', 'cov240k', '1e-8', MAX_ITER,
+                      dict(legacy, **reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=str(FORCED)))
+        rec = row['record']
+        legacy_fired['b2'] += 1 if [b for b in row['breakdowns'] if b['stage'] == 'test-forced'] else 0
         p = forced_problems(row, FORCED, [['lsmr-rejected-by-test-hook']]) + accepted_problems(row, rec, '1e-8')
         if len(row['accel']) != 2:
             p.append(f"{len(row['accel'])} stages (expected the CG stage and the strict repair)")
         record(row, p + invariant_problems(row, rec, 1e-8))
-        row = run_fit(module, workdir, f'B3_{i:02d}', 'B3', 'pathlike', '1e-8', MAX_ITER,
-                      dict(reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
+        row = run_fit(module, workdir, f'legacy_B3_{i:02d}', 'legacy_B3', 'pathlike', '1e-8', MAX_ITER,
+                      dict(legacy, **reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
         rec = row['record']
         cg = [int(c['cg_iterations']) for c in row['cg_end']]
         lsmr = [int(x['iterations']) for x in row['lsmr']]
-        expected = sum(cg) + sum(lsmr)  # from the stage lines
-        p = refusal_problems(rec, expected, MAX_ITER)
+        p = refusal_problems(rec, sum(cg) + sum(lsmr), MAX_ITER)
         if [s.get('outcome') for s in row['strict_restart']] != ['lsmr-rejected-by-test-hook', 'lsmr-already-consumed']:
             p.append(f"outcomes {[s.get('outcome') for s in row['strict_restart']]}")
         if cg != [SEQUENCE_HOOK_ITERATION] * 2 or len(lsmr) != 1:
             p.append(f'CG stages {cg}, LSMR {lsmr}')
         record(row, p + invariant_problems(row, rec, 1e-8))
-        row = run_fit(module, workdir, f'B4_{i:02d}', 'B4', 'session', '1e-8', MAX_ITER,
-                      dict(reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
+        row = run_fit(module, workdir, f'legacy_B4_{i:02d}', 'legacy_B4', 'session', '1e-8', MAX_ITER,
+                      dict(legacy, **reject, XHDFE_TEST_CUDA_CG_BREAKDOWN=SEQUENCE_HOOK))
         fits = row['record'].get('fits', [])
         p = []
         if [f.get('refused') for f in fits] != [False, True, False]:
@@ -626,6 +883,36 @@ def main():
                     p.append(f"{f['name']} not converged, certified and on the GPU")
         if any(a.get('honest') == '1' for a in row['accel']):
             p.append('a cold MAP ran')
+        record(row, p)
+    # Where the legacy entry fired the hook, the in-scope "the hook does not fire" is a note, not a label.
+    notes = []
+    for messages, fired in ((scope_unfired, legacy_fired['forced']), (scope_b2_unfired, legacy_fired['b2'])):
+        for message in messages:
+            (notes if fired else labels).append(('' if fired else 'NOT_EXERCISED: ') + message)
+    # Package B: cgseed_iv in scope with the hook firing (its CG stage breaks naturally at 7 in comparable).
+    for i in range(args.cgseed_fits):
+        row = run_fit(module, workdir, f'cgseed_iv_{i:02d}', 'cgseed_iv', 'cgseed_iv', '1e-8', MAX_ITER,
+                      {'XHDFE_TEST_CUDA_CG_BREAKDOWN': str(CGSEED_HOOK)})
+        rec = row['record']
+        p = scope_invariant_problems(row, rec, allow_tail_restart=True)
+        forced = [b for b in row['breakdowns'] if b['stage'] == 'test-forced']
+        if not forced or forced[0]['iter'] != CGSEED_HOOK:
+            p.append(f"forced breakdowns {[(b['stage'], b['iter']) for b in row['breakdowns']]}")
+        if [t.get('outcome') for t in row['tail_restart']] != ['restart->device-lsmr']:
+            p.append(f"tail restarts {[t.get('outcome') for t in row['tail_restart']]}")
+        if rec.get('refused') is not False:
+            p.append(f"refused or no result: {str(rec.get('error'))[:200]}")
+        else:
+            lsmr = sum(int(x.get('iterations', 0)) for x in row['lsmr'])
+            if rec['iterations'] != CGSEED_HOOK + lsmr:
+                p.append(f"iterations {rec['iterations']} != {CGSEED_HOOK} + LSMR {lsmr}")
+            if not (rec['converged'] and rec['certified'] and rec['gpu_used'] and rec['gpu_status_code'] == 1):
+                p.append('not converged, certified and on the GPU with status 1')
+            if rec.get('group_mean_max') is None or not rec['group_mean_max'] <= TOLERANCES['1e-8']:
+                p.append(f"D {rec.get('group_mean_max')} above the tolerance")
+            for k, limit in SCOPE_LIMITS.items():
+                if not rec.get(k, math.inf) <= limit:
+                    p.append(f'{k} {rec.get(k)} above {limit}')
         record(row, p)
     control = None
     if args.reference_module:
@@ -672,7 +959,7 @@ def main():
     status = 'FAIL' if failures else ('KNOWN_DEFECT' if known_defects else
                                       ('NOT_EXERCISED' if labels else 'PASS'))
     report = dict(status=status, failures=failures, labels=labels, known_defects=known_defects,
-                  not_exercised=not_exercised, summary=summary, negative_control=control,
+                  not_exercised=not_exercised, notes=notes, summary=summary, negative_control=control,
                   stata=stata, module=str(module), module_sha256=hashlib.sha256(module.read_bytes()).hexdigest(),
                   gpu_apps_at_start=apps, seconds=time.time() - started,
                   envelope_strict=ENVELOPE_STRICT, envelope_source=ENVELOPE_STRICT_SOURCE,
@@ -680,8 +967,8 @@ def main():
                   rows=[{k: v for k, v in r.items() if k != 'stderr_tail'} for r in rows])
     if args.output:
         args.output.write_text(json.dumps(report, indent=1) + '\n')
-    print(json.dumps({k: report[k] for k in ('status', 'failures', 'known_defects', 'not_exercised', 'summary',
-                                             'negative_control')},
+    print(json.dumps({k: report[k] for k in ('status', 'failures', 'known_defects', 'not_exercised', 'notes',
+                                             'summary', 'negative_control')},
                      indent=1)[:20000])
     if cleanup:
         cleanup.cleanup()

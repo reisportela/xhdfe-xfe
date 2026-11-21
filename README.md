@@ -2,12 +2,19 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.31.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.34.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-Version 2.31.1: `xhdfeakm` 1.9.0 adds an
+Version 2.34.1 brings to the public release the work of versions 2.32 to 2.34:
+the reduced-system route for `reghdfe-comparable` fits on CPU, corrections to
+`savefe`, to heterogeneous slopes and to weighted projections, lower memory use,
+and CUDA libraries that load on demand. See
+[the release notes](docs/releases/RELEASE_NOTES_2.34.1.20261121.md) and
+[the validation record](docs/releases/VALIDATION_2.34.1.20261121.md).
+
+Version 2.31.1 added to `xhdfeakm` 1.9.0 an
 explicit person-year-centred point estimator and full-model worker projection
 inference while retaining the legacy default. See [the option and its statistical limits](docs/akm-projection-inference.md)
-and [the validation record](docs/releases/VALIDATION_2.31.1.20261112.md).
+and [its validation record](docs/releases/VALIDATION_2.31.1.20261112.md).
 
 This release also includes the [2.31.0 source changes](docs/releases/RELEASE_NOTES_2.31.0.20261111.md),
 which correct Student-t inference on Windows, where an x87 precision-control
@@ -52,6 +59,11 @@ and clusters standard errors at the worker level:
 | `xhdfe`, Stata | CUDA | 22.7 | 161.7x |
 | `xhdfe`, Python | CUDA | 14.5 | 252.2x |
 
+These timings were measured before 24 August 2026 (the table has been in this
+README since release 2.25.0, commit `0d54ecae`) with the releases of each
+package available then; they predate the current releases listed under
+[Algorithmic and software provenance](#algorithmic-and-software-provenance) and
+the release of `fereg`, and they are not a comparison with those releases.
 The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
 `reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
 These historical timings do not benchmark every current workflow.
@@ -467,9 +479,18 @@ software. The roles of the principal packages were distinct:
 | --- | --- |
 | [`reghdfe`](https://github.com/sergiocorreia/reghdfe), by Sergio Correia | Canonical econometric and Stata-behaviour reference for the estimator, defaults, reporting, and validation. |
 | [`fixest`](https://github.com/lrberge/fixest), by Laurent Bergé and contributors | Algorithmic and performance reference for accelerated MAP, including the Irons-Tuck route used by the headline `xhdfe` GPU benchmarks. |
-| [`pyfixest`](https://github.com/py-econometrics/pyfixest), by Alexander Fischer and contributors | Public code and documentation studied during development, plus interface, DGP, numerical, and cross-language benchmark references. |
+| [`pyfixest`](https://github.com/py-econometrics/pyfixest) ([pyfixest.org](https://pyfixest.org/)), by Alexander Fischer and contributors | Public code and documentation studied during development, plus interface, DGP, numerical, and cross-language benchmark references. |
 | [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
 | [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
+| [`fereg`](https://github.com/johannes-schmieder/fereg), by Johannes F. Schmieder | Design followed by the reduced-system route (`reduced-pcg`) of version 2.32, as implemented in `fereg` 0.6.0 and described in Schmieder (2026) ([author's copy](https://johannes-schmieder.com/papers/fereg.pdf), [CEPR DP22170](https://cepr.org/publications/dp22170)); benchmark that led to two changes of version 2.31.0 and reference of the performance work of November 2026. |
+| [`fereg`](https://github.com/leoliu0/fereg), by Leo Liu | A different package with the same name, for Stata, Python and R on one Rust core. Studied in November 2026 as an independent implementation of exact elimination with conjugate gradients and as a performance reference. Version 2.34.1 contains no change taken from it. |
+| [`reghdfejl`](https://github.com/droodman/reghdfejl), by David Roodman | Stata front end to `FixedEffectModels.jl` through his [`julia`](https://github.com/droodman/julia.ado) package; comparison engine in the Stata benchmarks. `julia` is the precedent that `fereg` credits for copying Stata data in parallel, which `xhdfe` adopted in version 2.31.0. |
+
+Comparison packages, current releases checked at their sources on 21 November
+2026: `reghdfe` 6.14.1 (8 July 2026), `fixest` 0.14.2 (CRAN, 26 June 2026),
+`pyfixest` 0.70.0 (8 November 2026), `FixedEffectModels.jl` 2.2.1 (16 November
+2026), `reghdfejl` 1.1.9 (12 October 2026), `fereg` by Schmieder 0.6.7
+(20 November 2026) and `fereg` by Liu 0.5.0 (21 November 2026).
 
 Fischer and Schröder's public `within` materials and their 2026 mimeo,
 *Graph Preconditioning for High-Dimensional Fixed Effects Regression*, were the
@@ -487,6 +508,58 @@ and batching choices, routing and fallbacks, diagnostics, precision
 certification, and cross-platform validation. These contributions do not alter
 the credit for the algorithms on which they build.
 
+The reduced-system route of version 2.32 (`reduced-pcg`) follows the design
+implemented in `fereg` 0.6.0 and described in Schmieder (2026), *fereg: Fast
+high-dimensional fixed-effects regressions in Stata* (CEPR Discussion Paper No.
+22170), and cites it as such: with two to five fixed effects, it eliminates
+exactly the effect with the most levels and solves the remaining system by
+Jacobi-preconditioned conjugate gradients. Which effect is eliminated, the
+range of two to five effects, the joint treatment of up to eight columns per
+pass, the limit of 1,500 iterations for that stage and the form of its stall
+test (the residual must halve within each window of iterations) follow `fereg`.
+As Schmieder (2026) notes, the elimination is the block reduction of Somaini and
+Wolak (2016), and iterative solutions have precedents in Abowd, Creecy and
+Kramarz (2002) and in Mittag (2019). `xhdfe` does not implement what Schmieder
+(2026) presents as `fereg`'s distinguishing contribution in this step, the
+escalation to stronger preconditioners, including combinatorial multigrid, on
+poorly connected data: where the Jacobi-preconditioned iteration stalls, `xhdfe`
+hands the fit to its previous routes. `xhdfe`'s part is an independent C++
+implementation inside its own routing, acceptance certificate, fallbacks,
+diagnostics and three language front ends. `xhdfe` contains no `fereg` source
+code; its C++ implementation was written after studying the paper and
+`fereg`'s public source.
+
+Two changes of version 2.31.0 followed benchmarks against `fereg`: reading the
+Stata data in parallel on qualified hosts, as `fereg` does, and larger automatic
+thread teams (one thread per 25,000 rows instead of 500,000), where `fereg` by
+default uses all logical processors and sizes the parallel work of each stage
+by its amount of work. `fereg` credits the precedent of parallel copying from
+Stata to David Roodman's `julia` package (Roodman 2025).
+
+The performance work of November 2026 (versions 2.32 to 2.34) was measured
+against successive releases of Schmieder's `fereg`, from 0.6.0 to 0.6.7, on
+public benchmark datasets and on large linked panels. In the same month we
+studied [`fereg`](https://github.com/leoliu0/fereg) by Leo Liu, whose solver, in
+its author's words, "eliminates the largest fixed effect exactly and solves the
+remaining system with a preconditioned conjugate-gradient method on
+cell-compressed sufficient statistics". We compared it with `xhdfe`'s
+reduced-system route on a large panel to learn where the time of that route
+goes. Version 2.34.1 contains no source code and no algorithmic change taken
+from that package; anything a later version adopts from that study will be
+credited here.
+
+The numerical methods that `xhdfe` exposes are established ones and are cited
+as such in the [References](#references): partialling out by the
+Frisch–Waugh–Lovell theorem, alternating projections as applied to fixed
+effects by Guimarães and Portugal (2010) and Gaure (2013) and as implemented in
+`reghdfe` (Correia 2017), conjugate gradients (Hestenes and Stiefel 1952), LSMR
+(Fong and Saunders 2011) and the Irons–Tuck acceleration (Irons and Tuck 1969).
+The approximate-Cholesky local solves of the graph-preconditioned route are
+those that Fischer and Schröder take from the Laplacian-solver literature
+(Spielman and Teng 2014; Gao, Kyng and Spielman 2026). Multiway clustering
+follows Cameron, Gelbach and Miller (2011), and the Driscoll–Kraay covariance
+follows Driscoll and Kraay (1998).
+
 ### AI-assisted development record
 
 AI-assisted work used public software and documentation in the development
@@ -500,7 +573,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.31.1.
+> effects regression via a C++ backend.* Version 2.34.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License
@@ -522,7 +595,8 @@ R package's offline build dependency; see
 `xhdfe` is a high-performance, `reghdfe`-compatible implementation: the
 `reghdfe` estimator, defaults, and reporting conventions remain its reference.
 The roles of the prior HDFE packages, the direct Fischer–Schröder algorithmic
-credit, and the distinct `xhdfe` contribution are summarized in
+credit, the `fereg` credit for the reduced-system route, and the distinct `xhdfe`
+contribution are summarized in
 [Validation, development provenance, and contributions](#validation-development-provenance-and-contributions).
 
 The AKM layer builds on the worker-firm literature and on
@@ -533,7 +607,17 @@ against Raffaele Saggio's canonical
 implementation. `xhdfe` also exports its leave-out sample in the
 `pytwoway`/`bipartitepandas` format, while leaving structural CRE and BLM models
 to `pytwoway`. The Gelbach decomposition is validated against Jonah Gelbach's
-`b1x2`.
+`b1x2`. Its design also drew on the decomposition interface of `pyfixest`
+(groups of covariates, tables, plots and bootstrap intervals), on Guimarães,
+Portugal and Reis (2026) as the starting point for the decomposition with
+high-dimensional fixed effects, on Gaure's `lfe` article in *The R Journal*
+(2013) for what is estimable about absorbed effects, and on the literature
+that delimits how such a decomposition
+may be read: Kohler, Karlson and Holm (2011) for nonlinear probability models,
+Fortin, Lemieux and Firpo (2011) for its relation to Oaxaca–Blinder
+decompositions, Cameron, Gelbach and Miller (2008) for bootstrap inference with
+clustered errors, and Acharya, Blackwell and Sen (2016) and Tingley et al.
+(2014) for causal mediation, which the decomposition does not identify.
 
 We thank Paulo Guimaraes and Nelson Areal for discussions and workshop
 collaboration around earlier versions of the project.
@@ -568,10 +652,80 @@ High-dimensional fixed effects — the `reghdfe` universe `xhdfe` replicates:
   *Computational Statistics & Data Analysis* 66: 8-18.
 - Correia, S. 2016. `reghdfe`: Estimating linear models with multi-way fixed
   effects. Stata Conference, Stata Users Group.
+- Correia, S. 2017. Linear models with high-dimensional fixed effects: An
+  efficient and feasible estimator. Working paper.
+  http://scorreia.com/research/hdfe.pdf (the estimator that `reghdfe`
+  implements.)
+- Constantine, N., and S. Correia. 2021. `reghdfe`: Stata module for linear and
+  instrumental-variable/GMM regression absorbing multiple levels of fixed
+  effects. https://ideas.repec.org/c/boc/bocode/s457874.html
 - Correia, S., P. Guimaraes, and T. Zylkin. 2020. Fast Poisson estimation with
   high-dimensional fixed effects. *Stata Journal* 20(1): 95-115.
+- Bergé, L. R., K. Butts, and G. McDermott. 2026. Fast and user-friendly
+  econometrics estimations: The R package `fixest`. arXiv preprint
+  arXiv:2601.21749. doi:10.48550/arXiv.2601.21749
+- The PyFixest Authors. `pyfixest`: Fast high-dimensional fixed effect
+  estimation in Python. https://github.com/py-econometrics/pyfixest
+  (https://pyfixest.org/)
+- Gomez, M., and contributors. `FixedEffectModels.jl`: Fast estimation of
+  linear models with IV and high dimensional categorical variables. Julia
+  package. https://github.com/FixedEffects/FixedEffectModels.jl
+- Roodman, D. `reghdfejl`: High-dimensional fixed-effect estimation in Stata
+  using Julia. https://github.com/droodman/reghdfejl
+- Liu, L. `fereg`: Fast high-dimensional fixed-effects regressions for Stata,
+  Python and R, on one Rust core. https://github.com/leoliu0/fereg
 - Fischer, A., and K. Schröder. 2026. *Graph Preconditioning for
-  High-Dimensional Fixed Effects Regression*. Mimeo.
+  High-Dimensional Fixed Effects Regression*. Mimeo, draft of June 2026.
+  https://github.com/py-econometrics/within-paper
+- Fischer, A., and K. Schröder. `within`: Fast solvers for high-dimensional
+  fixed effects. Rust crate and Python package.
+  https://github.com/py-econometrics/within
+- Abowd, J. M., R. H. Creecy, and F. Kramarz. 2002. Computing person and firm
+  effects using linked longitudinal employer-employee data. Longitudinal
+  Employer-Household Dynamics Technical Paper TP-2002-06, U.S. Census Bureau.
+- Mittag, N. 2019. A simple method to estimate large fixed effects models
+  applied to wage determinants. *Labour Economics* 61: 101766.
+  doi:10.1016/j.labeco.2019.101766
+- Somaini, P., and F. A. Wolak. 2016. An algorithm to estimate the two-way
+  fixed effects model. *Journal of Econometric Methods* 5(1): 143-152.
+  doi:10.1515/jem-2014-0008
+- Roodman, D. 2025. Julia as a universal platform for statistical software
+  development. *Stata Journal* 25(2): 255-284. doi:10.1177/1536867X251341105
+- Schmieder, J. F. 2026. `fereg`: Fast high-dimensional fixed-effects
+  regressions in Stata. CEPR Discussion Paper No. 22170. CEPR Press, Paris &
+  London. https://cepr.org/publications/dp22170 (author's copy, November 2026:
+  https://johannes-schmieder.com/papers/fereg.pdf; software:
+  https://github.com/johannes-schmieder/fereg)
+
+Numerical methods and inference:
+
+- Frisch, R., and F. V. Waugh. 1933. Partial time regressions as compared with
+  individual trends. *Econometrica* 1(4): 387-401. doi:10.2307/1907330
+- Lovell, M. C. 1963. Seasonal adjustment of economic time series and multiple
+  regression analysis. *Journal of the American Statistical Association*
+  58(304): 993-1010. doi:10.1080/01621459.1963.10480682
+- Hestenes, M. R., and E. Stiefel. 1952. Methods of conjugate gradients for
+  solving linear systems. *Journal of Research of the National Bureau of
+  Standards* 49(6): 409-436. doi:10.6028/jres.049.044
+- Irons, B. M., and R. C. Tuck. 1969. A version of the Aitken accelerator for
+  computer iteration. *International Journal for Numerical Methods in
+  Engineering* 1(3): 275-277. doi:10.1002/nme.1620010306
+- Fong, D. C.-L., and M. Saunders. 2011. LSMR: An iterative algorithm for
+  sparse least-squares problems. *SIAM Journal on Scientific Computing* 33(5):
+  2950-2971. doi:10.1137/10079687X
+- Spielman, D. A., and S.-H. Teng. 2014. Nearly linear time algorithms for
+  preconditioning and solving symmetric, diagonally dominant linear systems.
+  *SIAM Journal on Matrix Analysis and Applications* 35(3): 835-885.
+  doi:10.1137/090771430
+- Gao, Y., R. Kyng, and D. A. Spielman. 2026. AC(k): Robust solution of
+  Laplacian equations by randomized approximate Cholesky factorization. *SIAM
+  Journal on Scientific Computing* 48(3): A1643-A1684. doi:10.1137/24M1673577
+- Cameron, A. C., J. B. Gelbach, and D. L. Miller. 2011. Robust inference with
+  multiway clustering. *Journal of Business & Economic Statistics* 29(2):
+  238-249. doi:10.1198/jbes.2010.07136
+- Driscoll, J. C., and A. C. Kraay. 1998. Consistent covariance matrix
+  estimation with spatially dependent panel data. *Review of Economics and
+  Statistics* 80(4): 549-560. doi:10.1162/003465398557825
 
 Worker-firm (AKM) leave-out layer — what `xhdfe` borrows from the `pytwoway`
 literature (see [Acknowledgements](#acknowledgements)):
@@ -591,6 +745,30 @@ literature (see [Acknowledgements](#acknowledgements)):
 - Gelbach, J. B. 2016. When do covariates matter? And which ones, and how
   much? *Journal of Labor Economics* 34(2): 509-543. (Conditional
   decomposition of coefficient movements.)
+
+Gelbach decomposition — further sources studied in its design (see
+[Acknowledgements](#acknowledgements)):
+
+- Guimarães, P., P. Portugal, and H. Reis. 2026. Labor market sorting in
+  Portugal, with a practitioner corner on the decomposition of the regression
+  coefficient estimates. *Banco de Portugal Economic Studies* XII(3).
+- Gaure, S. 2013. lfe: Linear group fixed effects. *The R Journal* 5(2):
+  104-116. doi:10.32614/RJ-2013-031
+- Kohler, U., K. B. Karlson, and A. Holm. 2011. Comparing coefficients of
+  nested nonlinear probability models. *Stata Journal* 11(3): 420-438.
+  doi:10.1177/1536867X1101100306
+- Fortin, N., T. Lemieux, and S. Firpo. 2011. Decomposition methods in
+  economics. In *Handbook of Labor Economics*, vol. 4A, 1-102.
+  doi:10.1016/S0169-7218(11)00407-2
+- Cameron, A. C., J. B. Gelbach, and D. L. Miller. 2008. Bootstrap-based
+  improvements for inference with clustered errors. *Review of Economics and
+  Statistics* 90(3): 414-427. doi:10.1162/rest.90.3.414
+- Acharya, A., M. Blackwell, and M. Sen. 2016. Explaining causal findings
+  without bias: Detecting and assessing direct effects. *American Political
+  Science Review* 110(3): 512-529. doi:10.1017/S0003055416000216
+- Tingley, D., T. Yamamoto, K. Hirose, L. Keele, and K. Imai. 2014. mediation:
+  R package for causal mediation analysis. *Journal of Statistical Software*
+  59(5): 1-38. doi:10.18637/jss.v059.i05
 
 ## Contributing
 

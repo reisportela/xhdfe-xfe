@@ -271,6 +271,14 @@ for cmd in xhdfe xfepout; do
     echo "$cmd.pkg: staged version '$actual' does not match source '$expected'" >&2
     exit 1
   }
+  # Every ado and help file of the source package must be installable from the
+  # staged one: the staged manifests are generated from their own file lists.
+  while IFS= read -r name; do
+    grep -Fxq "f $name" "$site/$cmd.pkg" || {
+      echo "$cmd.pkg: staged package omits $name, listed in stata/$cmd.pkg" >&2
+      exit 1
+    }
+  done < <(awk '$1 == "f" && $2 ~ /\.(ado|sthlp)$/ { print $2 }' "$repo_root/stata/$cmd.pkg")
 done
 
 for pkg in "$site"/*.pkg; do

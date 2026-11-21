@@ -45,7 +45,11 @@ dnf -y config-manager --add-repo \
 dnf -y install "cuda-nvcc-${CUDA_MM}" "cuda-cudart-devel-${CUDA_MM}" \
   "cuda-cccl-${CUDA_MM}" \
   "cuda-cuobjdump-${CUDA_MM}" "cuda-nvdisasm-${CUDA_MM}" \
+  "libcublas-devel-${CUDA_MM}" "libcusparse-devel-${CUDA_MM}" \
   >/dev/null
+# libcublas-devel and libcusparse-devel: src/network_cuda.cu (2.34.0) includes
+# cublas_v2.h and cusparse.h. The libraries are not linked: the functions are
+# resolved with dlopen at the first use of the network route (2.34.1).
 # cuda-nvdisasm: cuobjdump --dump-sass DELEGATES disassembly to nvdisasm;
 # without it the dump emits fatbin headers but zero "Function :" lines and
 # the FMA gate fail-closes on "no hdfe_cert functions found in SASS".

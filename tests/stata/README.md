@@ -111,6 +111,63 @@ identifier (bit identity of samples, DoF and `e(b)`/`e(V)`) and against `reghdfe
 and check the negative controls (`##` with more than two components in cluster
 options, continuous components in interaction terms).
 
+## String-identifier encoding contract
+
+`string_id_encoding_contract.do` covers the helper that codes string
+identifiers in `absorb()`, `cluster()` and `group()` by sorting only the
+identifier columns in a temporary frame (`_xhdfe_string_group`). It runs as five
+fresh processes in one scratch directory, because the last step reads the files
+of the two battery arms. `XHDFE_PROFILE_CPU=1` is set for the `profile` step
+only; every other step must run without it:
+
+```bash
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/string_id_encoding_contract.do codes
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata XHDFE_PROFILE_CPU=1 stata-mp -b do /path/to/xhdfe/tests/stata/string_id_encoding_contract.do profile
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/string_id_encoding_contract.do battery patched
+XHDFE_STATA_ADOPATH=/path/to/xhdfe/stata stata-mp -b do /path/to/xhdfe/tests/stata/string_id_encoding_contract.do battery native
+stata-mp -b do /path/to/xhdfe/tests/stata/string_id_encoding_contract.do compare
+```
+
+The markers are `STRING_ID_ENCODING_CODES_PASS`,
+`STRING_ID_ENCODING_PROFILE_PASS`, `STRING_ID_ENCODING_BATTERY_DONE <arm>` and
+`STRING_ID_ENCODING_CONTRACT_PASS`; `run_stata_tests.sh` runs the five steps in
+`output/string_id_encoding/` and keeps each log as
+`string_id_encoding_<step>.log`.
+
+- `codes` compares the helper's codes, storage type, label and notes with
+  `egen group()` on every list, sample and order of the battery and more
+  (empty strings, spaces, Unicode, strL, extended missing values, abbreviations
+  with `varabbrev` on and off, the caller's `version` 16 to 19, `set type
+  double`), from the default frame and from another one. It then checks the
+  failure paths: at the frame limit `frame put` fails for real; a copy of the
+  helper with `error 3498` after each statement of its body, and a Mata
+  function that stores half of the codes and then fails, inject the others.
+  Without strict mode the call falls back to `egen` and gives its codes and
+  estimates; with `$XHDFE_STRING_GROUP_STRICT` set to 1 it stops; a Break
+  (rc 1) always stops; nothing is left behind.
+- `profile` checks the one `ado_profile label=string_group_fallback` line.
+- `battery <arm>` runs the same fits in each arm, each with the return code it
+  must give and, after a successful fit, `e(converged)` 1 and `e(gpu_used)` 0.
+  It writes in `%21x` the estimates, the sample, residuals and saved effects,
+  and, after every call, `c(rc)`, what the call left in `r()` and `s()`, the
+  `EGEN_*` globals and the characteristics of the data and of every variable.
+  The Mata functions the session gains must all be the ado's own (`_xhdfe_*`).
+- Every arm runs the package's `xhdfe.ado`, so that its subroutines are
+  ordinary programs. The `native` arm then replaces `_xhdfe_string_group`, in
+  the test only, by a program that runs `egen long target = group(varlist) if
+  touse` (what the ado did at those sites before the helper). It counts that
+  program's calls against the number each case must make, and installs a Mata
+  function that stops any call reaching the helper's frame-based body. Any
+  other arm name runs the package of `XHDFE_STATA_ADOPATH` unchanged, for
+  instance a frozen release, and `compare <left> <right>` compares any two
+  arms (default `patched native`).
+- `compare` requires the two battery files, the printed fits (logged with
+  `nomsg`, line by line) and the random-number states to be identical; the
+  sort-tiebreak states are reported only.
+
+The `STRING_ID_NOT_RUN` lines at the top of every log list what the contract
+deliberately does not run, with the reason.
+
 ## Input-read contract
 
 The plugin reads its numeric inputs in one pass by observation and falls back

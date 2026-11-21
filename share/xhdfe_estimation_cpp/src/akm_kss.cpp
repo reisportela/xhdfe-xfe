@@ -2504,6 +2504,9 @@ AkmKssResult akm_kss_decompose(const Eigen::VectorXd& y,
         // thread requests are propagated unchanged to its operators.
         ho.absorption_method = AbsorptionMethod::Mlsmr;
         ho.tolerance_mode = ToleranceMode::StrictResidual;
+        // The nested FWL solve must be invariant to the outcome's units.
+        // The mode supplies the Krylov target and the relative certificate.
+        ho.strict_cpu_absolute_check = false;
         // Only the coefficients and the convergence, certificate and omission
         // flags of this fit are used below; xhdfeakm reports no control SE, t,
         // p-value or CI.  Do not evaluate Student-t quantiles that no output
@@ -5194,6 +5197,7 @@ const char* gelbach_gpu_status_name(int code) {
         case 4: return "failed";
         case 5: return "cpu_cache";
         case 6: return "not_applicable";
+        case 7: return "weighted_cpu_route";  // package C: the full-model regressor's code
         default: return "not_requested";
     }
 }
@@ -5997,6 +6001,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     ho.tol = options.tol;
     ho.num_threads = options.num_threads;
     ho.weights_are_frequencies = freq_weights;
+    ho.weighted_cpu_route = options.weighted_cpu_route;
     ho.capture_fe_collinear_ss_ratio = true;
     const bool diagnostic_uses_first_pair =
         !common_fe_mode && nfe >= 2 &&
@@ -6695,6 +6700,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
     hb.tol = options.tol;
     hb.num_threads = recovery_threads;
     hb.weights_are_frequencies = freq_weights;
+    hb.weighted_cpu_route = options.weighted_cpu_route;
     v11::HdfeRegressorV11 breg(hb);
     progress.say("fitting the base specification...");
     breg.fit(y, X1, common_fes, weights != nullptr ? &w_raw : nullptr);
@@ -7044,6 +7050,7 @@ GelbachResult decompose(const Eigen::VectorXd& y_in,
             hw.tol = options.tol;
             hw.num_threads = recovery_threads;
             hw.weights_are_frequencies = freq_weights;
+            hw.weighted_cpu_route = options.weighted_cpu_route;
             if (Kx == 0) {
                 // A full model containing only absorbed FEs is valid in the
                 // absorbed-target mode. Its stacked score has no explicit

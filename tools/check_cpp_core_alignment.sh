@@ -118,6 +118,22 @@ pairs=(
   "include/hdfe/auto_team_registry.hpp:r/xhdfe/src/include/hdfe/auto_team_registry.hpp"
   "include/hdfe/auto_team_registry.hpp:share/xhdfe_estimation_cpp/include/hdfe/auto_team_registry.hpp"
   "stata/include/hdfe/auto_team_registry.hpp:share/xhdfe_estimation_cpp/stata/include/hdfe/auto_team_registry.hpp"
+  "src/reduced_schur_pcg.cpp:stata/src/reduced_schur_pcg.cpp"
+  "src/reduced_schur_pcg.cpp:r/xhdfe/src/reduced_schur_pcg.cpp"
+  "src/reduced_schur_pcg.cpp:share/xhdfe_estimation_cpp/src/reduced_schur_pcg.cpp"
+  "stata/src/reduced_schur_pcg.cpp:share/xhdfe_estimation_cpp/stata/src/reduced_schur_pcg.cpp"
+  "src/reduced_schur_pcg.hpp:stata/src/reduced_schur_pcg.hpp"
+  "src/reduced_schur_pcg.hpp:r/xhdfe/src/reduced_schur_pcg.hpp"
+  "src/reduced_schur_pcg.hpp:share/xhdfe_estimation_cpp/src/reduced_schur_pcg.hpp"
+  "stata/src/reduced_schur_pcg.hpp:share/xhdfe_estimation_cpp/stata/src/reduced_schur_pcg.hpp"
+  "src/sparse_rank.hpp:stata/src/sparse_rank.hpp"
+  "src/sparse_rank.hpp:r/xhdfe/src/sparse_rank.hpp"
+  "src/sparse_rank.hpp:share/xhdfe_estimation_cpp/src/sparse_rank.hpp"
+  "stata/src/sparse_rank.hpp:share/xhdfe_estimation_cpp/stata/src/sparse_rank.hpp"
+  "src/reduced_schur_pcg_entry.hpp:stata/src/reduced_schur_pcg_entry.hpp"
+  "src/reduced_schur_pcg_entry.hpp:r/xhdfe/src/reduced_schur_pcg_entry.hpp"
+  "src/reduced_schur_pcg_entry.hpp:share/xhdfe_estimation_cpp/src/reduced_schur_pcg_entry.hpp"
+  "stata/src/reduced_schur_pcg_entry.hpp:share/xhdfe_estimation_cpp/stata/src/reduced_schur_pcg_entry.hpp"
   "src/schwarz_demean.cpp:stata/src/schwarz_demean.cpp"
   "include/schwarz_demean.hpp:stata/include/schwarz_demean.hpp"
   "src/schwarz_demean.cpp:share/xhdfe_estimation_cpp/src/schwarz_demean.cpp"
@@ -149,6 +165,7 @@ pairs=(
   "stata/src/akm_kss_cuda.cu:share/xhdfe_estimation_cpp/stata/src/akm_kss_cuda.cu"
   "stata/include/hdfe/akm_kss_cuda.hpp:share/xhdfe_estimation_cpp/stata/include/hdfe/akm_kss_cuda.hpp"
   "stata/src/xhdfe_plugin.cpp:share/xhdfe_estimation_cpp/stata/src/xhdfe_plugin.cpp"
+  "stata/src/xhdfe_wide_id_rank.hpp:share/xhdfe_estimation_cpp/stata/src/xhdfe_wide_id_rank.hpp"
   "stata/src/xfe_plugin.cpp:share/xhdfe_estimation_cpp/stata/src/xfe_plugin.cpp"
   "include/hdfe/akm_kss_am_tabulation.hpp:stata/include/hdfe/akm_kss_am_tabulation.hpp"
   "include/hdfe/akm_kss_am_tabulation.hpp:share/xhdfe_estimation_cpp/include/hdfe/akm_kss_am_tabulation.hpp"
@@ -207,6 +224,18 @@ done < "stata/xfepout.pkg"
 # Report EVERY divergent pair before exiting. The previous exit-on-first
 # behaviour systematically understated the remaining work: fixing the reported
 # pair and re-running produced a new DIFF instead of green (WP0 finding F-09).
+# The opt-in solvers are mirrored even in CPU-only packages. Keep their
+# complete private source families under the same exact-byte contract.
+for source in reduced_schur_pcg_cuda.cu \
+              reduced_schur_pcg_cuda.hpp reduced_schur_pcg_cuda_controller.cpp \
+              reduced_schur_pcg_cuda_controller.hpp reduced_schur_pcg_cuda_layout.hpp \
+              reduced_schur_pcg_cuda_memory.hpp \
+              mixed_network.hpp mixed_network_impl.hpp network_device.hpp network_cuda.cu; do
+  for mirror in stata/src r/xhdfe/src share/xhdfe_estimation_cpp/src \
+                share/xhdfe_estimation_cpp/stata/src; do
+    pairs+=("src/${source}:${mirror}/${source}")
+  done
+done
 status=0
 for pair in "${pairs[@]}"; do
   left="${pair%%:*}"

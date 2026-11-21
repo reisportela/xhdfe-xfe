@@ -133,9 +133,17 @@ endif
 # NVIDIA HPC SDK layouts); set CUDA_HOME/XHDFE_CUDA_LIB to override.
 NVCC ?= $(if $(CUDA_HOME),$(CUDA_HOME)/bin/nvcc,nvcc)
 XHDFE_CUDA_LIB ?= $(if $(CUDA_HOME),$(CUDA_HOME)/lib64,$(dir $(shell $(NVCC) --version > /dev/null 2>&1 && command -v $(NVCC)))../../cuda/lib64)
+# The HPC SDK keeps cuBLAS and cuSPARSE beside the versioned CUDA toolkit.
+XHDFE_CUDA_TOOLKIT_DIR := $(abspath $(XHDFE_CUDA_LIB)/..)
+XHDFE_CUDA_VERSION := $(shell $(NVCC) --version | sed -nE 's/.*release ([0-9]+\.[0-9]+),.*/\1/p')
+XHDFE_HPC_MATH_LIB := $(firstword $(wildcard $(XHDFE_CUDA_TOOLKIT_DIR)/../math_libs/$(XHDFE_CUDA_VERSION)/lib64/libcublas.so $(XHDFE_CUDA_TOOLKIT_DIR)/../../math_libs/$(XHDFE_CUDA_VERSION)/lib64/libcublas.so))
+XHDFE_CUDA_MATH_LIB ?= $(if $(XHDFE_HPC_MATH_LIB),$(abspath $(dir $(XHDFE_HPC_MATH_LIB))),$(XHDFE_CUDA_LIB))
 PKG_CPPFLAGS += -DHDFE_USE_CUDA
 PKG_LIBS += -L$(XHDFE_CUDA_LIB) -Wl,-rpath,$(XHDFE_CUDA_LIB) -lcudart
-CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o fe_absorption_cuda_verifier.o
+# cuBLAS and cuSPARSE are opened on demand by network_cuda.cu (dlopen), not
+# linked; their directory stays on the run path so that the same files are found.
+PKG_LIBS += -Wl,-rpath,$(XHDFE_CUDA_MATH_LIB) -ldl
+CUDA_OBJECTS = fe_absorption_cuda.o akm_kss_cuda.o fe_absorption_cuda_verifier.o reduced_schur_pcg_cuda.o network_cuda.o
 CUDA_HOST_OBJECTS = fe_absorption_cuda_certificate.o
 
 # WP3 verifier TU (plan P1/§7.6): strict FP flags regardless of the package
@@ -161,6 +169,19 @@ akm_kss_cuda.o: akm_kss_cuda.cu
 	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
 	    --expt-relaxed-constexpr \
 	    -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
+	    -I. -Iinclude -Ieigen -c $< -o $@
+
+reduced_schur_pcg_cuda.o: reduced_schur_pcg_cuda.cu
+	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
+	    -DHDFE_GPU_BACKEND_DEFAULT='"cpu"' \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
+	    --expt-relaxed-constexpr -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
+	    -I. -Iinclude -Ieigen -c $< -o $@
+
+network_cuda.o: network_cuda.cu
+	$(NVCC) -O3 -std=c++17 -DNDEBUG -DHDFE_USE_CUDA $(XHDFE_OMP_DEF) \
+	    --generate-code=arch=compute_$(XHDFE_CUDA_ARCH_SELECTED),code=[compute_$(XHDFE_CUDA_ARCH_SELECTED),sm_$(XHDFE_CUDA_ARCH_SELECTED)] \
+	    --expt-relaxed-constexpr -Xcompiler $(XHDFE_NVCC_HOST_FLAGS) \
 	    -I. -Iinclude -Ieigen -c $< -o $@
 
 fe_absorption_cuda.o: fe_absorption_cuda.cu

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.14.0 12nov2026}{...}
+{* *! version 1.14.5 21nov2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -7,6 +7,7 @@
 {viewerjumpto "Syntax" "xfepout##syntax"}{...}
 {viewerjumpto "Absvar Syntax" "xfepout##absvar"}{...}
 {viewerjumpto "Options" "xfepout##options"}{...}
+{viewerjumpto "Examples" "xfepout##examples"}{...}
 {viewerjumpto "Stored results" "xfepout##results"}{...}
 {title:Title}
 
@@ -20,20 +21,7 @@
 {marker development}{...}
 {title:Development process}
 
-{pstd}
-{cmd:xfepout} shares the AI-assisted development workflow used for {cmd:xhdfe}.
-The project used AI coding tools to study existing HDFE packages, review relevant
-literature, inspect the Stata/C++ codebase, draft and revise patches, instrument
-slow paths, and improve absorption performance. No AI tool or system is named or
-credited as a contributor.{p_end}
-
-{pstd}
-The listed human authors did not write the package line by line. Their role was
-to define the econometric target, set numerical and performance guardrails,
-choose the benchmark and validation criteria, direct the optimization process,
-decide which AI-assisted changes to keep, and retain responsibility for the
-package. No software tool or AI system is credited as an author or co-author.
-{p_end}
+{pstd}{cmd:xfepout} shares the {help xhdfe##development:xhdfe development and validation process}.{p_end}
 
 {marker syntax}{...}
 {title:Syntax}
@@ -46,7 +34,7 @@ package. No software tool or AI system is credited as an author or co-author.
 {ifin}
 {it:{weight}}
 {cmd:,}
-{opth a:bsorb(xfepout##absvar:absvars)}
+{opth abs:orb(xfepout##absvar:absvars)}
 {opt clear}
 [{opth keepv:ars(varlist)} {opt keepid:s}]
 [{opth clusterv:ars(varlist)} {help xfepout##options:options}]
@@ -60,8 +48,8 @@ package. No software tool or AI system is credited as an author or co-author.
 {ifin}
 {it:{weight}}
 {cmd:,}
-{opth a:bsorb(xfepout##absvar:absvars)}
-{opt g:enerate(stubname)}
+{opth abs:orb(xfepout##absvar:absvars)}
+{opt gen:erate(stubname)}
 [{opt sample(newvarname)}]
 [{opth clusterv:ars(varlist)} {help xfepout##options:options}]
 {p_end}
@@ -71,6 +59,7 @@ package. No software tool or AI system is credited as an author or co-author.
 {p 8 15 2}
 {cmd:xfepout, version}
 {p_end}
+{p 4 6 2}The version query clears the current {cmd:e()} results.{p_end}
 
 {p 4 6 2}{bf:Important:} {it:varlist} must contain existing numeric variables (no factor-variable or time-series operators in the varlist).{p_end}
 {p 4 6 2}{opt absorb(absvars)} is required.{p_end}
@@ -93,7 +82,8 @@ options are for fixed-effect or cluster identifiers, not for heterogeneous slope
 
 {p 4 6 2}- Interactions are materialized with {cmd:egen group()} over all their components after the
 estimation sample is defined. Plain numeric identifiers are passed directly to the plugin;
-string identifiers are encoded by Stata before the plugin call.{p_end}
+string identifiers are coded with {cmd:egen group()} before the plugin call ({cmd:xfepout} does not use the
+frame-based coding of string identifiers in {helpb xhdfe}).{p_end}
 {p 4 6 2}- Factor-style prefixes such as {cmd:i.}, {cmd:ib#.}, {cmd:bn.}, and {cmd:ibn.} are stripped
 for compatibility before the underlying variable names are resolved.{p_end}
 {p 4 6 2}- Prefix {cmd:c.} and heterogeneous-slope syntax such as {cmd:var#c.x} or {cmd:var##c.x}
@@ -109,29 +99,30 @@ by its residualized version. The resulting dataset keeps the transformed variabl
 variables, weights, optional {cmd:groupvar()}, anything requested in {cmd:keepvars()}, and any
 materialized FE/cluster ids requested through {cmd:keepids}.{p_end}
 {phang}{opt generate(stub)} keep the current dataset and create new double-precision transformed variables
-named {it:stub}{it:varname}. Each new variable is labeled {cmd:Residuals: <source label>}.{p_end}
+named {it:stub}{it:varname}. Each new variable is labelled {cmd:Residuals: <source label>}.{p_end}
 {phang}{opt sample(newvar)} save a sample marker (1=kept, 0=dropped/outside sample). Only with
-{opt generate()}; the generated variable is labeled {cmd:[XFEPOUT Sample]}.{p_end}
+{opt generate()}; the generated variable is labelled {cmd:[XFEPOUT Sample]}.{p_end}
 {phang}{opt keepvars(varlist)} in {opt clear} mode, keep additional variables in the rewritten dataset.{p_end}
 {phang}{opt keepids} in {opt clear} mode, keep the materialized integer FE/cluster ids created for the
 plugin (for example {cmd:__xfe_ID*__} and {cmd:__xfe_CL*__}).{p_end}
-{phang}{opt clustervars(varlist)} cluster identifiers used only for DoF bookkeeping and mobility
-adjustments in {cmd:e(df_a)}. {cmd:xfepout} does not estimate clustered standard errors.
-{cmd:cl()} and {cmd:cluster()} are accepted as aliases.{p_end}
+{phang}{opt clustervars(varlist)} supplies cluster identifiers for absorbed-DoF
+bookkeeping in {cmd:e(df_a)}. Missing cluster identifiers exclude rows from
+the sample used for all transformed variables. Aliases are {opt cl()} and
+{opt cluster()}.{p_end}
 
 {dlgtab:Optimization}
 {marker opt_tolerance}{...}
 {phang}{opt tolerance(#)} absorber tolerance (default 1e-8; valid range (0,1)).
 The selected method uses reghdfe-comparable semantics, matching the default mode
 of {cmd:xhdfe}, together with the required projection-precision checks.
-Version 1.13.5 completes unfinished ordinary three-effect CUDA projections at
-the existing target. {cmd:xfepout} does not expose a separate {cmd:tolerancemode()} option.{p_end}
+Ordinary three-effect CUDA projections can use a completion step at the same
+tolerance.{p_end}
 {phang}{opt maxiter(#)} maximum total absorption iterations (default 100000),
 including any continuation within the remaining budget.{p_end}
 {pmore}A failed necessary precision check after continuation returns no estimates.
 Some ill-conditioned three-effect CUDA partial-out cases still refuse with multiple
-workers, as in the previous release; use {cmd:gpubackend(cpu)} for these designs.
-Expected refusals are recorded separately from numerical passes in the validation record.{p_end}
+workers; use {cmd:gpubackend(cpu)} for these designs.
+{p_end}
 {phang}{opt transform(str)} accept hdfe-style transform names: {it:kac}, {it:cim}, {it:sym}. {it:sym}
 turns on symmetric sweeps; {it:kac} and {it:cim} only steer method choice when
 {cmd:absorptionmethod(auto)} is in effect.{p_end}
@@ -143,8 +134,16 @@ turns on symmetric sweeps; {it:kac} and {it:cim} only steer method choice when
 {it:mlsmr} (aliases {it:modified-lsmr}, {it:modified_lsmr}, {it:within},
 {it:within-additive}, {it:within_additive}); and {it:auto-mlsmr}
 (aliases {it:auto_mlsmr}, {it:mlsmr-auto}, {it:mlsmr_auto}).{p_end}
-{pmore}Default is {it:symmetric-gauss-seidel}. The LSMR/MLSMR family is CPU-only and
-applies to standard categorical fixed effects; {cmd:xfepout} rejects heterogeneous-slope syntax before the plugin call.{p_end}
+{pmore}The default is {it:symmetric-gauss-seidel}. Explicit {it:lsmr} and {it:mlsmr}
+requests are CPU-only.{p_end}
+{pmore}For partial-out with analytic weights and two or three fixed effects,
+the implicit method or {cmd:absorptionmethod(auto)} can retry if the initial
+sweep projection fails its precision check. This automatic retry requires that
+{cmd:transform()} and {cmd:symmetricsweep} be omitted. It uses MLSMR on CPU or
+device LSMR on CUDA (up to 2,000,000 estimation rows) and shares the original
+{cmd:maxiter()} budget. {cmd:e(method_used)} reports the accepted method.{p_end}
+{pmore}{cmd:xfepout} never enters the reduced-system tier of {help xhdfe##reduced_pcg:xhdfe}: the absorption
+runs the route selected here, whatever {cmd:XHDFE_REDUCED_PCG} is set to.{p_end}
 {phang}{opt symmetricsweep} force forward/backward sweeps per iteration.{p_end}
 {phang}{opt jacobirelaxation(#)} Jacobi relaxation parameter (default 0).{p_end}
 {phang}{opt keepsingletons} do not drop singleton observations.{p_end}
@@ -155,7 +154,7 @@ request bypasses auto-only workload and {opt maxthreads()} heuristics and is
 limited only by the logical processors/OpenMP limit visible to the process.{p_end}
 {phang}{opt defaultthreads(#)} default auto-thread count when {opt numthreads(0)}.{p_end}
 {phang}{opt maxthreads(#)} cap for auto-thread selection (0=no cap).{p_end}
-{phang}{opt minparallelrows(#)} minimum rows before parallelization is considered.{p_end}
+{phang}{opt minparallelrows(#)} minimum rows before automatic parallelisation is considered.{p_end}
 {phang}{opt targetrowsperthread(#)} target row budget per thread in auto-threading.
 The default, 0, is automatic: one thread per 25,000 rows within the problem-size
 cap (one thread below 100,000 rows, at most 8 below 250,000 and at most 16
@@ -171,32 +170,14 @@ coordination. {cmd:XHDFE_AUTO_TEAM_COORDINATION=0} before Stata starts turns it
 off.{p_end}
 
 {dlgtab:GPU}
-{phang}{opt gpubackend(str)} backend selector: {it:cpu}, {it:cuda}, or {it:metal}.
-CUDA requires a CUDA-enabled plugin build and a CUDA device; {it:metal} is reserved for
-Metal-enabled builds. If a requested non-CPU backend is unavailable, {cmd:xfepout} exits
-with an error instead of silently falling back to CPU. For CUDA builds, use
-{cmd:XHDFE_CUDA_ARCH} (single SM target) or {cmd:XHDFE_CUDA_ARCHS} (multi-target list)
-when running {cmd:bash stata/tools/build-xfepout-plugin.sh}. If the plugin was rebuilt
-or switched in the current session, run {cmd:discard} (with no arguments) before retrying.{p_end}
-
-{phang}On this workstation (H100), rebuild with
-{cmd:XHDFE_ENABLE_CUDA=ON XHDFE_CUDA_ARCH=90 bash stata/tools/build-xfepout-plugin.sh --linux --openmp}.{p_end}
-
-{phang}After running {cmd:xfepout, ... gpubackend(cuda)}, verify {cmd:e(gpu_used)},
-{cmd:e(gpu_backend)}, and {cmd:e(gpu_status)}. If CUDA is unavailable, fails before a
-converged absorption result, or returns a CPU cache/profile result, {cmd:xfepout} exits
-with error 498 instead of silently returning CPU output. If the plugin was rebuilt
-or switched during the current Stata session, run {cmd:discard} (with no arguments)
-before rerunning the command.{p_end}
-
-{phang}Practical rule: after rebuilding {cmd:xfepout.plugin}, after switching between CPU and
-CUDA plugin binaries, or after changing the active {cmd:adopath} entry that provides
-{cmd:xfepout.ado}/{cmd:xfepout.plugin}, run {cmd:discard} (not {cmd:discard xfepout}) before
-rerunning {cmd:xfepout}.{p_end}
-
-{phang}Ordinary repeated calls in the same Stata session do {bf:not} require {cmd:discard}
-when the plugin binary itself has not changed; for example, rerunning {cmd:xfepout} first
-on CPU and then with {cmd:gpubackend(cuda)} now reuses the same loaded plugin correctly.{p_end}
+{phang}{opt gpubackend(cpu|cuda|metal)} selects the backend. CUDA needs a
+CUDA-enabled plugin and an available device. Metal is reserved. An explicit
+non-CPU request returns error 498 if the selected backend cannot provide a
+converged result or if the result would come from a CPU transform.
+Check {cmd:e(gpu_used)}, {cmd:e(gpu_backend)}, {cmd:e(gpu_status)} and
+{cmd:e(cuda_tail)}. See {helpb xhdfegpu} for Linux CUDA builds. After replacing
+a plugin or changing its {cmd:adopath} entry, run {cmd:discard} with no arguments
+or restart Stata.{p_end}
 
 {dlgtab:Cache and Profile}
 {phang}{opt mobilityprofile} write/update a mobility profile at the path supplied by
@@ -209,19 +190,15 @@ reuse. Legacy version-1 files and mismatches are safe misses. A suggested method
 after convergence and independent precision certification; otherwise automatic selection restarts
 from the original data. CPU-only method hints are not forced on CUDA runs, and profiles are written
 only after convergence and certification.{p_end}
-{phang}{opt absorptioncache(path)} path for the generation-4 absorption cache payload.
-{cmd:abscachefile()} is accepted as an alias.{p_end}
-{phang}{opt abscachemode(mode)} absorption cache mode: {it:off}, {it:auto}, {it:read}, {it:write}.
-{cmd:absorptioncachemode()} is accepted as an alias.{p_end}
-{pmore}{it:read}, {it:write}, and {it:auto} require either an explicit
-{cmd:absorptioncache()}/{cmd:abscachefile()} path or a mobility profile path supplied by
-{cmd:mobfile()} or one of its aliases. Pathless {cmd:abscachemode(off)} is allowed.{p_end}
-{pmore}Cache identity covers the retained outcome, transformed-variable matrix, FE structure,
-weights, solver contract, requested tolerance/method/thread configuration, and CPU/CUDA request.
-Old cache magic, signature or dimension mismatch, truncation, corruption, nonfinite payloads, and
-trailing bytes are safe misses. {it:auto} repairs a miss only after a newly computed result converges
-and passes the independent precision certificate; {it:read} never rewrites. CPU cache material is
-never returned for an explicit CUDA request.{p_end}
+{phang}{opt absorptioncache(path)} specifies a cache of transformed variables.
+{opt abscachefile()} is an alias.{p_end}
+{phang}{opt abscachemode(mode)} selects {it:off}, {it:auto}, {it:read}, or {it:write}.
+{opt absorptioncachemode()} is an alias. Active caching needs an explicit
+cache path or a profile path from which the companion cache path is derived.
+Reuse requires matching input, FE structure, weights and solver contract.
+{it:read} leaves the file untouched, {it:write} writes a fresh certified
+result, and {it:auto} reads valid entries and can replace misses.
+CUDA absorption skips reads from this cache.{p_end}
 {phang}{opt fescache(path)} path for FE-structure cache payload.{p_end}
 {phang}{opt festructurecache} use default FE-structure cache path relative to {cmd:xfepout.ado}.
 {cmd:festructurecache()} and {cmd:festructurecachefile()} are accepted as aliases for
@@ -242,11 +219,19 @@ never returned for an explicit CUDA request.{p_end}
 {phang}{opt a(...)}/{opt abs(...)} are aliases for {opt absorb(...)}; {opt groupv()} is an alias
 for {opt groupvar()}.{p_end}
 {phang}{opt nowarn} suppress singleton warning messages; transformation is unchanged.{p_end}
-{phang}{opt poolsize(#)} accepted for hdfe compatibility; currently ignored by {cmd:xfepout}.{p_end}
-{phang}{opt acceleration(str)} accepted for hdfe compatibility; currently ignored by {cmd:xfepout}.{p_end}
-{phang}{opt prune} accepted for hdfe compatibility; currently ignored by {cmd:xfepout}.{p_end}
-{phang}{opt verbose(#)} accepted for hdfe compatibility; currently ignored by {cmd:xfepout}.{p_end}
+{phang}{opt poolsize(#)}, {opt acceleration(str)}, {opt prune} and
+{opt verbose(#)} are accepted for hdfe compatibility and leave the
+transformation unchanged.{p_end}
 {phang}{opt timeit} print plugin wall-clock time from the ado layer.{p_end}
+
+{marker examples}{...}
+{title:Examples}
+
+{pstd}Partial out firm and year effects, then calculate the within slopes.
+Use {helpb xhdfe} when you need absorbed DoF and regression inference.{p_end}
+{phang2}{cmd:. use "https://www.stata-press.com/data/r19/grunfeld.dta", clear}{p_end}
+{phang2}{cmd:. xfepout invest mvalue kstock, absorb(company year) generate(within_) sample(in_fit)}{p_end}
+{phang2}{cmd:. regress within_invest within_mvalue within_kstock if in_fit, noconstant}{p_end}
 
 {marker results}{...}
 {title:Stored results}
@@ -273,27 +258,30 @@ for {opt groupvar()}.{p_end}
 {synopt:{cmd:e(thread_capacity)}}runtime-visible logical processor capacity{p_end}
 {synopt:{cmd:e(openmp_enabled)}}1 when the plugin has OpenMP support{p_end}
 {synopt:{cmd:e(thread_limit_code)}}0 none, 1 runtime capacity, 2 auto policy, 3 auto maxthreads, 4 OpenMP unavailable,
-6 automatic team shared with the same user's simultaneous fits{p_end}
-{synopt:{cmd:e(thread_limit_reason)}}label corresponding to the limit code{p_end}
+5 automatic request made inside an active OpenMP region, 6 automatic team shared with the same user's
+simultaneous fits; its label is the macro {cmd:e(thread_limit_reason)}{p_end}
 {synopt:{cmd:e(gpu_used)}}1 if GPU backend was effectively used, 0 if CPU path was used{p_end}
 {synopt:{cmd:e(gpu_status_code)}}GPU status code: 0 not requested, 1 used, 2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result{p_end}
 {synopt:{cmd:e(gpu_attempted)}}1 if GPU absorption was attempted, 0 otherwise{p_end}
 {synopt:{cmd:e(gpu_absorption_converged)}}1 if attempted GPU absorption converged, 0 if not, missing if not attempted{p_end}
 {synopt:{cmd:e(gpu_absorption_iterations)}}GPU absorption iterations, missing if GPU absorption was not attempted{p_end}
-{synopt:{cmd:e(cuda_tail_code)}}three-FE Comparable CUDA completion: 0 none, 1 GPU LSMR, 2 CPU MLSMR after the GPU sweeps (see {help xhdfe}){p_end}
-{synopt:{cmd:e(method_used)}}numeric method code: 0 auto, 1 gauss-seidel, 2 symmetric-gauss-seidel, 3 jacobi, 4 Schwarz/CG, 5 LSMR, 6 MLSMR, 7 auto-MLSMR{p_end}
+{synopt:{cmd:e(cuda_tail_code)}}CUDA completion: 0 none reported, 1 device LSMR, 2 host MLSMR (see {help xhdfe##opt_gpu:backend selection}){p_end}
+{synopt:{cmd:e(method_used)}}method code: 0 auto, 1 Gauss-Seidel, 2 symmetric Gauss-Seidel,
+3 Jacobi, 4 Schwarz/CG, 5 LSMR, 6 MLSMR, 7 Auto-MLSMR, 9 Krylov-PCG
+(a profile-selected route). Internal direct methods can report the chosen sweep code.{p_end}
 
 {synoptset 24 tabbed}{...}
 {p2col 5 24 28 2: Macros}{p_end}
 {synopt:{cmd:e(absvars)}}canonical FE specification used by {cmd:absorb()}{p_end}
 {synopt:{cmd:e(extended_absvars)}}alias of {cmd:e(absvars)}{p_end}
-{synopt:{cmd:e(absorption_method)}}resolved sweep-method label; inspect {cmd:e(method_used)} for the full method enum{p_end}
+{synopt:{cmd:e(absorption_method)}}reported absorption method label; see {cmd:e(method_used)}{p_end}
 {synopt:{cmd:e(gpu_backend_requested)}}requested backend from {opt gpubackend()}, when provided{p_end}
-{synopt:{cmd:e(gpu_backend)}}effective backend ({cmd:cpu}, {cmd:cuda}, or {cmd:metal}) when the command completed successfully{p_end}
+{synopt:{cmd:e(gpu_backend)}}effective backend when {opt gpubackend()} was specified{p_end}
 {synopt:{cmd:e(gpu_status)}}GPU status label: {cmd:not_requested}, {cmd:used},
 {cmd:backend_unavailable}, {cmd:gpu_absorption_not_converged},
 {cmd:gpu_backend_failed}, or {cmd:cpu_cache_or_profile_result}{p_end}
 {synopt:{cmd:e(cuda_tail)}}label of {cmd:e(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
+{synopt:{cmd:e(thread_limit_reason)}}label of {cmd:e(thread_limit_code)}{p_end}
 {synopt:{cmd:e(version)}}xfepout version string{p_end}
 {synopt:{cmd:e(cmd)}}{cmd:xfepout}{p_end}
 {synopt:{cmd:e(cmdline)}}command line used to invoke xfepout{p_end}

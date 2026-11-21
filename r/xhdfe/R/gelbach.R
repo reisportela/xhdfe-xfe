@@ -51,6 +51,9 @@
 #'   logical mask used only to select focal rows for reporting. Every X1
 #'   column remains in both specifications, so common controls can be included
 #'   in \code{x1} without crowding the empirical table.
+#' @param weighted_cpu_route Logical scalar, default \code{FALSE}. With
+#'   \code{TRUE}, request CPU for eligible weighted CUDA fits. Bootstrap
+#'   callers can pass this argument through \code{...}.
 #' @param gpu Logical scalar. With \code{TRUE}, request CUDA for the
 #'   full-model FE-absorption phase. The decomposition and covariance
 #'   calculations remain on the CPU. A CPU-only build or unavailable device
@@ -333,7 +336,8 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
                           gpu = FALSE, connected = "diagnose",
                           connectivity_fes = NULL, common_fes = NULL,
                           sample_info = FALSE,
-                          fe_variance_ratio_min = 0.35) {
+                          fe_variance_ratio_min = 0.35,
+                          weighted_cpu_route = FALSE) {
   y <- as.numeric(y)
   x1_is_numeric <- if (is.data.frame(x1)) {
     all(vapply(x1, function(z) is.numeric(z) && !is.factor(z), logical(1)))
@@ -382,6 +386,10 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
   }
   if (length(gpu) != 1L || is.na(gpu) || !is.logical(gpu)) {
     stop("gpu must be one non-missing logical value", call. = FALSE)
+  }
+  if (!is.logical(weighted_cpu_route) || length(weighted_cpu_route) != 1L ||
+      is.na(weighted_cpu_route)) {
+    stop("weighted_cpu_route must be TRUE or FALSE", call. = FALSE)
   }
   if (length(sample_info) != 1L || is.na(sample_info) ||
       !is.logical(sample_info)) {
@@ -559,7 +567,7 @@ xhdfe_gelbach <- function(y, x1, x2_groups = NULL, fes = NULL,
                             as.integer(connectivity_fe_pair - 1L),
                             identical(connected, "require"),
                             as.integer(length(common_fe_list)),
-                            isTRUE(sample_info))
+                            isTRUE(sample_info), weighted_cpu_route)
   out$sample_info_requested <- isTRUE(sample_info)
   if (isTRUE(sample_info)) {
     sample_index <- as.integer(out$sample_index)

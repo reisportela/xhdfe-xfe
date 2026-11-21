@@ -57,6 +57,19 @@ inline const char* cuda_tail_name(int code) noexcept {
                                        : "none";
 }
 
+// Package C (18nov2026): the GPU status code of a weighted fit with two or more
+// absorbed effect dimensions, in reghdfe-comparable or strict-residual mode,
+// whose effective backend was CUDA and which the regressor ran as the CPU call
+// on an explicit per-fit request. Name
+// weighted_cpu_route. Only the code says so: the other GPU fields are the CPU
+// call's. 6 is taken (Gelbach reads it as not_applicable).
+constexpr int kGpuStatusWeightedCpuRoute = 7;
+
+// Phase 5a: false under XHDFE_SLOPE_TEAM_INDEXERS=0 (read once per process in
+// fe_absorption.cpp), which keeps the serial identifier builds of the route with
+// heterogeneous slopes; otherwise they run on the team, bit for bit the same.
+bool slope_team_indexers_enabled();
+
 struct AbsorptionResult {
     std::shared_ptr<N1FeEvidence> n1_fe;
     Eigen::VectorXd y_tilde;
@@ -151,6 +164,26 @@ struct AbsorptionResult {
     // converged" result (fe_absorption.cpp); the regressor hands it to the fit's
     // one strict repair as HdfeOptions::strict_lsmr_consumed.
     bool cuda_strict_lsmr_restart = false;
+    // Point 14 (17nov2026): set only by absorb_fixed_effects_krylov, on the
+    // transforms its preconditioned conjugate gradients produced. The regressor
+    // reports KrylovPcg when this result is published under a forced Krylov
+    // route; no computation reads it. Last member, so that no other offset moves.
+    bool krylov_pcg_used = false;
+    // Package B, stage 2a' (18nov2026), appended so that no other offset moves: the
+    // raw sums of squares of the original y and of every original column (instruments
+    // included) as the last certificate of this result formed them, before any
+    // normalisation; and the request, set by the regressor only for the
+    // recertification after the strict continuation, that this certificate take them
+    // over instead of forming them again (the dominant-origin normalisation of the
+    // comparable mode still runs on them). The certificate clears the request.
+    std::vector<long double> raw_original_norm_sq;
+    bool reuse_raw_original_norm_sq = false;
+    // The CPU LSMR/MLSMR Strict projection needs the absolute check on readback too.
+    AbsorptionMethod strict_cpu_projection_method = AbsorptionMethod::Auto;
+    long double strict_cpu_max_abs_mean = -1.0L;
+    bool weighted_gs_moments_met = true;
+    bool cuda_projection_moments_met = true;
+    bool cuda_projection_repaired = false;
 };
 
 struct HeterogeneousSlopeTerm {
@@ -166,6 +199,14 @@ struct FeRecoveryResult {
     bool converged = true;
 };
 
+// The FE-collinearity constant: a regressor whose absorbed sum of squares is
+// at most this fraction of its raw sum of squares (of its centred one when the
+// model has a constant) is collinear with the absorbed effects. The regressor
+// omits such a column (hdfe_regressor_v11.cpp), and the heterogeneous-slope
+// block certificate judges it in its input scale (certify_absorption_result,
+// HdfeOptions::fe_collinear_omission_cols).
+constexpr double kFeCollinearTol = 1e-9;
+
 // Compute an explicit normal-equation residual for the returned within
 // transform. The diagnostic is independent of the solver's internal stopping
 // proxy and uses fixed logical chunks, so its value is invariant to the OpenMP
@@ -178,7 +219,201 @@ void certify_absorption_result(
     const HdfeOptions& options,
     const std::vector<HeterogeneousSlopeTerm>& slopes,
     AbsorptionResult& result,
-    const GroupIndividualStructure* group_individual = nullptr);
+    const GroupIndividualStructure* group_individual = nullptr,
+    bool refresh_cuda_projection = false);
+
+// One weighted projection on the span of forward GS increments, within the
+// remaining iteration budget. Called after the per-column moment check fails.
+bool repair_weighted_gauss_seidel(
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd& weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result);
+
+// Complete an inaccurate ordinary CUDA projection on the device, in the
+// remaining iteration budget. The independent check sees the original data.
+bool repair_cuda_projection(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result);
+
+// The codes the reduced-system tier computed for one effect (phase 2 of the
+// Stata-path plan, design note Verifications/perf_stata_path_20261114/fase2/
+// DESENHO_FASE2.md, section 6): the ascending compact ranks 0..levels-1 of the
+// effect's identifiers, whose minimum and maximum are min_id and max_id.
+struct TierFeCodes {
+    std::vector<int>* codes = nullptr;
+    int levels = 0;
+    int min_id = 0;
+    int max_id = 0;
+};
+
+// certify_absorption_result(y, X, fes, nullptr, options, {}, result) for the
+// tier's attempt, with its codes (one entry per effect of fes, in order). For
+// every effect whose indexer would number the identifiers by the same ranks
+// (sparse_rank::indexer_numbers_by_rank()) the certificate takes the codes vector
+// over instead of numbering the identifiers again; the other effects are numbered
+// as before and their vectors are left alone. The result is the same.
+void certify_tier_absorption(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const HdfeOptions& options,
+    AbsorptionResult& result,
+    std::vector<TierFeCodes>& tier_codes);
+
+// The Krylov parity floor of the fit's mode as MLSMR applies it: krylov_parity_tolerance
+// (fe_absorption.cpp) with absorption_method = Mlsmr, the atol the reduced tier also uses
+// (reduced_schur_pcg.cpp, mlsmr_parity_tolerance). It follows the public tolerance:
+// min(effective tolerance, 1e-11) in reghdfe-comparable and strict-residual with the parity
+// floor on (1e-11 at the default 1e-8), the effective tolerance otherwise. Used by correction
+// E1 (hdfe_regressor_v11.cpp, publish_savefe_projection); not a new tolerance.
+double mode_parity_floor(const HdfeOptions& options);
+
+// Package B (strict-residual on CUDA, 17nov2026). The largest absolute group
+// mean of `values` over the absorbed effects `fes`: a fresh pass,
+// long-double sums per group of each effect in row order, the effects in parallel,
+// each serial (deterministic). Stage 2a' (18nov2026): the groups are indexed by the
+// codes themselves when they are non-negative and dense (largest code below 5e7
+// and at most 2n, build_indexer's dense range), by build_indexer otherwise
+// (sparse or negative identifiers); the sums and their order are the same.
+// `finite` is false when a value or a group mean is not finite; `maximum` is then
+// +infinity.
+struct GroupMeanReading {
+    long double maximum = 0.0L;
+    bool finite = true;
+    std::vector<long double> per_effect;
+};
+GroupMeanReading max_abs_group_mean(const Eigen::Ref<const Eigen::VectorXd>& values,
+                                    const std::vector<Eigen::VectorXi>& fes,
+                                    int threads,
+                                    const Eigen::VectorXd* weights = nullptr);
+
+// Package B: the continuation of a strict-residual fit on CUDA whose delivered
+// residual failed D(e) <= tol. Gauss-Seidel sweeps of y_tilde and of every
+// column of X_tilde (kept regressors, omitted ones, instruments), in `order`
+// (the order of the effects the fit used; when empty, the order the GPU
+// dispatch of absorb_fixed_effects_v6 computes for the original data: by
+// profile with three or more effects, select_sweep_order on y_original with
+// two). After each effect, the group means of the combination
+// y_tilde - X_tilde * combination removed by it are read on the device (the
+// in-sweep maximum, a trigger only); when a sweep's in-sweep maximum is at or
+// below tol, a fresh device pass (the residual formed by row, one column
+// reduced per effect) confirms, and the continuation stops iff the fresh
+// maximum is at or below tol. It never refuses by that rule: at the last sweep
+// max_sweeps allows the state is returned as it is. Confirmations are not
+// sweeps. Returns false when the device did not serve the call (the caller
+// refuses); y_tilde and X_tilde are then unspecified.
+struct StrictContinuationReport {
+    int sweeps = 0;
+    int confirmations = 0;
+    bool confirmed = false;         // stopped by a fresh maximum at or below tol
+    double first_effect_in_sweep = -1.0;  // in-sweep maximum of order[0], first sweep
+    double last_in_sweep = -1.0;
+    double last_fresh = -1.0;
+    std::vector<int> order;         // the order the sweeps used
+    bool order_inherited = false;   // true: the fit's sweep_order_used
+    double seconds_indexers = 0.0;
+    double seconds_upload = 0.0;
+    double seconds_sweeps = 0.0;
+    double seconds_confirmations = 0.0;
+    double seconds_download = 0.0;
+    // Stage 2a'' (input, set by the regressor): 2 prints one trace line per fresh reading
+    // and, for the trace alone, also takes one at power-of-two sweeps (no decision reads
+    // it); 0 and 1 leave the work of stage 2a' unchanged.
+    int trace_level = 0;
+    // Stage 2c (b/RESPOSTA_2B_B_ADENDA.md): the continuation has no frozen exit. A window
+    // of three equal power-of-two readings is no evidence of a stalled state there: on the
+    // reviewer's deterministic counterexample at the continuation's entry (16 pairs, 32
+    // rows, two effects A_j = (u_j, v_j) and B_j = (v_j, u_{j+1}), no regressors, e(u_j) =
+    // -e(v_j) = 2a min(j, 16 - j), a = 43 * 2^-32, order A, B) the readings after sweeps 1, 2
+    // and 4 are bit for bit a > 1e-8 and the fifth is 127a/128 < 1e-8, so such a rule
+    // refuses at the fourth sweep a fit the trigger accepts at the sixth.
+    const char* exit = "budget";  // confirmed or budget (output)
+};
+bool continue_strict_residual(Eigen::VectorXd& y_tilde,
+                              Eigen::MatrixXd& X_tilde,
+                              const Eigen::Ref<const Eigen::VectorXd>& y_original,
+                              const std::vector<Eigen::VectorXi>& fes,
+                              const std::vector<int>& order_used,
+                              const Eigen::VectorXd& combination,
+                              double tol,
+                              int max_sweeps,
+                              int threads,
+                              StrictContinuationReport& report);
+
+// Package B, stage 2a' (18nov2026; b/RESPOSTA_2A_B.md): the polish of a strict-residual
+// fit in scope at a sweep exit. The regressor sets HdfeOptions::strict_sweep_exit on the
+// primary absorption only. The CUDA sweep route (absorb_fixed_effects_cuda_impl), when its
+// main solve ended in Gauss-Seidel sweeps (no LSMR completion, no tail hand-off, no CG
+// stage) and after the six fixed sweeps of the comparable polish, reads it once: a
+// provisional b0 from the Gram of [X~ | y~] formed on the device and solved on the host
+// (strict_sweep_exit_solve; no Gram without regressors, b0 empty), then D0, the largest
+// absolute group mean of y~ - X~ b0 measured fresh on the device; above `tol` it sweeps
+// every column in the route's order, each sweep counted against max_iter, until a fresh
+// confirmation is at or below `tol` (the in-sweep maximum of the combination is only the
+// trigger), b0 fixed. It never marks non-convergence and never refuses: at the last sweep
+// the budget allows the state goes on as it is. Skipped, the fit unchanged, with
+// instruments, above kStrictSweepExitMaxColumns regressors, a non-finite Gram, or a rank
+// that is deficient or doubtful (strict_sweep_exit_solve). The fields after `instruments`
+// are the step's report (trace only).
+constexpr int kStrictSweepExitMaxColumns = 32;
+// Stage 2b, step 0 (18nov2026; b/RESPOSTA_2A3_B.md): in the direct form (no symmetric
+// sweep) a fresh reading is also taken when the count of additional sweeps is a power of
+// two (at most one fresh reading per sweep), and the step hands the state over to the
+// host, nothing confirmed, when the readings taken at the last three power-of-two counts
+// are bit for bit the same (`frozen`; trigger readings in between do not enter that
+// test). XHDFE_STRICT_FROZEN_STOP: `0` (stage 2a' exactly) or anything else, unset
+// included (frozen_stop 1, the default; stage 2c removed the value `all`, which now means
+// the default). The symmetric form is stage 2a' under every value. `frozen_stop` and
+// `trace_level` are inputs set by the regressor (XHDFE_STRICT_ACCEPT_TRACE=2 prints every
+// fresh reading).
+struct StrictSweepExitRequest {
+    double tol = 0.0;           // the public tolerance (the primary's may be tighter)
+    double rank_tol = 0.0;      // the regressor's rank tolerance, max(1e-6, 10 tol)
+    bool instruments = false;   // the fit has instruments: the step is skipped
+    int frozen_stop = 1;        // 0 (stage 2a'), 1 step (the default); the step sets the
+                                // effective value (0 on the symmetric form)
+    int trace_level = 0;        // 2: one trace line per fresh reading
+    bool consumed = false;      // the step was reached (once per fit)
+    const char* exit = "none";  // d0, confirmed, frozen, budget, device; none when not
+                                // reached or skipped
+    int readings = 0;           // fresh readings after D0
+    double best = -1.0;         // the smallest fresh reading (D0 included)
+    bool formed = false;        // b0 formed (or empty without regressors) and D0 measured
+    const char* skipped = "";   // why b0 was not formed: instruments, columns, cg-exit,
+                                // non-finite, fe-collinear, rank, device
+    int columns = 0;
+    double lambda_min = -1.0;   // smallest eigenvalue of the unit-diagonal Gram
+    double seconds_raw = 0.0;   // raw sums of squares of the original columns (device)
+    double seconds_gram = 0.0;
+    double seconds_solve = 0.0;
+    double seconds_total = 0.0;
+    double d0 = -1.0;
+    int sweeps = 0;             // additional sweeps (counted in iterations)
+    int confirmations = 0;
+    bool confirmed = false;     // D0 or a fresh confirmation at or below tol
+    double last_in_sweep = -1.0;
+    double last_fresh = -1.0;
+};
+
+// Package B, stage 2a': b0 from the device Gram of [X~ | y~] (`upper`: its upper triangle,
+// row major, cols + 1 columns, y~ last). Skipped (false, `reason` set) when an entry is not
+// finite; when a column's absorbed sum of squares is at most 1e3 * kFeCollinearTol times its
+// raw one (`raw_ss`, the original column; the regressor omits a column at 1e0 times); or
+// when the smallest eigenvalue of the unit-diagonal Gram is below (1e3 * rank_tol)^2, the
+// regressor dropping a column whose residual norm after the others is at most rank_tol times
+// its norm. Otherwise b0 solves the scaled system by LDLT.
+bool strict_sweep_exit_solve(const std::vector<double>& upper,
+                             int cols,
+                             const std::vector<double>& raw_ss,
+                             double rank_tol,
+                             std::vector<double>& b0,
+                             double& lambda_min,
+                             const char*& reason);
 
 // Authoritative convergence gate for group()/individual() absorption.
 // The norm-change proxy is only a candidate trigger: this routine certifies
@@ -216,8 +451,12 @@ bool certify_group_individual_candidate(
     const HdfeOptions& options,
     AbsorptionResult& result);
 
-AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
-                                      const Eigen::MatrixXd& X,
+// The sweep absorber. It reads y and X where the caller keeps them (no
+// temporary copy at the call) and works on its own copy (result.y_tilde,
+// result.X_tilde); the inputs must not overlap the result and must not change
+// during the call.
+AbsorptionResult absorb_fixed_effects(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
                                       const std::vector<Eigen::VectorXi>& fes,
                                       const Eigen::VectorXd* weights,
                                       const HdfeOptions& options);

@@ -9,7 +9,8 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
                        symmetric_sweep, absorption_method, jacobi_relaxation,
                        level, dof, ssc, tolerance_mode, fe_tolerance,
                        fe_recovery_method, stats_style, weights_type,
-                       groupvar) {
+                       groupvar, reduced_pcg = NULL, reduced_pcg_cuda = NULL,
+                       weighted_cpu_route = FALSE) {
   thread_values <- c(threads, default_threads, max_threads)
   if (any(lengths(list(threads, default_threads, max_threads)) != 1L) ||
       any(!is.finite(thread_values)) || any(thread_values < 0) ||
@@ -55,6 +56,28 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
     weights_are_importance = identical(weights_type, "importance"),
     groupvar = isTRUE(groupvar)
   )
+  # The reduced-system tier for this fit: NULL follows the process default
+  # (XHDFE_REDUCED_PCG), TRUE and FALSE override it.
+  if (!is.null(reduced_pcg)) {
+    if (!is.logical(reduced_pcg) || length(reduced_pcg) != 1L || is.na(reduced_pcg)) {
+      stop("reduced_pcg must be NULL, TRUE or FALSE", call. = FALSE)
+    }
+    opts$reduced_pcg <- reduced_pcg
+  }
+  # The experimental CUDA variant of the tier for this fit: NULL follows the
+  # process default (XHDFE_REDUCED_PCG_CUDA), TRUE and FALSE override it.
+  if (!is.null(reduced_pcg_cuda)) {
+    if (!is.logical(reduced_pcg_cuda) || length(reduced_pcg_cuda) != 1L ||
+        is.na(reduced_pcg_cuda)) {
+      stop("reduced_pcg_cuda must be NULL, TRUE or FALSE", call. = FALSE)
+    }
+    opts$reduced_pcg_cuda <- reduced_pcg_cuda
+  }
+  if (!is.logical(weighted_cpu_route) || length(weighted_cpu_route) != 1L ||
+      is.na(weighted_cpu_route)) {
+    stop("weighted_cpu_route must be TRUE or FALSE", call. = FALSE)
+  }
+  if (weighted_cpu_route) opts$weighted_cpu_route <- TRUE
   if (!is.null(keep_singletons)) opts$keepsingletons <- isTRUE(keep_singletons)
   if (!is.null(dof)) opts$dofadjustments <- as.character(dof)
   opts[names(ssc)] <- ssc
@@ -111,11 +134,15 @@ parse_ssc <- function(ssc) {
 }
 
 # Run the fit with a task-local native backend override and fail-closed GPU
-# semantics (mirrors Stata's error 498 contract for gpubackend(cuda|metal)).
+# semantics (mirrors Stata's error 498 contract for gpubackend(cuda|metal)): a
+# CUDA request that ends without the GPU stops, except status 7
+# (weighted_cpu_route), a weighted fit with two or more absorbed effects that
+# the core ran on the CPU by design and reports as such.
 run_with_backend <- function(backend, fun) {
   backend <- match.arg(backend, c("default", "cpu", "cuda", "metal"))
   res <- .xhdfe_cpp_run_with_backend(backend, fun)
-  if (backend %in% c("cuda", "metal") && !isTRUE(res$gpu_used)) {
+  if (backend %in% c("cuda", "metal") && !isTRUE(res$gpu_used) &&
+      !identical(as.integer(res$gpu_status_code), 7L)) {
     stop("backend = \"", backend, "\" was requested but the GPU was not used (status: ",
          gpu_status_label(res$gpu_status_code),
          "). xhdfe refuses to return silent CPU-fallback results; rebuild the ",
@@ -385,6 +412,9 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     precision_certified = res$precision_certified,
     absorption_method_used = res$absorption_method_used,
     absorption_method_code = res$absorption_method_code,
+    reduced_pcg_status = res$reduced_pcg_status,
+    reduced_pcg_reason = res$reduced_pcg_reason,
+    reduced_pcg_discarded_iterations = res$reduced_pcg_discarded_iterations,
     threads_used = res$threads_used,
     threads_requested = res$threads_requested,
     threads_effective = res$threads_effective,

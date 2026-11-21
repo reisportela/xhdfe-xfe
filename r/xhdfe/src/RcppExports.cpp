@@ -134,8 +134,8 @@ BEGIN_RCPP
 END_RCPP
 }
 // xhdfe_cpp_gelbach
-Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y, Rcpp::NumericMatrix X1, SEXP X2, Rcpp::IntegerVector x2_group_sizes, Rcpp::List fes, SEXP cluster, std::string vce, bool gamma0, bool cov0, double tol, int num_threads, bool gpu, SEXP weights, bool fweights, Rcpp::IntegerVector absorbed_x1, Rcpp::IntegerVector connectivity_fe_pair, bool require_connected, int n_common_fes, bool sample_info);
-RcppExport SEXP _xhdfe_xhdfe_cpp_gelbach(SEXP ySEXP, SEXP X1SEXP, SEXP X2SEXP, SEXP x2_group_sizesSEXP, SEXP fesSEXP, SEXP clusterSEXP, SEXP vceSEXP, SEXP gamma0SEXP, SEXP cov0SEXP, SEXP tolSEXP, SEXP num_threadsSEXP, SEXP gpuSEXP, SEXP weightsSEXP, SEXP fweightsSEXP, SEXP absorbed_x1SEXP, SEXP connectivity_fe_pairSEXP, SEXP require_connectedSEXP, SEXP n_common_fesSEXP, SEXP sample_infoSEXP) {
+Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y, Rcpp::NumericMatrix X1, SEXP X2, Rcpp::IntegerVector x2_group_sizes, Rcpp::List fes, SEXP cluster, std::string vce, bool gamma0, bool cov0, double tol, int num_threads, bool gpu, SEXP weights, bool fweights, Rcpp::IntegerVector absorbed_x1, Rcpp::IntegerVector connectivity_fe_pair, bool require_connected, int n_common_fes, bool sample_info, bool weighted_cpu_route);
+RcppExport SEXP _xhdfe_xhdfe_cpp_gelbach(SEXP ySEXP, SEXP X1SEXP, SEXP X2SEXP, SEXP x2_group_sizesSEXP, SEXP fesSEXP, SEXP clusterSEXP, SEXP vceSEXP, SEXP gamma0SEXP, SEXP cov0SEXP, SEXP tolSEXP, SEXP num_threadsSEXP, SEXP gpuSEXP, SEXP weightsSEXP, SEXP fweightsSEXP, SEXP absorbed_x1SEXP, SEXP connectivity_fe_pairSEXP, SEXP require_connectedSEXP, SEXP n_common_fesSEXP, SEXP sample_infoSEXP, SEXP weighted_cpu_routeSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -158,7 +158,8 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< bool >::type require_connected(require_connectedSEXP);
     Rcpp::traits::input_parameter< int >::type n_common_fes(n_common_fesSEXP);
     Rcpp::traits::input_parameter< bool >::type sample_info(sample_infoSEXP);
-    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_gelbach(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info));
+    Rcpp::traits::input_parameter< bool >::type weighted_cpu_route(weighted_cpu_routeSEXP);
+    rcpp_result_gen = Rcpp::wrap(xhdfe_cpp_gelbach(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info, weighted_cpu_route));
     return rcpp_result_gen;
 END_RCPP
 }
@@ -172,7 +173,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_xhdfe_xhdfe_cpp_akm_leave_out_set", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_leave_out_set, 2},
     {"_xhdfe_xhdfe_cpp_akm_leave_out_set_opts", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_leave_out_set_opts, 6},
     {"_xhdfe_xhdfe_cpp_akm_kss", (DL_FUNC) &_xhdfe_xhdfe_cpp_akm_kss, 6},
-    {"_xhdfe_xhdfe_cpp_gelbach", (DL_FUNC) &_xhdfe_xhdfe_cpp_gelbach, 19},
+    {"_xhdfe_xhdfe_cpp_gelbach", (DL_FUNC) &_xhdfe_xhdfe_cpp_gelbach, 20},
     {NULL, NULL, 0}
 };
 

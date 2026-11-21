@@ -1,4 +1,4 @@
-*! version 1.0.2  12nov2026
+*! version 1.0.2  21nov2026
 *! Full pairs/cluster-pairs bootstrap for xhdfegelbach point functionals.
 
 program define xhdfegelbachbootstrap, rclass sortpreserve
@@ -12,7 +12,13 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
           CONNected(string) CONNectivityfes(varlist numeric min=2 max=2) ///
           BOOTCLuster(varname numeric) REPS(integer 999) SEED(integer 0) ///
           MINValid(integer 0) BOOTCI(string) Level(cilevel) ///
-          REQUIREGPU SHARETOL(real 1e-12) ]
+          REQUIREGPU SHARETOL(real 1e-12) WEIGHTEDCPUROUTE(string) ]
+
+    local weightedcpuroute = lower(strtrim(`"`weightedcpuroute'"'))
+    if ("`weightedcpuroute'" != "" & !inlist("`weightedcpuroute'", "on", "off")) {
+        di as err "weightedcpuroute() must be on or off"
+        exit 198
+    }
 
     local y `varlist'
     local method = lower(trim("`method'"))
@@ -128,6 +134,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     if ("`focal'" != "") ///
         local point_options "`point_options' focal(`focal')"
     if ("`gpu'" != "") local point_options "`point_options' gpu"
+    if ("`weightedcpuroute'" == "on") local point_options "`point_options' weightedcpuroute(on)"
     if ("`verbose'" != "") local point_options "`point_options' verbose"
     local point_options "`point_options' connected(`connected')"
     if ("`connectivityfes'" != "") ///
@@ -140,7 +147,12 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
         exit 430
     }
     if ("`requiregpu'" != "" & r(gpu_used) != 1) {
-        di as err "GPU use was required but the point estimate used a fallback"
+        * Package C (18nov2026): a weighted full model with two or more absorbed effects runs on the CPU by design.
+        if ("`r(gpu_status)'" == "weighted_cpu_route") {
+            di as err "GPU use was required, but a weighted decomposition with two or more absorbed effects" ///
+                " runs on the CPU by design (r(gpu_status) = weighted_cpu_route)"
+        }
+        else di as err "GPU use was required but the point estimate used a fallback"
         exit 459
     }
 
@@ -232,6 +244,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     if ("`focal'" != "") ///
         local replicate_options "`replicate_options' focal(`focal')"
     if ("`gpu'" != "") local replicate_options "`replicate_options' gpu"
+    if ("`weightedcpuroute'" == "on") local replicate_options "`replicate_options' weightedcpuroute(on)"
     local replicate_options "`replicate_options' connected(`connected')"
     if ("`connectivityfes'" != "") ///
         local replicate_options "`replicate_options' connectivityfes(`connectivityfes')"
@@ -415,7 +428,7 @@ program define xhdfegelbachbootstrap, rclass sortpreserve
     return local ci_method "`bootci'"
     return local interval_status ///
         "resampling_based_not_a_nonregularity_cure"
-    return local version "1.0.1 20oct2026"
+    return local version "1.0.2 21nov2026"
     return local rng "Stata_rng_reproducible_seed"
     return local point_vce "`point_vce'"
     return local point_gpu_backend "`point_gpu_backend'"

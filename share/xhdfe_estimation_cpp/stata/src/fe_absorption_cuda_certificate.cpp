@@ -95,16 +95,17 @@ inline Index deterministic_chunk_end(Index n, int chunk, int chunks) {
 }
 
 template <typename Index, typename Body>
-double deterministic_chunked_sum(
+auto deterministic_chunked_sum(
     Index n,
     int threads,
     const Body& body,
-    ParallelWorkObserver* observer = nullptr) {
+    ParallelWorkObserver* observer = nullptr) -> decltype(body(n)) {
+    using Value = decltype(body(n));
     const int chunks = deterministic_chunk_count(n);
     if (chunks == 0) {
-        return 0.0;
+        return Value{};
     }
-    InlineOrDynamicBuffer<double> partial(
+    InlineOrDynamicBuffer<Value> partial(
         static_cast<std::size_t>(chunks));
     int local_threads = 1;
 #ifdef HDFE_USE_OPENMP
@@ -127,7 +128,7 @@ double deterministic_chunked_sum(
         }
         const Index begin = deterministic_chunk_begin(n, chunk, chunks);
         const Index end = deterministic_chunk_end(n, chunk, chunks);
-        double local = 0.0;
+        Value local{};
         for (Index i = begin; i < end; ++i) {
             local += body(i);
         }
@@ -136,12 +137,23 @@ double deterministic_chunked_sum(
     if (region_observer) {
         region_observer->end_region();
     }
-    double total = 0.0;
+    Value total{};
     for (int chunk = 0; chunk < chunks; ++chunk) {
         total += partial[static_cast<std::size_t>(chunk)];
     }
     return total;
 }
+
+struct ProjectionSquares {
+    double plain = 0.0;
+    double scaled = 0.0;
+
+    ProjectionSquares& operator+=(const ProjectionSquares& other) {
+        plain += other.plain;
+        scaled += other.scaled;
+        return *this;
+    }
+};
 
 double deterministic_sumsq_raw(
     const double* data,
@@ -375,19 +387,58 @@ void certify_cuda_absorption_result(
     const bool unit_weights = (weights == nullptr);
     const double* weight_ptr = unit_weights ? nullptr : weights->data();
     const int rhs_count = static_cast<int>(X.cols()) + 1;
+    const bool check_projection = slopes.empty() &&
+        cuda_projection_scope(fe_views.size(), !unit_weights, y.size(), options);
+    const bool strict_projection = check_projection &&
+        (options.tolerance_mode == ToleranceMode::StrictResidual ||
+         options.strict_provenance || options.strict_sweep_exit != nullptr);
+    result.cuda_projection_moments_met = true;
+    const double moment_limit = std::max(std::min(options.tol, 1e-9),
+                                         64.0 * std::numeric_limits<double>::epsilon());
+    std::vector<double> projection_norm_sq(check_projection ? rhs_count : 0);
     std::vector<long double> original_norm_sq(
         static_cast<std::size_t>(rhs_count), 0.0L);
     std::vector<long double> residual_norm_sq(
         static_cast<std::size_t>(rhs_count), 0.0L);
-    original_norm_sq[0] = static_cast<long double>(
-        deterministic_sumsq_raw(
-            y.data(), n, threads, options.parallel_observer));
-    for (int rhs = 1; rhs < rhs_count; ++rhs) {
-        original_norm_sq[static_cast<std::size_t>(rhs)] =
-            static_cast<long double>(deterministic_sumsq_raw(
-                X.col(rhs - 1).data(), n, threads,
-                options.parallel_observer));
+    const bool reuse_raw_norms = result.reuse_raw_original_norm_sq && unit_weights &&
+        result.raw_original_norm_sq.size() == static_cast<std::size_t>(rhs_count);
+    result.reuse_raw_original_norm_sq = false;
+    for (int rhs = 0; rhs < rhs_count; ++rhs) {
+        const double* data = rhs == 0 ? y.data() : X.col(rhs - 1).data();
+        if (check_projection && !unit_weights) {
+            const auto totals = deterministic_chunked_sum<int>(
+                n, threads, [&](int row) {
+                    const double sq = data[row] * data[row];
+                    return ProjectionSquares{sq, weight_ptr[row] * sq};
+                }, options.parallel_observer);
+            original_norm_sq[rhs] = totals.plain;
+            projection_norm_sq[rhs] = totals.scaled;
+        } else {
+            const double total = reuse_raw_norms
+                ? static_cast<double>(result.raw_original_norm_sq[rhs])
+                : deterministic_sumsq_raw(data, n, threads, options.parallel_observer);
+            original_norm_sq[rhs] = total;
+            if (check_projection) projection_norm_sq[rhs] = total;
+        }
+        if (strict_projection) {
+            const double* projected = rhs == 0 ? result.y_tilde.data()
+                                               : result.X_tilde.col(rhs - 1).data();
+            const double within_sq = deterministic_chunked_sum<int>(
+                n, threads, [&](int i) {
+                    const double value = projected[i];
+                    return unit_weights ? value * value : (weight_ptr[i] * value) * value;
+                }, options.parallel_observer);
+            // Judge retained signal in the units used for inference. A
+            // potentially annihilated column keeps the input-scale check.
+            if (finite_double_bits(within_sq) &&
+                within_sq > kFeCollinearTol * projection_norm_sq[rhs]) {
+                projection_norm_sq[rhs] = std::min(projection_norm_sq[rhs], within_sq);
+            }
+        }
     }
+    // Package B, stage 2a': the raw values, before the normalisation below, for the
+    // recertification after the strict continuation (AbsorptionResult).
+    result.raw_original_norm_sq = original_norm_sq;
     long double operator_norm_sq = 0.0L;
 
     using CertificateMatrix =
@@ -654,6 +705,21 @@ void certify_cuda_absorption_result(
         for (int moment = 0; moment < moment_count; ++moment) {
             const int base = moment * rhs_count;
             for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                if (check_projection && result.cuda_projection_moments_met) {
+                    const auto totals = deterministic_chunked_sum<int>(
+                        input.num_groups, threads, [&](int group) {
+                            const double value = sums(group, base + rhs);
+                            const double sq = value * value;
+                            const double mass = input.weight_sums[group];
+                            return ProjectionSquares{sq, mass > 0.0 ? sq / mass : 0.0};
+                        }, options.parallel_observer);
+                    residual_norm_sq[rhs] += totals.plain;
+                    result.cuda_projection_moments_met =
+                        finite_double_bits(totals.scaled) &&
+                        finite_double_bits(projection_norm_sq[rhs]) &&
+                        std::sqrt(totals.scaled) <= moment_limit * std::sqrt(projection_norm_sq[rhs]);
+                    continue;
+                }
                 const double residual_sq = deterministic_chunked_sum<int>(
                     input.num_groups, threads, [&](int group) {
                         const double value = sums(group, base + rhs);

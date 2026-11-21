@@ -41,12 +41,14 @@ public:
     BindingAttemptGuard(HdfeRegressorV11& owner, bool weights_are_frequencies)
         : owner_(owner),
           previous_weights_are_frequencies_(
-              owner.options_.weights_are_frequencies) {
+              owner.options_.weights_are_frequencies),
+          previous_weighted_cpu_route_(owner.options_.weighted_cpu_route) {
         owner_.begin_attempt();
         owner_.options_.weights_are_frequencies = weights_are_frequencies;
     }
 
     ~BindingAttemptGuard() {
+        owner_.options_.weighted_cpu_route = previous_weighted_cpu_route_;
         if (!committed_) {
             owner_.fail_attempt();
             owner_.options_.weights_are_frequencies =
@@ -55,6 +57,10 @@ public:
     }
 
     void commit() noexcept { committed_ = true; }
+
+    void set_weighted_cpu_route(bool request) noexcept {
+        owner_.options_.weighted_cpu_route = request;
+    }
 
     void require_probability_inference() const {
         if (owner_.options_.se_type == hdfe::StandardErrorType::Homoskedastic) {
@@ -65,6 +71,7 @@ public:
 private:
     HdfeRegressorV11& owner_;
     bool previous_weights_are_frequencies_ = false;
+    bool previous_weighted_cpu_route_ = false;
     bool committed_ = false;
 };
 
@@ -215,6 +222,16 @@ AbsorptionMethod parse_absorption_method(const std::string& name) {
     if (lower == "auto-mlsmr" || lower == "auto_mlsmr" ||
         lower == "mlsmr-auto" || lower == "mlsmr_auto") {
         return AbsorptionMethod::AutoMlsmr;
+    }
+    if (lower == "reduced-pcg" || lower == "reduced_pcg") {
+        throw std::runtime_error(
+            "absorption method reduced-pcg is reported when the reduced-system tier publishes a fit; "
+            "it cannot be requested (use auto)");
+    }
+    if (lower == "krylov-pcg" || lower == "krylov_pcg") {
+        throw std::runtime_error(
+            "absorption method krylov-pcg is reported when the Krylov-PCG route is forced; "
+            "it cannot be requested (use auto)");
     }
     throw std::runtime_error("Unknown absorption method: " + name);
 }
@@ -578,6 +595,10 @@ std::string method_name(AbsorptionMethod method) {
             return "mlsmr";
         case AbsorptionMethod::AutoMlsmr:
             return "auto-mlsmr";
+        case AbsorptionMethod::ReducedPcg:
+            return "reduced-pcg";
+        case AbsorptionMethod::KrylovPcg:
+            return "krylov-pcg";
         case AbsorptionMethod::Auto:
         default:
             return "auto";
@@ -773,7 +794,9 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
         .value("schwarz", AbsorptionMethod::Schwarz)
         .value("lsmr", AbsorptionMethod::Lsmr)
         .value("mlsmr", AbsorptionMethod::Mlsmr)
-        .value("auto_mlsmr", AbsorptionMethod::AutoMlsmr);
+        .value("auto_mlsmr", AbsorptionMethod::AutoMlsmr)
+        .value("reduced_pcg", AbsorptionMethod::ReducedPcg)
+        .value("krylov_pcg", AbsorptionMethod::KrylovPcg);
 
     py::enum_<ConvergenceCriterion>(m, "ConvergenceCriterion", py::module_local())
         .value("auto", ConvergenceCriterion::Auto)
@@ -811,7 +834,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                          const std::string& tolerance_mode,
                          double fe_tolerance,
                          const std::string& fe_recovery_method,
-                         const std::string& stats_style) {
+                         const std::string& stats_style,
+                         py::object reduced_pcg,
+                         py::object reduced_pcg_cuda,
+                         bool weighted_cpu_route) {
                  if (num_threads < 0 || default_threads < 0 ||
                      max_threads < 0) {
                      throw std::invalid_argument(
@@ -892,6 +918,28 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                      opts.ssc_t_df = ssc_t_df.cast<double>();
                  }
                  opts.tolerance_mode = parse_tolerance_mode(tolerance_mode);
+                 // The reduced-system tier for the fits of this regressor:
+                 // None follows the process default (XHDFE_REDUCED_PCG).
+                 if (!reduced_pcg.is_none()) {
+                     if (!py::isinstance<py::bool_>(reduced_pcg)) {
+                         throw py::type_error("reduced_pcg must be None, True or False");
+                     }
+                     opts.reduced_pcg = reduced_pcg.cast<bool>() ? hdfe::ReducedPcgRequest::On
+                                                                 : hdfe::ReducedPcgRequest::Off;
+                 }
+                 // The experimental CUDA variant of the tier for the fits of
+                 // this regressor: None follows the process default
+                 // (XHDFE_REDUCED_PCG_CUDA); inert unless the fit runs on CUDA.
+                 if (!reduced_pcg_cuda.is_none()) {
+                     if (!py::isinstance<py::bool_>(reduced_pcg_cuda)) {
+                         throw py::type_error("reduced_pcg_cuda must be None, True or False");
+                     }
+                     opts.reduced_pcg_cuda = reduced_pcg_cuda.cast<bool>()
+                                                 ? hdfe::ReducedPcgRequest::On
+                                                 : hdfe::ReducedPcgRequest::Off;
+                 }
+
+                 opts.weighted_cpu_route = weighted_cpu_route;
 
                  ThreadingOptions threading;
                  threading.default_threads =
@@ -931,7 +979,10 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
              py::arg("tolerance_mode") = "reghdfe-comparable",
              py::arg("fe_tolerance") = 1e-6,
              py::arg("fe_recovery_method") = "hybrid",
-             py::arg("stats_style") = "reghdfe")
+             py::arg("stats_style") = "reghdfe",
+             py::arg("reduced_pcg") = py::none(),
+             py::arg("reduced_pcg_cuda") = py::none(),
+             py::arg("weighted_cpu_route").noconvert() = false)
         .def(
             "fit",
             [precision_warning](HdfeRegressorV11& self,
@@ -948,8 +999,15 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                py::object slopes_obj,
                bool fweights,
                bool iweights,
-               bool pweights) {
+               bool pweights,
+               py::object weighted_cpu_route) {
                 hdfe::v11::BindingAttemptGuard attempt(self, fweights);
+                if (!weighted_cpu_route.is_none()) {
+                    if (!py::isinstance<py::bool_>(weighted_cpu_route)) {
+                        throw py::type_error("weighted_cpu_route must be None, True or False");
+                    }
+                    attempt.set_weighted_cpu_route(weighted_cpu_route.cast<bool>());
+                }
                 if (int(fweights) + int(iweights) + int(pweights) > 1) {
                     throw std::runtime_error("fweights, iweights and pweights are mutually exclusive");
                 }
@@ -1162,6 +1220,7 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
             py::arg("fweights") = false,
             py::arg("iweights") = false,
             py::arg("pweights") = false,
+            py::arg("weighted_cpu_route") = py::none(),
             R"doc(
 Fit the HDFE model.
 
@@ -1171,6 +1230,9 @@ replication for sample-size, degrees-of-freedom, singleton, and variance
 bookkeeping. Set ``iweights=True`` for Stata's importance-weight counts and
 inference convention. ``pweights=True`` requires robust or clustered inference.
 All weight-type flags require ``weights`` and are mutually exclusive.
+``weighted_cpu_route=True`` explicitly requests CPU for an eligible weighted
+CUDA fit. ``None`` uses the regressor's setting and a Boolean overrides it
+for this call.
 )doc")
         .def(
             "extract_group_individual_fes",
@@ -1669,6 +1731,15 @@ All weight-type flags require ``weights`` and are mutually exclusive.
         .def_property_readonly("absorption_method_used", [](const HdfeRegressorV11& self) {
             return self.absorption_method_used();
         })
+        .def_property_readonly("reduced_pcg_status_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_status();
+        })
+        .def_property_readonly("reduced_pcg_reason_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_reason();
+        })
+        .def_property_readonly("reduced_pcg_discarded_iterations_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_discarded_iterations();
+        })
         .def_property_readonly("lifecycle_state_", [](const HdfeRegressorV11& self) {
             return std::string(self.lifecycle_state_name());
         })
@@ -2067,7 +2138,7 @@ All weight-type flags require ``weights`` and are mutually exclusive.
            bool cov0, double tol, int num_threads, py::object weights_obj,
            bool fweights, std::vector<int> absorbed_x1, bool gpu,
            std::vector<int> connectivity_fe_pair,
-           bool require_connected, int n_common_fes, bool sample_info) {
+           bool require_connected, int n_common_fes, bool sample_info, bool weighted_cpu_route) {
             auto y_arr = py::array_t<double, py::array::c_style | py::array::forcecast>(y_obj);
             if (y_arr.ndim() != 1) {
                 throw std::runtime_error("y must be a 1-D array");
@@ -2126,6 +2197,7 @@ All weight-type flags require ``weights`` and are mutually exclusive.
             opt.tol = tol;
             opt.num_threads = num_threads;
             opt.use_gpu = gpu;
+            opt.weighted_cpu_route = weighted_cpu_route;
             opt.capture_sample_provenance = sample_info;
             opt.return_sample_index = sample_info;
             std::optional<Eigen::VectorXd> w_vec;
@@ -2282,6 +2354,7 @@ All weight-type flags require ``weights`` and are mutually exclusive.
         py::arg("require_connected") = false,
         py::arg("n_common_fes") = 0,
         py::arg("sample_info") = false,
+        py::arg("weighted_cpu_route").noconvert() = false,
         "Gelbach (2016) conditional decomposition, HDFE-aware (see "
         "xhdfe.gelbach for the friendly wrapper). Opt-in; does not affect "
         "any existing estimation path.");

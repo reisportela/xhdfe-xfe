@@ -1,6 +1,6 @@
 # xhdfe Gelbach decomposition help
 
-Package version: xhdfe 2.31.1.20261112 (`xhdfegelbach` 1.6.2). This version
+Package version: xhdfe 2.34.1.20261121 (`xhdfegelbach` 1.6.2). This version
 includes the bootstrap, table and waterfall interfaces documented below.
 Inspect the installed package version with `python -m xhdfe --version`.
 
@@ -111,6 +111,7 @@ gelbach.decompose(
     common_fes=None,
     sample_info=False,
     fe_variance_ratio_min=0.35,
+    weighted_cpu_route=False,
 )
 ```
 
@@ -166,6 +167,9 @@ Arguments:
   regression, component construction and covariance calculations remain CPU
   work. The request is opt-in and a non-use/fallback is reported truthfully in
   the returned diagnostics.
+- `weighted_cpu_route`: when `True`, request CPU for an eligible weighted
+  CUDA fit and report GPU status 7 (`weighted_cpu_route`). The default is
+  `False`. Bootstrap forwards this option to the point estimate and refits.
 - `connected`: `"diagnose"` (default) reports the connectivity contract without
   changing the fit. `"require"` fails closed unless there are no common FEs and
   exactly two retained added-FE dimensions form one mobility component. It

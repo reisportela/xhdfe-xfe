@@ -1,4 +1,5 @@
 #include "ols.hpp"
+#include "mixed_network.hpp"
 #include "wide_float.hpp"
 #include "wide_covariance.hpp"
 #include "ols_precision.hpp"
@@ -34,7 +35,39 @@
 
 namespace hdfe {
 namespace detail {
+
+// Phase 5b: the one reader of XHDFE_CLUSTER_SHARED_PASSES (once per process); "0"
+// keeps today's passes of multi-way clustering everywhere.
+bool cluster_shared_passes_enabled() {
+    static const bool on = [] {
+        const char* raw = std::getenv("XHDFE_CLUSTER_SHARED_PASSES");
+        return !(raw != nullptr && raw[0] == '0' && raw[1] == '\0');
+    }();
+    return on;
+}
+
+// Defined in fe_absorption.cpp: 0/off/false/no and 1/on/true/yes, anything else the default.
+bool mlsmr_env_enabled(const char* name, bool default_value);
+
 namespace {
+
+// The cluster_passes lines of phase 5b, on the cpu_profile channel.
+bool ols_profile_enabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("XHDFE_PROFILE_CPU");
+        return raw != nullptr && *raw != '\0' && *raw != '0';
+    }();
+    return enabled;
+}
+
+// Low-memory package L3.1-C, C1: without weights the multi-way OLS stage and the
+// covariance rebuild read y, X and the scores where they are; their copies were
+// scaled by sqrt(w) only when there were weights, and are still made then.
+// XHDFE_MULTIWAY_INPUT_COPY=1 restores the three copies. Read once per process.
+bool multiway_input_copy_enabled() {
+    static const bool on = mlsmr_env_enabled("XHDFE_MULTIWAY_INPUT_COPY", false);
+    return on;
+}
 
 // Phase timings on the cpu_profile channel (XHDFE_PROFILE_CPU=1).
 struct OlsPhaseTimer {
@@ -251,17 +284,21 @@ bool inference_score_present(const Eigen::Ref<const Eigen::MatrixXd>& X,
 template<class Derived>
 bool inference_meat_needs_wide(const Eigen::MatrixBase<Derived>& meat,
     const Eigen::Ref<const Eigen::MatrixXd>& X,const Eigen::VectorXd& residuals,
-    const Eigen::VectorXd* weights,const Eigen::VectorXi* clusters,bool scale_loss=false,bool frequency=false) {
+    const Eigen::VectorXd* weights,const Eigen::VectorXi* clusters,bool scale_loss=false,bool frequency=false,
+    bool implicit_ones=false) {
     const double floor=inference_meat_floor(static_cast<int>(X.rows()));
     bool positive=false;
     for (int j=0;j<meat.rows();++j) {
         const double diagonal=meat(j,j);
         if (!ieee_finite(diagonal) || diagonal<0) return true;
+        // L3.1-C, C2: the meat's last column may be a column of ones that X does not
+        // hold; inference_score_present reads column -1 as ones.
+        const int column=(implicit_ones && j==X.cols()) ? -1 : j;
         if (inference_nonzero(diagonal)) {
             positive=true;
-            if (diagonal<floor && inference_score_present(X,residuals,weights,clusters,j,true,frequency)) return true;
+            if (diagonal<floor && inference_score_present(X,residuals,weights,clusters,column,true,frequency)) return true;
         }
-        else if (inference_score_present(X,residuals,weights,clusters,j)) return true;
+        else if (inference_score_present(X,residuals,weights,clusters,column)) return true;
     }
     // All-zero meat is safe only after each column's exact support/cancellation
     // check. A lost scalar on an irrelevant row must not revoke that zero.
@@ -408,7 +445,8 @@ OlsResult run_ols_origin_shifted(
     double tss, double within_tss, double n_effective, bool frequency,
     const Eigen::Ref<const Eigen::MatrixXd>* residual_design,
     bool explicit_threads, ParallelWorkObserver* observer,
-    ClusterDofMethod g_df = ClusterDofMethod::Min, bool g_adj = true) {
+    ClusterDofMethod g_df = ClusterDofMethod::Min, bool g_adj = true,
+    ClusterPasses* passes = nullptr) {
     Eigen::MatrixXd shifted = X, actual;
     if (residual_design) actual = *residual_design;
     auto subtract_origins = [&](Eigen::MatrixXd& matrix) {
@@ -429,10 +467,12 @@ OlsResult run_ols_origin_shifted(
     }
     std::optional<Eigen::Ref<const Eigen::MatrixXd>> actual_ref;
     if (residual_design) actual_ref.emplace(actual);
+    // Phase 5b: the same carrier and the same cluster list through the recursion;
+    // the wide fallback above produces nothing.
     OlsResult result = multiway
         ? run_ols_multiway_with_score_low(y,shifted,weights,multiway,se_type,
             tss,within_tss,g_df,g_adj,n_effective,actual_ref ? &*actual_ref : nullptr,
-            explicit_threads,observer,nullptr)
+            explicit_threads,observer,nullptr,nullptr,nullptr,nullptr,passes)
         : run_ols_with_score_low(y,shifted,weights,cluster,se_type,tss,within_tss,
             n_effective,frequency,actual_ref ? &*actual_ref : nullptr,
             explicit_threads,observer,nullptr);
@@ -1476,17 +1516,28 @@ Eigen::MatrixXd compute_covariance(const Eigen::MatrixXd& xtx_inv,
     return cov;
 }
 
-Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
+// WX is a view (L3.1-C, C1): the caller's matrix without weights, its scaled copy with them.
+// C2: wx_ones / x_ones say that WX / original_X carry, after their columns, a column of
+// ones they do not hold. wx_ones only without weights, where that column of WX is 1.0:
+// each row then adds scaled_u to the last sum, the same double that 1.0 * scaled_u gives,
+// fused or not, into the same sum in the same row order.
+Eigen::MatrixXd compute_cluster_meat(const Eigen::Ref<const Eigen::MatrixXd>& WX,
                                      const Eigen::Ref<const Eigen::MatrixXd>& original_X,
                                      const Eigen::VectorXd& residuals,
                                      const Eigen::VectorXd* original_weights,
                                      const Eigen::VectorXd* sqrt_weights,
                                      const Eigen::VectorXi& clusters,
-                                     int* num_clusters_out) {
-    const int p = static_cast<int>(WX.cols());
+                                     int* num_clusters_out,
+                                     bool wx_ones,
+                                     bool x_ones) {
+    const int px = static_cast<int>(WX.cols());  // columns read from WX
+    const int p = px + (wx_ones ? 1 : 0);         // width of the scores and of the meat
     const int n = static_cast<int>(WX.rows());
     if (clusters.size() != n) {
         throw std::runtime_error("Cluster vector length must equal the number of observations");
+    }
+    if (wx_ones && sqrt_weights) {
+        throw std::logic_error("implicit column of ones with weighted scores in multiway meat");
     }
     int min_id = clusters(0);
     int max_id = clusters(0);
@@ -1533,9 +1584,10 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
                             sqrt_weights ? residuals(i) * (*sqrt_weights)(i) : residuals(i);
                         if (sqrt_weights && inference_nonzero(residuals(i)) &&
                             inference_nonzero((*sqrt_weights)(i)) && inference_bad_product(scaled_u)) scale_loss=true;
-                        for (int j = 0; j < p; ++j) {
+                        for (int j = 0; j < px; ++j) {
                             run_score[j] += WX(i, j) * scaled_u;
                         }
+                        if (wx_ones) run_score[px] += scaled_u;
                         ++i;
                     } while (i < n && (clusters(i) - min_id) == idx);
 
@@ -1560,9 +1612,10 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
                             sqrt_weights ? residuals(i) * (*sqrt_weights)(i) : residuals(i);
                         if (sqrt_weights && inference_nonzero(residuals(i)) &&
                             inference_nonzero((*sqrt_weights)(i)) && inference_bad_product(scaled_u)) scale_loss=true;
-                        for (int j = 0; j < p; ++j) {
+                        for (int j = 0; j < px; ++j) {
                             run_score[static_cast<std::size_t>(j)] += WX(i, j) * scaled_u;
                         }
+                        if (wx_ones) run_score[static_cast<std::size_t>(px)] += scaled_u;
                         ++i;
                     } while (i < n && (clusters(i) - min_id) == idx);
 
@@ -1587,9 +1640,10 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
                     inference_nonzero((*sqrt_weights)(i)) && inference_bad_product(scaled_u)) scale_loss=true;
                 double* score = aggregated.data() +
                                 static_cast<std::size_t>(idx) * static_cast<std::size_t>(p);
-                for (int j = 0; j < p; ++j) {
+                for (int j = 0; j < px; ++j) {
                     score[static_cast<std::size_t>(j)] += WX(i, j) * scaled_u;
                 }
+                if (wx_ones) score[static_cast<std::size_t>(px)] += scaled_u;
             }
         }
         Eigen::MatrixXd meat = Eigen::MatrixXd::Zero(p, p);
@@ -1605,7 +1659,7 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
         if (num_clusters_out) {
             *num_clusters_out = next_cluster;
         }
-        if (inference_meat_needs_wide(meat,original_X,residuals,original_weights,&clusters,scale_loss))
+        if (inference_meat_needs_wide(meat,original_X,residuals,original_weights,&clusters,scale_loss,false,x_ones))
             throw OlsInferenceRangeError("multiway component meat");
         return meat.selfadjointView<Eigen::Lower>();
     }
@@ -1632,9 +1686,10 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
             inference_nonzero((*sqrt_weights)(i)) && inference_bad_product(scaled_u)) scale_loss=true;
         double* score = aggregated.data() +
                         static_cast<std::size_t>(cluster_idx) * static_cast<std::size_t>(p);
-        for (int j = 0; j < p; ++j) {
+        for (int j = 0; j < px; ++j) {
             score[static_cast<std::size_t>(j)] += WX(i, j) * scaled_u;
         }
+        if (wx_ones) score[static_cast<std::size_t>(px)] += scaled_u;
     }
     Eigen::MatrixXd meat = Eigen::MatrixXd::Zero(p, p);
     auto meat_lower = meat.selfadjointView<Eigen::Lower>();
@@ -1646,7 +1701,7 @@ Eigen::MatrixXd compute_cluster_meat(const Eigen::MatrixXd& WX,
     if (num_clusters_out) {
         *num_clusters_out = next_cluster;
     }
-    if (inference_meat_needs_wide(meat,original_X,residuals,original_weights,&clusters,scale_loss))
+    if (inference_meat_needs_wide(meat,original_X,residuals,original_weights,&clusters,scale_loss,false,x_ones))
         throw OlsInferenceRangeError("multiway component meat");
     return meat.selfadjointView<Eigen::Lower>();
 }
@@ -1692,7 +1747,7 @@ Eigen::VectorXi combine_clusters(const std::vector<Eigen::VectorXi>& clusters,
 }
 
 Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
-                                            const Eigen::MatrixXd& WX,
+                                            const Eigen::Ref<const Eigen::MatrixXd>& WX,
                                             const Eigen::Ref<const Eigen::MatrixXd>& original_X,
                                             const Eigen::VectorXd& residuals,
                                             const Eigen::VectorXd* original_weights,
@@ -1702,8 +1757,14 @@ Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
                                             double n_effective,
                                             int* num_clusters_out,
                                             ClusterDofMethod g_df,
-                                            bool g_adj) {
-    const int p = static_cast<int>(WX.cols());
+                                            bool g_adj,
+                                            const char* site = nullptr,
+                                            ClusterPasses* produce = nullptr,
+                                            const ClusterPasses* consume = nullptr,
+                                            bool wx_ones = false,
+                                            bool x_ones = false) {
+    // C2 (L3.1-C): wx_ones / x_ones, see compute_cluster_meat.
+    const int p = static_cast<int>(WX.cols()) + (wx_ones ? 1 : 0);
     const int n = static_cast<int>(WX.rows());
     const int m = static_cast<int>(clusters.size());
     if (m <= 0) {
@@ -1718,39 +1779,86 @@ Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
         }
     }
 
-    int min_clusters = std::numeric_limits<int>::max();
-    for (const auto& c : clusters) {
-        std::unordered_map<int, int> uniq;
-        uniq.reserve(static_cast<std::size_t>(n));
-        for (int i = 0; i < n; ++i) {
-            uniq.emplace(c(i), 1);
-        }
-        min_clusters = std::min(min_clusters, static_cast<int>(uniq.size()));
+    // Phase 5b (DESENHO_FASE5B.md): with a carrier the distinct counts are the G of
+    // the meats of one dimension, which run anyway; the producer keeps the G of every
+    // mask, and the pair when asked, in a local pending state moved into the carrier
+    // only after the last range check below; a consumer lends the producer's pair to
+    // mask 3. The vectors the meats and their dispatcher see are today's, element by
+    // element; anything else about the carrier, or the switch off, gives today's code.
+    if (!cluster_shared_passes_enabled()) {
+        produce = nullptr;
+        consume = nullptr;
     }
-    if (num_clusters_out) {
-        *num_clusters_out = (min_clusters == std::numeric_limits<int>::max()) ? 0 : min_clusters;
+    const std::size_t masks = (static_cast<std::size_t>(1) << m) - 1;
+    const bool consuming = consume && consume->ready && consume->source == &clusters &&
+                           consume->mask_counts.size() == masks;
+    const bool producing = !consuming && produce && !produce->ready && produce->source == nullptr &&
+                           produce->mask_counts.empty() && produce->pair.size() == 0;
+    const bool shared = consuming || producing;
+    const bool lend_pair = consuming && m == 2 && consume->pair.size() == n;
+    std::vector<int> pending_counts;
+    Eigen::VectorXi pending_pair;
+
+    int min_clusters = std::numeric_limits<int>::max();
+    if (!shared) {
+        for (const auto& c : clusters) {
+            std::unordered_map<int, int> uniq;
+            uniq.reserve(static_cast<std::size_t>(n));
+            for (int i = 0; i < n; ++i) {
+                uniq.emplace(c(i), 1);
+            }
+            min_clusters = std::min(min_clusters, static_cast<int>(uniq.size()));
+        }
+        if (num_clusters_out) {
+            *num_clusters_out = (min_clusters == std::numeric_limits<int>::max()) ? 0 : min_clusters;
+        }
+    } else {
+        pending_counts.assign(masks, 0);
     }
 
     Eigen::MatrixXd meat_total = Eigen::MatrixXd::Zero(p, p);
     const std::uint64_t max_mask = (static_cast<std::uint64_t>(1) << m);
     std::vector<int> dims;
     dims.reserve(static_cast<std::size_t>(m));
-    for (std::uint64_t mask = 1; mask < max_mask; ++mask) {
+    const bool captured =
+        producing && produce->want_pair && m == 2 && produce->network &&
+        produce->network->clusters == &clusters && !wx_ones && !x_ones &&
+        !original_weights && !sqrt_weights && WX.data() == original_X.data() &&
+        produce->network->form(original_X, residuals, g_df, g_adj);
+    if (captured) {
+        pending_counts = produce->network->counts;
+        meat_total = produce->network->raw.topLeftCorner(p,p);
+    }
+    for (std::uint64_t mask = 1; !captured && mask < max_mask; ++mask) {
         dims.clear();
         for (int j = 0; j < m; ++j) {
             if (mask & (static_cast<std::uint64_t>(1) << j)) {
                 dims.push_back(j);
             }
         }
-        Eigen::VectorXi combined = combine_clusters(clusters, dims);
+        const Eigen::VectorXi* lent = (lend_pair && mask == 3) ? &consume->pair : nullptr;
+        Eigen::VectorXi combined;
+        if (!lent) combined = combine_clusters(clusters, dims);
         int G = 0;
-        Eigen::MatrixXd meat = compute_cluster_meat(WX,original_X,residuals,original_weights,sqrt_weights,combined,&G);
+        Eigen::MatrixXd meat = compute_cluster_meat(WX,original_X,residuals,original_weights,sqrt_weights,
+                                                    lent ? *lent : combined,&G,wx_ones,x_ones);
+        if (shared) pending_counts[static_cast<std::size_t>(mask - 1)] = G;
+        if (producing && produce->want_pair && m == 2 && mask == 3) pending_pair = std::move(combined);
         double scale = 1.0;
         if (g_df == ClusterDofMethod::Conventional && g_adj && G > 1) {
             scale = static_cast<double>(G) / (G - 1.0);
         }
         const double sign = (dims.size() % 2 == 1) ? 1.0 : -1.0;
         meat_total.noalias() += sign * scale * meat;
+    }
+    if (shared) {
+        // The minimum over the masks of one dimension: today's count, exactly.
+        for (int d = 0; d < m; ++d) {
+            min_clusters = std::min(min_clusters, pending_counts[(static_cast<std::size_t>(1) << d) - 1]);
+        }
+        if (num_clusters_out) {
+            *num_clusters_out = (min_clusters == std::numeric_limits<int>::max()) ? 0 : min_clusters;
+        }
     }
 
     double scale = 1.0;
@@ -1765,6 +1873,18 @@ Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
     Eigen::MatrixXd cov = xtx_inv * meat_total * xtx_inv;
     cov *= scale;
     if (!ieee_all_finite(cov)) throw OlsInferenceRangeError("multiway covariance scaling overflow");
+    if (producing) {
+        // Published only now, after the last check: ownership moves, nothing is copied.
+        produce->mask_counts = std::move(pending_counts);
+        produce->pair = std::move(pending_pair);
+        produce->source = &clusters;
+        produce->ready = true;
+    }
+    if (site && ols_profile_enabled()) {
+        std::fprintf(stderr, "cpu_profile label=cluster_passes site=%s counts=%s pair=%s\n", site,
+                     shared ? "carrier" : "recount",
+                     captured ? "scores" : lend_pair ? "shared" : "built");
+    }
     return cov;
 }
 
@@ -3055,23 +3175,52 @@ OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     return result;
 }
 
-Eigen::MatrixXd multiway_cluster_sandwich(
+namespace {
+
+// The covariance rebuild of multiway_cluster_sandwich. With append_constant (L3.1-C, C2)
+// `scores` holds only the regressors and the scores are [scores | 1]: the meats read the
+// regressors where they are and take the column of ones implicitly.
+Eigen::MatrixXd multiway_cluster_sandwich_impl(
     const Eigen::MatrixXd& bread,
     const Eigen::Ref<const Eigen::MatrixXd>& scores,
+    bool append_constant,
     const Eigen::VectorXd& residuals,
     const Eigen::VectorXd* weights,
     const std::vector<Eigen::VectorXi>& clusters,
     ClusterDofMethod g_df,
-    bool g_adj) {
+    bool g_adj,
+    const ClusterPasses* passes) {
     const int n = static_cast<int>(scores.rows());
-    const int p = static_cast<int>(scores.cols());
+    const int p = static_cast<int>(scores.cols()) + (append_constant ? 1 : 0);
     if (n == 0 || p == 0 || residuals.size() != n) {
         throw std::runtime_error("Invalid inputs for multiway covariance rebuild");
     }
     if (bread.rows() != p || bread.cols() != p) {
         throw std::runtime_error("Bread dimension mismatch in multiway covariance rebuild");
     }
-    Eigen::MatrixXd WS = scores;
+    if (append_constant && !weights && passes && passes->ready && passes->network &&
+        passes->network->matches(scores, residuals, clusters, g_df, g_adj) &&
+        !inference_sandwich_needs_wide(bread, passes->network->raw)) {
+        Eigen::MatrixXd result = bread * passes->network->raw * bread;
+        if (ieee_all_finite(result)) return result;
+    }
+    // C1 (L3.1-C): the scaled copy only with weights (or XHDFE_MULTIWAY_INPUT_COPY=1);
+    // without them the meats read the scores themselves. With append_constant the copy
+    // is [scores | 1], the matrix the caller used to build, scaled as before.
+    const bool copy_scores = weights != nullptr || multiway_input_copy_enabled();
+    Eigen::MatrixXd WS_copy;
+    if (copy_scores) {
+        if (append_constant) {
+            WS_copy.resize(n, p);
+            WS_copy.leftCols(p - 1) = scores;
+            WS_copy.col(p - 1).setOnes();
+        } else {
+            WS_copy = scores;
+        }
+    }
+    // The implicit column: in WS only when it is not copied (no weights, so it is 1.0),
+    // in the unweighted scores whenever append_constant.
+    const bool ws_ones = append_constant && !copy_scores;
     Eigen::VectorXd sqrt_weights;
     if (weights) {
         if (weights->size() != n) {
@@ -3079,17 +3228,87 @@ Eigen::MatrixXd multiway_cluster_sandwich(
         }
         sqrt_weights = weights->array().sqrt();
         for (int j = 0; j < p; ++j) {
-            WS.col(j).array() *= sqrt_weights.array();
+            WS_copy.col(j).array() *= sqrt_weights.array();
         }
     }
+    const Eigen::Ref<const Eigen::MatrixXd> WS =
+        copy_scores ? Eigen::Ref<const Eigen::MatrixXd>(WS_copy) : scores;
     const Eigen::VectorXd* sqrt_ptr = weights ? &sqrt_weights : nullptr;
     int min_clusters = 0;
     // Conventional factors belong to each inclusion-exclusion component.
     // The caller maps only the remaining common scale from its slope block.
-    return compute_covariance_multiway(bread,WS,scores,residuals,weights,sqrt_ptr,clusters,
-                                       /*df_resid=*/0.0, static_cast<double>(n),
-                                       &min_clusters, g_df,
-                                       g_adj && g_df == ClusterDofMethod::Conventional);
+    // Phase 5b: the reconstruction only reads the carrier (it never fills it).
+    try {
+        return compute_covariance_multiway(bread,WS,scores,residuals,weights,sqrt_ptr,clusters,
+                                           /*df_resid=*/0.0, static_cast<double>(n),
+                                           &min_clusters, g_df,
+                                           g_adj && g_df == ClusterDofMethod::Conventional,
+                                           "recon", nullptr, passes, ws_ones, append_constant);
+    } catch (const OlsInferenceRangeError&) {
+        // As in the wide OLS route, keep residual products in range before
+        // forming the meat. Ordinary reconstructions retain their exact path.
+        if (!ieee_all_finite(residuals)) throw;
+        const double maximum = residuals.cwiseAbs().maxCoeff();
+        if (!(maximum > 0.0)) throw;
+        int exponent = 0;
+        std::frexp(maximum, &exponent);
+        exponent = std::clamp(exponent,
+            std::numeric_limits<double>::min_exponent - 1,
+            std::numeric_limits<double>::max_exponent - 1);
+        if (exponent == 0) throw;
+        Eigen::VectorXd normalized(n);
+        for (int i = 0; i < n; ++i) {
+            normalized[i] = std::ldexp(residuals[i], -exponent);
+            if (!ieee_finite(normalized[i]) ||
+                std::ldexp(normalized[i], exponent) != residuals[i]) throw;
+        }
+        Eigen::MatrixXd covariance = compute_covariance_multiway(
+            bread,WS,scores,normalized,weights,sqrt_ptr,clusters,
+            /*df_resid=*/0.0, static_cast<double>(n), &min_clusters, g_df,
+            g_adj && g_df == ClusterDofMethod::Conventional,
+            "recon", nullptr, passes, ws_ones, append_constant);
+        const OlsWide scale(std::ldexp(1.0, exponent));
+        for (int j = 0; j < p; ++j) {
+            for (int i = 0; i < p; ++i) {
+                covariance(i,j) = checked_inference_product(
+                    checked_inference_product(OlsWide(covariance(i,j)), scale), scale).value();
+            }
+        }
+        return covariance;
+    }
+}
+
+}  // namespace
+
+Eigen::MatrixXd multiway_cluster_sandwich(
+    const Eigen::MatrixXd& bread,
+    const Eigen::Ref<const Eigen::MatrixXd>& scores,
+    const Eigen::VectorXd& residuals,
+    const Eigen::VectorXd* weights,
+    const std::vector<Eigen::VectorXi>& clusters,
+    ClusterDofMethod g_df,
+    bool g_adj,
+    const ClusterPasses* passes) {
+    return multiway_cluster_sandwich_impl(bread, scores, false, residuals, weights, clusters,
+                                          g_df, g_adj, passes);
+}
+
+Eigen::MatrixXd multiway_cluster_sandwich_with_constant(
+    const Eigen::MatrixXd& bread,
+    const Eigen::Ref<const Eigen::MatrixXd>& regressors,
+    const Eigen::VectorXd& residuals,
+    const Eigen::VectorXd* weights,
+    const std::vector<Eigen::VectorXi>& clusters,
+    ClusterDofMethod g_df,
+    bool g_adj,
+    const ClusterPasses* passes) {
+    return multiway_cluster_sandwich_impl(bread, regressors, true, residuals, weights, clusters,
+                                          g_df, g_adj, passes);
+}
+
+bool multiway_scores_copy_enabled() {
+    static const bool on = mlsmr_env_enabled("XHDFE_MULTIWAY_SCORES_COPY", false);
+    return on;
 }
 
 OlsResult run_ols_multiway(const Eigen::VectorXd& y,
@@ -3104,12 +3323,13 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            double n_effective,
                            const Eigen::MatrixXd* X_for_residuals,
                            bool num_threads_explicit,
-                           ParallelWorkObserver* parallel_observer) {
+                           ParallelWorkObserver* parallel_observer,
+                           ClusterPasses* passes) {
     std::optional<Eigen::Ref<const Eigen::MatrixXd>> actual;
     if (X_for_residuals) actual.emplace(*X_for_residuals);
     return run_ols_multiway_with_score_low(y,X,weights,clusters,se_type,total_sum_squares,
         within_sum_squares,g_df,g_adj,n_effective,actual ? &*actual : nullptr,num_threads_explicit,
-        parallel_observer,nullptr);
+        parallel_observer,nullptr,nullptr,nullptr,nullptr,passes);
 }
 
 OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
@@ -3128,7 +3348,8 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
                            const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means,
     Eigen::VectorXd* intercept_covariance,
-    OlsWideCovariance* covariance_wide) {
+    OlsWideCovariance* covariance_wide,
+    ClusterPasses* passes) {
     if (intercept_covariance) intercept_covariance->resize(0);
     if (covariance_wide) covariance_wide->values.resize(0,0);
     if (se_type != StandardErrorType::Cluster) {
@@ -3163,19 +3384,29 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
         }
     }
 
-    Eigen::VectorXd Wy = y;
-    Eigen::MatrixXd WX = X;
+    // C1 (L3.1-C): the scaled copies only with weights (or XHDFE_MULTIWAY_INPUT_COPY=1);
+    // without them the bread and the meats read y and X themselves.
+    const bool copy_inputs = weights != nullptr || multiway_input_copy_enabled();
+    Eigen::VectorXd Wy_copy;
+    Eigen::MatrixXd WX_copy;
+    if (copy_inputs) {
+        Wy_copy = y;
+        WX_copy = X;
+    }
     Eigen::VectorXd sqrt_weights;
     if (weights) {
         if (weights->size() != n) {
             throw std::runtime_error("Weights must align with y in run_ols_multiway");
         }
         sqrt_weights = weights->array().sqrt();
-        Wy.array() *= sqrt_weights.array();
+        Wy_copy.array() *= sqrt_weights.array();
         for (int j = 0; j < p; ++j) {
-            WX.col(j).array() *= sqrt_weights.array();
+            WX_copy.col(j).array() *= sqrt_weights.array();
         }
     }
+    const Eigen::VectorXd& Wy = copy_inputs ? Wy_copy : y;
+    const Eigen::Ref<const Eigen::MatrixXd> WX =
+        copy_inputs ? Eigen::Ref<const Eigen::MatrixXd>(WX_copy) : X;
 
     bool parallel_moments = false;
     int ols_threads = 1;
@@ -3256,8 +3487,9 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
         if (auto shift = find_ols_origin_shift(xtx, X))
             return run_ols_origin_shifted(*shift,y,X,weights,nullptr,clusters,se_type,
                 total_sum_squares,within_sum_squares,n_eff,false,
-                X_for_residuals,num_threads_explicit,parallel_observer,g_df,g_adj);
+                X_for_residuals,num_threads_explicit,parallel_observer,g_df,g_adj,passes);
     }
+    // The wide routes never produce the carrier (phase 5b).
     if(normal_equations_need_wide(xtx))
         return run_ols_wide(y,X,weights,nullptr,clusters,se_type,total_sum_squares,
             within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance,covariance_wide);
@@ -3371,9 +3603,15 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     Eigen::MatrixXd covariance;
     try {
         covariance = compute_covariance_multiway(xtx_inv,WX,X,residuals,weights,sqrt_ptr,
-            *clusters,df_resid,n_eff,&min_clusters,g_df,g_adj);
+            *clusters,df_resid,n_eff,&min_clusters,g_df,g_adj,nullptr,passes);
     } catch (const OlsInferenceRangeError&) {
         n1_normal.reset();
+        // Phase 5b: the attempt's pending counts and pair were locals of the stage,
+        // freed by the unwinding; the carrier is left as it was (nothing published).
+        if (passes && ols_profile_enabled()) {
+            std::fprintf(stderr, "cpu_profile label=cluster_passes site=ols route=wide ready=%d pair_rows=%lld\n",
+                         passes->ready ? 1 : 0, static_cast<long long>(passes->pair.size()));
+        }
         return run_ols_wide(y,X,weights,nullptr,clusters,se_type,total_sum_squares,
             within_sum_squares,n_eff,false,X_for_residuals,parallel_observer,g_df,g_adj,score_low,normalization_means,intercept_covariance,covariance_wide);
     }

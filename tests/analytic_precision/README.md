@@ -77,6 +77,22 @@ sandbox, follow AGENTS.md's host-level GPU probe policy. The runner records
 `nvidia-smi`, and a CUDA precision row requires actual `gpu_used == 1`.
 Fresh processes, temporary files and CUDA caches stay within the campaign.
 
+The CPU projection regressions are in `cpu_projection_contract.py MODULE NEW_DIR`.
+They check the full weighted three-effect Gauss–Seidel sandwich, duplicated
+regressors across the projection block, its cache readback, and the Strict
+LSMR/MLSMR absolute checks on the absorbed outcome and regressors. The Strict
+tests record a measured refusal separately from a certified fit.
+`tests/stata/xfepout_cpu_weighted_retry.do PACKAGE COV240K NEW_DIR` runs the
+Stata partial-out cases on the synthetic cov240k fixture. It verifies retry
+provenance, cache readback, an explicitly chosen sweep, and variable cleanup
+after the plugin refuses the command.
+
+`cuda_projection_repair_contract.py MODULE NEW_DIR` grades fresh H100
+fits against the full weighted sandwich. It includes two to four fixed
+effects, all four weight types, four unweighted effects, Strict, retained
+effects and collapsed groups. `tests/stata/xfepout_cuda_weighted_retry.do`
+checks device use and the five transformed columns with analytic weights.
+
 The 19 October CG regression guards are separate from that matrix:
 `cg_restart_budget_contract.py`, `cg_projection_full_covariance_contract.py`
 and `cg_final_step_contract.py` accept `--module PATH --backend cpu|cuda`
@@ -177,6 +193,9 @@ The proportional-instrument repair has separate permanent guards:
 - `n1_iv_cache_contract.py` crosses its independent IV score and saved-FE
   recovery fixtures with and without proportional columns. Its existing OLS
   persistent-cache checks are unchanged.
+- `combined_absorption_cache_contract.py --module MODULE --scratch NEW_DIR` checks immediate reuse of both caches on CPU in Fast and Comparable.
+  It checks read-only files, singleton pruning, frequency weights, changed input,
+  changed threads, and separation from the standalone absorption cache.
 - `iv_cache_contract.py --module MODULE --out NEW.json` (CPU only, 13oct2026)
   exercises the persistent absorption cache on an IV fit: the identical read
   must hit (`cache_hit=1` from the `XHDFE_DEBUG_SOLVER` stderr line) and be
@@ -574,6 +593,13 @@ The new `slope_block_checked_` diagnostic (Stata: `e(slope_block_checked)`, R:
 `slope_block_checked`) distinguishes skipped checks from zero residuals. The
 five existing block metrics are zero placeholders when it is false.
 
+`secondreg_near_slopes_contract.py --module MODULE` compares the four
+structural coefficients' covariance block and the full covariance against
+an offline SVD and two-way sandwich on the fixed synthetic secondreg
+counterexample. It checks the exact sample and uses the existing
+diagonal-scaled `1e-8` covariance limit. The frozen unguarded v3 module is
+the negative control. See [the lesson and receipts](../../docs/LICOES_SECONDREG_20261120.md).
+
 ## Ordinary CUDA weak-graph projection
 
 `cuda_ordinary_weak_graph_contract.py --module MODULE --backend cpu|cuda
@@ -602,3 +628,55 @@ The optional real-data control certifies return, sample, backend and b; V
 deviations are recorded separately and do not redefine Fast's approximation.
 Run `cg_final_step_contract.py` alongside it to retain the MP120 covariance
 protection for Comparable, with the distinct existing Fast/Strict limits.
+
+## Omitted-column covariance and reconstruction range (15 November 2026)
+
+`omitted_multiway_covariance_contract.py --module MODULE --backend cpu|cuda
+--output NEW_JSON` covers active-column covariance and stable public shape,
+omitted columns at several positions, literal zero RHS columns, one/two
+clusters, analytic/frequency weights, constant on/off, saved effects,
+group/individual sum/mean and all slopes omitted. It separately checks
+representable response rescaling and an expected non-representable range
+refusal. The receipt pins the module, test and fixture generator hashes.
+
+The reference fit on the kept columns checks omission invariance. It does
+not turn a different approximate Fast solve into an exact full-covariance
+oracle. Fast rescaling keeps its b/SE gates and records full V as a
+measurement; independent `multiway_intercept_ssc_contract.py` and the PSD
+helper oracle retain their covariance contracts. Eight weighted CUDA
+comparisons with a nonzero linear-combination RHS remain inherited
+full-V REVIEW cases: the raw failure rows are retained, and identical-input
+baseline/candidate comparisons and GPU repetitions are reported separately.
+Do not tighten the solver or loosen Comparable's gate to make them green.
+
+`tests/stata/omitted_multiway_covariance_contract.do cpu|cuda MODE`, with
+`XHDFE_STATA_ADOPATH` set to the exact package, checks the ado/plugin and
+reghdfe tight reference, including e(b), e(V), omitted r(table) entries and
+table dimensions. Launch every leg in a new output directory/process.
+
+`intercept_psd_contract.py --output NEW_DIRECTORY
+--production-flags-from BUILD/CMakeFiles/xhdfe.dir/flags.make` compiles the
+actual helper with the build's flags. Common covariance-unit changes
+2^±930 are graded in the original units so the oracle cannot underflow the
+Schur numerator. The test restores the IEEE environment of a loaded module,
+following `wide_product_probe`. Nineteen normal-input matrices are numerical
+passes; the separate 2^-1040 diagonal control is outside the public normal
+inference range and is retained as a known baseline/candidate limit, never
+as a numerical PASS. `--source BASELINE_CPP --only MATRIX` reproduces it
+against an immutable baseline source. These are offline checks; they add
+no estimator stopping target or mandatory absorption work.
+
+`conditional_intercept_reconstruction_contract.py --module MODULE
+--backend cpu|cuda --output NEW_DIRECTORY` is the reusable predicate guard.
+Its 100 cases retain the existing b, SE and full-V limits. Literal-zero
+omissions are compared with the kept-column fit, which retains the unchanged
+full-width reconstruction. `--reference-module FROZEN_MODULE` instead
+compares identical inputs with a compatible functional reference, without
+any hard-coded historical path. Independent dummy-WLS arithmetic verifies
+that the designated indefinite fixture really has positive intercept
+variance and a negative joint eigenvalue. Existing opt-in profile lines
+prove direct/reconstructed branches, fallback entry with zero covariance,
+and a direct/fallback/direct sequence on one object. Weights, both cluster
+corrections, large regressor offsets and response scales 1e-140/1e140 with
+omissions remain explicit cases. These checks do not change the solver or
+introduce an in-fit numerical threshold.

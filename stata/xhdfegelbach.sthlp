@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.6.2  12nov2026}{...}
+{* *! version 1.6.2  21nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
@@ -12,8 +12,8 @@
 {p2colreset}{...}
 
 {pstd}
-{bf:Version 1.6.2 (11nov2026), distributed with shared package}
-{bf:2.31.0.20261111.} The shared package includes common HDFE, selectable connectivity
+{bf:Version 1.6.2 (21nov2026), distributed with shared package}
+{bf:2.34.1.20261121.} The shared package includes common HDFE, selectable connectivity
 diagnostics, retained-sample provenance, conservative inference gates, and the
 bootstrap/table/waterfall companion commands.{p_end}
 
@@ -48,6 +48,7 @@ bootstrap/table/waterfall companion commands.{p_end}
 {synopt :{opt tol(#)}}FE absorption tolerance; default {cmd:1e-8}{p_end}
 {synopt :{opt threads(#)}}explicit OpenMP request (0 = automatic policy){p_end}
 {synopt :{opt gpu}}request CUDA for the full HDFE absorption{p_end}
+{synopt :{opt weightedcpuroute(on|off)}}request CPU for eligible weighted CUDA fits; default {cmd:off}{p_end}
 {synopt :{opt verbose}}stream deterministic phase progress and elapsed time live{p_end}
 {synopt :{opt sampleaudit}}compute and return a stable retained-sample identifier{p_end}
 {synopt :{opth generate(newvar)}}also generate the retained-sample indicator{p_end}
@@ -224,7 +225,7 @@ global split to identified.{p_end}
 {pstd}
 Because the two option names share a prefix, {opt connected()} may be
 abbreviated to {cmd:conn()}, {cmd:connec()} or {cmd:connect()}, whereas
-{opt connectivityfes()} requires at least {cmd:connectivity()}. Spelling the
+{opt connectivityfes()} requires at least {cmd:connecti()}. Spelling the
 full names is recommended in reproducibility scripts.{p_end}
 
 {phang}{opt absorbedtargets(varlist)} must be a subset of {opt x1()} and
@@ -342,7 +343,7 @@ retained for descriptive accounting but print a loud warning and set
 
 {pstd}The Gelbach covariance follows {cmd:b1x2}'s random-design stacked-
 moment variance, including uncertainty in the auxiliary projections. It is
-not the smaller variance conditional on the realised covariate design.
+not the smaller variance conditional on the realized covariate design.
 Absorbed-FE component covariances remain conditional/{cmd:gamma0}; hence an
 absorbed-target total is labelled
 {cmd:target_exact_base_vce_mixed_components}.{p_end}
@@ -420,7 +421,14 @@ on CPU; this hybrid split preserves the certified FE normalization while
 accelerating the absorption phase that benefits from the GPU. If CUDA is not
 compiled, unavailable, fails, or does not converge, the existing xhdfe
 fallback rules preserve the CPU result. Inspect {cmd:r(gpu_used)} and
-{cmd:r(gpu_status)} to distinguish real CUDA use from fallback. CUDA applies
+{cmd:r(gpu_status)} to identify the backend used. With {cmd:weightedcpuroute(on)}, an eligible weighted
+full model with two or more absorbed effects is fitted on the CPU and
+reports {cmd:r(gpu_status)} = {cmd:weighted_cpu_route} (see
+{help xhdfe##gpu_weighted_cpu_route:weighted fits on CUDA}), except when the
+fixed-effect recovery falls back to the full refit ({cmd:XHDFE_GELBACH_WARM_RECOVERY=0},
+or a warm start that is not certified): the status reported is then that refit's,
+which runs after the CUDA request has ended (code 0 when nothing else requests
+CUDA), as for an unweighted model. CUDA applies
 only to the full-model HDFE absorption; it does not move the base regression,
 auxiliary covariance algebra, share delta method, or FE recovery to the GPU.
 
@@ -705,7 +713,7 @@ layer emits a note or warning.{p_end}
 {synopt:{cmd:r(recovery_threads_effective)}}FE-recovery/covariance CPU phase budget{p_end}
 {synopt:{cmd:r(threads_used)} {cmd:r(parallel_workers_active)}}largest observed team and useful-worker count over all phases{p_end}
 {synopt:{cmd:r(thread_capacity)} {cmd:r(openmp_enabled)}}runtime-visible capacity and OpenMP availability{p_end}
-{synopt:{cmd:r(thread_limit_code)} {cmd:r(thread_limit_reason)}}capacity/availability limit diagnostics{p_end}
+{synopt:{cmd:r(thread_limit_code)}}capacity/availability limit code; its label is the macro {cmd:r(thread_limit_reason)}{p_end}
 {synopt:{cmd:r(fullfit_threads_used)} {cmd:r(fullfit_parallel_workers_active)}}observed full-fit team/workers{p_end}
 {synopt:{cmd:r(recovery_threads_used)} {cmd:r(recovery_parallel_workers_active)}}observed recovery team/workers (0 when absent){p_end}
 {synopt:{cmd:r(covariance_threads_used)} {cmd:r(cov_parallel_workers_active)}}
@@ -713,11 +721,12 @@ observed base/auxiliary/covariance team/workers; the worker-field name is shorte
 for Stata's identifier limit{p_end}
 {synopt:{cmd:r(gpu_requested)}}1 when CUDA was requested by {opt gpu} or the active backend selector{p_end}
 {synopt:{cmd:r(gpu_used)}}1 only if CUDA was actually used{p_end}
-{synopt:{cmd:r(gpu_status_code)}}0 not requested; 1 used; 2 unavailable; 3 not converged; 4 failed; 5 CPU cache; 6 not applicable{p_end}
+{synopt:{cmd:r(gpu_status_code)}}0 not requested; 1 used; 2 unavailable; 3 not converged; 4 failed; 5 CPU cache; 6 not applicable;
+7 weighted full-model fit run on the CPU by design (see {help xhdfe##gpu_weighted_cpu_route:weighted fits on CUDA}){p_end}
 {synopt:{cmd:r(gpu_attempted)}}1 if GPU absorption was attempted{p_end}
 {synopt:{cmd:r(gpu_absorption_converged)}}1 if attempted GPU absorption converged{p_end}
 {synopt:{cmd:r(gpu_absorption_iterations)}}iterations of attempted GPU absorption{p_end}
-{synopt:{cmd:r(cuda_tail_code)}}three-FE Comparable CUDA completion of the full-model fit: 0 none, 1 GPU LSMR,
+{synopt:{cmd:r(cuda_tail_code)}}CUDA completion of the full-model fit: 0 none, 1 GPU LSMR,
 2 CPU MLSMR after the GPU sweeps (see {help xhdfe}){p_end}
 
 {p2col 5 20 24 2: Macros}{p_end}
@@ -761,8 +770,9 @@ or {cmd:not_certified_with_common_fes}{p_end}
 {synopt:{cmd:r(mobility_component_scope)}}historical FE-pair scope, added-FE-pair scope with common FEs, or {cmd:not_applicable}{p_end}
 {synopt:{cmd:r(gpu_backend)}}effective backend, {cmd:cuda} or {cmd:cpu}{p_end}
 {synopt:{cmd:r(gpu_status)}}{cmd:not_requested}, {cmd:used}, {cmd:unavailable},
-{cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, or {cmd:not_applicable}{p_end}
+{cmd:not_converged}, {cmd:failed}, {cmd:cpu_cache}, {cmd:not_applicable}, or {cmd:weighted_cpu_route}{p_end}
 {synopt:{cmd:r(cuda_tail)}}label of {cmd:r(cuda_tail_code)}: {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr}{p_end}
+{synopt:{cmd:r(thread_limit_reason)}}label of {cmd:r(thread_limit_code)}{p_end}
 {synopt:{cmd:r(regular_inference_status)}}group-major status words, X1 rows then intercept within each observed block{p_end}
 {synopt:{cmd:r(regular_inference_status_order)}}ordering description for the status words{p_end}
 {synopt:{cmd:r(regular_inference_codebook)}}mapping from numeric status codes to status words{p_end}
@@ -771,64 +781,17 @@ or {cmd:not_certified_with_common_fes}{p_end}
 
 {title:Examples}
 
-{pstd}Account for the movement of the education coefficient using an ability
-block, a job-covariate block and a firm fixed-effect block:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("ability = ability : job_covariates = tenure exper") fes(firm_id)}{p_end}
+{pstd}Decompose the movement in the tenure coefficient when experience, job
+characteristics and occupation effects enter the wage model.{p_end}
+{phang2}{cmd:. use "https://www.stata-press.com/data/r19/nlswork.dta", clear}{p_end}
+{phang2}{cmd:. xhdfegelbach ln_wage, x1(tenure)}
+{cmd:x2groups("experience = ttl_exp : job = union south not_smsa") commonfes(year)}
+{cmd:fes(occ_code) vce(cluster) cluster(idcode) shares(movement) sampleaudit generate(in_gelbach)}{p_end}
 {phang2}{cmd:. matrix list r(delta)}{p_end}
-{phang2}{cmd:. matrix list r(total)}{p_end}
 
-{pstd}Cluster-robust inference by firm:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") vce(cluster) cluster(firm_id)}{p_end}
-
-{pstd}Keep age and a high-dimensional year effect common to both models, report
-only education, and obtain signed shares of the coefficient movement:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ age) focal(educ)}
-{cmd:x2groups("ability = ability : job = tenure exper") commonfes(year)}
-{cmd:fes(firm_id) shares(movement)}{p_end}
-{phang2}{cmd:. matrix list r(share)}{p_end}
-{phang2}{cmd:. matrix list r(share_se)}{p_end}
-{phang2}{cmd:. matrix list r(share_ci_low)}{p_end}
-
-{pstd}Report shares of the base coefficient with full ratio inference using
-the numerator-denominator cross-covariance:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ age) focal(educ) x2groups("job = tenure exper") fes(firm_id) shares(base)}{p_end}
-{phang2}{cmd:. matrix list r(share)}{p_end}
-{phang2}{cmd:. matrix list r(share_se)}{p_end}
-
-{pstd}Allocate a worker-invariant group coefficient after worker FE absorb it.
-The zero in {cmd:r(b_full)} is imposed and is labelled accordingly:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(female age)}
-{cmd:x2groups("job = tenure exper") fes(worker_id firm_id)}
-{cmd:absorbedtargets(female) vce(cluster) cluster(worker_id)}{p_end}
-{phang2}{cmd:. di "`r(estimand)'  `r(b_full_status)'"}{p_end}
-
-{pstd}Request real CUDA absorption and show phase progress:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(firm_id year) vce(cluster) cluster(worker_id) gpu verbose}{p_end}
-{phang2}{cmd:. return list}{p_end}
-
-{pstd}Require an identified worker-firm split, or inspect another pair in a
-larger FE system without claiming multiway certification:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(worker_id firm_id) connected(require)}{p_end}
-{phang2}{cmd:. xhdfegelbach lwage, x1(educ) x2groups("job = tenure exper") fes(worker_id firm_id occupation_id) connectivityfes(worker_id firm_id)}{p_end}
-
-{pstd}Materialize and fingerprint the exact retained estimation sample:{p_end}
-{phang2}{cmd:. xhdfegelbach lwage if analysis_sample, x1(educ age)}
-{cmd:x2groups("job = tenure exper") fes(worker_id firm_id)}
-{cmd:sampleaudit generate(gelbach_sample)}{p_end}
-{phang2}{cmd:. local gelbach_sample_hash "`r(sample_hash)'"}{p_end}
-{phang2}{cmd:. local gelbach_sample_hash_algorithm "`r(sample_hash_algorithm)'"}{p_end}
-{pstd}{cmd:r()} is volatile: store provenance results before running another
-{cmd:rclass} command.{p_end}
-{phang2}{cmd:. tab gelbach_sample, missing}{p_end}
-{phang2}{cmd:. di "`gelbach_sample_hash'  `gelbach_sample_hash_algorithm'"}{p_end}
-
-{pstd}Two executable empirical designs ship in all three frontends: the
-standard decomposition and the absorbed-target allocation. The Stata files
-are {bf:examples/gelbach_example.do} and
-{bf:examples/gelbach_absorbed_target.do}; matching Python and R files are in
-the same directory. Thus the example suite is two designs by three
-frontends, not six different estimands.{p_end}
-
+{pstd}See the complete {help xhdfe_examples##gelbach:table and graph example},
+the {help xhdfe_examples##gelbach_absorbed:absorbed-target example} and
+{help xhdfe_examples##bootstrap:bootstrap examples}.{p_end}
 
 {title:References}
 
@@ -836,6 +799,58 @@ frontends, not six different estimands.{p_end}
 Gelbach, J. B. 2016. When do covariates matter? And which ones, and how much?
 {it:Journal of Labor Economics} 34(2): 509-543. Validated against his
 {cmd:b1x2} Stata implementation.{p_end}
+
+{pstd}
+The design of this command and of its companions also drew on the following sources. The decomposition
+interface of {cmd:pyfixest} (groups of covariates, tables, plots and bootstrap intervals) was the reference
+for a modern interface; Guimaraes, Portugal and Reis (2026) was the starting point for the decomposition
+with high-dimensional fixed effects; Gaure (2013) sets out what is estimable about absorbed effects. The
+others delimit how the decomposition may be read: Kohler, Karlson and Holm (2011) for nonlinear probability
+models, Fortin, Lemieux and Firpo (2011) for its relation to Oaxaca-Blinder decompositions, Cameron, Gelbach
+and Miller (2008) for bootstrap inference with clustered errors, and Acharya, Blackwell and Sen (2016) and
+Tingley et al. (2014) for causal mediation, which the decomposition does not identify.{p_end}
+
+{phang}
+The PyFixest Authors. "{cmd:pyfixest}: Fast high-dimensional fixed effect estimation in Python."
+{browse "https://github.com/py-econometrics/pyfixest":https://github.com/py-econometrics/pyfixest}.{p_end}
+
+{phang}
+Guimaraes, P., P. Portugal, and H. Reis. 2026. Labor market sorting in Portugal, with a practitioner
+corner on the decomposition of the regression coefficient estimates.
+{it:Banco de Portugal Economic Studies} XII(3).{p_end}
+
+{phang}
+Gaure, S. 2013. lfe: Linear group fixed effects. {it:The R Journal} 5(2): 104-116.
+{browse "https://doi.org/10.32614/RJ-2013-031":doi:10.32614/RJ-2013-031}.{p_end}
+
+{phang}
+Kohler, U., K. B. Karlson, and A. Holm. 2011. Comparing coefficients of nested nonlinear probability
+models. {it:Stata Journal} 11(3): 420-438.
+{browse "https://doi.org/10.1177/1536867X1101100306":doi:10.1177/1536867X1101100306}.{p_end}
+
+{phang}
+Fortin, N., T. Lemieux, and S. Firpo. 2011. Decomposition methods in economics. In
+{it:Handbook of Labor Economics}, vol. 4A, 1-102.
+{browse "https://doi.org/10.1016/S0169-7218(11)00407-2":doi:10.1016/S0169-7218(11)00407-2}.{p_end}
+
+{phang}
+Cameron, A. C., J. B. Gelbach, and D. L. Miller. 2008. Bootstrap-based improvements for inference with
+clustered errors. {it:Review of Economics and Statistics} 90(3): 414-427.
+{browse "https://doi.org/10.1162/rest.90.3.414":doi:10.1162/rest.90.3.414}.{p_end}
+
+{phang}
+Acharya, A., M. Blackwell, and M. Sen. 2016. Explaining causal findings without bias: Detecting and
+assessing direct effects. {it:American Political Science Review} 110(3): 512-529.
+{browse "https://doi.org/10.1017/S0003055416000216":doi:10.1017/S0003055416000216}.{p_end}
+
+{phang}
+Tingley, D., T. Yamamoto, K. Hirose, L. Keele, and K. Imai. 2014. mediation: R package for causal
+mediation analysis. {it:Journal of Statistical Software} 59(5): 1-38.
+{browse "https://doi.org/10.18637/jss.v059.i05":doi:10.18637/jss.v059.i05}.{p_end}
+
+{pstd}
+For the packages and papers on which the shared xhdfe backend builds, see
+{help xhdfe##acknowledgements:help xhdfe, Acknowledgements}.{p_end}
 
 
 {title:Also see}

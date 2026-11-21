@@ -261,6 +261,7 @@ gpu_status_label <- function(code) {
          "3" = "gpu_absorption_not_converged",
          "4" = "gpu_backend_failed",
          "5" = "cpu_cache_or_profile_result",
+         "7" = "weighted_cpu_route",
          "unknown")
 }
 

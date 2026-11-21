@@ -10,6 +10,7 @@ namespace hdfe {
 
 namespace detail {
 class ParallelWorkObserver;
+struct StrictSweepExitRequest;  // package B, stage 2a' (fe_absorption.hpp)
 
 /** \brief Internal (F2-A): the CPU automatic route selector's answer for one fit. */
 struct AutoRouteAnswer {
@@ -23,8 +24,16 @@ struct AutoRouteAnswer {
 /** \brief Supported covariance estimators for coefficient inference. */
 enum class StandardErrorType { Homoskedastic, Robust, Cluster };
 
-/** \brief Algorithmic strategy used for the fixed-effect absorber. */
-enum class AbsorptionMethod { Auto, GaussSeidel, SymmetricGaussSeidel, Jacobi, Schwarz, Lsmr, Mlsmr, AutoMlsmr };
+/** \brief Algorithmic strategy used for the fixed-effect absorber.
+ *  ReducedPcg (code 8, public name reduced-pcg) is an output only: it is the
+ *  method used when the reduced-system tier publishes a fit, and it is
+ *  rejected as a requested method. KrylovPcg (code 9, public name krylov-pcg)
+ *  is an output only as well: it is reported when the fit's route was forced
+ *  to the Krylov-PCG absorber (HdfeOptions::use_krylov in force) and that
+ *  absorber produced the published transform, and it is rejected as a
+ *  requested method. New values are appended at the end so that no existing
+ *  code changes. */
+enum class AbsorptionMethod { Auto, GaussSeidel, SymmetricGaussSeidel, Jacobi, Schwarz, Lsmr, Mlsmr, AutoMlsmr, ReducedPcg, KrylovPcg };
 
 /** \brief Numerical stopping rule used by the alternating-projection absorber. */
 enum class ConvergenceCriterion { Auto, NormChange, Reghdfe, Both };
@@ -46,6 +55,14 @@ enum class StatsStyle { Reghdfe, Legacy };
 
 /** \brief Absorber convergence mode. */
 enum class ToleranceMode { XhdfeFast, ReghdfeComparable, StrictResidual };
+
+/** \brief The reduced-system tier for one fit (2.32). Default follows the
+ *  process switch (on unless the environment variable XHDFE_REDUCED_PCG is
+ *  exactly 0, read once per process); On and Off override it for this fit.
+ *  HdfeOptions::reduced_pcg_cuda uses the same three states for the CUDA
+ *  variant of the tier, whose process switch is off unless
+ *  XHDFE_REDUCED_PCG_CUDA is exactly 1. */
+enum class ReducedPcgRequest { Default, On, Off };
 
 /**
  * \brief Configuration parameters controlling numerical tolerances and options for HDFE estimation.
@@ -84,7 +101,7 @@ struct HdfeOptions {
     bool capture_first_pair_component_stats = false;       //!< Retain first-pair mobility-component counts/shares during the existing DoF pass.
     bool retain_fixed_effects = false;                     //!< When true, recover and cache observation-level fixed effects.
     bool refine_stored_residuals = false;                  //!< When true, recompute stored residuals via a final absorption of y-Xb.
-    bool stored_residuals_fit_state = false;               //!< Internal (P7, 2.31.0): set only by the Stata plugin for residuals(), together with refine_stored_residuals, which keeps recording the request (the opt-in accuracy prototypes read it). The stored residuals are then the fit's own within residuals, the vector behind rss and the covariance, and the late re-absorption of y-Xb does not run. Other callers keep the meaning of refine_stored_residuals. Not user-facing.
+    bool stored_residuals_fit_state = false;               //!< Internal (P7, 2.31.0): set only by the Stata plugin for residuals(), together with refine_stored_residuals, which keeps recording the request (the opt-in accuracy prototypes read it). The stored residuals are then the fit's own within residuals, the vector behind rss and the covariance, and the late re-absorption of y-Xb does not run; for a strict-residual request that holds only inside the scope of the strict CUDA acceptance (package B, 17nov2026: the core decides from that record), and every other strict fit keeps the re-absorption. Other callers keep the meaning of refine_stored_residuals. Not user-facing.
     int savefe_fastpath_max_cols = 8;                      //!< Max X columns to enable savefe alpha accumulation during absorption.
     bool symmetric_sweep = false;                          //!< When true, apply a forward and backward sweep per iteration for faster convergence.
     AbsorptionMethod absorption_method = AbsorptionMethod::Auto; //!< Absorption strategy selector (auto picks based on FE count and threads).
@@ -120,6 +137,15 @@ struct HdfeOptions {
     StatsStyle stats_style = StatsStyle::Reghdfe;          //!< Fit-statistics style (reghdfe default).
     std::vector<int> collinear_priority;                   //!< Column priority when dropping collinear regressors (higher = keep).
     int dkraay_bandwidth = -1;                            //!< -1: ordinary VCE; 0: automatic DK bandwidth; >0: Bartlett bandwidth. Requires one chronologically ordered cluster ID.
+    ReducedPcgRequest reduced_pcg = ReducedPcgRequest::Default; //!< The reduced-system tier for this fit: Default follows the process switch, On and Off override it. The resulting effective switch (detail::reduced_pcg_effective) decides the tier's entry, the absorption-cache tag, the fold of the tier's observation and the tier's diagnostics; with it off every output and the cache key are those of the tier switched off for the process. Last member, so that no existing member moves.
+    int fe_collinear_omission_cols = 0;                    //!< Internal (E2, 16nov2026): the leading columns of the absorbed X that the regressor's fit omits when the absorption annihilates them (its FE-collinearity rule, detail::kFeCollinearTol). The heterogeneous-slope block certificate judges such an annihilated column in its input scale, not in its absorbed scale (rounding noise). 0, the default, keeps the absorbed scale for every column. Set by the regressor's fit only; appended so that no existing member moves. Not user-facing.
+    bool fe_collinear_centred = false;                     //!< Internal (E2, 16nov2026): the model of that fit has a constant (explicit or absorbed), so its FE-collinearity rule also tests the centred sum of squares; the certificate applies the same variant. Set with fe_collinear_omission_cols. Not user-facing.
+    ReducedPcgRequest reduced_pcg_cuda = ReducedPcgRequest::Default; //!< The experimental CUDA variant of the reduced-system tier for this fit: Default follows the process switch (off unless the environment variable XHDFE_REDUCED_PCG_CUDA is exactly 1, read once per process), On and Off override it (detail::reduced_pcg_cuda_effective). Read only by the tier's entry of a reghdfe-comparable fit that requests CUDA, which still needs the effective reduced_pcg switch and no mobility profile, absorption cache or FE-structure cache; inert for every other fit. Appended so that no existing member moves.
+    detail::StrictSweepExitRequest* strict_sweep_exit = nullptr; //!< Internal (package B, stage 2a', 18nov2026): the request of a strict-residual fit in scope of the CUDA acceptance, set by the regressor on its primary absorption only; the CUDA sweep route reads it once, after the polish of a sweep exit (fe_absorption.hpp). Appended so that no existing member moves. Not user-facing.
+    bool weighted_cpu_route = false;                       //!< Explicit request to run an eligible weighted CUDA fit on CPU.
+    bool partial_out_allow_mlsmr_repair = false;            //!< xfepout delegated the solver for an analytically weighted partial-out.
+    bool certify_weighted_gauss_seidel = false;             //!< Internal: explicit ordinary three-effect CPU GS in Comparable mode.
+    bool strict_cpu_absolute_check = true;                  //!< Internal: AKM's nested FWL uses its scale-invariant projection contract.
 };
 
 /**

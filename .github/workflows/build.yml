@@ -31,7 +31,8 @@ jobs:
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
             -DXHDFE_ENABLE_CUDA=OFF -DXHDFE_ENABLE_MARCH_NATIVE=OFF
-          cmake --build build -j
+          nproc; free -m
+          cmake --build build --parallel 2
 
       - name: Verify maintained source mirrors
         run: bash tools/check_cpp_core_alignment.sh

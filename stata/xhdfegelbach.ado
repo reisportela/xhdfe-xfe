@@ -1,4 +1,4 @@
-*! version 1.6.2  12nov2026
+*! version 1.6.2  21nov2026
 *! Gelbach (2016) conditional decomposition, HDFE-aware (xhdfe backend).
 *! Same compiled implementation as Python xhdfe.gelbach and R xhdfe_gelbach;
 *! inference matches Gelbach's b1x2 (unadjusted/robust/cluster, gamma0/cov0).
@@ -13,7 +13,13 @@ program define xhdfegelbach, rclass sortpreserve
           SHARES(string) SHARETOL(real 1e-12) SHARETMIN(real 3.0) ///
           FEVARMIN(real 0.35) Level(cilevel) ///
           CONNected(string) CONNectivityfes(varlist numeric min=2 max=2) ///
-          SAMPLEAudit GENerate(name) ]
+          SAMPLEAudit GENerate(name) WEIGHTEDCPUROUTE(string) ]
+
+    local weightedcpuroute = lower(strtrim(`"`weightedcpuroute'"'))
+    if ("`weightedcpuroute'" != "" & !inlist("`weightedcpuroute'", "on", "off")) {
+        di as err "weightedcpuroute() must be on or off"
+        exit 198
+    }
 
     local y `varlist'
     if ("`generate'" != "") {
@@ -334,6 +340,7 @@ program define xhdfegelbach, rclass sortpreserve
         local cfg "`cfg'connectivity_fe_pair=`connectivity_pair_csv';"
     local cfg "`cfg'require_connected=`=("`connected'"=="require")';"
     local cfg "`cfg'use_gpu=`=("`gpu'"!="")';verbose=`=("`verbose'"!="")';"
+    if ("`weightedcpuroute'" == "on") local cfg "`cfg'weighted_cpu_route=1;"
     local cfg "`cfg'capture_sample_provenance=`sample_requested';"
     local cfg "`cfg'has_sample_output=`=("`generate'"!="")';"
     local cfg "`cfg'dmat=`D';semat=`SE';totmat=`TOT';bbasemat=`BBASE';bfullmat=`BFULL';"
@@ -677,6 +684,7 @@ program define xhdfegelbach, rclass sortpreserve
     else if (scalar(__xgel_gpu_status_code) == 4) local gpu_status "failed"
     else if (scalar(__xgel_gpu_status_code) == 5) local gpu_status "cpu_cache"
     else if (scalar(__xgel_gpu_status_code) == 6) local gpu_status "not_applicable"
+    else if (scalar(__xgel_gpu_status_code) == 7) local gpu_status "weighted_cpu_route"
     local cuda_tail "none"
     if (scalar(__xgel_cuda_tail_code) == 1) local cuda_tail "device-lsmr"
     else if (scalar(__xgel_cuda_tail_code) == 2) local cuda_tail "host-mlsmr"
@@ -688,6 +696,7 @@ program define xhdfegelbach, rclass sortpreserve
         else if ("`gpu_status'" == "failed") local backend_display "CPU (CUDA failed)"
         else if ("`gpu_status'" == "cpu_cache") local backend_display "CPU (cached result)"
         else if ("`gpu_status'" == "not_applicable") local backend_display "CPU (CUDA not applicable)"
+        else if ("`gpu_status'" == "weighted_cpu_route") local backend_display "CPU (weighted fit, CPU route)"
     }
 
     di as txt _n "{hline 78}"

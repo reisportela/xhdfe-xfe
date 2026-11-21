@@ -5,7 +5,10 @@ set(sources
     src/akm_kss.cpp
     src/akm_projection.cpp
     src/fe_absorption.cpp
-    src/hdfe_regressor_v11.cpp)
+    src/hdfe_regressor_v11.cpp
+    src/reduced_schur_pcg.cpp
+    src/reduced_schur_pcg.hpp
+    src/sparse_rank.hpp)
 set(pattern
     "std::is(finite|nan|inf)[ \t]*\\(|\\.allFinite[ \t]*\\(|\\.hasNaN[ \t]*\\(")
 set(violations "")

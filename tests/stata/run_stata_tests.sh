@@ -154,6 +154,45 @@ if ! grep -Fxq "GROUP_INTERACTION_CONTRACT_PASS cpu" "${OUT_DIR}/group_interacti
   exit 1
 fi
 
+# String identifiers coded in a temporary frame (_xhdfe_string_group) against
+# the same package and plugin with egen at those sites (the native arm). Five
+# fresh processes in one folder, since compare reads the files of the two
+# battery arms; XHDFE_PROFILE_CPU is set for the profile step only. The log of
+# each step is kept as string_id_encoding_<step>.log.
+STRING_ID_DIR="${OUT_DIR}/string_id_encoding"
+mkdir -p "${STRING_ID_DIR}"
+string_id_steps=(
+  "codes|STRING_ID_ENCODING_CODES_PASS"
+  "profile|STRING_ID_ENCODING_PROFILE_PASS"
+  "battery patched|STRING_ID_ENCODING_BATTERY_DONE patched"
+  "battery native|STRING_ID_ENCODING_BATTERY_DONE native"
+  "compare|STRING_ID_ENCODING_CONTRACT_PASS"
+)
+for string_id_step in "${string_id_steps[@]}"; do
+  string_id_args="${string_id_step%%|*}"
+  string_id_marker="${string_id_step#*|}"
+  string_id_log="string_id_encoding_${string_id_args// /_}.log"
+  (
+    cd "${STRING_ID_DIR}"
+    if [[ "${string_id_args}" == "profile" ]]; then
+      export XHDFE_PROFILE_CPU=1
+    else
+      unset XHDFE_PROFILE_CPU
+    fi
+    # shellcheck disable=SC2086
+    "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/string_id_encoding_contract.do" ${string_id_args} \
+      2> "${string_id_log%.log}.stderr"
+    cp string_id_encoding_contract.log "${string_id_log}"
+  )
+  if ! grep -Fxq "${string_id_marker}" "${STRING_ID_DIR}/${string_id_log}"; then
+    echo "Stata string-identifier encoding contract failed (${string_id_args}). Last log lines:" >&2
+    tail -n 80 "${STRING_ID_DIR}/${string_id_log}" >&2
+    exit 1
+  fi
+done
+grep -h '^STRING_ID_NOT_RUN ' "${STRING_ID_DIR}/string_id_encoding_codes.log" || true
+echo "Stata string-identifier encoding contract: codes, profile, the patched and native arms and compare passed"
+
 (
   cd "${OUT_DIR}"
   "${STATA_BIN}" -q -b do "${SCRIPT_DIR}/iv_firststage_contract.do" cpu

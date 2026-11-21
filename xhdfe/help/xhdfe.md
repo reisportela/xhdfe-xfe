@@ -1,7 +1,11 @@
 # xhdfe Python help
 
-Package documentation version: 2.31.1.20261112. Use `python -m xhdfe --version`
+Package documentation version: 2.34.1.20261121. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
+
+Version 2.32.0 adds the reduced-system tier, on by default for eligible CPU
+fits (see "Reduced-system tier" below); `reduced_pcg=False` in the constructor
+turns it off for that regressor, and `XHDFE_REDUCED_PCG=0` for the process.
 
 Version 2.31.0 corrects Student-t inference under the 53-bit x87 precision of
 Windows hosts, corrects weighted `reghdfe-comparable` fits on CPU and carries
@@ -23,6 +27,11 @@ help.
 The package is a proof of concept. Estimates, standard errors, and recovered
 fixed effects should be validated for the user's research design, just as with
 the Stata package.
+
+When using the absorption and FE-structure caches together on CPU, give
+each a distinct path. Use `auto` or `write` to refresh an older
+combined absorption entry. The fit keys the two-cache entry on the original
+FE identifiers and singleton policy.
 
 ## Installation
 
@@ -110,31 +119,23 @@ xhdfe-help gelbach
 
 ## Minimal example
 
+Use pandas to read the public Grunfeld investment panel from statsmodels.
+
 ```python
-import os
-import numpy as np
+import pandas as pd
 import xhdfe
 
-n = 2000
-rng = np.random.default_rng(0)
-y = rng.normal(size=n)
-X = rng.normal(size=(n, 3))
-firm_id = rng.integers(0, 200, size=n)
-year_id = rng.integers(0, 20, size=n)
-
-reg = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
-reg.fit(y, X, fes=[firm_id, year_id])
-
-print(reg.coef_)
+url = "https://raw.githubusercontent.com/statsmodels/statsmodels/main/statsmodels/datasets/grunfeld/grunfeld.csv"
+data = pd.read_csv(url)
+firm = pd.factorize(data["firm"])[0]
+reg = xhdfe.HdfeRegressor(se_type="cluster")
+reg.fit(
+    data["invest"].to_numpy(),
+    data[["value", "capital"]].to_numpy(),
+    fes=[firm, data["year"].to_numpy()],
+    clusters=firm,
+)
 print(reg.summary())
-
-# Optional: request CUDA after installing a CUDA-enabled build
-os.environ["XHDFE_GPU_BACKEND"] = "cuda"
-reg_gpu = xhdfe.HdfeRegressor(se_type="robust", tol=1e-8)
-reg_gpu.fit(y, X, fes=[firm_id, year_id])
-assert reg_gpu.gpu_used_ == 1
-assert reg_gpu.gpu_status_code_ == 1
-os.environ.pop("XHDFE_GPU_BACKEND", None)
 ```
 
 ## Optional formula interface
@@ -369,6 +370,8 @@ xhdfe.HdfeRegressor(
     ssc_g_df=None,
     ssc_t_df=None,
     tolerance_mode="reghdfe-comparable",
+    reduced_pcg=None,
+    reduced_pcg_cuda=None,
 )
 ```
 
@@ -405,8 +408,53 @@ Main options:
 - `retain_fes`: recover per-observation fixed-effect contributions.
 - `absorption_method`: `auto`, `gauss-seidel`, `symmetric-gauss-seidel`,
   `jacobi`, `mlsmr`, `lsmr`, or `auto-mlsmr` with documented aliases.
+  `reduced-pcg` is only reported (see "Reduced-system tier" below);
+  requesting it raises an error. `krylov-pcg`
+  (`xhdfe.AbsorptionMethod.krylov_pcg`, code 9 in Stata and R) is only
+  reported, when the Krylov-PCG route is forced, for example by a mobility
+  profile that suggests it; requesting it raises an error. In
+  `absorption_method_used`, `gauss_seidel`, `symmetric_gauss_seidel` and
+  `jacobi` (codes 1 to 3) name the sweep selected for the fit; they are also
+  reported when a route without a code of its own served it: the exact
+  projections of weighted designs whose effects have few levels, the exact sparse
+  solve and the conjugate-gradient accelerator of small path-like two-way
+  graphs, and the conjugate-gradient stage that can follow the GPU sweeps.
+- `reduced_pcg`: the reduced-system tier for the fits of this regressor:
+  `True` on, `False` off, `None` (default) the process default (see
+  "Reduced-system tier" below). Any other value raises `TypeError`.
+- `reduced_pcg_cuda`: the experimental CUDA variant of that tier for the fits
+  of this regressor that run on CUDA: `True` requests it, `False` does not,
+  `None` (default) the process default (see "Reduced-system tier" below). It
+  has no effect on CPU fits. Any other value raises `TypeError`.
 - `tolerance_mode`: `reghdfe-comparable` (default), `xhdfe-fast`, or
-  `strict-residual`. Ordinary no-slope LSMR/MLSMR uses
+  `strict-residual`. `strict-residual` treats a final absolute check as
+  authoritative, may use additional iterations up to `max_iter`, and raises a
+  non-convergence error if that check is not met. On the CPU the check is the
+  largest absolute group mean of the absorbed outcome and of every absorbed
+  regressor for sweeps, for fits with both `group` and `individual`, and for
+  ordinary LSMR or MLSMR projections without saved effects, including cached projections. A failed
+  LSMR or MLSMR absolute check can trigger one continuation in the same solver
+  within the remaining `max_iter` budget. For the sparse direct and Krylov-PCG
+  solvers, the solver's stopping rule and the relative certificate apply.
+  An ordinary categorical CUDA fit checks the largest absolute group mean of
+  its reported residuals, using the fit's weights. It checks the structural
+  residual for IV and the reconstruction when the fit retains effects. The
+  unweighted automatic Comparable-based Strict route can continue from its
+  projected state. Other ordinary CUDA fits can run one device LSMR projection
+  within the remaining `max_iter` budget if the absolute check fails.
+  `weighted_cpu_route=True` applies the CPU checks to an eligible fit.
+  Fits with both `group` and `individual` use the grouped-absorption checks.
+  The check of the delivered residuals is absolute, in the units of the
+  dependent variable. When the residuals are so large in those units that
+  the tolerance is within a few units of roundoff of them (observed on one
+  synthetic panel, with `tol=1e-8`, from residuals of about 2e7 to 4e7), the
+  check may be unattainable in double precision: the fit can then use
+  iterations up to `max_iter` and raise a non-convergence error, in some runs
+  well before that limit, and close to that point the same fit can be
+  accepted in one run and refused in the next. Rescale the dependent
+  variable, raise `tol`, or use `reghdfe-comparable`, whose criteria are
+  relative.
+  Ordinary no-slope LSMR/MLSMR uses
   `min(effective tolerance, 1e-11)` in comparable/strict modes; fast mode and
   requested tolerances at or below `1e-11` are unchanged.
   For heterogeneous slopes, fast mode uses the historical aggregate residual
@@ -528,6 +576,15 @@ reg.fit(
 )
 ```
 
+Set `XHDFE_EXPERIMENT_SLOPE_SCHUR=1` to enable the optional secondreg solver
+for eligible unweighted OLS with two ordinary fixed effects and two slopes on
+the same carrier with an intercept. It applies to automatic absorption and
+convergence in `reghdfe-comparable` mode without retained effects. Accepted
+fits report method code 9 and pass the original slope certificate.
+`XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1` enables parallel sparse matrix assembly.
+`XHDFE_EXPERIMENT_NETWORK_SCORES=1` enables eligible two-way cluster score reuse
+when the cluster partitions match the worker and firm effects.
+
 ## Group and individual fixed effects
 
 `group` without `individual` collapses data by group and estimates on the
@@ -549,23 +606,131 @@ Explicit `gauss-seidel` and
 `symmetric-gauss-seidel` remain available; `jacobi`, `schwarz`, `mlsmr`, and
 `auto-mlsmr` are unsupported for combined group/individual fits.
 
-## Known limitations (2.31.0)
+## Reduced-system tier
 
-- Weighted ordinary three-fixed-effect fits on CUDA in `reghdfe-comparable`
-  keep the 2.30.1 sweep exit: converged and certified, but outside the
-  comparable contract against `reghdfe` at tolerance 1e-12 (public
-  240,000-row three-way fixture: coefficients up to 4.4e-7 and standard
-  errors up to 2.3e-5 relative). Use the CPU backend, where weighted fits are
-  corrected in this release.
-- `retain_fes=True` in `reghdfe-comparable` uses the effect-capturing sweep,
-  whose exit can leave coefficients and standard errors outside the
-  comparable contract (in the measured cases up to 4.5e-7 relative in
-  coefficients and 1e-4 in the covariance).
-- CUDA `strict-residual` with the automatic method and criterion and no
-  weights may pass the relative certificate without the final strict check
-  (public fixture: coefficients 1.5e-7 and standard errors 1.7e-4 relative
-  to an exact reference). Inherited, present in 2.28.1. Use the CPU backend
-  for strict-residual results.
+The reduced-system tier is on by default. Before the route chosen by
+`absorption_method="auto"` runs, an ordinary fit with
+`tolerance_mode="reghdfe-comparable"`, `convergence="auto"`, two to five fixed
+effects and no CUDA or Metal request (`XHDFE_GPU_BACKEND`), and without
+weights, instruments, slopes, `retain_fes=True`, `groupvar`, `group` or the
+writing of a mobility profile, eliminates exactly the fixed effect with the
+most levels and solves for the others by preconditioned conjugate gradients on
+the CPU, with the fit's threads, in at most `min(max_iter, 1500)` iterations.
+For a requested tolerance of at least `1.25e-12`, a column stops when its
+reduced-system acceptance quantity is at most `1e-12`, confirmed after
+recomputing the reduced residual. Existing exits for trivial or compatible
+systems remain available. Smaller requested tolerances retain the former
+stopping criterion. Passing this fixed stopping target does not replace the
+independent final precision certificate. The result is published only if it
+passes that certificate, including the requested tolerance, and the unchanged
+acceptance trigger, with a verified `abs_residual_rel_` of at most `1e-11`. A
+published fit reports `absorption_method_used` equal to
+`xhdfe.AbsorptionMethod.reduced_pcg` (`summary()` prints `reduced-pcg`; code 8
+in Stata and R), `reduced_pcg_status_ == 1` and the tier's iterations in
+`num_iterations_` (plus those of a normal-equation correction, should one
+follow); the CPU Auto retry does not run. The method is reported, never
+requested. The design follows fereg 0.6.0 (Schmieder 2026); see
+"Acknowledgements and references" below.
+
+Otherwise the attempt declines: `reduced_pcg_status_ == 2`,
+`reduced_pcg_reason_` names the reason (for example `stall`, `ceiling`,
+`projected`, `memory`, `certificate` or `trigger`) and
+`reduced_pcg_discarded_iterations_` counts its iterations. Its work is
+discarded and the route runs from the original data with its own `max_iter`
+budget, so the estimates, `num_iterations_`, `absorption_method_used` and the
+thread diagnostics are those of the route, as with the tier off. The attempt
+declines with reason `memory` when its working-memory estimate exceeds the
+larger of 1 GiB and 16 bytes per observation for each of the outcome, the
+regressors and the fixed effects, or when an allocation fails.
+
+A fit outside the conditions above, or whose solver a matching mobility
+profile forces, reports `reduced_pcg_status_ == 0` and the condition in
+`reduced_pcg_reason_`: `off` when the tier is switched off, `not_reached` for
+a path that never reaches it, and `cache` when another route's transform was
+read from the absorption cache (a transform the tier published is read back
+with status 1 and reason `none`). While the tier is on for a fit,
+absorption-cache entries written with it off or by an earlier version are not
+read, and while it is off, entries written with it on are not read. The
+internal fits of `xhdfe.akm` and `xhdfe.gelbach` never enter the tier.
+
+The constructor argument `reduced_pcg` switches the tier for the fits of one
+regressor, so that fits with and without it can be compared in the same
+process: `reduced_pcg=False` turns it off and `reduced_pcg=True` turns it on,
+whatever the process default; `None` (the default) follows the process
+default. The process default is the environment variable `XHDFE_REDUCED_PCG`,
+read once per process (`0` turns the tier off for every regressor that leaves
+`reduced_pcg=None`), and otherwise on. A fit with the tier switched off reports
+`reduced_pcg_status_ == 0` and `reduced_pcg_reason_ == "off"`, and gives the
+results of the tier switched off for the whole process. The formula interface
+passes the argument through (`xhdfe.feols(..., reduced_pcg=False)`).
+`XHDFE_REDUCED_PCG_TRACE=1` writes the tier's plan and decision to standard
+error, and `2` adds the verified residual of each column of a published fit.
+
+The tier has an experimental CUDA variant, off by default and the one
+exception to the condition of no CUDA request above. A fit that runs on CUDA
+(`XHDFE_GPU_BACKEND=cuda`), meets the other conditions, requests the variant
+and uses no mobility profile, absorption cache or FE-structure cache attempts
+the tier with the products of the reduced system computed on the GPU; the
+recurrence, the stopping rule, the acceptance trigger and the certificate are
+those described above, computed on the CPU. The constructor argument
+`reduced_pcg_cuda` requests it for the fits of one regressor: `True` requests
+it and `False` does not, whatever the process default; `None` (the default)
+follows the process default, the environment variable `XHDFE_REDUCED_PCG_CUDA`
+(`1` requests the variant; read once per process), and otherwise off. It has
+no effect on CPU fits, and `reduced_pcg=False` (or `XHDFE_REDUCED_PCG=0` with
+`reduced_pcg=None`) keeps both the tier and its CUDA variant off. The
+regressor has no backend argument: each fit follows the value of
+`XHDFE_GPU_BACKEND` at the time it runs, so one process can alternate CPU and
+CUDA fits by setting `os.environ["XHDFE_GPU_BACKEND"]` between them. A
+published fit reports `absorption_method_used` equal to
+`xhdfe.AbsorptionMethod.reduced_pcg`, `reduced_pcg_status_ == 1`,
+`gpu_used_ == 1` and `gpu_status_code_ == 1`; requesting CUDA alone does not
+prove entry, so check all of them. A declined attempt runs the CUDA route that
+the fit takes without the request. A CUDA fit without the request reports
+`reduced_pcg_reason_ == "gpu"`; with the request, a fit kept out by a mobility
+profile or a cache reports `"mobility_profile"`, `"absorption_cache"` or
+`"fe_structure_cache"` (the first that applies, in that order; a file
+`xhdfe_mobility_profile.txt` in the working directory is a mobility profile)
+and runs that same route. An attempt that cannot obtain device memory, or
+cannot page-lock the rows it exchanges with the GPU, declines with
+`reduced_pcg_reason_` equal to `"memory"` or `"pinned"` and runs that same
+route. Where that confirmed stopping rule is in force (a requested tolerance
+of at least `1.25e-12` and `XHDFE_REDUCED_PCG_CHAT_STOP` not `0`), the product
+used to recompute the reduced residual is computed on the GPU as well; the
+stopping decisions stay on the CPU. `XHDFE_REDUCED_PCG_CUDA_REPLACEMENT=0`,
+set in the environment before the first fit (read once per process), keeps
+that product on the CPU. The acceptance trigger and the certificate, computed
+on the CPU, are unchanged. The formula
+interface passes the argument through
+(`xhdfe.feols(..., reduced_pcg_cuda=True)`).
+
+For comparison with the former stopping criterion, set
+`XHDFE_REDUCED_PCG_CHAT_STOP=0` before starting Python. This process switch
+restores that criterion; it does not switch the tier off or change its
+acceptance trigger or final certificate. An unsuccessful attempt declines to
+the unchanged route. The switch is read once per process; requested
+tolerances below `1.25e-12` retain the former criterion with either setting.
+
+## Known limitations
+
+- CUDA checks the fixed-effect moments of each absorbed column in
+  `reghdfe-comparable` and `strict-residual` for ordinary weighted fits
+  with two to four effects and unweighted fits with four effects. A failed
+  check can trigger one device LSMR projection within the iteration budget.
+  For analytic, probability and importance weights, the Comparable
+  correction covers up to 2,000,000 estimation rows.
+  For eligible fits, `weighted_cpu_route=True`
+  requests the CPU fit and reports `gpu_status_code_ == 7` (see "Weighted fits
+  on CUDA" below). Weighted `group` fits with `individual` keep the GPU
+  route and lack CUDA accuracy measurements for this contract.
+  In the ordinary weighted Auto CPU path, the published Comparable
+  projection may use the ordinary selector with four effects and
+  `retain_fes=True`, or for just-identified IV with three effects.
+- With `retain_fes=True` in Comparable mode, a fit can publish a
+  separate certified within projection and recover its effects afterwards.
+  The outcome reconstruction is then limited by the accuracy of FE recovery.
+  Explicit-method, IV, heterogeneous-slope and grouped routes can publish
+  the effect-capturing sweep, whose accuracy is design-dependent.
 - On CUDA, `residuals_` has the accuracy of the CUDA fit (for example 8.4e-4
   relative for `xhdfe-fast` and 1.3e-6 for `reghdfe-comparable` on a
   path-like two-FE public fixture).
@@ -673,6 +838,9 @@ After `fit`, the regressor exposes:
   maximum running condition estimate. They remain zero on non-Krylov paths.
   The distinct Krylov-PCG path is not covered and continues to report zeros;
   a PCG precision floor remains future work rather than part of this change.
+  The reduced-system tier is a different conjugate-gradient solver with the
+  stopping rule described under "Reduced-system tier"; it leaves these four
+  fields at zero itself.
 
   When a fit stops with `precision_certified_` false, `fit` emits a
   `py_hdfe_v11.PrecisionWarning` (a `RuntimeWarning` subclass, so it can be
@@ -709,7 +877,11 @@ After `fit`, the regressor exposes:
   `parallel_workers_active_` (largest useful-worker count in one region),
   `thread_capacity_`, `openmp_enabled_`, `thread_limit_code_`,
   `thread_limit_reason_`, `absorption_method_used`,
-  `gpu_attempted_`, `gpu_used_`, `gpu_status_code_`,
+  `reduced_pcg_status_`, `reduced_pcg_reason_`,
+  `reduced_pcg_discarded_iterations_` (see "Reduced-system tier"),
+  `gpu_attempted_`, `gpu_used_`, `gpu_status_code_` (0 not requested, 1 used,
+  2 unavailable, 3 not converged, 4 failed, 5 CPU cache/profile result, 7
+  weighted fit run on the CPU by design: see "Weighted fits on CUDA"),
   `gpu_absorption_converged_`, `gpu_absorption_iterations_`,
   `cuda_tail_code_`, `cuda_tail_`.
 
@@ -790,6 +962,57 @@ scope. Python callers must check
 `gpu_used_` and `gpu_status_code_`: an unavailable CUDA backend can return a
 CPU result. Fast and Comparable remain distinct approximation contracts.
 
+### Weighted fits on CUDA
+
+Set `weighted_cpu_route=True` in `xhdfe.feols()`, `HdfeRegressor()` or
+`reg.fit()` to request CPU for an eligible weighted CUDA fit. The
+regressor's default is `False`. In `reg.fit()`, `None` uses the
+regressor's setting and a Boolean overrides it for that call only.
+
+With the option enabled, a fit with weights (frequency, analytic, probability or importance; all ones
+and zero weights included) and two or more absorbed effect dimensions, in
+`reghdfe-comparable` or `strict-residual`, whose effective backend is CUDA
+(`XHDFE_GPU_BACKEND=cuda`, or a build whose default backend is CUDA), is
+absorbed on the CPU and says so: `gpu_used_` is 0, `gpu_attempted_` is 0, and
+`gpu_status_code_` is 7 (`weighted_cpu_route`). On CUDA such fits could pass
+the certificate and still lie outside the comparable contract against
+`reghdfe` at tolerance 1e-12 (public 240,000-row fixture: coefficients up to
+4.5e-7 and standard errors up to 2.8e-5 relative). The dimensions are counted
+as `fit` receives them, before redundant ones are removed: `fes=[a, a]` is two.
+A weighted fit with `group` and without `individual` is the collapsed weighted
+fit and is routed too; its CPU fit runs, as before, without the routing retry
+and without the saved-effects projection (the `group` entry turns both off).
+With `individual` a fit keeps the GPU route and was not measured against the
+contract on CUDA; `xhdfe-fast`, unweighted fits and fits with one absorbed
+effect keep the GPU route. A routed fit takes the time of
+the CPU backend. Its results other than the GPU status code are bit for bit
+those of the same fit with `XHDFE_GPU_BACKEND=cpu`, with the same module,
+threads and initial cache and profile state (`reduced_pcg_reason_` included),
+wherever that CPU fit repeats itself (an automatic fit that benchmarks methods
+by time while writing a mobility profile from empty does not); the identity is
+stated for builds whose default backend is the CPU (all released ones). It is
+an identity with the CPU backend, not a guarantee against `reghdfe`, and the
+route is not a general correction (see "Known limitations"). A routed
+`strict-residual` fit applies the CPU checks described under `tolerance_mode`.
+For ordinary weighted CPU fits with three fixed effects and without saved effects,
+explicit `absorption_method="gauss-seidel"` in Comparable mode checks each column's
+fixed-effect moments and can perform one Gauss–Seidel block correction within `max_iter`.
+An explicit `absorption_method="schwarz"`
+with weights gets the CPU's answer, which for an ordinary fit is a refusal. A
+routed fit is the CPU fit also for the optional absorption cache and mobility
+profile, so in a process that writes profiles a later fit may read what a
+routed fit wrote, as it reads what a CPU fit wrote. With `weighted_cpu_route=True`, a weighted Gelbach
+decomposition reports the status of the full-model fit it reports
+(`gpu_status == "weighted_cpu_route"`), except when the fixed-effect recovery
+falls back to the full refit (`XHDFE_GELBACH_WARM_RECOVERY=0`, or a warm start
+that is not certified): the status is then that refit's, made after the CUDA
+request has ended (code 0 when nothing else requests CUDA), as for an
+unweighted model. A bootstrap using `require_gpu_used=True` refuses a fit
+whose actual backend is CPU.
+
+This routing applies to model fits. Stata's `xfepout` and R's
+`xhdfe_demean()` keep their CUDA partial-out route with weights.
+
 For unweighted Comparable fits with three fixed effects, the CUDA path
 completes the projection after its sweeps. This completion normally runs on
 the GPU. When a short GPU probe predicts a long GPU solve (graphs that mix
@@ -837,6 +1060,9 @@ require two domain-separated signatures covering the post-singleton operator,
 incidence and aggregation scale, weights and frequency-weight semantics, RHS
 count, threads, tolerance, backend, and solver-selection context. Legacy
 version-1 profiles, scope mismatches, and signature mismatches are safe misses.
+Writing a profile (`write`, or `auto` without a matching profile) keeps the fit
+out of the reduced-system tier, as does a matching profile that suggests a
+Krylov or sparse solver.
 
 A profile is a method-selection hint, not a transformed-data cache. In
 group/individual Auto it cannot promote Gauss-Seidel or symmetric Gauss-Seidel:
@@ -857,6 +1083,79 @@ moments `C D' W r`, and a Frobenius norm over active normalized columns. The
 consistent-system residual ratio or the least-squares optimality ratio must
 pass for every right-hand side. The public residual diagnostics retain their
 established scale for compatibility.
+
+## Acknowledgements and references
+
+`xhdfe` follows the estimator, defaults and reporting of `reghdfe` (Sergio
+Correia) and builds on the work of other researchers:
+
+- `fixest` (Laurent Bergé and contributors): accelerated alternating
+  projections and small-sample corrections.
+- `pyfixest` (Alexander Fischer and contributors; https://pyfixest.org/,
+  https://github.com/py-econometrics/pyfixest): code and documentation
+  studied during development, and interface, numerical and benchmark
+  references.
+- `FixedEffectModels.jl` (Matthieu Gomez and contributors): diagonally
+  preconditioned LSMR.
+- `within` (Alexander Fischer and Kristof Schröder;
+  https://github.com/py-econometrics/within) and Fischer and Schröder (2026),
+  "Graph Preconditioning for High-Dimensional Fixed Effects Regression",
+  mimeo, draft of June 2026 (https://github.com/py-econometrics/within-paper):
+  the direct starting point of the graph-preconditioned MLSMR/additive-Schwarz
+  route.
+- `fereg` (Johannes F. Schmieder; https://github.com/johannes-schmieder/fereg)
+  and Schmieder (2026), "fereg: Fast high-dimensional fixed-effects
+  regressions in Stata", CEPR Discussion Paper No. 22170, CEPR Press, Paris &
+  London (https://cepr.org/publications/dp22170). The reduced-system tier of
+  version 2.32 follows the design implemented in fereg 0.6.0 and described
+  there, and cites it as such: exact elimination of the effect with the most
+  levels and Jacobi-preconditioned conjugate gradients on the remaining
+  system, for two to five fixed effects, with up to eight columns per pass, a
+  limit of 1,500 iterations for that stage and a stall test of the same form
+  (the residual must halve within each window of iterations). As that paper
+  notes, the elimination is the block reduction of Somaini and Wolak (2016),
+  and iterative solutions have precedents in Abowd, Creecy and Kramarz (2002)
+  and in Mittag (2019). `xhdfe` does not implement what Schmieder (2026)
+  presents as fereg's distinguishing contribution in this step, the escalation
+  to stronger preconditioners, including combinatorial multigrid, on poorly
+  connected data: where the Jacobi-preconditioned iteration stalls, `xhdfe`
+  hands the fit to its previous routes. `xhdfe`'s part is an independent C++
+  implementation inside its own routing, certificate, fallbacks and
+  diagnostics. `xhdfe` contains no fereg source code; its C++ implementation
+  was written after studying the paper and fereg's public source. Two
+  changes of version 2.31.0 followed benchmarks against fereg: reading the
+  Stata data in parallel on qualified hosts, as fereg does, and larger
+  automatic thread teams (one thread per 25,000 rows instead of 500,000),
+  where fereg by default uses all logical processors and sizes the parallel
+  work of each stage by its amount of work. fereg
+  credits the precedent of parallel copying from Stata to David Roodman's
+  `julia` package (Roodman 2025).
+
+Comparison packages, current releases checked on 14 November 2026: `reghdfe`
+6.14.1 (8 July 2026), `fixest` 0.14.2 (CRAN, 26 June 2026), `pyfixest`
+0.70.0, `FixedEffectModels.jl` 2.2.0 (2 November 2026) and fereg 0.6.0.
+
+References cited above:
+
+- Abowd, John M., Robert H. Creecy, and Francis Kramarz. 2002. "Computing
+  person and firm effects using linked longitudinal employer-employee data."
+  Longitudinal Employer-Household Dynamics Technical Paper TP-2002-06, U.S.
+  Census Bureau.
+- Fischer, Alexander, and Kristof Schröder. 2026. "Graph Preconditioning for
+  High-Dimensional Fixed Effects Regression." Mimeo, draft of June 2026.
+  https://github.com/py-econometrics/within-paper
+- Mittag, Nikolas. 2019. "A simple method to estimate large fixed effects
+  models applied to wage determinants." Labour Economics 61: 101766.
+  doi:10.1016/j.labeco.2019.101766
+- Roodman, David. 2025. "Julia as a universal platform for statistical
+  software development." Stata Journal 25(2): 255-284.
+  doi:10.1177/1536867X251341105
+- Schmieder, Johannes. 2026. "fereg: Fast high-dimensional fixed-effects
+  regressions in Stata." CEPR Discussion Paper No. 22170. CEPR Press, Paris &
+  London. https://cepr.org/publications/dp22170
+- Somaini, Paulo, and Frank A. Wolak. 2016. "An algorithm to estimate the
+  two-way fixed effects model." Journal of Econometric Methods 5(1): 143-152.
+  doi:10.1515/jem-2014-0008
 
 ## Help commands
 

@@ -24,7 +24,8 @@ xhdfe_gelbach(
   connectivity_fes = NULL,
   common_fes = NULL,
   sample_info = FALSE,
-  fe_variance_ratio_min = 0.35
+  fe_variance_ratio_min = 0.35,
+  weighted_cpu_route = FALSE
 )
 }
 \arguments{
@@ -78,6 +79,10 @@ full-model coefficient is imposed at zero, not estimated.}
 logical mask used only to select focal rows for reporting. Every X1
 column remains in both specifications, so common controls can be included
 in \code{x1} without crowding the empirical table.}
+
+\item{weighted_cpu_route}{Logical scalar, default \code{FALSE}. With
+\code{TRUE}, request CPU for eligible weighted CUDA fits. Bootstrap
+callers can pass this argument through \code{...}.}
 
 \item{gpu}{Logical scalar. With \code{TRUE}, request CUDA for the
 full-model FE-absorption phase. The decomposition and covariance

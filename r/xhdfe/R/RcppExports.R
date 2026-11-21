@@ -33,6 +33,6 @@
     .Call(`_xhdfe_xhdfe_cpp_akm_kss`, y, worker, firm, X, opts, fweights)
 }
 
-.xhdfe_cpp_gelbach <- function(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info) {
-    .Call(`_xhdfe_xhdfe_cpp_gelbach`, y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info)
+.xhdfe_cpp_gelbach <- function(y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info, weighted_cpu_route) {
+    .Call(`_xhdfe_xhdfe_cpp_gelbach`, y, X1, X2, x2_group_sizes, fes, cluster, vce, gamma0, cov0, tol, num_threads, gpu, weights, fweights, absorbed_x1, connectivity_fe_pair, require_connected, n_common_fes, sample_info, weighted_cpu_route)
 }

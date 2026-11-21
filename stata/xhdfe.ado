@@ -1,4 +1,4 @@
-*! version 2.31.1 12nov2026
+*! version 2.34.1 21nov2026
 program define xhdfe, eclass
     version 16.0
 
@@ -25,7 +25,8 @@ program define xhdfe, eclass
     ereturn clear
     local output = cond(c(noisily), "noisily", "quietly")
     // sortpreserve builds an index of every observation on each call, and an
-    // estimation never reorders the data: egen restores its own sort and
+    // estimation never reorders the data: egen restores its own sort, string
+    // identifiers are sorted in a separate frame (_xhdfe_string_group), and
     // time-series operators stop with r(5) instead of sorting. The index is
     // needed only when the data are sorted by an automatic output that this
     // call may refill (__hdfe#__, _reghdfe_resid): Stata then re-sorts on exit
@@ -55,7 +56,7 @@ end
 
 program define _xhdfe_package_version, rclass
     version 16.0
-    return local package_version "2.31.1 12nov2026"
+    return local package_version "2.34.1 21nov2026"
 end
 
 program define _xhdfe_estimate, eclass
@@ -237,6 +238,9 @@ program define _xhdfe_estimate, eclass
         FECACHEMODE(string) ///
         SYMmetricsweep ///
         ABSORPTIONMethod(string) ///
+        REDUCEDPCG(string) ///
+        REDUCEDPCGCUDA(string) ///
+        WEIGHTEDCPUROUTE(string) ///
         JACOBIRelaxation(real 0) ///
         LEVEL(real 95) ///
         KEEPsingletons ///
@@ -255,6 +259,42 @@ program define _xhdfe_estimate, eclass
         GROUPVAR(name) ///
         SAVEFEs(string) ///
         ]
+
+    // The reduced-system tier for this fit: reducedpcg(on|off), else the Stata
+    // global XHDFE_REDUCED_PCG (0 off, 1 on). Undecided leaves the plugin's
+    // process default (the environment variable XHDFE_REDUCED_PCG, else on).
+    // Validated here, before anything creates or resets an output variable.
+    local reduced_pcg_request ""
+    if (`"`reducedpcg'"' != "") {
+        local reduced_pcg_request = lower(strtrim(`"`reducedpcg'"'))
+        if (!inlist(`"`reduced_pcg_request'"', "on", "off")) {
+            di as err "reducedpcg() must be on or off"
+            exit 198
+        }
+    }
+    else if (`"$XHDFE_REDUCED_PCG"' == "0") local reduced_pcg_request "off"
+    else if (`"$XHDFE_REDUCED_PCG"' == "1") local reduced_pcg_request "on"
+    // The experimental CUDA variant of the tier for this fit, which acts only
+    // on a fit on CUDA: reducedpcgcuda(on|off), else the Stata global
+    // XHDFE_REDUCED_PCG_CUDA (0 off, 1 on). Undecided leaves the plugin's
+    // process default (the environment variable XHDFE_REDUCED_PCG_CUDA, else
+    // off). Validated here, like reducedpcg().
+    local reduced_pcg_cuda_request ""
+    if (`"`reducedpcgcuda'"' != "") {
+        local reduced_pcg_cuda_request = lower(strtrim(`"`reducedpcgcuda'"'))
+        if (!inlist(`"`reduced_pcg_cuda_request'"', "on", "off")) {
+            di as err "reducedpcgcuda() must be on or off"
+            exit 198
+        }
+    }
+    else if (`"${XHDFE_REDUCED_PCG_CUDA}"' == "0") local reduced_pcg_cuda_request "off"
+    else if (`"${XHDFE_REDUCED_PCG_CUDA}"' == "1") local reduced_pcg_cuda_request "on"
+
+    local weightedcpuroute = lower(strtrim(`"`weightedcpuroute'"'))
+    if ("`weightedcpuroute'" != "" & !inlist("`weightedcpuroute'", "on", "off")) {
+        di as err "weightedcpuroute() must be on or off"
+        exit 198
+    }
 
     // Validate formats before estimating or displaying any fit statistics.
     if ("`noabsorb'" != "" & "`absorb'" != "") {
@@ -1050,7 +1090,13 @@ program define _xhdfe_estimate, eclass
                 local components : subinstr local entry "#" " ", all
                 if ("`alias_name'" != "") confirm new variable `alias_name'
                 tempvar feint
-                quietly egen long `feint' = group(`components') if `touse'
+                local has_string 0
+                foreach component of local components {
+                    local component_type : type `component'
+                    if (substr("`component_type'", 1, 3) == "str") local has_string 1
+                }
+                if (`has_string') _xhdfe_string_group `feint' `touse' `components'
+                else quietly egen long `feint' = group(`components') if `touse'
                 local absorb_list "`absorb_list' `feint'"
                 local absorb_display "`absorb_display' `label'"
             }
@@ -1069,7 +1115,13 @@ program define _xhdfe_estimate, eclass
             if (strpos("`entry'", "#") > 0) {
                 local components : subinstr local entry "#" " ", all
                 tempvar clint
-                quietly egen long `clint' = group(`components') if `touse'
+                local has_string 0
+                foreach component of local components {
+                    local component_type : type `component'
+                    if (substr("`component_type'", 1, 3) == "str") local has_string 1
+                }
+                if (`has_string') _xhdfe_string_group `clint' `touse' `components'
+                else quietly egen long `clint' = group(`components') if `touse'
                 local cluster_list "`cluster_list' `clint'"
             }
             else {
@@ -1105,7 +1157,7 @@ program define _xhdfe_estimate, eclass
             local feid "`v'"
             if (substr("`t'", 1, 3) == "str") {
                 tempvar feid_tmp
-                quietly egen long `feid_tmp' = group(`v') if `touse'
+                _xhdfe_string_group `feid_tmp' `touse' `v'
                 local feid "`feid_tmp'"
             }
             local fe_raw "`fe_raw' `v'"
@@ -1170,7 +1222,7 @@ program define _xhdfe_estimate, eclass
                 local t : type `v'
                 if (substr("`t'", 1, 3) == "str") {
                     tempvar clid_tmp
-                    quietly egen long `clid_tmp' = group(`v') if `touse'
+                    _xhdfe_string_group `clid_tmp' `touse' `v'
                     local clid "`clid_tmp'"
                 }
             }
@@ -1194,7 +1246,10 @@ program define _xhdfe_estimate, eclass
         local group_mode 1
         local t : type `group'
         tempvar gid
-        if (substr("`t'", 1, 3) == "str" | inlist("`t'", "float", "double")) {
+        if (substr("`t'", 1, 3) == "str") {
+            _xhdfe_string_group `gid' `touse' `group'
+        }
+        else if (inlist("`t'", "float", "double")) {
             quietly egen long `gid' = group(`group') if `touse'
         }
         else {
@@ -1212,6 +1267,179 @@ program define _xhdfe_estimate, eclass
     if (`group_mode' & `nslope' > 0) {
         di as err "group()/individual() mode does not support heterogeneous slopes"
         exit 198
+    }
+
+    // Option values are validated here, before any output variable is created
+    // or reset: an invalid request then leaves the outputs of an earlier fit
+    // (residuals, groupvar, saved effects) as they were, as for reducedpcg().
+
+    local convergence = lower(strtrim("`convergence'"))
+    if ("`convergence'" == "") local convergence "auto"
+    if (inlist("`convergence'", "norm", "norm_change", "current", "xhdfe")) {
+        local convergence "normchange"
+    }
+    if (inlist("`convergence'", "vector", "vectors", "reghdfe-style", "reghdfe_style")) {
+        local convergence "reghdfe"
+    }
+    if (!inlist("`convergence'", "auto", "normchange", "reghdfe", "both")) {
+        di as err "convergence() must be auto, normchange, reghdfe, or both"
+        exit 198
+    }
+
+    // Some Stata versions leave long option defaults empty; enforce defaults here.
+    if ("`minparrows'" == "") local minparrows 20000
+    if ("`targetrpt'" == "") local targetrpt 0
+    if (`numthreads' < 0) {
+        di as err "numthreads() must be >= 0"
+        exit 198
+    }
+    if (`defaultthreads' < 0) {
+        di as err "defaultthreads() must be >= 0"
+        exit 198
+    }
+    if (`maxthreads' < 0) {
+        di as err "maxthreads() must be >= 0"
+        exit 198
+    }
+    if (`minparrows' <= 0) {
+        di as err "minparallelrows() must be positive"
+        exit 198
+    }
+    if (`targetrpt' < 0) {
+        di as err "targetrowsperthread() must be >= 0"
+        exit 198
+    }
+
+    local statstyle = lower(strtrim("`statstyle'"))
+    if ("`statstyle'" == "") local statstyle "reghdfe"
+    if (inlist("`statstyle'", "current", "xhdfe")) local statstyle "legacy"
+    if (!inlist("`statstyle'", "reghdfe", "legacy")) {
+        di as err "statstyle() must be reghdfe or legacy"
+        exit 198
+    }
+
+    local tolerance_mode = lower(strtrim("`tolerancemode'"))
+    if ("`tolerance_mode'" == "") local tolerance_mode "reghdfe-comparable"
+    local tolerance_mode : subinstr local tolerance_mode "_" "-", all
+    if (inlist("`tolerance_mode'", "xhdfe", "fast", "current")) local tolerance_mode "xhdfe-fast"
+    if (inlist("`tolerance_mode'", "reghdfe", "comparable")) local tolerance_mode "reghdfe-comparable"
+    if (inlist("`tolerance_mode'", "strict", "residual-certificate")) local tolerance_mode "strict-residual"
+    if (!inlist("`tolerance_mode'", "xhdfe-fast", "reghdfe-comparable", "strict-residual")) {
+        di as err "tolerancemode() must be xhdfe-fast, reghdfe-comparable, or strict-residual"
+        exit 198
+    }
+
+    local gpu_backend ""
+    if ("`gpubackend'" != "") {
+        local gpu_backend = lower(strtrim("`gpubackend'"))
+        if (!inlist("`gpu_backend'", "cpu", "cuda", "metal")) {
+            di as err "gpubackend() must be one of cpu, cuda, or metal"
+            exit 198
+        }
+    }
+
+    local mobility_profile ""
+    local mobility_profile_mode ""
+    if ("`mobfile'" != "") {
+        local mobility_profile = strtrim("`mobfile'")
+        local mobility_profile_mode "auto"
+    }
+    if ("`mobilityprofile'" != "") {
+        if ("`mobility_profile'" == "") {
+            local mobility_profile "xhdfe_mobility_profile.txt"
+        }
+        local mobility_profile_mode "write"
+    }
+    if ("`mobility_profile'" != "") {
+        // Strip surrounding quotes to avoid passing literal quotes to the plugin.
+        if (substr("`mobility_profile'", 1, 1) == `"""' & ///
+            substr("`mobility_profile'", strlen("`mobility_profile'"), 1) == `"""') {
+            local mobility_profile = substr("`mobility_profile'", 2, ///
+                strlen("`mobility_profile'") - 2)
+        }
+        if (strpos("`mobility_profile'", ";") > 0) {
+            di as err "mobilityprofile path cannot contain ';'"
+            exit 198
+        }
+    }
+
+    local absorption_cache ""
+    local absorption_cache_mode ""
+    if ("`abscachemode'" != "") {
+        local absorption_cache_mode = lower(strtrim("`abscachemode'"))
+        if (!inlist("`absorption_cache_mode'", "off", "auto", "read", "write")) {
+            di as err "absorptioncachemode() must be off, auto, read, or write"
+            exit 198
+        }
+    }
+    if ("`absorptioncache'" != "") {
+        local absorption_cache = strtrim("`absorptioncache'")
+        if ("`absorption_cache_mode'" == "") {
+            local absorption_cache_mode "auto"
+        }
+    }
+    if ("`absorption_cache'" != "") {
+        // Strip surrounding quotes to avoid passing literal quotes to the plugin.
+        if (substr("`absorption_cache'", 1, 1) == `"""' & ///
+            substr("`absorption_cache'", strlen("`absorption_cache'"), 1) == `"""') {
+            local absorption_cache = substr("`absorption_cache'", 2, ///
+                strlen("`absorption_cache'") - 2)
+        }
+        if (strpos("`absorption_cache'", ";") > 0) {
+            di as err "absorptioncache path cannot contain ';'"
+            exit 198
+        }
+    }
+
+    local fe_structure_cache ""
+    local fe_structure_cache_mode ""
+    if ("`fecachemode'" != "") {
+        local fe_structure_cache_mode = lower(strtrim("`fecachemode'"))
+        if (!inlist("`fe_structure_cache_mode'", "off", "auto", "read", "write")) {
+            di as err "fescachemode() must be off, auto, read, or write"
+            exit 198
+        }
+    }
+    if ("`fescache'" != "") {
+        local fe_structure_cache = strtrim("`fescache'")
+        if ("`fe_structure_cache_mode'" == "") {
+            local fe_structure_cache_mode "auto"
+        }
+    }
+    if ("`festructurecache'" != "") {
+        if ("`fe_structure_cache'" != "") {
+            di as err "festructurecache cannot be combined with fescache()"
+            exit 198
+        }
+        local ado_path ""
+        capture findfile xhdfe.ado
+        if (!_rc) local ado_path "`r(fn)'"
+        local cache_dir ""
+        if ("`ado_path'" != "") {
+            local cache_dir = substr("`ado_path'", 1, strlen("`ado_path'") - strlen("xhdfe.ado"))
+        }
+        if ("`cache_dir'" == "") {
+            local cache_dir "`c(pwd)'/"
+        }
+        local fe_structure_cache "`cache_dir'xhdfe_fe_structure_cache.bin"
+        if ("`fe_structure_cache_mode'" == "") {
+            local fe_structure_cache_mode "auto"
+        }
+    }
+    if ("`fe_structure_cache_mode'" != "" & "`fe_structure_cache'" == "") {
+        di as err "fescachemode() requires fescache() or festructurecache"
+        exit 198
+    }
+    if ("`fe_structure_cache'" != "") {
+        if (substr("`fe_structure_cache'", 1, 1) == `"""' & ///
+            substr("`fe_structure_cache'", strlen("`fe_structure_cache'"), 1) == `"""') {
+            local fe_structure_cache = substr("`fe_structure_cache'", 2, ///
+                strlen("`fe_structure_cache'") - 2)
+        }
+        if (strpos("`fe_structure_cache'", ";") > 0) {
+            di as err "festructurecache path cannot contain ';'"
+            exit 198
+        }
     }
 
     // Output variables.
@@ -1454,19 +1682,25 @@ program define _xhdfe_estimate, eclass
         local fe_out_count : word count `fe_out_vars'
     }
 
-    // e(sample) marker (always created).
-    tempvar esample
+    // e(sample) marker. group()/individual() fill a separate marker that starts
+    // at 0. Other fits post touse itself, prefilled with the candidate sample:
+    // the plugin reads the sample before it writes anything, then clears only
+    // the observations it dropped, which leaves touse equal to the copy that
+    // used to be made here. Without the copy the posted marker is this
+    // program's first temporary variable, so Stata does not compact the data
+    // when the program exits.
     if (`group_mode') {
+        tempvar esample
         gen byte `esample' = 0
     }
     else {
-        // Prefill with the candidate sample; the plugin will clear dropped observations.
-        gen byte `esample' = `touse'
+        local esample "`touse'"
     }
     if (`__xhdfe_profile') {
         timer off 99
         quietly timer list 99
         di as txt "ado_profile label=outputs_esample ms=" %12.3f (1000 * r(t99))
+        di as txt "ado_profile label=esample_marker same_as_touse=" ("`esample'" == "`touse'")
         timer clear 99
         timer on 99
     }
@@ -1506,43 +1740,6 @@ program define _xhdfe_estimate, eclass
     // absorption method default
     if ("`absorptionmethod'" == "") {
         local absorptionmethod "auto"
-    }
-
-    local convergence = lower(strtrim("`convergence'"))
-    if ("`convergence'" == "") local convergence "auto"
-    if (inlist("`convergence'", "norm", "norm_change", "current", "xhdfe")) {
-        local convergence "normchange"
-    }
-    if (inlist("`convergence'", "vector", "vectors", "reghdfe-style", "reghdfe_style")) {
-        local convergence "reghdfe"
-    }
-    if (!inlist("`convergence'", "auto", "normchange", "reghdfe", "both")) {
-        di as err "convergence() must be auto, normchange, reghdfe, or both"
-        exit 198
-    }
-
-    // Some Stata versions leave long option defaults empty; enforce defaults here.
-    if ("`minparrows'" == "") local minparrows 20000
-    if ("`targetrpt'" == "") local targetrpt 0
-    if (`numthreads' < 0) {
-        di as err "numthreads() must be >= 0"
-        exit 198
-    }
-    if (`defaultthreads' < 0) {
-        di as err "defaultthreads() must be >= 0"
-        exit 198
-    }
-    if (`maxthreads' < 0) {
-        di as err "maxthreads() must be >= 0"
-        exit 198
-    }
-    if (`minparrows' <= 0) {
-        di as err "minparallelrows() must be positive"
-        exit 198
-    }
-    if (`targetrpt' < 0) {
-        di as err "targetrowsperthread() must be >= 0"
-        exit 198
     }
 
     // symmetric sweep flag
@@ -1599,24 +1796,6 @@ program define _xhdfe_estimate, eclass
             }
         }
     }
-    local statstyle = lower(strtrim("`statstyle'"))
-    if ("`statstyle'" == "") local statstyle "reghdfe"
-    if (inlist("`statstyle'", "current", "xhdfe")) local statstyle "legacy"
-    if (!inlist("`statstyle'", "reghdfe", "legacy")) {
-        di as err "statstyle() must be reghdfe or legacy"
-        exit 198
-    }
-
-    local tolerance_mode = lower(strtrim("`tolerancemode'"))
-    if ("`tolerance_mode'" == "") local tolerance_mode "reghdfe-comparable"
-    local tolerance_mode : subinstr local tolerance_mode "_" "-", all
-    if (inlist("`tolerance_mode'", "xhdfe", "fast", "current")) local tolerance_mode "xhdfe-fast"
-    if (inlist("`tolerance_mode'", "reghdfe", "comparable")) local tolerance_mode "reghdfe-comparable"
-    if (inlist("`tolerance_mode'", "strict", "residual-certificate")) local tolerance_mode "strict-residual"
-    if (!inlist("`tolerance_mode'", "xhdfe-fast", "reghdfe-comparable", "strict-residual")) {
-        di as err "tolerancemode() must be xhdfe-fast, reghdfe-comparable, or strict-residual"
-        exit 198
-    }
 
     if ("`ssc_k_fixef'" == "") {
         if ("`statstyle'" == "legacy") {
@@ -1624,119 +1803,6 @@ program define _xhdfe_estimate, eclass
         }
         else {
             local ssc_k_fixef "full"
-        }
-    }
-
-    local gpu_backend ""
-    if ("`gpubackend'" != "") {
-        local gpu_backend = lower(strtrim("`gpubackend'"))
-        if (!inlist("`gpu_backend'", "cpu", "cuda", "metal")) {
-            di as err "gpubackend() must be one of cpu, cuda, or metal"
-            exit 198
-        }
-    }
-
-    local mobility_profile ""
-    local mobility_profile_mode ""
-    if ("`mobfile'" != "") {
-        local mobility_profile = strtrim("`mobfile'")
-        local mobility_profile_mode "auto"
-    }
-    if ("`mobilityprofile'" != "") {
-        if ("`mobility_profile'" == "") {
-            local mobility_profile "xhdfe_mobility_profile.txt"
-        }
-        local mobility_profile_mode "write"
-    }
-    if ("`mobility_profile'" != "") {
-        // Strip surrounding quotes to avoid passing literal quotes to the plugin.
-        if (substr("`mobility_profile'", 1, 1) == `"""' & ///
-            substr("`mobility_profile'", strlen("`mobility_profile'"), 1) == `"""') {
-            local mobility_profile = substr("`mobility_profile'", 2, ///
-                strlen("`mobility_profile'") - 2)
-        }
-        if (strpos("`mobility_profile'", ";") > 0) {
-            di as err "mobilityprofile path cannot contain ';'"
-            exit 198
-        }
-    }
-
-    local absorption_cache ""
-    local absorption_cache_mode ""
-    if ("`abscachemode'" != "") {
-        local absorption_cache_mode = lower(strtrim("`abscachemode'"))
-        if (!inlist("`absorption_cache_mode'", "off", "auto", "read", "write")) {
-            di as err "absorptioncachemode() must be off, auto, read, or write"
-            exit 198
-        }
-    }
-    if ("`absorptioncache'" != "") {
-        local absorption_cache = strtrim("`absorptioncache'")
-        if ("`absorption_cache_mode'" == "") {
-            local absorption_cache_mode "auto"
-        }
-    }
-    if ("`absorption_cache'" != "") {
-        // Strip surrounding quotes to avoid passing literal quotes to the plugin.
-        if (substr("`absorption_cache'", 1, 1) == `"""' & ///
-            substr("`absorption_cache'", strlen("`absorption_cache'"), 1) == `"""') {
-            local absorption_cache = substr("`absorption_cache'", 2, ///
-                strlen("`absorption_cache'") - 2)
-        }
-        if (strpos("`absorption_cache'", ";") > 0) {
-            di as err "absorptioncache path cannot contain ';'"
-            exit 198
-        }
-    }
-
-    local fe_structure_cache ""
-    local fe_structure_cache_mode ""
-    if ("`fecachemode'" != "") {
-        local fe_structure_cache_mode = lower(strtrim("`fecachemode'"))
-        if (!inlist("`fe_structure_cache_mode'", "off", "auto", "read", "write")) {
-            di as err "fescachemode() must be off, auto, read, or write"
-            exit 198
-        }
-    }
-    if ("`fescache'" != "") {
-        local fe_structure_cache = strtrim("`fescache'")
-        if ("`fe_structure_cache_mode'" == "") {
-            local fe_structure_cache_mode "auto"
-        }
-    }
-    if ("`festructurecache'" != "") {
-        if ("`fe_structure_cache'" != "") {
-            di as err "festructurecache cannot be combined with fescache()"
-            exit 198
-        }
-        local ado_path ""
-        capture findfile xhdfe.ado
-        if (!_rc) local ado_path "`r(fn)'"
-        local cache_dir ""
-        if ("`ado_path'" != "") {
-            local cache_dir = substr("`ado_path'", 1, strlen("`ado_path'") - strlen("xhdfe.ado"))
-        }
-        if ("`cache_dir'" == "") {
-            local cache_dir "`c(pwd)'/"
-        }
-        local fe_structure_cache "`cache_dir'xhdfe_fe_structure_cache.bin"
-        if ("`fe_structure_cache_mode'" == "") {
-            local fe_structure_cache_mode "auto"
-        }
-    }
-    if ("`fe_structure_cache_mode'" != "" & "`fe_structure_cache'" == "") {
-        di as err "fescachemode() requires fescache() or festructurecache"
-        exit 198
-    }
-    if ("`fe_structure_cache'" != "") {
-        if (substr("`fe_structure_cache'", 1, 1) == `"""' & ///
-            substr("`fe_structure_cache'", strlen("`fe_structure_cache'"), 1) == `"""') {
-            local fe_structure_cache = substr("`fe_structure_cache'", 2, ///
-                strlen("`fe_structure_cache'") - 2)
-        }
-        if (strpos("`fe_structure_cache'", ";") > 0) {
-            di as err "festructurecache path cannot contain ';'"
-            exit 198
         }
     }
 
@@ -1852,7 +1918,9 @@ program define _xhdfe_estimate, eclass
     }
     // The estimation-sample marker goes last and sample_marker gives its
     // position: the parallel reader selects the rows whose marker is not zero,
-    // the serial readers keep the if condition and ignore it.
+    // the serial readers keep the if condition and ignore it. Outside
+    // group()/individual() the e(sample) marker just before it is the same
+    // variable (touse).
     local plugin_varlist "`plugin_varlist' `touse'"
     local sample_marker : word count `plugin_varlist'
     // Facts for the plugin's table of hosts qualified for the parallel read.
@@ -1929,7 +1997,7 @@ program define _xhdfe_estimate, eclass
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
         sGpuUsed sGpuStatus sCudaTail ///
         sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth sNclust sClustScale sVcvFix ///
-        sFeRecConv sFeRecIter sFeRecMaxDelta
+        sFeRecConv sFeRecIter sFeRecMaxDelta sRpcgStatus sRpcgDisc
     scalar `sGpuUsed' = 0
     scalar `sGpuStatus' = 0
     scalar `sSat' = 0
@@ -1951,6 +2019,11 @@ program define _xhdfe_estimate, eclass
     scalar `sAutoRetryIter' = 0
     scalar `sAutoRetryRel' = 0
     scalar `sAutoRetrySeconds' = 0
+    // Reduced-system tier diagnostics; the plugin writes the reason into
+    // local xhdfe_rpcg_reason. Missing/empty means the plugin did not report.
+    scalar `sRpcgStatus' = .
+    scalar `sRpcgDisc' = .
+    local xhdfe_rpcg_reason ""
 
     local have_dof_table 0
     tempname dof_table
@@ -1981,6 +2054,9 @@ program define _xhdfe_estimate, eclass
         local cfg "`cfg'esample_prefilled=1;"
     }
     local cfg "`cfg'absorption_method=`absorptionmethod';jacobi_relaxation=`jacobirelaxation';level=`level';"
+    if ("`reduced_pcg_request'" != "") local cfg "`cfg'reduced_pcg=`reduced_pcg_request';"
+    if ("`reduced_pcg_cuda_request'" != "") local cfg "`cfg'reduced_pcg_cuda=`reduced_pcg_cuda_request';"
+    if ("`weightedcpuroute'" == "on") local cfg "`cfg'weighted_cpu_route=1;"
     local cfg "`cfg's_N=`sN';s_N_full=`sNfull';s_num_singletons=`sNsng';s_df_r=`sDFr';"
     local cfg "`cfg's_df_r_unadj=`sDFRUnadj';s_df_m=`sDFm';s_df_a=`sDFa';"
     local cfg "`cfg's_df_a_levels=`sDFaLevels';s_df_a_exact=`sDFaExact';s_df_a_nested=`sDFaNested';"
@@ -2007,6 +2083,8 @@ program define _xhdfe_estimate, eclass
     local cfg "`cfg's_parallel_workers_active=`sThrActive';s_thread_capacity=`sThrCap';"
     local cfg "`cfg's_openmp_enabled=`sOmpEnabled';s_thread_limit_code=`sThrLimitCode';"
     local cfg "`cfg's_gpu_used=`sGpuUsed';s_method_used=`sMeth';"
+    local cfg "`cfg's_reduced_pcg_status=`sRpcgStatus';m_reduced_pcg_reason=xhdfe_rpcg_reason;"
+    local cfg "`cfg's_reduced_pcg_discarded_iterations=`sRpcgDisc';"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
     local cfg "`cfg's_cuda_tail_code=`sCudaTail';"
@@ -2156,6 +2234,7 @@ program define _xhdfe_estimate, eclass
     else if (`gpu_status_code' == 3) local gpu_status "gpu_absorption_not_converged"
     else if (`gpu_status_code' == 4) local gpu_status "gpu_backend_failed"
     else if (`gpu_status_code' == 5) local gpu_status "cpu_cache_or_profile_result"
+    else if (`gpu_status_code' == 7) local gpu_status "weighted_cpu_route"
 
     local thread_limit_reason "none"
     if (scalar(`sThrLimitCode') == 1) local thread_limit_reason "runtime_capacity"
@@ -2166,8 +2245,11 @@ program define _xhdfe_estimate, eclass
 
     // When the user explicitly requests a GPU backend, do not accept CPU
     // fallback results. GPU failures and non-convergence must be surfaced as
-    // errors with diagnostics rather than silently changing backend.
-    local reject_cpu_gpu = ("`gpu_backend'" != "" & "`gpu_backend'" != "cpu" & scalar(`sGpuUsed') < 0.5)
+    // errors with diagnostics rather than silently changing backend. The one
+    // exception is status 7 (weighted_cpu_route): a weighted fit with two or more
+    // absorbed effects that the core ran on the CPU by design and says so.
+    local reject_cpu_gpu = ("`gpu_backend'" != "" & "`gpu_backend'" != "cpu" & scalar(`sGpuUsed') < 0.5 ///
+        & `gpu_status_code' != 7)
     if (`reject_cpu_gpu') {
         if (`fv_created') {
             capture drop `fv_created_vars'
@@ -2765,7 +2847,19 @@ program define _xhdfe_estimate, eclass
             ereturn local gpu_backend "cuda"
         }
     }
+    else if (e(gpu_status_code) == 7) {
+        // A weighted fit requested on CUDA through XHDFE_GPU_BACKEND (or by the
+        // build's default backend) and run on the CPU by design.
+        ereturn local gpu_backend_requested "cuda"
+        ereturn local gpu_backend "cpu"
+    }
+    if (e(gpu_status_code) == 7) {
+        di as txt "note: weighted fit absorbed on the CPU (e(gpu_status) = weighted_cpu_route); see {help xhdfe##gpu_weighted_cpu_route:weighted fits on CUDA}"
+    }
     ereturn scalar absorption_method_used = scalar(`sMeth')
+    ereturn scalar reduced_pcg_status = scalar(`sRpcgStatus')
+    ereturn local reduced_pcg_reason "`xhdfe_rpcg_reason'"
+    ereturn scalar reduced_pcg_discarded_iterations = scalar(`sRpcgDisc')
     // Only a clustered fit posts e(N_clust). The plugin reports zero when no
     // cluster variable was given, and posting that made `!missing(e(N_clust))`
     // — the usual way to detect clustering — answer yes for every fit.
@@ -2956,6 +3050,7 @@ program define _xhdfe_estimate, eclass
         if ("`fsbackend'" == "") local fsbackend : environment XHDFE_GPU_BACKEND
         if ("`fsbackend'" == "") local fsbackend "cpu"
         local fsopts "`fsopts' gpubackend(`fsbackend')"
+        if ("`weightedcpuroute'" == "on") local fsopts "`fsopts' weightedcpuroute(on)"
         ereturn local firststage_options `"`fsopts'"'
         if ("`first'`ffirst'" != "") {
             // ereturn post consumes esample when it installs e(sample).
@@ -3003,6 +3098,81 @@ program define _xhdfe_auto_fe_variable
         quietly gen double `target' = .
     }
     char `target'[xhdfe_auto_fe] "1"
+end
+
+// What `egen long target = group(varlist) if touse' returns (_ggroup.ado,
+// GroupFromSort) for a list with at least one string variable, without
+// sorting the data in memory. The observations of touse with no missing value
+// in the list (an empty string is missing: marksample, strok) get codes 1..K
+// in the sort order of the list, the others missing; _ggroup never samples a
+// list with a string. Only the listed variables of those observations are
+// copied into a temporary frame and sorted there, and the codes come back by
+// position, so the order of the data and their sortedby marker are untouched.
+// The type is long, double only past the long range (where egen's replace
+// would promote it), and the variable label is egen's. If anything fails on
+// the way, other than Break (rc 1), the helper cleans up and runs that egen
+// command instead, so that it never turns a call that works with egen into an
+// error; global XHDFE_STRING_GROUP_STRICT = 1 lets the failure stop the
+// command (tests). Under XHDFE_PROFILE_CPU the fallback prints one line; the
+// helper prints nothing else, and its callers do not wrap it in quietly, so
+// that line follows the command's own output setting.
+program define _xhdfe_string_group
+    version 16.0
+    gettoken target 0 : 0
+    gettoken touse 0 : 0
+    syntax varlist
+    confirm new variable `target'
+    local origin = c(frame)
+    tempvar sel idx first code
+    tempname fr
+    // Break is recognised only inside the body (break). Stata ignores, and does
+    // not defer, a Break pressed in the rest of the nobreak block, so the
+    // cleanup always runs to its end.
+    nobreak {
+        capture break {
+            mark `sel' if `touse'
+            markout `sel' `varlist', strok
+            quietly count if `sel'
+            local n = r(N)
+            local K 0
+            if (`n' > 0) {
+                local keys : list uniq varlist
+                local itype = cond(`n' > 2147483620, "double", "long")
+                frame put `keys' if `sel', into(`fr')
+                frame `fr' {
+                    quietly generate `itype' `idx' = _n
+                    sort `keys'
+                    quietly by `keys': generate byte `first' = (_n == 1)
+                    quietly generate `itype' `code' = sum(`first')
+                    local K = `code'[_N]
+                    drop `keys' `first'
+                }
+            }
+            local ttype = cond(`K' > 2147483620, "double", "long")
+            quietly generate `ttype' `target' = .
+            if (`n' > 0) {
+                mata: _xhdfe_group_scatter("`fr'", "`idx'", "`code'", "`target'", "`sel'")
+            }
+            if (udstrlen("group(`varlist')") > 80) {
+                note `target' : group(`varlist')
+                label variable `target' "see notes"
+            }
+            else {
+                label variable `target' "group(`varlist')"
+            }
+        }
+        local rc = _rc
+        if ("`c(frame)'" != "`origin'") frame change `origin'
+        capture frame drop `fr'
+        if (`rc') capture drop `target'
+    }
+    if (`rc' == 0) exit
+    if (`rc' == 1 | "$XHDFE_STRING_GROUP_STRICT" == "1") exit `rc'
+    local profile : environment XHDFE_PROFILE_CPU
+    if ("`profile'" != "" & "`profile'" != "0") {
+        display as txt "ado_profile label=string_group_fallback rc=`rc'"
+    }
+    quietly egen long `target' = group(`varlist') if `touse'
 end
 
 program define xhdfe__footnote
@@ -3534,5 +3704,35 @@ void _xhdfe_expand_fv_base(string scalar bname, string scalar Vname,
     st_matrix(omitname, omn)
     st_matrixrowstripe(omitname, (J(kn, 1, ""), target))
     st_matrixcolstripe(omitname, (J(1, 1, ""), J(1, 1, "reason")))
+}
+end
+
+capture mata: mata drop _xhdfe_group_scatter()
+mata:
+// The codes of _xhdfe_string_group back into the order of the observations:
+// row r of the sorted frame holds the code of the selected observation at
+// position idx[r]. The frame is read in fixed blocks of rows while it is the
+// current frame, so that Mata holds the output vector and one block; the codes
+// are then stored into target at the observations of selvar in the caller's
+// frame.
+void _xhdfe_group_scatter(string scalar frame, string scalar idxvar,
+                          string scalar codevar, string scalar target,
+                          string scalar selvar)
+{
+    string scalar origin
+    real colvector out
+    real scalar n, a, b, step
+
+    origin = st_framecurrent()
+    st_framecurrent(frame)
+    n = st_nobs()
+    out = J(n, 1, .)
+    step = 1048576
+    for (a = 1; a <= n; a = a + step) {
+        b = min((a + step - 1, n))
+        out[st_data((a, b), idxvar)] = st_data((a, b), codevar)
+    }
+    st_framecurrent(origin)
+    st_store(., target, selvar, out)
 }
 end

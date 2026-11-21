@@ -1,122 +1,78 @@
 {smcl}
-{* *! version 2.31.1  12nov2026}{...}
+{* *! version 2.34.1  21nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:Title}
 
 {p2colset 5 18 20 2}{...}
-{p2col :{cmd:xhdfegpu} {hline 2}}build and install a CUDA (GPU) xhdfe/xfepout plugin for this machine{p_end}
+{p2col :{cmd:xhdfegpu} {hline 2}}Build and install local CUDA plugins on Linux{p_end}
 {p2colreset}{...}
-
 
 {title:Syntax}
 
-{p 8 17 2}
-{cmd:xhdfegpu} [{cmd:,} {it:options}]
+{p 8 17 2}{cmd:xhdfegpu} [{cmd:,} {it:options}]{p_end}
 
 {synoptset 20 tabbed}{...}
 {synopthdr}
 {synoptline}
-{syntab:Source}
-{synopt :{opth zip(filename)}}build from a source distribution zip already on
-this machine (offline); by default {cmd:xhdfegpu} downloads it from the online site{p_end}
-{synopt :{opth source(dirname)}}build from an already-extracted {cmd:xhdfe-src} source directory{p_end}
-{synopt :{opth url(string)}}override the download URL of the source distribution zip{p_end}
-
-{syntab:Build}
-{synopt :{opt arch(#)}}force the CUDA compute capability (e.g. {cmd:90} for an
-H100) instead of auto-detecting it with {cmd:nvidia-smi}{p_end}
-{synopt :{opt keep}}keep the temporary build directory instead of deleting it{p_end}
+{synopt :{opth source(dirname)}}build from an extracted source tree{p_end}
+{synopt :{opth zip(filename)}}build from a local source archive{p_end}
+{synopt :{opt url(string)}}override the default source archive URL{p_end}
+{synopt :{opt arch(#)}}select CUDA compute capability, e.g. 90 for an H100{p_end}
+{synopt :{opt keep}}keep the temporary build directory{p_end}
+{synopt :{opt force}}accepted for compatibility; build and installation are unchanged{p_end}
 {synoptline}
-
 
 {title:Description}
 
 {pstd}
-{cmd:xhdfegpu} compiles a CUDA (NVIDIA GPU) plugin for {cmd:xhdfe} and
-{cmd:xfepout} matched to this machine's GPU, and installs it {it:over} the CPU
-plugin that {cmd:net install} placed on the adopath. The runtime file names do
-not change: the same {cmd:xhdfe.plugin} and {cmd:xfepout.plugin} are replaced in
-place, so nothing else in your setup changes — GPU runs are then requested the
-usual way with {cmd:gpubackend(cuda)}.
+The command builds OpenMP-enabled Linux plugins for a single CUDA
+architecture, with CPU and CUDA support in the same binary. Use source
+that matches the installed ado version. Source selection is {opt source()},
+then {opt zip()}, then {opt url()}. With all three omitted, the command
+downloads the source archive from the package's public net-install site.
 
 {pstd}
-{cmd:net install} ships a CPU-only plugin. Separate Linux CUDA bundles target
-the architectures listed in their release notes. {cmd:xhdfegpu} instead runs only when an NVIDIA GPU
-is present, detects its compute capability, builds a plugin for that exact
-architecture, and swaps it in atomically — the CPU plugin is replaced only if
-the build succeeds.
+Build requirements are Bash, a C++ compiler with OpenMP and the NVIDIA
+CUDA toolkit ({cmd:nvcc}), including its cuBLAS and cuSPARSE development
+files (the headers {cmd:cublas_v2.h} and {cmd:cusparse.h}): a full toolkit
+installation has them, a compiler-only installation does not.
+Archive inputs use {cmd:unzip}; online retrieval
+may use {cmd:curl} or {cmd:wget}. With {opt arch()} omitted, the command
+takes the first compute capability reported by {cmd:nvidia-smi}.
+For execution you also need a compatible driver and NVIDIA device
+(compute capability 7.5 or later). The local source archive supports an
+offline build after these tools are available.
 
 {pstd}
-The sources come from a self-contained distribution zip that vendors every
-build dependency (Eigen, pybind11, Stata's {cmd:stplugin} inputs), so the
-compilation itself needs {bf:no internet access}. {cmd:xhdfegpu} obtains that
-zip in one of three ways:
-
-{p 8 11 2}1. {bf:online (default)} — it downloads the zip from the project site;{p_end}
-{p 8 11 2}2. {bf:offline} — if the download fails (no internet, or the site is
-unreachable), download the zip on another machine, copy it over, and re-run
-with {cmd:zip(}{it:path}{cmd:)};{p_end}
-{p 8 11 2}3. {bf:pre-extracted} — point {cmd:source(}{it:dir}{cmd:)} at an
-already-unpacked {cmd:xhdfe-src} tree.{p_end}
-
-
-{title:Requirements}
-
-{pstd}
-{cmd:xhdfegpu} is supported on Linux. The machine must have an NVIDIA GPU, the
-NVIDIA CUDA toolkit ({cmd:nvcc}) and driver, a C++ compiler ({cmd:g++}/{cmd:c++}),
-and {cmd:unzip}. The produced plugin is OpenMP-enabled and built for the
-detected {cmd:sm_}{it:XX} target only.
-
-
-{title:Remarks}
-
-{pstd}
-After {cmd:xhdfegpu} finishes, the running Stata session still has the old
-plugin loaded. Type {cmd:discard} (with no arguments) or restart Stata so the
-new CUDA plugin is loaded, then verify a GPU run:
-
-{p 8 8 2}{cmd:. xhdfe y x, absorb(fe1 fe2) gpubackend(cuda)}{p_end}
-{p 8 8 2}{cmd:. display e(gpu_used)}   {it:// should be 1}{p_end}
-
-{pstd}
-CPU behavior is the numerical reference. A successful CUDA status proves GPU
-execution, not universal numerical equivalence. Version 2.31.0 retains refusals
-on some difficult Comparable and group/individual specifications. See
-{helpb xhdfe##opt_gpu:help xhdfe, GPU option} and the release validation record;
-use CPU for those specifications. If a {cmd:gpubackend(cuda)} run reports that
-CUDA was not available, this command is how you build the matching plugin.
-
+After building, the command replaces the first {cmd:xhdfe.plugin} found on
+the {cmd:adopath}. It also tries to build and replace {cmd:xfepout.plugin}
+if that plugin is installed. Check the installation message for each binary.
+After replacement, run {cmd:discard} with no arguments or restart Stata
+before testing a fit.
 
 {title:Examples}
 
-{pstd}Build and install for the local GPU, downloading the sources:{p_end}
-{p 8 8 2}{cmd:. xhdfegpu}{p_end}
+{pstd}Choose a single build command for the source available on your machine.{p_end}
+{phang2}{cmd:. xhdfegpu}{p_end}
+{phang2}{cmd:. xhdfegpu, zip("/path/to/xhdfe-src.zip") arch(90)}{p_end}
+{phang2}{cmd:. xhdfegpu, source("/path/to/xhdfe-src")}{p_end}
 
-{pstd}Offline machine — build from a zip you copied over by hand:{p_end}
-{p 8 8 2}{cmd:. xhdfegpu, zip("~/downloads/xhdfe-src.zip")}{p_end}
-
-{pstd}Force a specific architecture (e.g. an H100, {cmd:sm_90}):{p_end}
-{p 8 8 2}{cmd:. xhdfegpu, arch(90)}{p_end}
-
+{pstd}After reloading the plugin, run the
+{help xhdfe_examples##cuda:public-data CUDA example}.
+Check {cmd:e(gpu_used)} = 1 and {cmd:e(gpu_status)} = {cmd:used} on the CUDA fit.{p_end}
 
 {title:Stored results}
 
-{pstd}
-{cmd:xhdfegpu} stores the following in {cmd:r()}:
+{synoptset 18 tabbed}{...}
+{p2col 5 18 22 2: Scalars}{p_end}
+{synopt:{cmd:r(gpu_ready)}}1 when {cmd:xhdfe.plugin} was built and installed{p_end}
 
-{synoptset 16 tabbed}{...}
-{p2col 5 16 20 2: Scalars}{p_end}
-{synopt:{cmd:r(gpu_ready)}}1 when a CUDA plugin was built and installed{p_end}
-
-{p2col 5 16 20 2: Macros}{p_end}
-{synopt:{cmd:r(arch)}}the CUDA target that was built, e.g. {cmd:sm_90}{p_end}
-{synopt:{cmd:r(plugin)}}the adopath location of the installed {cmd:xhdfe.plugin}{p_end}
-
+{p2col 5 18 22 2: Macros}{p_end}
+{synopt:{cmd:r(arch)}}CUDA target, e.g. {cmd:sm_90}{p_end}
+{synopt:{cmd:r(plugin)}}installed path of {cmd:xhdfe.plugin}{p_end}
+{p2colreset}{...}
 
 {title:Also see}
 
-{p 4 13 2}
-{helpb xhdfe}, {helpb xfepout}
-{p_end}
+{psee}{helpb xhdfe}, {helpb xfepout}{p_end}

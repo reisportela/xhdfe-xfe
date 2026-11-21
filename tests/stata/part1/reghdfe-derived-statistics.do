@@ -1,7 +1,23 @@
 version 16
 
-local repo : environment XHDFE_REPO_ROOT
-if (`"`repo'"' != "") adopath ++ `"`repo'/stata"'
+* The package comes from the documented override XHDFE_STATA_ADOPATH when it
+* is set (as in _helpers.do), from the repository only otherwise; putting the
+* repository in front of the override would switch package in the middle of
+* a session.
+local adopath : environment XHDFE_STATA_ADOPATH
+if (`"`adopath'"' == "") {
+    local repo : environment XHDFE_REPO_ROOT
+    if (`"`repo'"' != "") local adopath `"`repo'/stata"'
+}
+while (strlen(`"`adopath'"') > 1 & substr(`"`adopath'"', -1, 1) == "/") {
+    local adopath = substr(`"`adopath'"', 1, strlen(`"`adopath'"') - 1)
+}
+if (`"`adopath'"' != "") {
+    adopath ++ `"`adopath'"'
+    quietly findfile xhdfe.ado
+    assert `"`r(fn)'"' == `"`adopath'/xhdfe.ado"'
+    display as text `"xhdfe.ado: `r(fn)'"'
+}
 
 * A connected two-way FE chain with duplicated end edges has exactly two
 * within dimensions. With two slopes and id1 nested in the cluster, reghdfe's

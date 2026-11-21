@@ -44,6 +44,13 @@ inline bool finite_double_bits(double value) {
            UINT64_C(0x7ff0000000000000);
 }
 
+// Package B, stage 2b: the bit pattern of a fresh reading (the frozen stop).
+inline std::uint64_t double_bits(double value) {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
 bool strict_residual_tolerance_mode(const HdfeOptions& options) {
     return options.tolerance_mode == ToleranceMode::StrictResidual;
 }
@@ -1814,6 +1821,140 @@ __global__ __launch_bounds__(BLOCK, 2) void max_abs_kernel(const double* values,
     }
 }
 
+// Package B (strict-residual continuation, continue_strict_residual_cuda): per
+// group, the mean of the combination y~ - X~ c removed by one effect, from the
+// means of every column that the sweep has just formed.
+__global__ __launch_bounds__(256, 4) void strict_combination_means_kernel(
+    const double* mean_y,
+    const double* mean_x,
+    const double* combination,
+    int groups,
+    int cols,
+    double* out) {
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= groups) {
+        return;
+    }
+    double value = mean_y[g];
+    for (int j = 0; j < cols; ++j) {
+        value -= combination[j] * mean_x[static_cast<std::size_t>(j) * groups + g];
+    }
+    out[g] = value;
+}
+
+// Package B: the residual by row, y~ - X~ c (the fresh confirmation).
+__global__ __launch_bounds__(256, 4) void strict_residual_rows_kernel(
+    const double* y,
+    const double* X,
+    int n,
+    int cols,
+    int ld,
+    const double* combination,
+    double* residual) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    double value = y[i];
+    for (int j = 0; j < cols; ++j) {
+        value -= combination[j] * X[static_cast<std::size_t>(j) * ld + i];
+    }
+    residual[i] = value;
+}
+
+// Package B, stage 2a' (the sweep-exit step, StrictSweepExitRequest): block partial
+// sums of the upper triangle of A'A, A = [X | y] (cols + 1 columns, y last). Each
+// block takes a fixed range of rows, read tile by tile into shared memory; each
+// thread keeps up to kStrictGramPairsPerThread pairs. Fixed ranges and a fixed
+// order make the partials, and the Gram strict_gram_finish_kernel sums from them in
+// block order, independent of scheduling.
+constexpr int kStrictGramTile = 64;
+constexpr int kStrictGramGrid = 512;
+constexpr int kStrictGramPairsPerThread =
+    ((kStrictSweepExitMaxColumns + 1) * (kStrictSweepExitMaxColumns + 2) / 2 + kBlockSize - 1) /
+    kBlockSize;
+
+__global__ __launch_bounds__(256) void strict_gram_partials_kernel(
+    const double* X,
+    const double* y,
+    int n,
+    int ld,
+    int cols,
+    double* partials) {
+    extern __shared__ double tile[];
+    const int width = cols + 1;
+    const int pairs = width * (width + 1) / 2;
+    int pair_i[kStrictGramPairsPerThread];
+    int pair_j[kStrictGramPairsPerThread];
+    double acc[kStrictGramPairsPerThread];
+    for (int k = 0; k < kStrictGramPairsPerThread; ++k) {
+        acc[k] = 0.0;
+        pair_i[k] = -1;
+        pair_j[k] = -1;
+        int pair = static_cast<int>(threadIdx.x) + k * static_cast<int>(blockDim.x);
+        if (pair < pairs) {
+            int i = 0;
+            while (pair >= width - i) {  // row i of the triangle holds width - i pairs
+                pair -= width - i;
+                ++i;
+            }
+            pair_i[k] = i;
+            pair_j[k] = i + pair;
+        }
+    }
+    const long long rows_per_block =
+        (static_cast<long long>(n) + gridDim.x - 1) / static_cast<long long>(gridDim.x);
+    const long long begin = static_cast<long long>(blockIdx.x) * rows_per_block;
+    const long long end = min(static_cast<long long>(n), begin + rows_per_block);
+    for (long long row0 = begin; row0 < end; row0 += kStrictGramTile) {
+        const int rows = static_cast<int>(min(static_cast<long long>(kStrictGramTile), end - row0));
+        for (int index = threadIdx.x; index < width * kStrictGramTile; index += blockDim.x) {
+            const int column = index / kStrictGramTile;
+            const int r = index - column * kStrictGramTile;
+            double value = 0.0;
+            if (r < rows) {
+                const long long row = row0 + r;
+                value = column < cols ? X[static_cast<std::size_t>(column) * ld + row] : y[row];
+            }
+            tile[index] = value;
+        }
+        __syncthreads();
+        for (int k = 0; k < kStrictGramPairsPerThread; ++k) {
+            if (pair_i[k] >= 0) {
+                const double* a = tile + pair_i[k] * kStrictGramTile;
+                const double* b = tile + pair_j[k] * kStrictGramTile;
+                double sum = 0.0;
+                for (int r = 0; r < rows; ++r) {
+                    sum += a[r] * b[r];
+                }
+                acc[k] += sum;
+            }
+        }
+        __syncthreads();
+    }
+    for (int k = 0; k < kStrictGramPairsPerThread; ++k) {
+        if (pair_i[k] >= 0) {
+            partials[static_cast<std::size_t>(blockIdx.x) * pairs + threadIdx.x +
+                     static_cast<std::size_t>(k) * blockDim.x] = acc[k];
+        }
+    }
+}
+
+__global__ void strict_gram_finish_kernel(const double* partials,
+                                          int pairs,
+                                          int blocks,
+                                          double* gram) {
+    const int pair = blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair >= pairs) {
+        return;
+    }
+    double sum = 0.0;
+    for (int block = 0; block < blocks; ++block) {
+        sum += partials[static_cast<std::size_t>(block) * pairs + pair];
+    }
+    gram[pair] = sum;
+}
+
 __global__ void jacobi_update_kernel(double* y,
                                      double* X,
                                      int n,
@@ -2289,10 +2430,10 @@ __global__ void ordinary_incidence_diagonal_kernel(
     if (level < levels) diagonal[level] = static_cast<double>(ptr[level + 1] - ptr[level]);
 }
 
-template <int BLOCK>
+template <int BLOCK, bool Weighted>
 __global__ void ordinary_at_block_kernel(
     const double* input, const int* ptr, const int* observation,
-    const double* scale, int offset, int levels, double* output) {
+    const double* scale, const double* weights, int offset, int levels, double* output) {
     const int level = blockIdx.x;
     if (level >= levels) return;
     using Reduce = cub::BlockReduce<double, BLOCK>;
@@ -2302,16 +2443,17 @@ __global__ void ordinary_at_block_kernel(
     for (std::int64_t pos = static_cast<std::int64_t>(ptr[level]) + threadIdx.x;
          pos < end; pos += BLOCK) {
         const int row = observation ? observation[pos] : static_cast<int>(pos);
-        sum += input[row];
+        if constexpr (Weighted) sum += sqrt(weights[row]) * input[row];
+        else sum += input[row];
     }
     const double total = Reduce(temp).Sum(sum);
     if (threadIdx.x == 0) output[offset + level] = scale[offset + level] * total;
 }
 
-template <int BLOCK>
+template <int BLOCK, bool Weighted>
 __global__ void ordinary_at_warp_kernel(
     const double* input, const int* ptr, const int* observation,
-    const double* scale, int offset, int levels, double* output) {
+    const double* scale, const double* weights, int offset, int levels, double* output) {
     constexpr int WARP = 32;
     constexpr int WARPS = BLOCK / WARP;
     const int warp = threadIdx.x / WARP;
@@ -2325,7 +2467,8 @@ __global__ void ordinary_at_warp_kernel(
     for (std::int64_t pos = static_cast<std::int64_t>(ptr[level]) + lane;
          pos < end; pos += WARP) {
         const int row = observation ? observation[pos] : static_cast<int>(pos);
-        sum += input[row];
+        if constexpr (Weighted) sum += sqrt(weights[row]) * input[row];
+        else sum += input[row];
     }
     const double total = Reduce(temp[warp]).Sum(sum);
     if (lane == 0) output[offset + level] = scale[offset + level] * total;
@@ -4262,6 +4405,56 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                               workspace.h_stage, "cudaMemcpy X failed");
         }
 
+        // Package B, stage 2a' (StrictSweepExitRequest, fe_absorption.hpp): the
+        // request of a strict-residual fit in scope (its primary absorption only),
+        // the Gram of [X | y] on the device for its step, and the raw sums of squares
+        // of the original columns, formed here while d_x still holds them, for the
+        // FE-collinearity test of b0. Any failure here only skips the step.
+        StrictSweepExitRequest* const strict_exit = options.strict_sweep_exit;
+        auto strict_gram = [&](const double* x_values, const double* y_values, int gram_cols,
+                               std::vector<double>& upper) {
+            const int width = gram_cols + 1;
+            const int pairs = width * (width + 1) / 2;
+            DeviceBuffer<double> partials(static_cast<std::size_t>(kStrictGramGrid) * pairs);
+            DeviceBuffer<double> gram(static_cast<std::size_t>(pairs));
+            const std::size_t shmem =
+                static_cast<std::size_t>(width) * kStrictGramTile * sizeof(double);
+            strict_gram_partials_kernel<<<kStrictGramGrid, kBlockSize, shmem>>>(
+                x_values, y_values, n, ld, gram_cols, partials.data());
+            cuda_check(cudaGetLastError(), "strict sweep exit: Gram partials kernel launch failed");
+            strict_gram_finish_kernel<<<(pairs + kBlockSize - 1) / kBlockSize, kBlockSize>>>(
+                partials.data(), pairs, kStrictGramGrid, gram.data());
+            cuda_check(cudaGetLastError(), "strict sweep exit: Gram finish kernel launch failed");
+            upper.assign(static_cast<std::size_t>(pairs), 0.0);
+            cuda_check(cudaMemcpy(upper.data(), gram.data(), sizeof(double) * pairs,
+                                  cudaMemcpyDeviceToHost),
+                       "strict sweep exit: Gram copy failed");
+        };
+        std::vector<double> strict_exit_raw_ss;
+        if (strict_exit != nullptr && !strict_exit->consumed && !strict_exit->instruments &&
+            unit_weights && cols > 0 && cols <= kStrictSweepExitMaxColumns) {
+            const auto raw_t0 = std::chrono::steady_clock::now();
+            try {
+                std::vector<double> raw_upper;
+                strict_gram(d_x.data(), d_y.data(), cols, raw_upper);
+                strict_exit_raw_ss.assign(static_cast<std::size_t>(cols), 0.0);
+                std::size_t position = 0;
+                for (int i = 0; i <= cols; ++i) {
+                    for (int j = i; j <= cols; ++j) {
+                        if (i == j && i < cols) {
+                            strict_exit_raw_ss[static_cast<std::size_t>(i)] = raw_upper[position];
+                        }
+                        ++position;
+                    }
+                }
+            } catch (const std::exception&) {
+                strict_exit_raw_ss.clear();
+                (void)cudaGetLastError();
+            }
+            strict_exit->seconds_raw += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - raw_t0).count();
+        }
+
         DeviceBuffer<double>& d_weights = workspace.d_weights;
         if (!unit_weights) {
             d_weights.allocate(static_cast<std::size_t>(n));
@@ -5000,6 +5193,9 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
         };
 
         const int dims = static_cast<int>(active_fes);
+        // Package B, stage 2a': whether the main solve ran a CG stage (then it does
+        // not end in Gauss-Seidel sweeps and the sweep-exit step does not apply).
+        bool strict_exit_cg_stage = false;
         if (method == AbsorptionMethod::Jacobi) {
             std::vector<const int*> gid_ptrs(static_cast<std::size_t>(dims));
             std::vector<const double*> mean_y_ptrs(static_cast<std::size_t>(dims));
@@ -6426,6 +6622,7 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                 }
                 const auto accel_stage_start = std::chrono::steady_clock::now();
                 auto run_cg_stage = [&](int preceding_iterations, bool after_sweeps) {
+                    strict_exit_cg_stage = true;
                     if (f2_stage_trace) {
                         cuda_check(cudaDeviceSynchronize(),
                                    "CG stage trace synchronisation failed");
@@ -6999,6 +7196,218 @@ static bool absorb_fixed_effects_cuda_impl(const Eigen::Ref<const Eigen::VectorX
                 if (final_max > polish_tol) {
                     result.converged = false;
                 }
+            }
+            // Package B, stage 2a' (StrictSweepExitRequest, fe_absorption.hpp): the
+            // step of a strict-residual fit in scope at a sweep exit, after the six
+            // fixed sweeps above, once per fit. It never changes `converged`.
+            if (strict_exit != nullptr && !strict_exit->consumed) {
+                strict_exit->consumed = true;
+                // Stage 2b: the symmetric form keeps stage 2a' (no hand-over).
+                if (polish_symmetric) {
+                    strict_exit->frozen_stop = 0;
+                }
+                using StepClock = std::chrono::steady_clock;
+                const auto step_t0 = StepClock::now();
+                auto step_seconds = [](StepClock::time_point start) {
+                    return std::chrono::duration<double>(StepClock::now() - start).count();
+                };
+                const char* ineligible =
+                    strict_exit->instruments ? "instruments"
+                    : (method == AbsorptionMethod::Jacobi || strict_exit_cg_stage) ? "cg-exit"
+                    : (!unit_weights || any_slope || store_alphas) ? "scope"
+                    : cols > kStrictSweepExitMaxColumns ? "columns"
+                    : (cols > 0 && strict_exit_raw_ss.size() != static_cast<std::size_t>(cols))
+                        ? "device"
+                        : nullptr;
+                strict_exit->columns = cols;
+                if (ineligible != nullptr) {
+                    strict_exit->skipped = ineligible;
+                } else {
+                    try {
+                        std::vector<double> b0;
+                        bool formed = true;
+                        if (cols > 0) {
+                            const auto gram_t0 = StepClock::now();
+                            std::vector<double> upper;
+                            strict_gram(d_x.data(), d_y.data(), cols, upper);
+                            strict_exit->seconds_gram = step_seconds(gram_t0);
+                            const auto solve_t0 = StepClock::now();
+                            const char* reason = "";
+                            formed = strict_sweep_exit_solve(upper, cols, strict_exit_raw_ss,
+                                                             strict_exit->rank_tol, b0,
+                                                             strict_exit->lambda_min, reason);
+                            strict_exit->seconds_solve = step_seconds(solve_t0);
+                            if (!formed) {
+                                strict_exit->skipped = reason;
+                            }
+                        }
+                        if (formed) {
+                            strict_exit->formed = true;
+                            const double tol = strict_exit->tol;
+                            const int blocks_n = (n + kBlockSize - 1) / kBlockSize;
+                            constexpr std::size_t kStepPrivatizedShmem = 40 * 1024;  // as the absorber
+                            int max_groups = 1;
+                            for (std::size_t dim = 0; dim < active_fes; ++dim) {
+                                max_groups = std::max(max_groups, fe_dev[dim].num_groups);
+                            }
+                            DeviceBuffer<double> d_b0(static_cast<std::size_t>(std::max(1, cols)));
+                            if (cols > 0) {
+                                cuda_check(cudaMemcpy(d_b0.data(), b0.data(), sizeof(double) * cols,
+                                                      cudaMemcpyHostToDevice),
+                                           "strict sweep exit: cudaMemcpy b0 failed");
+                            }
+                            DeviceBuffer<double> d_residual(static_cast<std::size_t>(n));
+                            DeviceBuffer<double> d_values(static_cast<std::size_t>(max_groups));
+                            DeviceBuffer<double> d_step_max(1);
+                            // Fresh: the residual y~ - X~ b0 by row, then its group means for
+                            // every effect (means only, no subtraction), largest absolute value.
+                            auto fresh_maximum = [&]() {
+                                strict_residual_rows_kernel<<<blocks_n, kBlockSize>>>(
+                                    d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld,
+                                    d_b0.data(), d_residual.data());
+                                cuda_check(cudaGetLastError(),
+                                           "strict sweep exit: residual kernel launch failed");
+                                cuda_check(cudaMemset(d_step_max.data(), 0, sizeof(double)),
+                                           "strict sweep exit: cudaMemset maximum failed");
+                                for (std::size_t dim = 0; dim < active_fes; ++dim) {
+                                    CudaFeDevice& fe = fe_dev[dim];
+                                    const int groups = fe.num_groups;
+                                    const int blocks_g = (groups + kBlockSize - 1) / kBlockSize;
+                                    cuda_check(cudaMemset(fe.sum_y.data(), 0, sizeof(double) * groups),
+                                               "strict sweep exit: cudaMemset sum_y failed");
+                                    const std::size_t shmem =
+                                        static_cast<std::size_t>(groups) * sizeof(double);
+                                    if (shmem <= kStepPrivatizedShmem) {
+                                        accumulate_sums_privatized_kernel<<<blocks_n, kBlockSize, shmem>>>(
+                                            d_residual.data(), nullptr, n, 0, ld, fe.gid.data(), nullptr,
+                                            true, fe.sum_y.data(), nullptr, groups);
+                                    } else {
+                                        accumulate_sums_segmented_kernel<<<blocks_n, kBlockSize>>>(
+                                            d_residual.data(), nullptr, n, 0, ld, fe.gid.data(), nullptr,
+                                            true, fe.sum_y.data(), nullptr, groups);
+                                    }
+                                    cuda_check(cudaGetLastError(),
+                                               "strict sweep exit: accumulate kernel launch failed");
+                                    compute_means_kernel<<<blocks_g, kBlockSize>>>(
+                                        fe.sum_y.data(), nullptr, fe.weight_sums.data(), groups, 0);
+                                    max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                                        fe.sum_y.data(), groups, d_step_max.data());
+                                    cuda_check(cudaGetLastError(),
+                                               "strict sweep exit: means kernel launch failed");
+                                }
+                                double value = 0.0;
+                                cuda_check(cudaMemcpy(&value, d_step_max.data(), sizeof(double),
+                                                      cudaMemcpyDeviceToHost),
+                                           "strict sweep exit: cudaMemcpy maximum failed");
+                                return value;
+                            };
+                            const double d0 = fresh_maximum();
+                            strict_exit->d0 = d0;
+                            strict_exit->last_fresh = d0;
+                            strict_exit->best = d0;
+                            if (d0 <= tol) {
+                                strict_exit->confirmed = true;
+                                strict_exit->exit = "d0";
+                            } else {
+                                // Stage 2b: the hand-over of the direct form when its last three
+                                // power-of-two readings are bit for bit the same
+                                // (StrictSweepExitRequest). The symmetric form (frozen_stop set
+                                // to 0 above), and frozen_stop 0, are stage 2a' exactly.
+                                const bool milestones_on = strict_exit->frozen_stop > 0;
+                                std::vector<std::uint64_t> milestone_bits;
+                                strict_exit->exit = "budget";
+                                std::vector<std::size_t> order;
+                                if (sweep_order.size() == active_fes) {
+                                    order = sweep_order;
+                                } else {
+                                    order.resize(active_fes);
+                                    std::iota(order.begin(), order.end(), std::size_t{0});
+                                }
+                                auto sweep_effect = [&](std::size_t dim) {
+                                    CudaFeDevice& fe = fe_dev[dim];
+                                    const int groups = fe.num_groups;
+                                    const int blocks_g = (groups + kBlockSize - 1) / kBlockSize;
+                                    double ignored = 0.0;
+                                    run_demean(fe, d_y.data(), d_x.data(), false, ignored, 1.0,
+                                               nullptr, nullptr);
+                                    strict_combination_means_kernel<<<blocks_g, kBlockSize>>>(
+                                        fe.sum_y.data(), cols > 0 ? fe.sum_x.data() : nullptr,
+                                        d_b0.data(), groups, cols, d_values.data());
+                                    max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                                        d_values.data(), groups, d_step_max.data());
+                                    cuda_check(cudaGetLastError(),
+                                               "strict sweep exit: trigger kernel launch failed");
+                                };
+                                const int budget = std::max(0, options.max_iter - result.iterations);
+                                for (int sweep = 0; sweep < budget; ++sweep) {
+                                    cuda_check(cudaMemset(d_step_max.data(), 0, sizeof(double)),
+                                               "strict sweep exit: cudaMemset trigger failed");
+                                    for (const std::size_t dim : order) {
+                                        sweep_effect(dim);
+                                    }
+                                    if (polish_symmetric) {
+                                        for (std::size_t position = order.size(); position-- > 0;) {
+                                            sweep_effect(order[position]);
+                                        }
+                                    }
+                                    ++result.iterations;
+                                    ++strict_exit->sweeps;
+                                    double in_sweep = 0.0;
+                                    cuda_check(cudaMemcpy(&in_sweep, d_step_max.data(), sizeof(double),
+                                                          cudaMemcpyDeviceToHost),
+                                               "strict sweep exit: cudaMemcpy trigger failed");
+                                    strict_exit->last_in_sweep = in_sweep;
+                                    const int count = strict_exit->sweeps;
+                                    const bool trigger = in_sweep <= tol;
+                                    const bool milestone = milestones_on && (count & (count - 1)) == 0;
+                                    if (!trigger && !milestone) {
+                                        continue;
+                                    }
+                                    if (trigger) {
+                                        ++strict_exit->confirmations;
+                                    }
+                                    ++strict_exit->readings;
+                                    const double fresh = fresh_maximum();
+                                    strict_exit->last_fresh = fresh;
+                                    strict_exit->best = std::min(strict_exit->best, fresh);
+                                    if (strict_exit->trace_level >= 2) {
+                                        std::fprintf(stderr,
+                                                     "strict_accept_trace reading loop=step sweep=%d kind=%s "
+                                                     "in_sweep=%.17g fresh=%.17g\n",
+                                                     count,
+                                                     trigger && milestone ? "both"
+                                                         : (trigger ? "trigger" : "milestone"),
+                                                     in_sweep, fresh);
+                                    }
+                                    if (fresh <= tol) {
+                                        strict_exit->confirmed = true;
+                                        strict_exit->exit = "confirmed";
+                                        break;
+                                    }
+                                    if (milestone) {
+                                        milestone_bits.push_back(double_bits(fresh));
+                                        const std::size_t m = milestone_bits.size();
+                                        if (m >= 3 && milestone_bits[m - 1] == milestone_bits[m - 2] &&
+                                            milestone_bits[m - 2] == milestone_bits[m - 3]) {
+                                            strict_exit->exit = "frozen";
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (const std::exception&) {
+                        // The step is optional: a device failure leaves the state as it
+                        // is (any partial sweep keeps it a valid transform) and the fit
+                        // goes on as in stage 2a.
+                        if (!strict_exit->formed) {
+                            strict_exit->skipped = "device";
+                        }
+                        strict_exit->exit = "device";  // stage 2a'': the step's end by failure
+                        (void)cudaGetLastError();
+                    }
+                }
+                strict_exit->seconds_total = step_seconds(step_t0);
             }
         }
 
@@ -7928,7 +8337,8 @@ static bool absorb_group_individual_lsmr_cuda_impl(
     if (!ordinary_projection) probe = nullptr;
     // Ordinary FEs reuse only the device operator and primary LSMR solve.
     // Group refinement and its forward guard do not define ordinary work.
-    const bool capture_projection = !ordinary_projection;
+    const bool capture_projection = !ordinary_projection ||
+        (options.retain_fixed_effects && cols <= options.savefe_fastpath_max_cols);
     const double effective_tol = effective_absorption_tolerance(options);
     const bool ordinary_parity = ordinary_projection &&
         options.ordinary_krylov_parity_floor && effective_tol > 0.0 &&
@@ -8195,21 +8605,33 @@ static bool absorb_group_individual_lsmr_cuda_impl(
         auto apply_at = [&](const double* input, double* output) {
             auto cooperative = [&](const int* ptr, const int* observation,
                                    int levels, int offset) {
-                if (!ordinary_projection || !unit_weights) return false;
+                if (!ordinary_projection) return false;
                 const std::int64_t rows = n;
                 if (rows >= static_cast<std::int64_t>(levels) * kBlockSize) {
-                    ordinary_at_block_kernel<kBlockSize><<<levels, kBlockSize>>>(
-                        input, ptr, observation, d_column_scale.data(),
-                        offset, levels, output);
+                    if (unit_weights) {
+                        ordinary_at_block_kernel<kBlockSize, false><<<levels, kBlockSize>>>(
+                            input, ptr, observation, d_column_scale.data(), nullptr,
+                            offset, levels, output);
+                    } else {
+                        ordinary_at_block_kernel<kBlockSize, true><<<levels, kBlockSize>>>(
+                            input, ptr, observation, d_column_scale.data(), d_weights.data(),
+                            offset, levels, output);
+                    }
                     return true;
                 }
                 constexpr int warp_size = 32;
                 if (rows >= static_cast<std::int64_t>(levels) * warp_size) {
                     constexpr int warps = kBlockSize / warp_size;
                     const int blocks = (levels + warps - 1) / warps;
-                    ordinary_at_warp_kernel<kBlockSize><<<blocks, kBlockSize>>>(
-                        input, ptr, observation, d_column_scale.data(),
-                        offset, levels, output);
+                    if (unit_weights) {
+                        ordinary_at_warp_kernel<kBlockSize, false><<<blocks, kBlockSize>>>(
+                            input, ptr, observation, d_column_scale.data(), nullptr,
+                            offset, levels, output);
+                    } else {
+                        ordinary_at_warp_kernel<kBlockSize, true><<<blocks, kBlockSize>>>(
+                            input, ptr, observation, d_column_scale.data(), d_weights.data(),
+                            offset, levels, output);
+                    }
                     return true;
                 }
                 return false;
@@ -8849,8 +9271,7 @@ static bool absorb_ordinary_lsmr_cuda(
     AbsorptionResult& result,
     CudaTailProbe* probe) {
     if (y.size() <= 0 || y.size() > std::numeric_limits<int>::max() ||
-        X.rows() != y.size() || fe_inputs.empty() ||
-        options.retain_fixed_effects) {
+        X.rows() != y.size() || fe_inputs.empty()) {
         return false;
     }
     const int n = static_cast<int>(y.size());
@@ -8884,7 +9305,31 @@ static bool absorb_ordinary_lsmr_cuda(
         y, X, standard, gi, weights, options, result, true, probe);
     // The fit layer reports this device Krylov diversion as LSMR.
     result.mlsmr_used = true;
-    if (ok) result.fe_levels.back() = last.num_levels_present;
+    if (ok) {
+        result.fe_levels.back() = last.num_levels_present;
+        if (options.retain_fixed_effects && result.converged) {
+            result.fe_group_ids.resize(fe_inputs.size());
+            result.fe_weight_sums.resize(fe_inputs.size());
+            for (std::size_t d = 0; d < fe_inputs.size(); ++d) {
+                const auto& fe = fe_inputs[d];
+                result.fe_group_ids[d].assign(fe.group_ids, fe.group_ids + n);
+                result.fe_weight_sums[d] =
+                    Eigen::Map<const Eigen::VectorXd>(fe.weight_sums, fe.num_groups);
+            }
+        }
+    }
+    return ok;
+}
+
+bool complete_ordinary_projection_cuda(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& fe_inputs,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+    const bool ok = absorb_ordinary_lsmr_cuda(y, X, fe_inputs, weights, options, result);
+    if (ok && result.converged) result.cuda_tail = kCudaTailDeviceLsmr;
     return ok;
 }
 
@@ -9386,6 +9831,256 @@ bool absorb_fixed_effects_group_individual_cuda(
 // groups, (d) subtract the means from `residual` in-place (Gauss-Seidel).
 // Returns the final max |mean| across all dims via out_max_delta. On any CUDA
 // error returns false; caller falls back to CPU implementation.
+// Package B (17nov2026; Verifications/corrigir_erros_20261117/b/RESPOSTA_DESENHO_B.md,
+// section 4): the continuation of a strict-residual fit on CUDA whose delivered
+// residual failed D(e) <= tol, with its own entry. Gauss-Seidel sweeps of y~ and
+// of every column of X~ in `order` (unit weights). Each effect's accumulation
+// uses the dispatch of the absorber (privatized partial sums when the groups of
+// every column fit the shared-memory budget, warp-segmented otherwise). After
+// each effect forms its means, strict_combination_means_kernel gives the means
+// of y~ - X~c it removes; their largest absolute value over the sweep is only a
+// trigger (with three or more effects a fresh mean can be up to k-1 times it).
+// When a sweep's trigger is at or below tol, a fresh pass confirms: the residual
+// formed by row, one column reduced per effect, means only. The continuation
+// stops iff that fresh maximum is at or below tol; otherwise it sweeps on, and at
+// the last sweep max_sweeps allows it returns the state as it is (it never
+// refuses: the caller's measurement on the host with the new coefficients
+// decides). The allocations of the thread's absorber workspace are reused (their
+// contents are overwritten); nothing persists between calls. Timings: upload,
+// sweeps, confirmations, download (each boundary synchronises).
+bool continue_strict_residual_cuda(Eigen::VectorXd& y_tilde,
+                                   Eigen::MatrixXd& X_tilde,
+                                   const std::vector<GpuFeInput>& fe_inputs,
+                                   const std::vector<std::size_t>& order,
+                                   const Eigen::VectorXd& combination,
+                                   double tol,
+                                   int max_sweeps,
+                                   StrictContinuationReport& report) {
+    using Clock = std::chrono::steady_clock;
+    auto seconds_since = [](Clock::time_point start) {
+        return std::chrono::duration<double>(Clock::now() - start).count();
+    };
+    try {
+        const int n = static_cast<int>(y_tilde.size());
+        const int cols = static_cast<int>(X_tilde.cols());
+        const int ld = static_cast<int>(X_tilde.rows());
+        const std::size_t dims = fe_inputs.size();
+        if (n <= 0 || (cols > 0 && ld != n) || dims == 0 || order.size() != dims ||
+            combination.size() != cols || max_sweeps < 1) {
+            return false;
+        }
+        std::vector<uint8_t> seen(dims, 0);
+        for (const std::size_t d : order) {
+            if (d >= dims || seen[d]) {
+                return false;
+            }
+            seen[d] = 1;
+        }
+        for (const GpuFeInput& fe : fe_inputs) {
+            if (fe.is_slope || fe.group_ids == nullptr || fe.weight_sums == nullptr ||
+                fe.num_groups <= 0) {
+                return false;
+            }
+        }
+        cudaGetLastError();
+        CudaWorkspace& workspace = cuda_workspace;
+        const int blocks_n = (n + kBlockSize - 1) / kBlockSize;
+        constexpr std::size_t kPrivatizedShmemBudget = 40 * 1024;  // as the absorber
+
+        const auto upload_t0 = Clock::now();
+        DeviceBuffer<double>& d_y = workspace.d_y;
+        d_y.allocate(static_cast<std::size_t>(n));
+        staged_memcpy_h2d(d_y.data(), y_tilde.data(), sizeof(double) * n, workspace.h_stage,
+                          "strict continuation: cudaMemcpy y failed");
+        DeviceBuffer<double>& d_x = workspace.d_x;
+        if (cols > 0) {
+            d_x.allocate(static_cast<std::size_t>(n) * cols);
+            staged_memcpy_h2d(d_x.data(), X_tilde.data(),
+                              sizeof(double) * static_cast<std::size_t>(n) * cols,
+                              workspace.h_stage, "strict continuation: cudaMemcpy X failed");
+        }
+        std::vector<CudaFeDevice>& fe_dev = workspace.fe_dev;
+        if (fe_dev.size() != dims) {
+            fe_dev.resize(dims);
+        }
+        int max_groups = 0;
+        for (std::size_t d = 0; d < dims; ++d) {
+            const GpuFeInput& fe = fe_inputs[d];
+            CudaFeDevice& dev = fe_dev[d];
+            dev.num_groups = fe.num_groups;
+            dev.num_levels_present = fe.num_levels_present;
+            dev.is_slope = false;
+            dev.slope_has_intercept = false;
+            const std::size_t shmem_needed = static_cast<std::size_t>(fe.num_groups) *
+                (1 + static_cast<std::size_t>(cols)) * sizeof(double);
+            dev.use_privatized_sums = shmem_needed <= kPrivatizedShmemBudget;
+            dev.privatized_shmem_bytes = dev.use_privatized_sums ? shmem_needed : 0;
+            dev.use_segmented_sums = !dev.use_privatized_sums;
+            dev.gid.allocate(static_cast<std::size_t>(n));
+            staged_memcpy_h2d(dev.gid.data(), fe.group_ids, sizeof(int) * n, workspace.h_stage,
+                              "strict continuation: cudaMemcpy group ids failed");
+            dev.weight_sums.allocate(static_cast<std::size_t>(fe.num_groups));
+            staged_memcpy_h2d(dev.weight_sums.data(), fe.weight_sums,
+                              sizeof(double) * fe.num_groups, workspace.h_stage,
+                              "strict continuation: cudaMemcpy weight sums failed");
+            dev.sum_y.allocate(static_cast<std::size_t>(fe.num_groups));
+            if (cols > 0) {
+                dev.sum_x.allocate(static_cast<std::size_t>(fe.num_groups) * cols);
+            }
+            max_groups = std::max(max_groups, fe.num_groups);
+        }
+        DeviceBuffer<double> d_combination(static_cast<std::size_t>(std::max(1, cols)));
+        if (cols > 0) {
+            cuda_check(cudaMemcpy(d_combination.data(), combination.data(),
+                                  sizeof(double) * cols, cudaMemcpyHostToDevice),
+                       "strict continuation: cudaMemcpy coefficients failed");
+        }
+        DeviceBuffer<double> d_group_values(static_cast<std::size_t>(max_groups));
+        DeviceBuffer<double> d_residual(static_cast<std::size_t>(n));
+        DeviceBuffer<double> d_maxima(2);
+        cuda_check(cudaDeviceSynchronize(), "strict continuation: upload synchronisation failed");
+        report.seconds_upload += seconds_since(upload_t0);
+
+        // Group means of the first `c` columns of (y_ptr, x_ptr) for one effect,
+        // into dev.sum_y / dev.sum_x, with the absorber's accumulation dispatch.
+        auto form_means = [&](CudaFeDevice& dev, const double* y_ptr, const double* x_ptr, int c) {
+            const int groups = dev.num_groups;
+            const int blocks_g = (groups + kBlockSize - 1) / kBlockSize;
+            cuda_check(cudaMemset(dev.sum_y.data(), 0, sizeof(double) * groups),
+                       "strict continuation: cudaMemset sum_y failed");
+            if (c > 0) {
+                cuda_check(cudaMemset(dev.sum_x.data(), 0,
+                                      sizeof(double) * static_cast<std::size_t>(groups) * c),
+                           "strict continuation: cudaMemset sum_x failed");
+            }
+            const std::size_t shmem = static_cast<std::size_t>(groups) *
+                (1 + static_cast<std::size_t>(c)) * sizeof(double);
+            if (shmem <= kPrivatizedShmemBudget) {
+                accumulate_sums_privatized_kernel<<<blocks_n, kBlockSize, shmem>>>(
+                    y_ptr, x_ptr, n, c, ld, dev.gid.data(), nullptr, true, dev.sum_y.data(),
+                    c > 0 ? dev.sum_x.data() : nullptr, groups);
+            } else {
+                accumulate_sums_segmented_kernel<<<blocks_n, kBlockSize>>>(
+                    y_ptr, x_ptr, n, c, ld, dev.gid.data(), nullptr, true, dev.sum_y.data(),
+                    c > 0 ? dev.sum_x.data() : nullptr, groups);
+            }
+            cuda_check(cudaGetLastError(), "strict continuation: accumulate kernel launch failed");
+            compute_means_kernel<<<blocks_g, kBlockSize>>>(
+                dev.sum_y.data(), c > 0 ? dev.sum_x.data() : nullptr, dev.weight_sums.data(),
+                groups, c);
+            cuda_check(cudaGetLastError(), "strict continuation: means kernel launch failed");
+        };
+
+        report.exit = "budget";
+        for (int sweep = 0; sweep < max_sweeps; ++sweep) {
+            const auto sweep_t0 = Clock::now();
+            cuda_check(cudaMemset(d_maxima.data(), 0, 2 * sizeof(double)),
+                       "strict continuation: cudaMemset maxima failed");
+            for (std::size_t position = 0; position < dims; ++position) {
+                CudaFeDevice& dev = fe_dev[order[position]];
+                const int groups = dev.num_groups;
+                const int blocks_g = (groups + kBlockSize - 1) / kBlockSize;
+                form_means(dev, d_y.data(), cols > 0 ? d_x.data() : nullptr, cols);
+                strict_combination_means_kernel<<<blocks_g, kBlockSize>>>(
+                    dev.sum_y.data(), cols > 0 ? dev.sum_x.data() : nullptr,
+                    d_combination.data(), groups, cols, d_group_values.data());
+                cuda_check(cudaGetLastError(),
+                           "strict continuation: combination kernel launch failed");
+                max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                    d_group_values.data(), groups, d_maxima.data());
+                if (sweep == 0 && position == 0) {
+                    max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                        d_group_values.data(), groups, d_maxima.data() + 1);
+                }
+                cuda_check(cudaGetLastError(), "strict continuation: max kernel launch failed");
+                apply_means_kernel<<<blocks_n, kBlockSize>>>(
+                    d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld, dev.gid.data(),
+                    dev.sum_y.data(), cols > 0 ? dev.sum_x.data() : nullptr, groups);
+                cuda_check(cudaGetLastError(), "strict continuation: apply kernel launch failed");
+            }
+            double maxima[2] = {0.0, 0.0};
+            cuda_check(cudaMemcpy(maxima, d_maxima.data(), 2 * sizeof(double),
+                                  cudaMemcpyDeviceToHost),
+                       "strict continuation: cudaMemcpy maxima failed");
+            ++report.sweeps;
+            report.seconds_sweeps += seconds_since(sweep_t0);
+            report.last_in_sweep = maxima[0];
+            if (sweep == 0) {
+                report.first_effect_in_sweep = maxima[1];
+            }
+            // Stage 2a'': at trace level 2 a fresh reading is also taken at power-of-two
+            // sweeps, for the trace alone (no decision reads it); at levels 0 and 1 the
+            // work is stage 2a''s.
+            // Stage 2c: no frozen exit here (StrictContinuationReport::exit).
+            const int count = report.sweeps;
+            const bool trigger = maxima[0] <= tol;
+            const bool milestone = report.trace_level >= 2 && (count & (count - 1)) == 0;
+            if (!trigger && !milestone) {
+                continue;
+            }
+            // The trigger holds: confirm on the device with a fresh pass.
+            const auto confirm_t0 = Clock::now();
+            if (trigger) {
+                ++report.confirmations;
+            }
+            strict_residual_rows_kernel<<<blocks_n, kBlockSize>>>(
+                d_y.data(), cols > 0 ? d_x.data() : nullptr, n, cols, ld, d_combination.data(),
+                d_residual.data());
+            cuda_check(cudaGetLastError(), "strict continuation: residual kernel launch failed");
+            cuda_check(cudaMemset(d_maxima.data(), 0, sizeof(double)),
+                       "strict continuation: cudaMemset fresh maximum failed");
+            for (std::size_t d = 0; d < dims; ++d) {
+                CudaFeDevice& dev = fe_dev[d];
+                const int blocks_g = (dev.num_groups + kBlockSize - 1) / kBlockSize;
+                form_means(dev, d_residual.data(), nullptr, 0);
+                max_abs_kernel<kBlockSize><<<blocks_g, kBlockSize>>>(
+                    dev.sum_y.data(), dev.num_groups, d_maxima.data());
+                cuda_check(cudaGetLastError(), "strict continuation: fresh max kernel launch failed");
+            }
+            double fresh = 0.0;
+            cuda_check(cudaMemcpy(&fresh, d_maxima.data(), sizeof(double), cudaMemcpyDeviceToHost),
+                       "strict continuation: cudaMemcpy fresh maximum failed");
+            report.seconds_confirmations += seconds_since(confirm_t0);
+            if (report.trace_level >= 2) {
+                std::fprintf(stderr,
+                             "strict_accept_trace reading loop=continuation sweep=%d kind=%s "
+                             "in_sweep=%.17g fresh=%.17g\n",
+                             count, trigger && milestone ? "both" : (trigger ? "trigger" : "milestone"),
+                             maxima[0], fresh);
+            }
+            if (!trigger) {
+                continue;  // a reading for the trace alone
+            }
+            report.last_fresh = fresh;
+            if (fresh <= tol) {
+                report.confirmed = true;
+                report.exit = "confirmed";
+                break;
+            }
+        }
+
+        const auto download_t0 = Clock::now();
+        staged_memcpy_d2h(y_tilde.data(), d_y.data(), sizeof(double) * n, workspace.h_stage,
+                          "strict continuation: cudaMemcpy y_tilde failed");
+        if (cols > 0) {
+            staged_memcpy_d2h(X_tilde.data(), d_x.data(),
+                              sizeof(double) * static_cast<std::size_t>(n) * cols,
+                              workspace.h_stage, "strict continuation: cudaMemcpy X_tilde failed");
+        }
+        report.seconds_download += seconds_since(download_t0);
+        return true;
+    } catch (const std::exception& e) {
+        if (std::getenv("XHDFE_DEBUG_GPU") != nullptr) {
+            std::fprintf(stderr, "[gpu] continue_strict_residual_cuda failed: %s\n", e.what());
+        }
+        cudaGetLastError();
+        return false;
+    } catch (...) {
+        cudaGetLastError();
+        return false;
+    }
+}
+
 bool fe_recovery_max_delta_cuda(const Eigen::Ref<const Eigen::VectorXd>& residual,
                                 const std::vector<GpuFeInput>& fe_inputs,
                                 const Eigen::VectorXd* weights,

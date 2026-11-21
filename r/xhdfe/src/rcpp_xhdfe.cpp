@@ -78,6 +78,16 @@ hdfe::AbsorptionMethod parse_absorption_method(const std::string& name) {
         lower == "mlsmr_auto") {
         return hdfe::AbsorptionMethod::AutoMlsmr;
     }
+    if (lower == "reduced-pcg" || lower == "reduced_pcg") {
+        throw std::runtime_error(
+            "absorption method reduced-pcg is reported when the reduced-system tier publishes a fit; "
+            "it cannot be requested (use auto)");
+    }
+    if (lower == "krylov-pcg" || lower == "krylov_pcg") {
+        throw std::runtime_error(
+            "absorption method krylov-pcg is reported when the Krylov-PCG route is forced; "
+            "it cannot be requested (use auto)");
+    }
     throw std::runtime_error("Unknown absorption method: " + name);
 }
 
@@ -226,6 +236,8 @@ const char* method_name(hdfe::AbsorptionMethod method) {
         case hdfe::AbsorptionMethod::Lsmr: return "lsmr";
         case hdfe::AbsorptionMethod::Mlsmr: return "mlsmr";
         case hdfe::AbsorptionMethod::AutoMlsmr: return "auto-mlsmr";
+        case hdfe::AbsorptionMethod::ReducedPcg: return "reduced-pcg";
+        case hdfe::AbsorptionMethod::KrylovPcg: return "krylov-pcg";
     }
     return "unknown";
 }
@@ -241,6 +253,8 @@ int method_code(hdfe::AbsorptionMethod method) {
         case hdfe::AbsorptionMethod::Lsmr: return 5;
         case hdfe::AbsorptionMethod::Mlsmr: return 6;
         case hdfe::AbsorptionMethod::AutoMlsmr: return 7;
+        case hdfe::AbsorptionMethod::ReducedPcg: return 8;
+        case hdfe::AbsorptionMethod::KrylovPcg: return 9;
     }
     return -1;
 }
@@ -424,6 +438,23 @@ void parse_options(const Rcpp::List& opts, hdfe::HdfeOptions& out,
     if (opt_has<bool>(opts, "groupvar")) {
         out.save_groupvar = Rcpp::as<bool>(opts["groupvar"]);
     }
+    // The reduced-system tier for this fit: absent follows the process default
+    // (XHDFE_REDUCED_PCG); TRUE and FALSE override it.
+    if (opt_has<bool>(opts, "reduced_pcg")) {
+        out.reduced_pcg = Rcpp::as<bool>(opts["reduced_pcg"]) ? hdfe::ReducedPcgRequest::On
+                                                               : hdfe::ReducedPcgRequest::Off;
+    }
+    // The experimental CUDA variant of the tier for this fit: absent follows the
+    // process default (XHDFE_REDUCED_PCG_CUDA); TRUE and FALSE override it.
+    // Inert unless the fit runs on CUDA.
+    if (opt_has<bool>(opts, "reduced_pcg_cuda")) {
+        out.reduced_pcg_cuda = Rcpp::as<bool>(opts["reduced_pcg_cuda"])
+                                   ? hdfe::ReducedPcgRequest::On
+                                   : hdfe::ReducedPcgRequest::Off;
+    }
+    if (opt_has<bool>(opts, "weighted_cpu_route")) {
+        out.weighted_cpu_route = Rcpp::as<bool>(opts["weighted_cpu_route"]);
+    }
 
     if (opt_has<bool>(opts, "ssc_k_adj")) out.ssc_k_adj = Rcpp::as<bool>(opts["ssc_k_adj"]);
     if (opt_has<std::string>(opts, "ssc_k_fixef")) {
@@ -560,6 +591,9 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["thread_limit_reason"] = reg.thread_limit_reason();
     out["absorption_method_used"] = std::string(method_name(reg.absorption_method_used()));
     out["absorption_method_code"] = method_code(reg.absorption_method_used());
+    out["reduced_pcg_status"] = reg.reduced_pcg_status();
+    out["reduced_pcg_reason"] = reg.reduced_pcg_reason();
+    out["reduced_pcg_discarded_iterations"] = reg.reduced_pcg_discarded_iterations();
     out["gpu_used"] = reg.gpu_used();
     out["gpu_status_code"] = reg.gpu_status_code();
     out["gpu_attempted"] = reg.gpu_attempted();
@@ -1373,7 +1407,8 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
                              Rcpp::IntegerVector connectivity_fe_pair,
                              bool require_connected,
                              int n_common_fes,
-                             bool sample_info) {
+                             bool sample_info,
+                             bool weighted_cpu_route) {
     const R_xlen_t n = y.size();
     if (X1.nrow() != n) {
         throw std::runtime_error("x1 must have the same number of rows as y");
@@ -1427,6 +1462,7 @@ Rcpp::List xhdfe_cpp_gelbach(Rcpp::NumericVector y,
     opt.tol = tol;
     opt.num_threads = num_threads;
     opt.use_gpu = gpu;
+    opt.weighted_cpu_route = weighted_cpu_route;
     opt.capture_sample_provenance = sample_info;
     opt.return_sample_index = sample_info;
     Eigen::VectorXd w_vec;

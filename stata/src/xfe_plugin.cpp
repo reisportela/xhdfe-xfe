@@ -327,6 +327,14 @@ AbsorptionMethod parse_absorption_method(const std::string& raw) {
         name == "mlsmr-auto" || name == "mlsmr_auto") {
         return AbsorptionMethod::AutoMlsmr;
     }
+    if (name == "reduced-pcg" || name == "reduced_pcg") {
+        throw_with_prefix("absorption method reduced-pcg is reported when the reduced-system tier "
+                          "publishes a fit; it cannot be requested (use auto)");
+    }
+    if (name == "krylov-pcg" || name == "krylov_pcg") {
+        throw_with_prefix("absorption method krylov-pcg is reported when the Krylov-PCG route "
+                          "is forced; it cannot be requested (use auto)");
+    }
     throw_with_prefix("unknown absorption_method: " + raw);
 }
 
@@ -556,6 +564,9 @@ STDLL stata_call(int argc, char* argv[]) {
         opts.drop_singletons = parse_bool(args.get_required("drop_singletons"), "drop_singletons");
         opts.symmetric_sweep = parse_bool(args.get_required("symmetric_sweep"), "symmetric_sweep");
         opts.absorption_method = parse_absorption_method(args.get_required("absorption_method"));
+        if (auto val = args.get_optional("partial_out_allow_mlsmr_repair")) {
+            opts.partial_out_allow_mlsmr_repair = parse_bool(*val, "partial_out_allow_mlsmr_repair");
+        }
         opts.ordinary_krylov_parity_floor = true;
         opts.jacobi_relaxation = parse_double(args.get_required("jacobi_relaxation"), "jacobi_relaxation");
         opts.save_groupvar = store_groupvar;

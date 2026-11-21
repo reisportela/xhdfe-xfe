@@ -30,6 +30,12 @@ HARNESS24 = load_module("xhdfe_core24_ab", ENC / "run_xhdfe_core24_ab.py")
 HARNESS23 = load_module("xhdfe_core23_ab", ENC / "run_xhdfe_core23_ab.py")
 WORKER = load_module("xhdfe_enc_worker", ENC / "enc_worker_py.py")
 CERTIFIER = load_module("xhdfe_marta_certifier", MARTA_GATE / "certify_python.py")
+# Suites that replace akm_v02_secondreg by a whole-worker sample of its panel (1%, 2%, 3%).
+SAMPLE_SUITES = {
+    "core24s1": "akm_v02_secondreg_small",
+    "core24s2": "akm_v02_secondreg_s2",
+    "core24s3": "akm_v02_secondreg_s3",
+}
 
 
 def expand_group(groups, name):
@@ -99,6 +105,48 @@ class Core24RegistryTest(unittest.TestCase):
             Path(core24["marta_group_individual_3m"]["_resolved_path"]),
             expected.resolve(),
         )
+
+    def test_core24_sample_suites_replace_only_secondreg(self):
+        full = HARNESS24.suite_specs(REGISTRY)
+        original = "akm_v02_secondreg"
+        for suite, replacement in SAMPLE_SUITES.items():
+            with self.subTest(suite=suite):
+                sample = HARNESS24.suite_specs(REGISTRY, suite)
+                self.assertEqual(
+                    list(sample), [replacement if name == original else name for name in full]
+                )
+                self.assertEqual(
+                    {name: spec for name, spec in sample.items() if name != replacement},
+                    {name: spec for name, spec in full.items() if name != original},
+                )
+                annotations = {"name", "path", "_resolved_path", "comment"}
+                self.assertEqual(
+                    {key: value for key, value in sample[replacement].items() if key not in annotations},
+                    {key: value for key, value in full[original].items() if key not in annotations},
+                )
+                self.assertEqual(
+                    Path(sample[replacement]["_resolved_path"]),
+                    Path(full[original]["_resolved_path"]).with_name(f"{replacement}.parquet"),
+                )
+                worker_specs = WORKER.select(WORKER.load_registry(REGISTRY), suite, "")
+                self.assertEqual(
+                    [(spec["name"], spec["path"]) for spec in worker_specs],
+                    [(name, spec["_resolved_path"]) for name, spec in sample.items()],
+                )
+
+    def test_ab_suite_selection_defaults_and_opt_in(self):
+        argv = [
+            "run_xhdfe_core24_ab.py", "--engine", "cpp", "--backend", "cpu",
+            "--mode", "comparable", "--baseline", str(ROOT), "--candidate", str(ROOT),
+            "--out", str(ROOT / "Verifications" / "core24_suite_navigation_test"),
+        ]
+        with mock.patch.object(sys, "argv", argv):
+            self.assertEqual(HARNESS24.parse_args().registry_group, "core24")
+            self.assertEqual(HARNESS23.parse_args().registry_group, "core23")
+        for suite in SAMPLE_SUITES:
+            with self.subTest(suite=suite), mock.patch.object(sys, "argv", [*argv, "--suite", suite]):
+                args = HARNESS24.parse_args()
+                self.assertEqual((args.registry_group, args.expected_dataset_count), (suite, 24))
 
     def test_worker_path_override_and_stata_list_fields(self):
         override = "/tmp/xhdfe-marta-core24-override.parquet"

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.3.0  12nov2026}{...}
+{* *! version 1.3.0  21nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -13,9 +13,11 @@
 {title:Syntax}
 
 {p 8 15 2}
-{cmd:xhdfeconnected} {it:workervar} {it:firmvar} {ifin} [{cmd:fweight}]{cmd:,}
+{cmd:xhdfeconnected} {it:workervar} {it:firmvar} {ifin} {weight}{cmd:,}
 {opth gen:erate(newvar)}
 [{opt replace} {opt threads(#)} {opt gpu} {opt verbose}]
+
+{p 4 6 2}Frequency weights are allowed, for example {cmd:[fw=count]}.{p_end}
 
 {synoptset 24 tabbed}{...}
 {synopthdr}
@@ -69,7 +71,7 @@ internally without changing the graph or the selected sample.
 observations in the leave-one-out connected set and zero for evaluated rows
 outside it. Rows excluded by {it:if}/{it:in} or missing worker/firm ids remain
 missing; use {cmd:if newvar == 1}, not merely {cmd:if newvar}, in a subsequent
-command. {opt replace} permits overwriting an existing target variable.
+command. {opt replace} drops an existing target before graph estimation.
 
 {phang}{opt threads(#)} sets the OpenMP request. Zero uses the automatic
 policy. A positive request bypasses workload heuristics and is limited only
@@ -100,7 +102,8 @@ surfaces.{p_end}
 {pstd}{cmd:r(n_obs)} (person-year observations in the leave-out set),
 {cmd:r(n_obs_input)}, {cmd:r(n_obs_connected)} (after the largest-CC step),
 {cmd:r(n_workers)}, {cmd:r(n_firms)}, {cmd:r(n_matches)}, {cmd:r(n_movers)},
-{cmd:r(n_stayers)}, {cmd:r(prune_iterations)}.
+{cmd:r(n_stayers)}, {cmd:r(prune_iterations)}, and the macro {cmd:r(cmd)}
+({cmd:xhdfeconnected}).
 
 {pstd}Thread diagnostics: {cmd:r(threads_requested)},
 {cmd:r(threads_effective)}, {cmd:r(threads_used)},
@@ -119,13 +122,13 @@ during useful graph/sample work; they are not copies of the request.
 
 {title:Example}
 
-{phang2}{cmd:. xhdfeconnected worker_id firm_id, generate(in_leaveout)}{p_end}
-{phang2}{cmd:. xhdfeakm y if in_leaveout == 1, worker(worker_id) firm(firm_id) noprune}{p_end}
-
-{pstd}For a very large graph, request CUDA sorting and inspect real backend use:{p_end}
-{phang2}{cmd:. xhdfeconnected worker_id firm_id, generate(in_leaveout) threads(16) gpu verbose}{p_end}
+{pstd}Use the largest leave-out connected set of the public simulation.
+The same sample can be passed to {cmd:xhdfeakm, noprune}.{p_end}
+{phang2}{cmd:. use "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/main/data/felsdvsimul.dta", clear}{p_end}
+{phang2}{cmd:. xhdfeconnected i j, generate(in_connected)}{p_end}
 {phang2}{cmd:. return list}{p_end}
-
+{pstd}See {help xhdfe_examples##akm:connected sample and AKM/KSS components}
+for the complete example.{p_end}
 
 {title:Also see}
 

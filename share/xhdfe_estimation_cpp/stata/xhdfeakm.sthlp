@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.9.0  12nov2026}{...}
+{* *! version 1.9.0  21nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -126,7 +126,7 @@ internally without changing the worker-firm graph or results.
 
 {phang}{opth controls(varlist)} lists covariates that are partialled out at the
 person-year level with the xhdfe absorber (Frisch-Waugh-Lovell) before the
-two-way machinery runs; their coefficients are returned in {cmd:e()}/{cmd:r(b)}.
+two-way machinery runs; their coefficients are returned in {cmd:r(b)}.
 Factor-variable notation is allowed, so {cmd:controls(i.year)} works directly
 (base level omitted, as with manual dummies) instead of expanding the dummies by
 hand; {cmd:i.}, {cmd:c.}, interactions and a chosen base ({cmd:ib#.}) are all
@@ -159,17 +159,17 @@ when the estimation sample is already leave-out connected (for example after
 
 {phang}{opt leverages(auto|exact|jla)} selects the statistical leverages
 {it:P_ii} and quadratic-form weights {it:B_ii}. {cmd:auto} (default) uses the
-{cmd:exact} per-observation solve when the input has at most
-{opt exactmaxrows()} rows and the JLA approximation otherwise; {cmd:exact}
-and {cmd:jla} force either path.
+{cmd:exact} per-observation solve up to {opt exactmaxrows()} and the JLA
+approximation above it. {cmd:exact} and {cmd:jla} force either path.
 
 {phang}{opt draws(#)} sets the number of JLA random projections (default 200,
 the LeaveOutTwoWay default). {opt seed(#)} makes the random streams
 deterministic. Thread/backend reductions preserve the estimator and FP64
 tolerance but can differ at the last-ulp level.
 
-{phang}{opt exactmaxrows(#)} is the row cap under which {cmd:auto} picks the
-exact path (default 10000, the LeaveOutTwoWay rule).
+{phang}{opt exactmaxrows(#)} sets the inclusive cap for the exact path
+(default 10000). It counts marked input person-years before leave-out pruning.
+With frequency weights it counts their sum.
 
 {dlgtab:Inference}
 
@@ -359,7 +359,7 @@ precision certificate{p_end}
 {synopt:{cmd:r(gpu_status_code)} {cmd:r(gpu_backend)} {cmd:r(gpu_status)}}two-way-solver backend diagnostics{p_end}
 
 {p2col 5 26 30 2: With {opt se} (component {it:C} in {cmd:var_psi}, {cmd:cov}, {cmd:var_alpha})}{p_end}
-{synopt:{cmd:r(se_}{it:C}{cmd:)}}standard error of the KSS component{p_end}
+{synopt:{cmd:r(se_}{it:C}{cmd:)}}standard error accompanying {cmd:r(theta_}{it:C}{cmd:)}{p_end}
 {synopt:{cmd:r(theta_}{it:C}{cmd:)}}the leave_out_COMPLETE point estimate accompanied by the reported SE/CI; distinct from {cmd:r(kss_}{it:C}{cmd:)}{p_end}
 
 {p2col 5 26 30 2: With {opt ci} (component suffix {it:c} in {cmd:_psi}, {cmd:_cov}, {cmd:_alpha})}{p_end}
@@ -391,7 +391,7 @@ precision certificate{p_end}
 {cmd:r(proj_cov_condition)}, {cmd:r(proj_solver_gap)}, {cmd:r(proj_bread_reused)},
 {cmd:r(proj_threads_used)} and {cmd:r(proj_workers_active)}. These are diagnostics,
 not automatic certificates of modelling assumptions. For each {it:c} in
-{cmd:psi cov}, {cmd:r(proj_nonlinear_}{it:c}{cmd:)} is the linearisation index,
+{cmd:psi cov}, {cmd:r(proj_nonlinear_}{it:c}{cmd:)} is the linearization index,
 {cmd:r(proj_correction_}{it:c}{cmd:)} is the absolute correction/SE ratio and
 {cmd:r(proj_zero_gradient_}{it:c}{cmd:)} flags when a zero gradient is not excluded.
 An infinite index is missing in Stata, with the flag set to one.{p_end}
@@ -399,23 +399,15 @@ An infinite index is missing in Stata, with the flag set to one.{p_end}
 
 {title:Examples}
 
-{pstd}With a worker-firm panel loaded ({it:y} = log wage, {it:i} = worker,
-{it:j} = firm), run the default (leave-a-match-out, exact on a small sample):{p_end}
-{phang2}{cmd:. xhdfeakm y, worker(i) firm(j)}{p_end}
+{pstd}Compute AKM/KSS components and save effects on the public project simulation.{p_end}
+{phang2}{cmd:. use "https://raw.githubusercontent.com/reisportela/xhdfe-xfe/main/data/felsdvsimul.dta", clear}{p_end}
+{phang2}{cmd:. xhdfeconnected i j, generate(in_connected)}{p_end}
+{phang2}{cmd:. xhdfeakm y if in_connected == 1, worker(i) firm(j) noprune}
+{cmd:leverages(exact) sigmacentering(personyear) generate(akm)}{p_end}
+{phang2}{cmd:. display r(kss_var_psi), r(kss_corr)}{p_end}
 
-{pstd}KSS standard errors and Andrews-Mikusheva confidence intervals, with the
-worker and firm effects saved:{p_end}
-{phang2}{cmd:. xhdfeakm y, worker(i) firm(j) ci generate(akm)}{p_end}
-{phang2}{cmd:. display r(kss_var_psi), r(se_var_psi), r(ci_lb_psi), r(ci_ub_psi)}{p_end}
-
-{pstd}Partial out controls, use the JLA leverages on the GPU, and read the
-sorting correlation:{p_end}
-{phang2}{cmd:. xhdfeakm y, worker(i) firm(j) controls(x1 x2) leverages(jla) gpu}{p_end}
-{phang2}{cmd:. display "corr(a,psi) = " r(kss_corr)}{p_end}
-
-{pstd}A fuller walkthrough (Stata/Python/R) ships as
-{bf:examples/akm_kss_example.do} and {bf:docs/akm-kss.md}.{p_end}
-
+{pstd}For an example that partials out controls and reports an interval with
+its matching point estimate, see {help xhdfe_examples##akm_inference:AKM inference on NLS data}.{p_end}
 
 {title:References}
 
@@ -429,6 +421,9 @@ low wage firms: negative assortative matching or limited mobility bias?
 {pstd}
 Kline, P., R. Saggio, and M. Soelvsten. 2020. Leave-out estimation of variance
 components. {it:Econometrica} 88(5): 1859-1898.{p_end}
+{pstd}
+For the packages and papers on which the shared xhdfe backend builds, see
+{help xhdfe##acknowledgements:help xhdfe, Acknowledgements}.{p_end}
 
 
 {title:Also see}

@@ -15,6 +15,7 @@
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,7 @@
 #include "hdfe/hdfe_regressor_v11.hpp"
 #include "hdfe/ieee_bits.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "xhdfe_wide_id_rank.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
 // with OpenMP, as used by the plugin build); otherwise fall back to std::sort.
@@ -271,9 +273,12 @@ void plugin_cpu_profile_log_elapsed(
 // less exact than the fit's own state (Fast and strict, MAP), and from 2.30.1 a Krylov fit sent it to the
 // host LSMR (ready, Comparable CUDA: about two minutes). refine_stored_residuals still records the request,
 // so every gate that reads it keeps its eligibility; stored_residuals_fit_state skips only the late
-// re-absorption. Lean 2.31.0: a strict-residual fit keeps that re-absorption, as up to 2.30.1 (its CUDA
-// acceptance is corrected first, P6). XHDFE_STATA_LEGACY_RESIDUAL_REFINE=1, read at every fit, restores
-// that re-absorption, and only it, for A/B and regression tests.
+// re-absorption. Lean 2.31.0: a strict-residual fit keeps that re-absorption, as up to 2.30.1. Package B
+// (17nov2026): the plugin asks for the fit's own residuals in every mode and the core decides for a
+// strict-residual fit, from the record of the scope of its CUDA acceptance: inside it the fit's own residual
+// (the one its acceptance measured), outside it (CPU strict, every excluded strict route) the re-absorption,
+// as before. XHDFE_STATA_LEGACY_RESIDUAL_REFINE=1, read at every fit, restores that re-absorption, and only
+// it, for A/B and regression tests.
 bool legacy_stored_residual_refinement() {
     const char* raw = std::getenv("XHDFE_STATA_LEGACY_RESIDUAL_REFINE");
     return raw != nullptr && std::strcmp(raw, "1") == 0;
@@ -475,6 +480,16 @@ AbsorptionMethod parse_absorption_method(const std::string& raw) {
     if (name == "auto-mlsmr" || name == "auto_mlsmr" ||
         name == "mlsmr-auto" || name == "mlsmr_auto") {
         return AbsorptionMethod::AutoMlsmr;
+    }
+    if (name == "reduced-pcg" || name == "reduced_pcg") {
+        throw_with_prefix("xhdfe plugin: ",
+                          "absorption method reduced-pcg is reported when the reduced-system tier "
+                          "publishes a fit; it cannot be requested (use auto)");
+    }
+    if (name == "krylov-pcg" || name == "krylov_pcg") {
+        throw_with_prefix("xhdfe plugin: ",
+                          "absorption method krylov-pcg is reported when the Krylov-PCG route "
+                          "is forced; it cannot be requested (use auto)");
     }
     throw_with_prefix("xhdfe plugin: ", "unknown absorption_method: " + raw);
 }
@@ -735,6 +750,24 @@ void maybe_save_gpu_diagnostics(const std::optional<std::string>& s_gpu_status_c
                       gpu_absorption_converged);
     maybe_save_scalar(s_gpu_absorption_iterations,
                       gpu_absorption_iterations);
+}
+
+// The reduced-system tier's read-only diagnostics of the fit: status and
+// discarded iterations in scalars (s_...), the reason in the caller's local
+// named by m_reduced_pcg_reason.
+void maybe_save_reduced_pcg(const std::optional<std::string>& s_status,
+                            const std::optional<std::string>& m_reason,
+                            const std::optional<std::string>& s_discarded,
+                            const HdfeRegressorV11& reg) {
+    maybe_save_scalar(s_status, static_cast<double>(reg.reduced_pcg_status()));
+    maybe_save_scalar(s_discarded, static_cast<double>(reg.reduced_pcg_discarded_iterations()));
+    if (m_reason && !m_reason->empty()) {
+        const std::string local = "_" + *m_reason;
+        if (SF_macro_save(const_cast<char*>(local.c_str()),
+                          const_cast<char*>(reg.reduced_pcg_reason().c_str()))) {
+            throw_with_prefix("xhdfe plugin: ", "failed to save macro: " + *m_reason);
+        }
+    }
 }
 
 void maybe_save_thread_diagnostics(
@@ -1252,6 +1285,12 @@ struct ParallelReadPlan {
     int read_workers = 0;       // threads of that team that read a block
     bool read_used = false;
     bool read_fallback = false;
+    // The team read of wide identifier columns (read_wide_id_on_team), kept or
+    // discarded: the largest team observed and the most active workers of its
+    // read and rank regions, over all the columns it took.
+    bool wide_ran = false;
+    int wide_team = 0;
+    int wide_workers = 0;
 };
 
 ParallelReadPlan plan_parallel_read(const ParsedArgs& args, int marker_var,
@@ -1633,6 +1672,9 @@ int parallel_read_threads_used(const ParallelReadPlan& plan) {
     if (plan.read_used || plan.read_fallback) {
         used = std::max(used, plan.read_team);
     }
+    if (plan.wide_ran) {
+        used = std::max(used, plan.wide_team);
+    }
     return used;
 }
 
@@ -1641,7 +1683,219 @@ int parallel_read_workers_active(const ParallelReadPlan& plan) {
     if (plan.read_used || plan.read_fallback) {
         active = std::max(active, plan.read_workers);
     }
+    if (plan.wide_ran) {
+        active = std::max(active, plan.wide_workers);
+    }
     return active;
+}
+
+// --- Wide identifier read (phase 3 of the Stata-path plan) ------------------
+// A wide identifier column (a value outside exact int32) left by the fused
+// pass to its column reader is read again, after a successful PARALLEL fused
+// pass only, on the same team: blocks of kParallelReadBlockRows positions of
+// the final sample map, schedule(static), straight into (value, row) pairs,
+// with the checks of the fused pass. A worker never reports: it marks an
+// anomaly and stops reading. After the region, an anomaly (or any exception
+// on the way) discards everything and the column reader of today runs where
+// it runs today, so every message and its order stay those of today. On
+// success the pairs are sorted as today and ranked on the team
+// (xhdfe_wide_id::rank_sorted), giving the codes of the column reader.
+// XHDFE_WIDE_ID_READ=0, read once per process, keeps the column reader.
+bool wide_id_read_enabled() {
+    static int cached = -1;
+    if (cached >= 0) {
+        return cached == 1;
+    }
+    const char* raw = std::getenv("XHDFE_WIDE_ID_READ");
+    cached = (raw && raw[0] == '0' && raw[1] == '\0') ? 0 : 1;
+    return cached == 1;
+}
+
+// Test hook, read once per process: XHDFE_TEST_WIDE_ID_READ_ANOMALY=k (k >= 0)
+// makes the worker of block k (the last block when k is beyond it) mark an
+// anomaly after writing that block's pairs, so that a partly written buffer is
+// discarded. -1 when unset or not a nonnegative integer.
+long long wide_id_read_test_anomaly_block() {
+    static long long cached = -2;
+    if (cached != -2) {
+        return cached;
+    }
+    cached = -1;
+    const char* raw = std::getenv("XHDFE_TEST_WIDE_ID_READ_ANOMALY");
+    if (raw && *raw != '\0') {
+        char* end = nullptr;
+        errno = 0;
+        const long long value = std::strtoll(raw, &end, 10);
+        if (errno == 0 && *end == '\0' && value >= 0) {
+            cached = value;
+        }
+    }
+    return cached;
+}
+
+// One store per 4 KiB page of a byte range, and one in its last byte.
+void touch_destination_bytes(void* data, std::size_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    volatile unsigned char* const p = static_cast<unsigned char*>(data);
+    for (std::size_t k = 0; k < bytes; k += 4096) {
+        p[k] = 0;
+    }
+    p[bytes - 1] = 0;
+}
+
+// The read region: pairs[i] = (value of row obs.obs_no(i), i). False on any
+// anomaly; the caller then discards the buffer.
+bool read_wide_id_pairs_parallel(const ObservationMap& obs, int var_idx,
+                                 bool validate_individual, int threads,
+                                 xhdfe_wide_id::Pair* pairs, int& team_observed,
+                                 int& workers_active) {
+    const ST_double missval = SV_missval;
+    const int n = obs.n;
+    const long long blocks =
+        (static_cast<long long>(n) + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    const long long inject_at = wide_id_read_test_anomaly_block();
+    const long long inject_block =
+        inject_at < 0 ? -1 : std::min<long long>(inject_at, blocks - 1);
+    std::atomic<int> anomaly{0};
+    std::atomic<int> active{0};
+    int team = 1;
+#ifdef _OPENMP
+#pragma omp parallel num_threads(threads)
+#else
+    (void)threads;
+#endif
+    {
+#ifdef _OPENMP
+#pragma omp single
+        team = omp_get_num_threads();
+#endif
+        int blocks_read = 0;
+#ifdef _OPENMP
+#pragma omp for schedule(static)
+#endif
+        for (long long b = 0; b < blocks; ++b) {
+            if (anomaly.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            ++blocks_read;
+            const int lo = static_cast<int>(b * kParallelReadBlockRows);
+            const int hi = static_cast<int>(
+                std::min<long long>(n, static_cast<long long>(lo) + kParallelReadBlockRows));
+            bool bad = false;
+            for (int i = lo; i < hi; ++i) {
+                ST_double z = 0.0;
+                if (SF_vdata(var_idx, obs.obs_no(i), &z) || !std::isfinite(z) || !(z < missval)) {
+                    bad = true;
+                    break;
+                }
+                if (validate_individual &&
+                    (z < 0.0 || std::trunc(z) != z || z > kMaxExactIntegerId)) {
+                    bad = true;
+                    break;
+                }
+                pairs[i].value = z;
+                pairs[i].row = i;
+            }
+            if (b == inject_block) {
+                bad = true;
+            }
+            if (bad) {
+                anomaly.store(1, std::memory_order_relaxed);
+            }
+        }
+        if (blocks_read > 0) {
+            active.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    team_observed = team;
+    workers_active = active.load();
+    return !anomaly.load();
+}
+
+// For a column the fused pass left to its column reader (wide): its codes on
+// the team, true, or false with `codes` to be discarded and the column reader
+// to run. `parallel_pass_done`: read_inputs_parallel itself succeeded (a
+// success of the serial fused pass does not qualify). Never throws.
+bool read_wide_id_on_team(ParallelReadPlan& plan, bool parallel_pass_done,
+                          const ObservationMap& obs, int var_idx, bool validate_individual,
+                          const char* what, Eigen::VectorXi& codes) {
+    const char* reason = "done";
+    bool ok = false;
+    int team = 1;
+    int read_team = 0;
+    int read_workers = 0;
+    xhdfe_wide_id::RankResult ranked;
+    const int n = obs.n;
+    const long long blocks =
+        (static_cast<long long>(n) + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    if (!parallel_pass_done) {
+        reason = "serial_first_pass";
+    } else if (!wide_id_read_enabled()) {
+        reason = "switch_off";
+    } else {
+        int core_threads = 0;
+        team = parallel_read_team(plan, n, blocks, core_threads);
+        if (team <= 1 || n < 1) {
+            reason = "serial_team";
+        } else {
+            try {
+                // Everything is allocated before the regions, so nothing
+                // inside them allocates or throws.
+                std::unique_ptr<xhdfe_wide_id::Pair[]> pairs(
+                    new xhdfe_wide_id::Pair[static_cast<std::size_t>(n)]);
+                codes.resize(n);
+                if (plan.pretouch) {
+                    touch_destination_bytes(pairs.get(),
+                                            static_cast<std::size_t>(n) * sizeof(xhdfe_wide_id::Pair));
+                    touch_destination_pages(codes.data(), n);
+                }
+                const auto read_t0 = std::chrono::steady_clock::now();
+                const bool read_ok = read_wide_id_pairs_parallel(
+                    obs, var_idx, validate_individual, team, pairs.get(), read_team, read_workers);
+                plan.wide_ran = true;
+                plan.wide_team = std::max(plan.wide_team, read_team);
+                plan.wide_workers = std::max(plan.wide_workers, read_workers);
+                plugin_cpu_profile_log_elapsed(std::string("read_") + what + "_wide_team", read_t0);
+                if (!read_ok) {
+                    reason = wide_id_read_test_anomaly_block() >= 0 ? "test_anomaly" : "anomaly";
+                } else {
+                    const auto code_t0 = std::chrono::steady_clock::now();
+                    xhdfe_wide_id::Pair* const first = pairs.get();
+                    XHDFE_PARALLEL_SORT(first, first + n,
+                                        [](const xhdfe_wide_id::Pair& a,
+                                           const xhdfe_wide_id::Pair& b) {
+                                            return a.value < b.value;
+                                        });
+                    ranked = xhdfe_wide_id::rank_sorted(first, n, codes.data(), blocks, team);
+                    plan.wide_team = std::max(plan.wide_team, ranked.team);
+                    plan.wide_workers = std::max(plan.wide_workers, ranked.workers);
+                    plugin_cpu_profile_log_elapsed(std::string("code_") + what + "_dense_team", code_t0);
+                    if (ranked.distinct >= 1) {
+                        ok = true;
+                    } else {
+                        reason = "empty";
+                    }
+                }
+            } catch (...) {
+                reason = "exception";
+                ok = false;
+            }
+        }
+    }
+    if (!ok) {
+        codes = Eigen::VectorXi();
+    }
+    if (plugin_cpu_profile_enabled()) {
+        std::cerr << "plugin_profile label=wide_id_read what=" << what << " var=" << var_idx
+                  << " path=" << (ok ? "team" : "column_reader") << " reason=" << reason
+                  << " team=" << read_team << " workers=" << read_workers
+                  << " rank_team=" << (ok ? ranked.team : 0)
+                  << " rank_workers=" << (ok ? ranked.workers : 0) << " rows=" << n
+                  << " distinct=" << (ok ? ranked.distinct : 0) << '\n';
+    }
+    return ok;
 }
 
 void log_parallel_read_mode(const ParallelReadPlan& plan) {
@@ -2630,6 +2884,9 @@ ST_retcode run_gelbach(const ParsedArgs& args) {
         use_gpu = parse_bool(*val, "use_gpu");
     }
     options.use_gpu = use_gpu;
+    if (auto val = args.get_optional("weighted_cpu_route")) {
+        options.weighted_cpu_route = parse_bool(*val, "weighted_cpu_route");
+    }
     if (auto val = args.get_optional("capture_sample_provenance")) {
         options.capture_sample_provenance =
             parse_bool(*val, "capture_sample_provenance");
@@ -2991,6 +3248,34 @@ STDLL stata_call(int argc, char* argv[]) {
         if (auto val = args.get_optional("convergence")) {
             opts.convergence_criterion = parse_convergence_criterion(*val);
         }
+        // The reduced-system tier for this fit: the ado passes reduced_pcg only
+        // when reducedpcg() or the Stata global XHDFE_REDUCED_PCG decided;
+        // otherwise the process default (the environment variable) applies.
+        if (auto val = args.get_optional("reduced_pcg")) {
+            if (*val == "on") {
+                opts.reduced_pcg = hdfe::ReducedPcgRequest::On;
+            } else if (*val == "off") {
+                opts.reduced_pcg = hdfe::ReducedPcgRequest::Off;
+            } else {
+                throw_with_prefix("xhdfe plugin: ", "reduced_pcg must be on or off");
+            }
+        }
+        // The experimental CUDA variant of the tier for this fit: the ado passes
+        // reduced_pcg_cuda only when reducedpcgcuda() or the Stata global
+        // XHDFE_REDUCED_PCG_CUDA decided; otherwise the process default (the
+        // environment variable) applies. Inert unless the fit runs on CUDA.
+        if (auto val = args.get_optional("reduced_pcg_cuda")) {
+            if (*val == "on") {
+                opts.reduced_pcg_cuda = hdfe::ReducedPcgRequest::On;
+            } else if (*val == "off") {
+                opts.reduced_pcg_cuda = hdfe::ReducedPcgRequest::Off;
+            } else {
+                throw_with_prefix("xhdfe plugin: ", "reduced_pcg_cuda must be on or off");
+            }
+        }
+        if (auto val = args.get_optional("weighted_cpu_route")) {
+            opts.weighted_cpu_route = parse_bool(*val, "weighted_cpu_route");
+        }
         opts.jacobi_relaxation = parse_double(args.get_required("jacobi_relaxation"), "jacobi_relaxation");
         opts.level = parse_double(args.get_required("level"), "level");
         opts.save_groupvar = store_groupvar;
@@ -3018,9 +3303,10 @@ STDLL stata_call(int argc, char* argv[]) {
         if (auto val = args.get_optional("tolerance_mode")) {
             opts.tolerance_mode = parse_tolerance_mode(*val);
         }
-        // P7 (lean 2.31.0): after the tolerance mode is known; strict-residual keeps the re-absorption.
-        opts.stored_residuals_fit_state = store_resid && !legacy_stored_residual_refinement() &&
-                                          opts.tolerance_mode != ToleranceMode::StrictResidual;
+        // P7 (lean 2.31.0): after the tolerance mode is known. Package B: for strict-residual the core
+        // decides (the scope of its CUDA acceptance keeps the fit's own residuals, every other strict
+        // fit the re-absorption).
+        opts.stored_residuals_fit_state = store_resid && !legacy_stored_residual_refinement();
 
         const ParsedDofAdjustments dof = parse_dofadjustments(args.get_optional("dofadjustments"));
         opts.dof_method = dof.method;
@@ -3309,6 +3595,7 @@ STDLL stata_call(int argc, char* argv[]) {
         // columns from here; otherwise they read as before and report.
         struct FusedInputs {
             bool done = false;
+            bool parallel = false;  // done by read_inputs_parallel itself
             std::vector<Eigen::VectorXi> fes;
             std::vector<char> fe_ready;
             std::vector<Eigen::VectorXd> slopes;
@@ -3424,10 +3711,14 @@ STDLL stata_call(int argc, char* argv[]) {
 
                     // The parallel pass when allowed; on any anomaly it is
                     // discarded and the serial pass reads everything again.
-                    if (!read_inputs_parallel(parallel_read, obs, doubles, ids) &&
-                        !read_columns_fused(obs, doubles, ids)) {
+                    // Only a success of the parallel pass itself lets the
+                    // column stages read a wide column on the team.
+                    const bool parallel_done =
+                        read_inputs_parallel(parallel_read, obs, doubles, ids);
+                    if (!parallel_done && !read_columns_fused(obs, doubles, ids)) {
                         return false;
                     }
+                    fused.parallel = parallel_done;
                     fused_id_columns = static_cast<int>(ids.size());
                     for (std::size_t k = 0; k < ids.size(); ++k) {
                         if (ids[k].exact_int32) {
@@ -3503,11 +3794,17 @@ STDLL stata_call(int argc, char* argv[]) {
                 continue;
             }
             const int var_idx = idx_fe_start + d;
-            Eigen::VectorXi v =
-                fused.done && fused.fe_ready[static_cast<std::size_t>(d)]
-                    ? std::move(fused.fes[static_cast<std::size_t>(d)])
-                    : read_categorical_numeric(
-                          var_idx, "fes", has_individual && d == individual_fe_read_index);
+            const bool validate_individual = has_individual && d == individual_fe_read_index;
+            Eigen::VectorXi v;
+            if (fused.done && fused.fe_ready[static_cast<std::size_t>(d)]) {
+                v = std::move(fused.fes[static_cast<std::size_t>(d)]);
+            } else if (!(fused.done &&
+                         read_wide_id_on_team(parallel_read, fused.parallel, obs, var_idx,
+                                              validate_individual, "fes", v))) {
+                // A column the fused pass left (wide) whose team read did
+                // not run or was discarded, or no fused pass: today's reader.
+                v = read_categorical_numeric(var_idx, "fes", validate_individual);
+            }
             fes.push_back(std::move(v));
         }
         plugin_cpu_profile_log_elapsed("read_fes", read_fes_t0);
@@ -3603,10 +3900,14 @@ STDLL stata_call(int argc, char* argv[]) {
                     continue;
                 }
                 const int var_idx = idx_clust_start + d;
-                Eigen::VectorXi v =
-                    fused.done && fused.cluster_ready[static_cast<std::size_t>(d)]
-                        ? std::move(fused.clusters[static_cast<std::size_t>(d)])
-                        : read_categorical_numeric(var_idx, "clusters");
+                Eigen::VectorXi v;
+                if (fused.done && fused.cluster_ready[static_cast<std::size_t>(d)]) {
+                    v = std::move(fused.clusters[static_cast<std::size_t>(d)]);
+                } else if (!(fused.done &&
+                             read_wide_id_on_team(parallel_read, fused.parallel, obs, var_idx,
+                                                  false, "clusters", v))) {
+                    v = read_categorical_numeric(var_idx, "clusters");
+                }
                 c.push_back(std::move(v));
             }
             clusters = std::move(c);
@@ -3795,6 +4096,12 @@ STDLL stata_call(int argc, char* argv[]) {
         const std::optional<std::string> s_cuda_tail_code =
             args.get_optional("s_cuda_tail_code");
         const std::optional<std::string> s_method_used = args.get_optional("s_method_used");
+        const std::optional<std::string> s_reduced_pcg_status =
+            args.get_optional("s_reduced_pcg_status");
+        const std::optional<std::string> m_reduced_pcg_reason =
+            args.get_optional("m_reduced_pcg_reason");
+        const std::optional<std::string> s_reduced_pcg_discarded_iterations =
+            args.get_optional("s_reduced_pcg_discarded_iterations");
         const std::optional<std::string> s_num_clusters = args.get_optional("s_num_clusters");
         const std::optional<std::string> s_cluster_scale = args.get_optional("s_cluster_scale");
         const std::optional<std::string> s_vcv_psd_fixed = args.get_optional("s_vcv_psd_fixed");
@@ -3947,7 +4254,12 @@ STDLL stata_call(int argc, char* argv[]) {
 
                 const Eigen::VectorXd* wptr_g = w_g ? &(*w_g) : nullptr;
                 const std::vector<Eigen::VectorXi>* cptr_g = c_g ? &(*c_g) : nullptr;
-                reg.fit(y_g, X_g, fes_g, wptr_g, cptr_g, nullptr, {});
+                {
+                    // Package B: this call is the group() collapse of the plugin, marked
+                    // for this call only (cleared on every exit, an exception included).
+                    HdfeRegressorV11::GroupedCallMark grouped_call(reg);
+                    reg.fit(y_g, X_g, fes_g, wptr_g, cptr_g, nullptr, {});
+                }
                 if (importance_weights) reg.apply_importance_weights(*wptr_g);
 
                 const hdfe::HdfeResults& r = reg.results();
@@ -4024,6 +4336,8 @@ STDLL stata_call(int argc, char* argv[]) {
                                            s_gpu_absorption_iterations, reg);
                 maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
                 maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
+                maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
+                                       s_reduced_pcg_discarded_iterations, reg);
                 maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
                 maybe_save_scalar(s_cluster_scale, r.cluster_scale);
                 maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4177,6 +4491,8 @@ STDLL stata_call(int argc, char* argv[]) {
                                        s_gpu_absorption_iterations, reg);
             maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
             maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
+            maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
+                                   s_reduced_pcg_discarded_iterations, reg);
             maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
             maybe_save_scalar(s_cluster_scale, r.cluster_scale);
             maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4297,6 +4613,8 @@ STDLL stata_call(int argc, char* argv[]) {
                                    s_gpu_absorption_iterations, reg);
         maybe_save_scalar(s_cuda_tail_code, static_cast<double>(reg.cuda_tail_code()));
         maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
+        maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
+                               s_reduced_pcg_discarded_iterations, reg);
         maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
         maybe_save_scalar(s_cluster_scale, r.cluster_scale);
         maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4405,6 +4723,8 @@ STDLL stata_call(int argc, char* argv[]) {
         const bool numerical_failure =
             msg.find(": did not converge;") != std::string::npos ||
             msg.find(": precision certification failed;") != std::string::npos ||
+            msg.find(": heterogeneous-slope acceptance criteria not met after continuation;") !=
+                std::string::npos ||
             msg.find("fixed-effect recovery did not converge") != std::string::npos ||
             msg.find("Fixed-effect recovery did not converge") != std::string::npos ||
             msg.find("FE extraction absorption did not converge") != std::string::npos ||

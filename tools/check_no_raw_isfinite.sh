@@ -9,6 +9,9 @@ sources=(
   src/akm_projection.cpp
   src/fe_absorption.cpp
   src/hdfe_regressor_v11.cpp
+  src/reduced_schur_pcg.cpp
+  src/reduced_schur_pcg.hpp
+  src/sparse_rank.hpp
 )
 
 pattern='std::is(finite|nan|inf)[[:space:]]*\(|\.allFinite[[:space:]]*\(|\.hasNaN[[:space:]]*\('

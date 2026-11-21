@@ -30,12 +30,31 @@ struct GpuFeCertificateView {
     std::size_t group_ptr_size = 0;
     int num_groups = 0;
     bool groups_contiguous = false;
+    const double* weight_sums = nullptr;
 };
 
 // CUDA-only post-solve certificate.  Its implementation deliberately lives
 // in a separate translation unit so CUDA certificate optimizations cannot
 // perturb compiler code generation for the CPU absorption solvers.
+constexpr int kBoundedCudaProjectionRows = 2000000;
+
 #ifdef HDFE_USE_CUDA
+inline bool cuda_projection_scope(
+    std::size_t effects, bool weighted, Eigen::Index rows, const HdfeOptions& options) {
+    const bool strict = options.tolerance_mode == ToleranceMode::StrictResidual ||
+        options.strict_provenance || options.strict_sweep_exit != nullptr;
+    // The observed throughput regression is on the weighted Comparable path.
+    // Frequency-weight replication and the unweighted four-effect repair
+    // must keep the same precision check across changes in row representation.
+    const bool bounded_weighted_comparable =
+        weighted && !options.weights_are_frequencies && !strict;
+    return (options.tolerance_mode == ToleranceMode::ReghdfeComparable ||
+            options.tolerance_mode == ToleranceMode::StrictResidual) &&
+        (!bounded_weighted_comparable || rows <= kBoundedCudaProjectionRows) &&
+        !options.use_sparse_solver && !options.use_krylov &&
+        ((weighted && effects >= 2 && effects <= 4) || (!weighted && effects == 4));
+}
+
 void certify_cuda_absorption_result(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -122,6 +141,11 @@ private:
 
 bool has_thread_gpu_backend_override() noexcept;
 GpuBackend thread_gpu_backend_override() noexcept;
+// Package C (18nov2026): the backend the absorbers of this thread resolve for
+// a call made now: the thread's override, else a non-empty XHDFE_GPU_BACKEND,
+// else the build's HDFE_GPU_BACKEND_DEFAULT (the same reading as the
+// absorbers' own, untrimmed). Read only; it selects nothing.
+GpuBackend effective_gpu_backend();
 
 class ScopedCudaForwardProbeRequest {
 public:
@@ -140,6 +164,14 @@ bool thread_cuda_forward_probe_requested() noexcept;
 
 #ifdef HDFE_USE_CUDA
 bool cuda_backend_available();
+
+bool complete_ordinary_projection_cuda(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<GpuFeInput>& fe_inputs,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result);
 
 bool absorb_fixed_effects_cuda(const Eigen::Ref<const Eigen::VectorXd>& y,
                                const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -187,6 +219,19 @@ bool fe_recovery_max_delta_cuda_cached(const Eigen::Ref<const Eigen::VectorXd>& 
                                        const Eigen::VectorXd* weights,
                                        const std::vector<std::size_t>& sweep_order,
                                        double& out_max_delta);
+
+// Package B (17nov2026): the device part of continue_strict_residual
+// (fe_absorption.hpp): unit weights, compact group ids, `order` indexing
+// fe_inputs; y_tilde and X_tilde are updated in place. False when the device
+// did not serve the call.
+bool continue_strict_residual_cuda(Eigen::VectorXd& y_tilde,
+                                   Eigen::MatrixXd& X_tilde,
+                                   const std::vector<GpuFeInput>& fe_inputs,
+                                   const std::vector<std::size_t>& order,
+                                   const Eigen::VectorXd& combination,
+                                   double tol,
+                                   int max_sweeps,
+                                   StrictContinuationReport& report);
 #else
 inline bool cuda_backend_available() { return false; }
 
@@ -238,6 +283,17 @@ inline bool fe_recovery_max_delta_cuda_cached(const Eigen::Ref<const Eigen::Vect
                                               const Eigen::VectorXd*,
                                               const std::vector<std::size_t>&,
                                               double&) {
+    return false;
+}
+
+inline bool continue_strict_residual_cuda(Eigen::VectorXd&,
+                                          Eigen::MatrixXd&,
+                                          const std::vector<GpuFeInput>&,
+                                          const std::vector<std::size_t>&,
+                                          const Eigen::VectorXd&,
+                                          double,
+                                          int,
+                                          StrictContinuationReport&) {
     return false;
 }
 #endif

@@ -39,7 +39,7 @@ INTS = {'N', 'N_full', 'num_singletons', 'rank', 'iterations', 'converged',
 ALIASES = {'N': 'nobs', 'N_full': 'nobs_full', 'df_r': 'df_resid',
            'absorption_method_used': 'method_code'}
 METHODS = {0: 'auto', 1: 'gauss-seidel', 2: 'symmetric-gauss-seidel', 3: 'jacobi',
-           4: 'schwarz', 5: 'lsmr', 6: 'mlsmr', 7: 'auto-mlsmr'}
+           4: 'schwarz', 5: 'lsmr', 6: 'mlsmr', 7: 'auto-mlsmr', 8: 'reduced-pcg'}
 
 
 def main():

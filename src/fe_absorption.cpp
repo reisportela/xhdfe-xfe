@@ -48,6 +48,7 @@
 #include "schwarz_demean.hpp"
 #include "ac_arena_storage.hpp"
 #include "lockstep_memory_plan.hpp"
+#include "sparse_rank.hpp"
 
 #ifdef HDFE_USE_OPENMP
 #include <omp.h>
@@ -92,7 +93,30 @@ GroupForwardWorkspace*& group_forward_workspace() {
     static thread_local GroupForwardWorkspace* workspace = nullptr;
     return workspace;
 }
+
+// XHDFE_SLOPE_TEAM_INDEXERS (phase 5a of the Stata-path plan): "0" keeps the
+// serial identifier builds of the route with heterogeneous slopes (the indexers
+// of each entry of absorb_fixed_effects_v6_mixed_impl() and the slope rank's);
+// anything else, or nothing, builds them on the team, with the indexer of today
+// field by field. Read once per process, here only.
+bool slope_team_indexers_enabled() {
+    static const bool on = [] {
+        const char* raw = std::getenv("XHDFE_SLOPE_TEAM_INDEXERS");
+        return !(raw != nullptr && raw[0] == '0' && raw[1] == '\0');
+    }();
+    return on;
+}
 namespace {
+
+// XHDFE_ABSORB_INPUT_COPY=1 (low-memory package L3.1-A, A1) restores the temporary
+// copies of y and X that absorb_fixed_effects_v6 made when it handed its
+// Eigen::Ref inputs to absorb_fixed_effects, which took them as VectorXd and
+// MatrixXd. By default the absorber reads the caller's memory and still makes
+// its own working copy (result.y_tilde, result.X_tilde). Read once per process.
+bool absorb_input_copy_enabled() {
+    static const bool on = mlsmr_env_enabled("XHDFE_ABSORB_INPUT_COPY", false);
+    return on;
+}
 
 #ifndef HDFE_GPU_BACKEND_DEFAULT
 #define HDFE_GPU_BACKEND_DEFAULT "cpu"
@@ -362,6 +386,10 @@ GpuBackend parse_gpu_backend(const char* raw) {
         return GpuBackend::Cpu;
     }
     std::string value(raw);
+    constexpr const char* spaces = " \t\r\n\f\v";
+    const auto first = value.find_first_not_of(spaces);
+    if (first == std::string::npos) return GpuBackend::Cpu;
+    value = value.substr(first, value.find_last_not_of(spaces) - first + 1);
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
@@ -573,6 +601,7 @@ void certify_cuda_absorption_from_indexers(
     const HdfeOptions& options,
     const std::vector<HeterogeneousSlopeTerm>& slopes,
     const std::vector<FeIndexer>& indexers,
+    const std::vector<GpuFeInput>& fe_inputs,
     AbsorptionResult& result) {
     const int n = static_cast<int>(y.size());
     std::vector<GpuFeCertificateView> views(indexers.size());
@@ -586,6 +615,7 @@ void certify_cuda_absorption_from_indexers(
                              : indexer.group_ptr.data();
         view.group_ptr_size = indexer.group_ptr.size();
         view.num_groups = indexer.num_groups;
+        view.weight_sums = fe_inputs[dim].weight_sums;
         view.groups_contiguous =
             indexer.groups_contiguous &&
             static_cast<int>(indexer.group_ids.size()) == n &&
@@ -758,6 +788,14 @@ struct FeWorkspace {
     int tls_epoch = 0;
     std::vector<int> tls_epoch_tags;                   // [threads * groups] last epoch touched
     std::vector<std::vector<int>> tls_touched_groups;  // per-thread touched group ids
+    // Per-thread sums by blocks of columns (low-memory package L3.1-A, A2): a
+    // thread keeps levels x width doubles instead of levels x cols. Kept apart
+    // from y_tls/x_tls, so that the full-width path (every call with fewer than
+    // kTlsColumnBlockMinCols columns, and XHDFE_TLS_COLUMN_BLOCKS=0) is the one of before.
+    std::vector<Eigen::VectorXd> y_tls_blocks;
+    std::vector<Eigen::MatrixXd> x_tls_blocks;
+    int tls_blocks_threads = 0;
+    int tls_blocks_width = 0;
 #endif
 
     FeWorkspace(int groups, int cols)
@@ -910,6 +948,52 @@ struct FeWorkspace {
             }
         }
     }
+
+    // The buffers of the column-block path for `threads` threads and blocks of at
+    // most `width` columns. The dense or sparse bookkeeping is chosen with all
+    // `cols` columns, by the rule of prepare_tls(); the buffers are zeroed (dense)
+    // or tagged (sparse) pass by pass, by the caller.
+    void prepare_tls_column_blocks(int threads, int cols, int width) {
+        const int groups = num_groups();
+        if (threads != tls_blocks_threads || width != tls_blocks_width ||
+            static_cast<int>(y_tls_blocks.size()) != threads) {
+            y_tls_blocks.assign(static_cast<std::size_t>(threads),
+                                Eigen::VectorXd::Zero(groups));
+            x_tls_blocks.assign(static_cast<std::size_t>(threads),
+                                Eigen::MatrixXd::Zero(groups, width));
+            tls_blocks_threads = threads;
+            tls_blocks_width = width;
+        }
+        constexpr std::size_t kSparseTlsMinBytes = 64U * 1024U * 1024U;  // as prepare_tls()
+        const std::size_t cols_entries =
+            static_cast<std::size_t>(std::max(0, cols)) + 1U;  // y + X columns
+        const std::size_t dense_bytes =
+            static_cast<std::size_t>(threads) * static_cast<std::size_t>(groups) * cols_entries *
+            sizeof(double);
+        tls_sparse = (dense_bytes >= kSparseTlsMinBytes);
+        if (tls_sparse) {
+            const std::size_t needed =
+                static_cast<std::size_t>(threads) * static_cast<std::size_t>(groups);
+            if (tls_epoch_tags.size() != needed) {
+                tls_epoch_tags.assign(needed, 0);
+            }
+            if (static_cast<int>(tls_touched_groups.size()) != threads) {
+                tls_touched_groups.assign(static_cast<std::size_t>(threads), {});
+            }
+        }
+    }
+
+    // A fresh epoch of the sparse bookkeeping: one per pass over the rows.
+    void next_tls_epoch() {
+        for (auto& v : tls_touched_groups) {
+            v.clear();
+        }
+        ++tls_epoch;
+        if (tls_epoch == std::numeric_limits<int>::max()) {
+            std::fill(tls_epoch_tags.begin(), tls_epoch_tags.end(), 0);
+            tls_epoch = 1;
+        }
+    }
 #endif
 
     inline void touch(int g) {
@@ -1050,8 +1134,58 @@ FeIndexer build_indexer(const Eigen::VectorXi& raw_ids) {
 }
 
 #ifdef HDFE_USE_OPENMP
+// The sparse branch of build_indexer() on a team (phase 1 of the Stata-path
+// plan, src/sparse_rank.hpp): the ascending dense ranks that the sort of
+// (identifier, row) pairs gives, from the bitmap index of the identifiers.
+// The ranks rise with the identifiers, so the rows are grouped exactly when
+// the identifiers never fall, and group_ptr is the one of
+// finalize_contiguous_groups(). False when the switch is off or the index
+// does not fit its budget; the caller then keeps the serial sort.
+bool build_indexer_sparse_rank(const Eigen::VectorXi& raw_ids,
+                               int min_id,
+                               int max_id,
+                               int threads,
+                               FeIndexer& idx) {
+    if (!sparse_rank::enabled()) {
+        return false;
+    }
+    const int n = static_cast<int>(raw_ids.size());
+    const sparse_rank::OmpRun run{threads, nullptr};
+    sparse_rank::Index index;
+    if (!sparse_rank::build_index(raw_ids.data(), n, min_id, max_id, run, index)) {
+        return false;
+    }
+    idx.group_ids.resize(static_cast<std::size_t>(n));
+    sparse_rank::map_ranks(raw_ids.data(), n, index, idx.group_ids.data(), run);
+    const int groups = index.levels;
+    index.clear();
+    idx.num_groups = groups;
+    idx.num_levels_present = groups;
+    idx.groups_contiguous = false;
+    idx.group_ptr.clear();
+    if (groups > 0 && sparse_rank::non_decreasing(idx.group_ids.data(), n, run)) {
+        idx.groups_contiguous = true;
+        idx.group_ptr.assign(static_cast<std::size_t>(groups) + 1U, n);
+        sparse_rank::fill_group_ptr(idx.group_ids.data(), n, groups,
+                                    idx.group_ptr.data(), run);
+    }
+    if (sparse_rank::verify_enabled()) {
+        const FeIndexer ref = build_indexer(raw_ids);
+        sparse_rank::verify_check(ref.group_ids == idx.group_ids, "indexer", "group_ids");
+        sparse_rank::verify_check(ref.num_groups == idx.num_groups, "indexer", "num_groups");
+        sparse_rank::verify_check(ref.num_levels_present == idx.num_levels_present, "indexer",
+                                  "num_levels_present");
+        sparse_rank::verify_check(ref.groups_contiguous == idx.groups_contiguous, "indexer",
+                                  "groups_contiguous");
+        sparse_rank::verify_check(ref.group_ptr == idx.group_ptr, "indexer", "group_ptr");
+        sparse_rank::verify_ok("indexer");
+    }
+    return true;
+}
+
 // build_indexer() on a team, for identifiers in a compact range; every
-// other input goes to build_indexer(). Minima, flags, counts and copies are
+// other input goes to build_indexer(), or to its sparse branch on the team
+// (build_indexer_sparse_rank()). Minima, flags, counts and copies are
 // exact, so the indexer is the one of the serial build.
 FeIndexer build_indexer_team(const Eigen::VectorXi& raw_ids,
                              int threads,
@@ -1089,7 +1223,17 @@ FeIndexer build_indexer_team(const Eigen::VectorXi& raw_ids,
     constexpr long long kDenseMinDensityDenominator = 10;
     if (!(range > 0 && range <= kDenseRangeCap &&
           range <= static_cast<long long>(n) * 2LL)) {
-        return build_indexer(raw_ids);
+        const auto sparse_t0 = std::chrono::steady_clock::now();
+        FeIndexer sparse;
+        if (build_indexer_sparse_rank(raw_ids, min_id, max_id, threads, sparse)) {
+            sparse_rank::profile_line("indexer", "bitmap", "index", n, min_id, max_id,
+                                      sparse.num_groups, threads, sparse_t0);
+            return sparse;
+        }
+        sparse = build_indexer(raw_ids);
+        sparse_rank::profile_line("indexer", "serial", sparse_rank::serial_reason(), n,
+                                  min_id, max_id, sparse.num_groups, 1, sparse_t0);
+        return sparse;
     }
 
     FeIndexer idx;
@@ -1184,6 +1328,64 @@ FeIndexer build_indexer_team(const Eigen::VectorXi& raw_ids, int, bool = false) 
     return build_indexer(raw_ids);
 }
 #endif
+
+// The certificate's indexer of one effect in the reduced-system tier's attempt
+// (phase 2 of the Stata-path plan, design note Verifications/perf_stata_path_20261114/
+// fase2/DESENHO_FASE2.md, section 6). When build_indexer() would number the
+// identifiers by their ascending compact ranks, which are the tier's codes, the
+// certificate takes the codes vector over and derives only groups_contiguous and
+// group_ptr, with build_indexer_team()'s gate and team and no observer, as the
+// certificate's indexers are built today. Otherwise (a dense range with at least
+// 90 % of its values present and holes) the indexer is built as before and the
+// codes are left alone. XHDFE_SPARSE_RANK_VERIFY=1 compares a taken indexer with
+// build_indexer_team() field by field; XHDFE_PROFILE_CPU=1 prints one line per
+// effect (site=cert_shared, path=codes or path=build).
+FeIndexer indexer_from_tier_codes(const Eigen::VectorXi& raw_ids,
+                                  TierFeCodes& given,
+                                  int threads,
+                                  bool explicit_request) {
+    const auto t0 = std::chrono::steady_clock::now();
+    const int n = static_cast<int>(raw_ids.size());
+    const bool usable = given.codes != nullptr && n > 0 &&
+                        static_cast<int>(given.codes->size()) == n && given.levels > 0 &&
+                        given.min_id <= given.max_id;
+    if (!usable ||
+        !sparse_rank::indexer_numbers_by_rank(n, given.min_id, given.max_id, given.levels)) {
+        FeIndexer built = build_indexer_team(raw_ids, threads, explicit_request);
+        sparse_rank::profile_line("cert_shared", "build", usable ? "holes" : "guard", n,
+                                  given.min_id, given.max_id, built.num_levels_present,
+                                  threads, t0);
+        return built;
+    }
+    // build_indexer_team()'s gate: a team from 2^20 rows, or when one was asked
+    // for, and never inside a parallel region.
+    constexpr int kTeamMinRows = 1048576;
+    bool on_team = threads > 1 && (n >= kTeamMinRows || explicit_request);
+#ifdef HDFE_USE_OPENMP
+    on_team = on_team && !omp_in_parallel();
+#endif
+    const sparse_rank::OmpRun run{on_team ? threads : 1, nullptr};
+    FeIndexer idx;
+    idx.group_ids = std::move(*given.codes);
+    idx.num_groups = given.levels;
+    idx.num_levels_present = given.levels;
+    idx.groups_contiguous = sparse_rank::contiguous_group_ptr(idx.group_ids.data(), n,
+                                                              given.levels, idx.group_ptr, run);
+    if (sparse_rank::verify_enabled()) {
+        const FeIndexer ref = build_indexer_team(raw_ids, threads, explicit_request);
+        sparse_rank::verify_check(ref.group_ids == idx.group_ids, "cert_shared", "group_ids");
+        sparse_rank::verify_check(ref.num_groups == idx.num_groups, "cert_shared", "num_groups");
+        sparse_rank::verify_check(ref.num_levels_present == idx.num_levels_present, "cert_shared",
+                                  "num_levels_present");
+        sparse_rank::verify_check(ref.groups_contiguous == idx.groups_contiguous, "cert_shared",
+                                  "groups_contiguous");
+        sparse_rank::verify_check(ref.group_ptr == idx.group_ptr, "cert_shared", "group_ptr");
+        sparse_rank::verify_ok("cert_shared");
+    }
+    sparse_rank::profile_line("cert_shared", "codes", "rank", n, given.min_id, given.max_id,
+                              given.levels, on_team ? threads : 1, t0);
+    return idx;
+}
 
 Eigen::VectorXd compute_weight_sums(const FeIndexer& idx,
                                     const double* weight_ptr,
@@ -2384,8 +2586,8 @@ std::vector<int> build_reference_sparse_columns(const std::vector<FeIndexer>& in
     return column_for_level;
 }
 
-AbsorptionResult absorb_fixed_effects_sparse(const Eigen::VectorXd& y,
-                                             const Eigen::MatrixXd& X,
+AbsorptionResult absorb_fixed_effects_sparse(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                             const Eigen::Ref<const Eigen::MatrixXd>& X,
                                              const std::vector<FeIndexer>& indexers,
                                              const Eigen::VectorXd* weights,
                                              const HdfeOptions& options,
@@ -2459,8 +2661,6 @@ AbsorptionResult absorb_fixed_effects_sparse(const Eigen::VectorXd& y,
     Eigen::SparseMatrix<double> D(n, solver_levels);
     D.setFromTriplets(triplets.begin(), triplets.end());
 
-    const Eigen::VectorXd* y_used = &y;
-    const Eigen::MatrixXd* X_used = &X;
     Eigen::VectorXd y_w;
     Eigen::MatrixXd X_w;
     if (use_weights) {
@@ -2471,9 +2671,12 @@ AbsorptionResult absorb_fixed_effects_sparse(const Eigen::VectorXd& y,
         for (int j = 0; j < X_w.cols(); ++j) {
             X_w.col(j).array() *= sqrt_w.array();
         }
-        y_used = &y_w;
-        X_used = &X_w;
     }
+    // Views of the right-hand sides: the inputs themselves, or their weighted copies.
+    const Eigen::Ref<const Eigen::VectorXd> y_used =
+        use_weights ? Eigen::Ref<const Eigen::VectorXd>(y_w) : y;
+    const Eigen::Ref<const Eigen::MatrixXd> X_used =
+        use_weights ? Eigen::Ref<const Eigen::MatrixXd>(X_w) : X;
 
     Eigen::SparseMatrix<double> A = D.transpose() * D;
     if (!reference_gauge) {
@@ -2497,10 +2700,10 @@ AbsorptionResult absorb_fixed_effects_sparse(const Eigen::VectorXd& y,
         Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
         solver.compute(A);
         if (solver.info() == Eigen::Success) {
-            const Eigen::VectorXd rhs_y = D.transpose() * (*y_used);
+            const Eigen::VectorXd rhs_y = D.transpose() * y_used;
             alpha_y_solved = solver.solve(rhs_y);
             if (X.cols() > 0) {
-                const Eigen::MatrixXd rhs_X = D.transpose() * (*X_used);
+                const Eigen::MatrixXd rhs_X = D.transpose() * X_used;
                 alpha_X_solved = solver.solve(rhs_X);
             }
             solved = (solver.info() == Eigen::Success);
@@ -2521,13 +2724,13 @@ AbsorptionResult absorb_fixed_effects_sparse(const Eigen::VectorXd& y,
         cg.setMaxIterations(options.max_iter);
         cg.compute(A);
 
-        const Eigen::VectorXd rhs_y = D.transpose() * (*y_used);
+        const Eigen::VectorXd rhs_y = D.transpose() * y_used;
         alpha_y_solved = cg.solve(rhs_y);
         int max_iters = static_cast<int>(cg.iterations());
         converged = (cg.info() == Eigen::Success);
 
         if (X.cols() > 0) {
-            const Eigen::MatrixXd rhs_X = D.transpose() * (*X_used);
+            const Eigen::MatrixXd rhs_X = D.transpose() * X_used;
             for (int j = 0; j < X.cols(); ++j) {
                 alpha_X_solved.col(j) = cg.solve(rhs_X.col(j));
                 max_iters = std::max(max_iters, static_cast<int>(cg.iterations()));
@@ -3034,6 +3237,182 @@ void demean_inplace_obspart_deterministic(
     }
 }
 
+#ifdef HDFE_USE_OPENMP
+// Low-memory package L3.1-A (A2). From kTlsColumnBlockMinCols columns, the threaded
+// level sums of demean_inplace() go by blocks of columns: one pass over the
+// rows per block, with per-thread buffers of levels x width (width at most
+// kTlsColumnBlock) instead of levels x cols. In every pass each thread takes the
+// rows of the same static partition as the full-width loop, in the same order,
+// and the per-thread partial sums are added in the same thread order (dense) or
+// in the same first-touch order (sparse): for each column and level these are
+// the floating-point operations of the full-width path, grouped by blocks. y
+// goes with the first block. XHDFE_TLS_COLUMN_BLOCKS=0 restores the full-width
+// buffers; limit_threads_by_tls() keeps counting all columns. The width 8 =
+// kInlineCols was chosen from measured widths 8, 16 and 32 (W25 and W100 Fast, 16
+// threads: 8 was the fastest and the smallest;
+// Verifications/low_memory_20261116/l31a/mem/bexp.jsonl).
+constexpr int kTlsColumnBlock = 8;
+// Revision R1 (Verifications/low_memory_20261116/briefs/L31A_R1_BLOCK_THRESHOLD.md):
+// the routine starts at two full blocks. With 9 to 15 columns (weighted fits; the
+// unweighted ones take the packed path) its two passes over the rows measured 2 to
+// 4 % slower than the full-width path, and faster from 16 columns; a call with
+// fewer than 16 columns keeps the full-width path.
+constexpr int kTlsColumnBlockMinCols = 2 * kTlsColumnBlock;
+
+bool tls_column_blocks_enabled() {
+    static const bool on = mlsmr_env_enabled("XHDFE_TLS_COLUMN_BLOCKS", true);
+    return on;
+}
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+void accumulate_level_sums_column_blocks(FeWorkspace& workspace,
+                                         int n,
+                                         int cols,
+                                         const int* gid,
+                                         const double* y_ptr,
+                                         double* const* x_cols,
+                                         const double* weight_ptr,
+                                         bool unit_weights,
+                                         int threads) {
+    const int groups = workspace.num_groups();
+    const int blocks = (cols + kTlsColumnBlock - 1) / kTlsColumnBlock;
+    const int width = (cols + blocks - 1) / blocks;
+    workspace.prepare_tls_column_blocks(threads, cols, width);
+    double* y_sums_out = workspace.y_sums.data();
+    double* x_sums_out = workspace.x_sums.data();
+    const Eigen::Index stride = groups;
+    for (int block = 0; block < blocks; ++block) {
+        const int c0 = static_cast<int>(static_cast<long long>(block) * cols / blocks);
+        const int c1 = static_cast<int>(static_cast<long long>(block + 1) * cols / blocks);
+        const int w = c1 - c0;
+        const bool first = (block == 0);
+        double* const* xc = x_cols + c0;
+        if (!workspace.tls_sparse) {
+            for (int t = 0; t < threads; ++t) {
+                if (first) {
+                    workspace.y_tls_blocks[static_cast<std::size_t>(t)].setZero();
+                }
+                workspace.x_tls_blocks[static_cast<std::size_t>(t)].leftCols(w).setZero();
+            }
+#pragma omp parallel num_threads(threads)
+            {
+                const int tid = omp_get_thread_num();
+                double* ys = workspace.y_tls_blocks[static_cast<std::size_t>(tid)].data();
+                double* xs = workspace.x_tls_blocks[static_cast<std::size_t>(tid)].data();
+                if (unit_weights) {
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        const int g = gid[i];
+                        if (first) {
+                            ys[g] += y_ptr[i];
+                        }
+                        for (int j = 0; j < w; ++j) {
+                            xs[static_cast<Eigen::Index>(j) * stride + g] += xc[j][i];
+                        }
+                    }
+                } else {
+#pragma omp for schedule(static)
+                    for (int i = 0; i < n; ++i) {
+                        const int g = gid[i];
+                        const double wi = weight_ptr[i];
+                        if (first) {
+                            ys[g] += wi * y_ptr[i];
+                        }
+                        for (int j = 0; j < w; ++j) {
+                            xs[static_cast<Eigen::Index>(j) * stride + g] += wi * xc[j][i];
+                        }
+                    }
+                }
+            }
+            if (first) {
+                for (int t = 0; t < threads; ++t) {
+                    workspace.y_sums.noalias() += workspace.y_tls_blocks[static_cast<std::size_t>(t)];
+                }
+            }
+            for (int t = 0; t < threads; ++t) {
+                workspace.x_sums.middleCols(c0, w).noalias() +=
+                    workspace.x_tls_blocks[static_cast<std::size_t>(t)].leftCols(w);
+            }
+            continue;
+        }
+        workspace.next_tls_epoch();
+        const int epoch = workspace.tls_epoch;
+#pragma omp parallel num_threads(threads)
+        {
+            const int tid = omp_get_thread_num();
+            double* ys = workspace.y_tls_blocks[static_cast<std::size_t>(tid)].data();
+            double* xs = workspace.x_tls_blocks[static_cast<std::size_t>(tid)].data();
+            int* tags = workspace.tls_epoch_tags.data() +
+                        static_cast<std::size_t>(tid) * static_cast<std::size_t>(groups);
+            std::vector<int>& touched = workspace.tls_touched_groups[static_cast<std::size_t>(tid)];
+            if (unit_weights) {
+#pragma omp for schedule(static)
+                for (int i = 0; i < n; ++i) {
+                    const int g = gid[i];
+                    if (tags[g] != epoch) {
+                        tags[g] = epoch;
+                        touched.push_back(g);
+                        if (first) {
+                            ys[g] = 0.0;
+                        }
+                        for (int j = 0; j < w; ++j) {
+                            xs[static_cast<Eigen::Index>(j) * stride + g] = 0.0;
+                        }
+                    }
+                    if (first) {
+                        ys[g] += y_ptr[i];
+                    }
+                    for (int j = 0; j < w; ++j) {
+                        xs[static_cast<Eigen::Index>(j) * stride + g] += xc[j][i];
+                    }
+                }
+            } else {
+#pragma omp for schedule(static)
+                for (int i = 0; i < n; ++i) {
+                    const int g = gid[i];
+                    if (tags[g] != epoch) {
+                        tags[g] = epoch;
+                        touched.push_back(g);
+                        if (first) {
+                            ys[g] = 0.0;
+                        }
+                        for (int j = 0; j < w; ++j) {
+                            xs[static_cast<Eigen::Index>(j) * stride + g] = 0.0;
+                        }
+                    }
+                    const double wi = weight_ptr[i];
+                    if (first) {
+                        ys[g] += wi * y_ptr[i];
+                    }
+                    for (int j = 0; j < w; ++j) {
+                        xs[static_cast<Eigen::Index>(j) * stride + g] += wi * xc[j][i];
+                    }
+                }
+            }
+        }
+        for (int t = 0; t < threads; ++t) {
+            const auto& touched = workspace.tls_touched_groups[static_cast<std::size_t>(t)];
+            const double* ys = workspace.y_tls_blocks[static_cast<std::size_t>(t)].data();
+            const double* xs = workspace.x_tls_blocks[static_cast<std::size_t>(t)].data();
+            for (int idx = 0; idx < static_cast<int>(touched.size()); ++idx) {
+                const int g = touched[static_cast<std::size_t>(idx)];
+                if (first) {
+                    y_sums_out[g] += ys[g];
+                }
+                for (int j = 0; j < w; ++j) {
+                    x_sums_out[static_cast<Eigen::Index>(c0 + j) * stride + g] +=
+                        xs[static_cast<Eigen::Index>(j) * stride + g];
+                }
+            }
+        }
+    }
+}
+#endif
+
 void demean_inplace(Eigen::VectorXd& y,
                     Eigen::MatrixXd& X,
                     const FeIndexer& idx,
@@ -3347,7 +3726,14 @@ void demean_inplace(Eigen::VectorXd& y,
 #ifndef HDFE_USE_OPENMP
     local_threads = 1;
 #else
-    workspace.prepare_tls(local_threads, cols);
+    // L3.1-A (A2, revision R1): from kTlsColumnBlockMinCols columns the per-thread
+    // sums go by blocks of columns (accumulate_level_sums_column_blocks); otherwise,
+    // and with XHDFE_TLS_COLUMN_BLOCKS=0, the full-width buffers of before.
+    const bool column_blocks =
+        cols >= kTlsColumnBlockMinCols && local_threads > 1 && tls_column_blocks_enabled();
+    if (!column_blocks) {
+        workspace.prepare_tls(local_threads, cols);
+    }
 #endif
 
     workspace.reset();
@@ -3384,7 +3770,10 @@ void demean_inplace(Eigen::VectorXd& y,
     }
 
 #ifdef HDFE_USE_OPENMP
-    if (local_threads > 1) {
+    if (column_blocks) {
+        accumulate_level_sums_column_blocks(workspace, n, cols, gid, y_ptr, x_cols, weight_ptr,
+                                            unit_weights, local_threads);
+    } else if (local_threads > 1) {
         if (!workspace.tls_sparse) {
             if (unit_weights) {
 #pragma omp parallel num_threads(local_threads)
@@ -5416,8 +5805,8 @@ double schwarz_probe_projected_iters(const std::vector<const int*>& g,
     return proj > 0.0 ? proj : 1e18;
 }
 
-bool run_schwarz_absorption_from_indexers(const Eigen::VectorXd& y,
-                                          const Eigen::MatrixXd& X,
+bool run_schwarz_absorption_from_indexers(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                          const Eigen::Ref<const Eigen::MatrixXd>& X,
                                           const std::vector<FeIndexer>& indexers,
                                           const HdfeOptions& options,
                                           double convergence_tol,
@@ -6624,6 +7013,10 @@ GpuBackend thread_gpu_backend_override() noexcept {
     return tls_gpu_backend_override;
 }
 
+GpuBackend effective_gpu_backend() {
+    return resolve_gpu_backend();
+}
+
 ScopedCudaForwardProbeRequest::ScopedCudaForwardProbeRequest(
     bool requested) noexcept
     : previous_requested_(tls_cuda_forward_probe_requested) {
@@ -6677,8 +7070,8 @@ void early_routing_trace_route_only(const char* route) {
 
 class EarlyRoutingTrace {
 public:
-    EarlyRoutingTrace(const Eigen::VectorXd& y,
-                      const Eigen::MatrixXd& X,
+    EarlyRoutingTrace(const Eigen::Ref<const Eigen::VectorXd>& y,
+                      const Eigen::Ref<const Eigen::MatrixXd>& X,
                       const std::vector<FeIndexer>& indexers,
                       const double* weights,
                       const HdfeOptions& options,
@@ -7103,8 +7496,8 @@ constexpr int kEarlyRoutingFirstCheckpoint = 8;
 class EarlyRouting {
 public:
     EarlyRouting(bool active,
-                 const Eigen::VectorXd& y,
-                 const Eigen::MatrixXd& X,
+                 const Eigen::Ref<const Eigen::VectorXd>& y,
+                 const Eigen::Ref<const Eigen::MatrixXd>& X,
                  const std::vector<FeIndexer>& indexers,
                  const double* weights,
                  const HdfeOptions& options,
@@ -7351,8 +7744,9 @@ private:
 
     bool active_ = false;
     bool deciding_ = false;
-    const Eigen::VectorXd& y_;
-    const Eigen::MatrixXd& X_;
+    // The absorber's own parameters (the original inputs), valid for the solve.
+    const Eigen::Ref<const Eigen::VectorXd>& y_;
+    const Eigen::Ref<const Eigen::MatrixXd>& X_;
     const std::vector<FeIndexer>& indexers_;
     const HdfeOptions& options_;
     int threads_ = 1;
@@ -7371,8 +7765,8 @@ private:
 
 }  // namespace
 
-AbsorptionResult absorb_fixed_effects(const Eigen::VectorXd& y,
-                                      const Eigen::MatrixXd& X,
+AbsorptionResult absorb_fixed_effects(const Eigen::Ref<const Eigen::VectorXd>& y,
+                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
                                       const std::vector<Eigen::VectorXi>& fes,
                                       const Eigen::VectorXd* weights,
                                       const HdfeOptions& options) {
@@ -10314,14 +10708,41 @@ static AbsorptionResult absorb_fixed_effects_v6_mixed_impl(
     result.y_tilde = y;
     result.X_tilde = X;
 
+    // Phase 5a: the indexers on the team, as at the sibling site of the MAP route
+    // (team of min(num_threads, max threads) when a count is given, from 4194304
+    // rows unless the count was explicit, one dimension at a time on the whole
+    // team). build_indexer_team() gives today's FeIndexer field by field and
+    // returns to build_indexer() inside a parallel region; under
+    // XHDFE_SLOPE_TEAM_INDEXERS=0 every dimension keeps build_indexer().
+    const auto indexers_t0 = std::chrono::steady_clock::now();
+    int indexer_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    if (slope_team_indexers_enabled() && options.num_threads > 0 &&
+        (options.num_threads_explicit || n >= 4194304)) {
+        indexer_threads = std::max(1, std::min(options.num_threads, omp_get_max_threads()));
+    }
+#endif
     std::vector<FeIndexer> indexers;
     indexers.reserve(fes.size());
     for (const auto& raw : fes) {
         if (raw.size() != n) {
             throw std::runtime_error("Each fixed-effect vector must match the length of y");
         }
+#ifdef HDFE_USE_OPENMP
+        indexers.push_back(indexer_threads > 1
+                               ? build_indexer_team(raw, indexer_threads,
+                                                    options.num_threads_explicit)
+                               : build_indexer(raw));
+#else
         indexers.push_back(build_indexer(raw));
+#endif
         result.fe_levels.push_back(indexers.back().num_levels_present);
+    }
+    if (cpu_profile_enabled()) {
+        const std::chrono::duration<double, std::milli> elapsed =
+            std::chrono::steady_clock::now() - indexers_t0;
+        std::cerr << "cpu_profile label=mixed_indexers dims=" << fes.size()
+                  << " team=" << indexer_threads << " ms=" << elapsed.count() << '\n';
     }
 
     const std::vector<const HeterogeneousSlopeTerm*> slope_lookup =
@@ -11325,7 +11746,12 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                     }
                     HdfeOptions o2 = options;
                     o2.absorption_method = AbsorptionMethod::Schwarz;
-                    return certified(absorb_fixed_effects(y, X, fes, weights, o2));
+                    // No temporary copy of y and X at this call unless
+                    // XHDFE_ABSORB_INPUT_COPY=1 (the copies it always made before).
+                    return certified(absorb_input_copy_enabled()
+                        ? absorb_fixed_effects(Eigen::VectorXd(y), Eigen::MatrixXd(X), fes,
+                                               weights, o2)
+                        : absorb_fixed_effects(y, X, fes, weights, o2));
                 }
                 // Reached only when go==false (proj <= mswitch): the moderate-proj MAP
                 // band. On this band the matrix-free MLSMR absorber beats accelerated MAP
@@ -11394,7 +11820,11 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             passthrough.symmetric_sweep =
                 (pre_selected == AbsorptionMethod::SymmetricGaussSeidel);
             passthrough.absorption_method = pre_selected;
-            AbsorptionResult cpu_result = absorb_fixed_effects(y, X, fes, weights, passthrough);
+            // No temporary copy of y and X (unless XHDFE_ABSORB_INPUT_COPY=1).
+            AbsorptionResult cpu_result = absorb_input_copy_enabled()
+                ? absorb_fixed_effects(Eigen::VectorXd(y), Eigen::MatrixXd(X), fes, weights,
+                                       passthrough)
+                : absorb_fixed_effects(y, X, fes, weights, passthrough);
             if (gpu_backend_requested(pre_gpu_backend)) {
                 mark_gpu_unavailable(cpu_result);
             }
@@ -11490,8 +11920,12 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
     }
 
     if (use_sparse && !gpu_available) {
+        // The sparse absorber takes its inputs as Eigen::Ref since L3.1-A (A1) so that the
+        // sweep absorber can hand it the caller's memory; this call keeps the temporary
+        // copies it has always made (outside A1, which covers only the three sweep calls).
         AbsorptionResult sparse_result =
-            absorb_fixed_effects_sparse(y, X, indexers, weights, options, false);
+            absorb_fixed_effects_sparse(Eigen::VectorXd(y), Eigen::MatrixXd(X), indexers,
+                                        weights, options, false);
         if (gpu_backend_requested(gpu_backend)) {
             mark_gpu_unavailable(sparse_result);
         }
@@ -11640,7 +12074,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
                 if (use_cuda) {
 #ifdef HDFE_USE_CUDA
                     certify_cuda_absorption_from_indexers(
-                        y, X, fes, weights, options, slopes, indexers,
+                        y, X, fes, weights, options, slopes, indexers, fe_inputs,
                         gpu_result);
                     return gpu_result;
 #else
@@ -11670,7 +12104,11 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
         passthrough.absorption_method = selected;
         // After a GPU attempt the retry is ineligible; so is early routing.
         passthrough.early_routing = options.early_routing && !result.gpu_attempted;
-        AbsorptionResult cpu_result = absorb_fixed_effects(y, X, fes, weights, passthrough);
+        // No temporary copy of y and X (unless XHDFE_ABSORB_INPUT_COPY=1).
+        AbsorptionResult cpu_result = absorb_input_copy_enabled()
+            ? absorb_fixed_effects(Eigen::VectorXd(y), Eigen::MatrixXd(X), fes, weights,
+                                   passthrough)
+            : absorb_fixed_effects(y, X, fes, weights, passthrough);
         if (result.gpu_attempted) {
             mark_gpu_failure_fallback(cpu_result, result, result.gpu_status_code == 3);
         } else if (gpu_backend_requested(gpu_backend)) {
@@ -11721,7 +12159,7 @@ AbsorptionResult absorb_fixed_effects_v6(const Eigen::Ref<const Eigen::VectorXd>
             if (use_cuda) {
 #ifdef HDFE_USE_CUDA
                 certify_cuda_absorption_from_indexers(
-                    y, X, fes, weights, options, slopes, indexers,
+                    y, X, fes, weights, options, slopes, indexers, fe_inputs,
                     gpu_result);
                 return gpu_result;
 #else
@@ -15079,6 +15517,7 @@ AbsorptionResult absorb_fixed_effects_krylov(const Eigen::VectorXd& y,
     if (probe > 0 && !ok_y) {
         result.iterations = max_iters_used;
         result.converged = false;   // stalled -> let the caller fall back to Schwarz
+        result.krylov_pcg_used = true;  // point 14: the PCG's transform (the gate discards it)
         return result;
     }
 
@@ -15095,6 +15534,7 @@ AbsorptionResult absorb_fixed_effects_krylov(const Eigen::VectorXd& y,
 
     result.iterations = max_iters_used;
     result.converged = all_converged;
+    result.krylov_pcg_used = true;  // point 14: the PCG's transform
 
     if (options.retain_fixed_effects) {
         result.fe_group_ids.resize(indexers.size());
@@ -21033,14 +21473,22 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
     }
 #endif
 
+    const bool strict_cpu_projection = options.strict_cpu_absolute_check &&
+        strict_residual_tolerance_mode(options) &&
+        !options.retain_fixed_effects && (options.absorption_method == AbsorptionMethod::Lsmr ||
+                                         options.absorption_method == AbsorptionMethod::Mlsmr);
+    const AbsorptionMethod strict_method = strict_cpu_projection
+        ? options.absorption_method : AbsorptionMethod::Auto;
     AbsorptionResult direct;
     if (weighted_two_by_two::try_cpu(y, X, fes, weights, options, direct)) {
+        direct.strict_cpu_projection_method = strict_method;
         return direct;
     }
 
     AbsorptionResult result;
     result.y_tilde = y;
     result.X_tilde = X;
+    result.strict_cpu_projection_method = strict_method;
 
     if (fes.empty()) {
         result.iterations = 0;
@@ -21124,6 +21572,7 @@ AbsorptionResult absorb_fixed_effects_mlsmr(const Eigen::VectorXd& y,
             views.push_back({idx.group_ids.data(), idx.num_groups, idx.num_levels_present});
         AbsorptionResult direct;
         if (weighted_two_by_two::try_cpu_indexed(y, X, views, weights, options, direct)) {
+            direct.strict_cpu_projection_method = strict_method;
             return direct;
         }
     }
@@ -24189,7 +24638,43 @@ FeRecoveryResult recover_fixed_effects_impl(const Eigen::VectorXd& partial,
 
 }  // namespace
 
-void certify_absorption_result(
+// E2 (16nov2026; Verifications/slopes_absorbed_regressor_20261116/briefs/
+// E2_SLOPES_ABSORBED_REGRESSOR.md): XHDFE_SLOPE_ABSORBED_INPUT_SCALE=0 restores
+// the absorbed scale for every column in the heterogeneous-slope block
+// certificate below; anything else, or nothing, judges a regressor that the
+// absorption annihilates in its input scale. Read once per process, here only.
+static bool slope_absorbed_input_scale_enabled() {
+    static const bool on = [] {
+        const char* raw = std::getenv("XHDFE_SLOPE_ABSORBED_INPUT_SCALE");
+        return !(raw != nullptr && raw[0] == '0' && raw[1] == '\0');
+    }();
+    return on;
+}
+
+// The centred sum of squares of the regressor's FE-collinearity rule
+// (centered_sum_of_squares, hdfe_regressor_v11.cpp), with the same arithmetic:
+// two passes in long double after shifting by the first element.
+static double fe_collinear_centred_sum_of_squares(const double* x, int n) {
+    if (n <= 0) {
+        return 0.0;
+    }
+    const long double shift = static_cast<long double>(x[0]);
+    long double sum = 0.0L;
+    for (int i = 0; i < n; ++i) {
+        sum += static_cast<long double>(x[i]) - shift;
+    }
+    const long double mean = sum / static_cast<long double>(n);
+    long double css = 0.0L;
+    for (int i = 0; i < n; ++i) {
+        const long double d = static_cast<long double>(x[i]) - shift - mean;
+        css += d * d;
+    }
+    return static_cast<double>(css);
+}
+
+// certify_absorption_result(), and certify_tier_absorption() with the tier's codes
+// (tier_codes, one entry per effect of fes; see indexer_from_tier_codes()).
+static void certify_absorption_impl(
     const Eigen::Ref<const Eigen::VectorXd>& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X,
     const std::vector<Eigen::VectorXi>& fes,
@@ -24197,10 +24682,17 @@ void certify_absorption_result(
     const HdfeOptions& options,
     const std::vector<HeterogeneousSlopeTerm>& slopes,
     AbsorptionResult& result,
-    const GroupIndividualStructure* group_individual) {
+    const GroupIndividualStructure* group_individual,
+    std::vector<TierFeCodes>* tier_codes) {
     ScopedAuditEnvironment audit_environment;
+    // Package B, stage 2a': the reuse request of the raw norms (below), read and
+    // cleared first, so that no early return leaves it set.
+    const bool reuse_raw_norms_requested = result.reuse_raw_original_norm_sq;
+    result.reuse_raw_original_norm_sq = false;
     result.abs_residual = 0.0;
     result.abs_residual_rel = 0.0;
+    result.strict_cpu_max_abs_mean = -1.0;
+    result.weighted_gs_moments_met = true;
     result.slope_block_checked = false;
     result.slope_block_residual_rel = 0.0;
     result.slope_block_frobenius_rel = 0.0;
@@ -24259,9 +24751,14 @@ void certify_absorption_result(
     auto certificate_t0 = std::chrono::steady_clock::now();
     std::vector<FeIndexer> indexers;
     indexers.reserve(fes.size());
-    for (const auto& fe : fes) {
-        indexers.push_back(
-            build_indexer_team(fe, threads, options.num_threads_explicit));
+    for (std::size_t d = 0; d < fes.size(); ++d) {
+        if (tier_codes != nullptr && d < tier_codes->size()) {
+            indexers.push_back(indexer_from_tier_codes(
+                fes[d], (*tier_codes)[d], threads, options.num_threads_explicit));
+        } else {
+            indexers.push_back(
+                build_indexer_team(fes[d], threads, options.num_threads_explicit));
+        }
     }
     cpu_profile_log_elapsed("cert_indexers", certificate_t0);
     certificate_t0 = std::chrono::steady_clock::now();
@@ -24280,6 +24777,17 @@ void certify_absorption_result(
     std::vector<long double> residual_norm_sq(static_cast<std::size_t>(rhs_count), 0.0L);
     std::vector<long double> slope_weighted_transformed_norm_sq(
         static_cast<std::size_t>(rhs_count), 0.0L);
+    // Package B, stage 2a': the recertification after the strict continuation takes
+    // over the raw sums of squares the last certificate of this result formed on the
+    // same original columns (AbsorptionResult::reuse_raw_original_norm_sq); every
+    // certificate leaves its raw values in the result. The normalisations below run
+    // on them as before.
+    const bool reuse_raw_norms =
+        reuse_raw_norms_requested &&
+        result.raw_original_norm_sq.size() == static_cast<std::size_t>(rhs_count);
+    if (reuse_raw_norms) {
+        original_norm_sq = result.raw_original_norm_sq;
+    } else {
     original_norm_sq[0] = static_cast<long double>(
         deterministic_sumsq_raw(y.data(), n, threads,
                                 options.parallel_observer));
@@ -24289,6 +24797,8 @@ void certify_absorption_result(
                 X.col(rhs - 1).data(), n, threads,
                 options.parallel_observer));
     }
+    }
+    result.raw_original_norm_sq = original_norm_sq;
     if (slope_block_scope) {
         for (int rhs = 0; rhs < rhs_count; ++rhs) {
             slope_weighted_transformed_norm_sq[static_cast<std::size_t>(rhs)] =
@@ -24303,8 +24813,84 @@ void certify_absorption_result(
                     }, options.parallel_observer));
         }
     }
+    // E2: the scale of each right-hand side in the slope-block test. A column
+    // of X that the absorption annihilates carries no coefficient (the
+    // regressor omits it afterwards by its FE-collinearity rule), and its
+    // absorbed norm is rounding noise, which no continuation can turn into a
+    // precision target. Such a column's block moments are judged in its input
+    // scale, as the pure-FE branch below judges y; every other right-hand
+    // side, y included, keeps its absorbed scale. "Annihilated" is the
+    // regressor's rule with the same constant on unweighted sums of squares,
+    // its centred variant when the model has a constant, for the leading
+    // fe_collinear_omission_cols columns only (the fit's regressors; 0 for
+    // every other caller); the input scale is weighted like the moments.
+    std::vector<long double> slope_block_scale_sq;
+    if (slope_block_scope) {
+        slope_block_scale_sq = slope_weighted_transformed_norm_sq;
+        const int omission_cols = slope_absorbed_input_scale_enabled()
+            ? std::min(std::max(0, options.fe_collinear_omission_cols),
+                       static_cast<int>(X.cols()))
+            : 0;
+        for (int rhs = 1; rhs <= omission_cols; ++rhs) {
+            const std::size_t index = static_cast<std::size_t>(rhs);
+            const double* raw = X.col(rhs - 1).data();
+            const double raw_ss = static_cast<double>(original_norm_sq[index]);
+            const double tilde_ss = unit_weights
+                ? static_cast<double>(slope_weighted_transformed_norm_sq[index])
+                : deterministic_chunked_sum<int>(
+                      n, threads, [&](int row) {
+                          const double value = result.X_tilde(row, rhs - 1);
+                          return value * value;
+                      }, options.parallel_observer);
+            const bool finite = hdfe::detail::ieee_finite(raw_ss) &&
+                                hdfe::detail::ieee_finite(tilde_ss);
+            bool annihilated =
+                finite && (raw_ss <= 0.0 ? (tilde_ss <= kFeCollinearTol)
+                                         : (tilde_ss <= kFeCollinearTol * raw_ss));
+            if (annihilated && options.fe_collinear_centred && raw_ss > 0.0 &&
+                tilde_ss > 0.0) {
+                const double centered_ss =
+                    fe_collinear_centred_sum_of_squares(raw, n);
+                const double rounding_floor =
+                    16.0 * std::numeric_limits<double>::epsilon() *
+                    std::numeric_limits<double>::epsilon() * raw_ss;
+                annihilated = !(centered_ss > 0.0) ||
+                              tilde_ss <= kFeCollinearTol * centered_ss ||
+                              tilde_ss <= rounding_floor;
+            }
+            if (!annihilated) {
+                continue;
+            }
+            slope_block_scale_sq[index] = unit_weights
+                ? original_norm_sq[index]
+                : static_cast<long double>(deterministic_chunked_sum<int>(
+                      n, threads, [&](int row) {
+                          return weight_ptr[row] * raw[row] * raw[row];
+                      }, options.parallel_observer));
+        }
+    }
     long double operator_norm_sq = 0.0L;
     const bool canonical_group_scope = group_individual != nullptr;
+    const bool strict_cpu_projection = !result.gpu_used && !canonical_group_scope &&
+        slopes.empty() && strict_residual_tolerance_mode(options) &&
+        result.strict_cpu_projection_method != AbsorptionMethod::Auto;
+    const bool weighted_gs_scope = options.certify_weighted_gauss_seidel &&
+        !result.gpu_used && !result.mlsmr_used && !result.schwarz_used &&
+        !options.use_sparse_solver && !options.use_krylov &&
+        !unit_weights && !canonical_group_scope && slopes.empty() &&
+        indexers.size() == 3;
+    const double weighted_gs_moment_limit = std::max(
+        effective_absorption_tolerance(options), 64.0 * std::numeric_limits<double>::epsilon());
+    std::vector<double> weighted_gs_norms;
+    if (weighted_gs_scope) {
+        weighted_gs_norms.resize(rhs_count);
+        for (int rhs = 0; rhs < rhs_count; ++rhs) {
+            const double* raw = rhs == 0 ? y.data() : X.col(rhs - 1).data();
+            weighted_gs_norms[rhs] = std::sqrt(deterministic_chunked_sum<int>(
+                n, threads, [&](int i) { return (weight_ptr[i] * raw[i]) * raw[i]; },
+                options.parallel_observer));
+        }
+    }
     // A small RMS can hide a failed individual column in grouped sweeps.
     // Collect the existing Comparable maximum test in the same reductions;
     // monotone flags avoid another pass or a stricter solver target.
@@ -24367,6 +24953,33 @@ void certify_absorption_result(
         auto dim_t0 = std::chrono::steady_clock::now();
         const FeIndexer& indexer = indexers[dim];
         const HeterogeneousSlopeTerm* slope = slope_lookup[dim];
+        if (strict_cpu_projection) {
+            // Strict measures the represented projection in the caller's units.
+            // Sum before taking the absolute value; FP64 group totals alone can
+            // decide the check incorrectly when large values nearly cancel.
+            const int groups = indexer.num_groups;
+            const auto& ids = indexer.group_ids;
+            std::vector<long double> masses(groups, 0.0L);
+            std::vector<long double> sums(groups, 0.0L);
+            for (int i = 0; i < n; ++i)
+                masses[ids[i]] += unit_weights ? 1.0L : weight_ptr[i];
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                const double* column = rhs == 0 ? result.y_tilde.data()
+                                               : result.X_tilde.col(rhs - 1).data();
+                std::fill(sums.begin(), sums.end(), 0.0L);
+                for (int i = 0; i < n; ++i) {
+                    const long double weight = unit_weights ? 1.0L : weight_ptr[i];
+                    sums[ids[i]] += weight * static_cast<long double>(column[i]);
+                }
+                for (int g = 0; g < groups; ++g) {
+                    if (masses[g] <= 0.0L) continue;
+                    const long double mean = std::abs(sums[g] / masses[g]);
+                    result.strict_cpu_max_abs_mean = hdfe::detail::ieee_finite(static_cast<double>(mean))
+                        ? std::max(result.strict_cpu_max_abs_mean, mean)
+                        : std::numeric_limits<long double>::infinity();
+                }
+            }
+        }
         const int moment_count = slope ? (slope->include_intercept ? 2 : 1) : 1;
         const int canonical_diag_base = rhs_count * moment_count;
         const bool need_block_diagonal =
@@ -24478,6 +25091,22 @@ void certify_absorption_result(
         cpu_profile_log_elapsed("cert_dim_combine", dim_t0);
         dim_t0 = std::chrono::steady_clock::now();
         }
+        if (weighted_gs_scope && result.weighted_gs_moments_met) {
+            const Eigen::VectorXd masses = compute_weight_sums(
+                indexer, weight_ptr, false, n, threads);
+            for (int rhs = 0; rhs < rhs_count; ++rhs) {
+                const double squared = deterministic_chunked_sum<int>(
+                    indexer.num_groups, threads, [&](int g) {
+                        if (masses[g] <= 0.0) return 0.0;
+                        const double value = sums(g, rhs) / std::sqrt(masses[g]);
+                        return value * value;
+                    }, options.parallel_observer);
+                result.weighted_gs_moments_met = result.weighted_gs_moments_met &&
+                    hdfe::detail::ieee_finite(squared) &&
+                    hdfe::detail::ieee_finite(weighted_gs_norms[rhs]) &&
+                    std::sqrt(squared) <= weighted_gs_moment_limit * weighted_gs_norms[rhs];
+            }
+        }
         for (int moment = 0; moment < moment_count; ++moment) {
             for (int chunk = 0; chunk < chunk_count; ++chunk) {
                 operator_norm_sq += static_cast<long double>(
@@ -24531,7 +25160,7 @@ void certify_absorption_result(
                     int active_groups = 0;
                     const double transformed_norm = std::sqrt(
                         static_cast<double>(std::max(
-                            0.0L, slope_weighted_transformed_norm_sq[
+                            0.0L, slope_block_scale_sq[
                                       static_cast<std::size_t>(rhs)])));
                     for (int group = 0; group < indexer.num_groups; ++group) {
                         const double diagonal =
@@ -24782,7 +25411,8 @@ void certify_absorption_result(
             finite_accumulators =
                 finite_accumulators &&
                 finite_nonnegative(
-                    slope_weighted_transformed_norm_sq[index]);
+                    slope_weighted_transformed_norm_sq[index]) &&
+                finite_nonnegative(slope_block_scale_sq[index]);
         }
     }
     if (canonical_group_scope) {
@@ -24944,6 +25574,510 @@ void certify_absorption_result(
                                          : (result.converged &&
                                             max_relative <= certificate_limit);
     }
+}
+
+#ifdef HDFE_USE_CUDA
+struct CudaProjectionGeometry {
+    std::vector<FeIndexer> indexers;
+    std::vector<Eigen::VectorXd> masses;
+    std::vector<GpuFeInput> inputs;
+
+    CudaProjectionGeometry(const std::vector<Eigen::VectorXi>& fes,
+                           const Eigen::VectorXd* weights, int n, const HdfeOptions& options)
+        : indexers(fes.size()), masses(fes.size()), inputs(fes.size()) {
+        const int threads = std::max(1, options.num_threads);
+        for (std::size_t d = 0; d < fes.size(); ++d) {
+            indexers[d] = build_indexer_team(fes[d], threads, options.num_threads_explicit);
+            const FeIndexer& fe = indexers[d];
+            masses[d] = compute_weight_sums(
+                fe, weights ? weights->data() : nullptr, !weights, n, threads);
+            GpuFeInput& input = inputs[d];
+            input.group_ids = fe.group_ids.data();
+            input.num_groups = fe.num_groups;
+            input.num_levels_present = fe.num_levels_present;
+            input.weight_sums = masses[d].data();
+        }
+    }
+};
+#endif
+
+void certify_absorption_result(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    const std::vector<HeterogeneousSlopeTerm>& slopes,
+    AbsorptionResult& result,
+    const GroupIndividualStructure* group_individual,
+    bool refresh_cuda_projection) {
+#ifdef HDFE_USE_CUDA
+    if (refresh_cuda_projection && result.gpu_used && !group_individual && slopes.empty() &&
+        cuda_projection_scope(fes.size(), weights != nullptr, y.size(), options)) {
+        const CudaProjectionGeometry geometry(fes, weights, static_cast<int>(y.size()), options);
+        certify_cuda_absorption_from_indexers(
+            y, X, fes, weights, options, slopes, geometry.indexers, geometry.inputs, result);
+        return;
+    }
+#else
+    (void)refresh_cuda_projection;
+#endif
+    certify_absorption_impl(y, X, fes, weights, options, slopes, result, group_individual,
+                            nullptr);
+}
+
+void certify_tier_absorption(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const HdfeOptions& options,
+    AbsorptionResult& result,
+    std::vector<TierFeCodes>& tier_codes) {
+    certify_absorption_impl(y, X, fes, nullptr, options, {}, result, nullptr, &tier_codes);
+}
+
+bool repair_weighted_gauss_seidel(
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd& weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+    const int budget = options.max_iter - result.iterations;
+    if (budget <= 0) return false;
+    const int sweeps = std::min(8, budget - 1);
+
+    const int n = static_cast<int>(weights.size());
+    const int threads = std::max(1, options.num_threads);
+    constexpr int dims = 3;
+    std::array<FeIndexer, dims> indexers;
+    std::array<Eigen::VectorXd, dims> masses;
+    for (int d = 0; d < dims; ++d) {
+        indexers[d] = build_indexer_team(fes[d], threads, options.num_threads_explicit);
+        masses[d] = compute_weight_sums(indexers[d], weights.data(), false, n, threads);
+    }
+    const int width = static_cast<int>(result.X_tilde.cols()) + 1;
+    auto column = [&](int rhs) -> double* {
+        return rhs == 0 ? result.y_tilde.data() : result.X_tilde.col(rhs - 1).data();
+    };
+    using LevelMatrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+    auto sweep = [&](const std::vector<double*>& columns,
+                     std::array<LevelMatrix, dims>* increments, int step) {
+        for (int pos = 0; pos < dims; ++pos) {
+            const int d = result.sweep_order_used.size() == dims
+                ? result.sweep_order_used[pos] : pos;
+            const auto& indexer = indexers[d];
+            const int groups = indexer.num_groups;
+            const int* ids = indexer.group_ids.data();
+            LevelMatrix means(groups, width);
+            certificate_level_sums(n, groups, ids,
+                indexer_has_contiguous_groups(indexer, n) ? indexer.group_ptr.data() : nullptr,
+                columns.data(), width, weights.data(),
+                deterministic_scatter_chunk_count(n, groups, width), threads,
+                means.data(), nullptr);
+            for (int g = 0; g < groups; ++g) {
+                if (masses[d][g] > 0.0) means.row(g) /= masses[d][g];
+            }
+            if (increments) (*increments)[d].middleCols(step * width, width) = means;
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads) if(threads > 1)
+#endif
+            for (int i = 0; i < n; ++i) {
+                for (int j = 0; j < width; ++j) columns[j][i] -= means(ids[i], j);
+            }
+        }
+    };
+
+    // Keep increments in FE-level coordinates. All columns use the same
+    // projection so that aliases across regressors remain aliases.
+    result.iterations += sweeps;
+    if (sweeps > 0) {
+        const Eigen::Index directions = static_cast<Eigen::Index>(sweeps) * width;
+        std::array<LevelMatrix, dims> increments;
+        for (int d = 0; d < dims; ++d) {
+            increments[d].resize(indexers[d].num_groups, directions);
+        }
+        {
+            Eigen::MatrixXd work(n, width);
+            std::vector<double*> columns(width);
+            for (int j = 0; j < width; ++j) {
+                work.col(j) = Eigen::Map<const Eigen::VectorXd>(column(j), n);
+                columns[j] = work.col(j).data();
+            }
+            for (int step = 0; step < sweeps; ++step) sweep(columns, &increments, step);
+        }
+
+        // Streaming thin QR of [sqrt(W) D increments | sqrt(W) Z].
+        // Merging the triangular factors preserves the weighted least-squares
+        // problem without squaring its condition number in normal equations.
+        const Eigen::VectorXd roots = weights.array().sqrt();
+        Eigen::MatrixXd reduced(0, directions + width);
+        const int tile_rows = static_cast<int>(std::clamp<Eigen::Index>(262144 / (directions + width), 1, 4096));
+        for (int begin = 0; begin < n;) {
+            const int rows = std::min(tile_rows, n - begin);
+            const Eigen::Index history = reduced.rows();
+            Eigen::MatrixXd tile(history + rows, directions + width);
+            tile.topRows(history) = reduced;
+            for (int row = 0; row < rows; ++row) {
+                const int i = begin + row;
+                tile.row(history + row).head(directions) = roots[i] * (
+                    increments[0].row(indexers[0].group_ids[i]) +
+                    increments[1].row(indexers[1].group_ids[i]) +
+                    increments[2].row(indexers[2].group_ids[i]));
+                for (int j = 0; j < width; ++j) {
+                    tile(history + row, directions + j) = roots[i] * column(j)[i];
+                }
+            }
+            Eigen::HouseholderQR<Eigen::MatrixXd> qr(std::move(tile));
+            const Eigen::Index retained = std::min(history + rows, qr.matrixQR().cols());
+            reduced = qr.matrixQR().topRows(retained).triangularView<Eigen::Upper>();
+            begin += rows;
+        }
+        Eigen::MatrixXd design = reduced.leftCols(directions);
+        const Eigen::RowVectorXd sizes = design.colwise().stableNorm();
+        for (Eigen::Index k = 0; k < directions; ++k) {
+            if (sizes[k] > 0.0) design.col(k) /= sizes[k];
+        }
+        if (!hdfe::detail::ieee_all_finite(reduced) || !hdfe::detail::ieee_all_finite(design))
+            return false;
+        Eigen::MatrixXd coefficients = design.completeOrthogonalDecomposition().solve(
+            reduced.rightCols(width));
+        for (Eigen::Index k = 0; k < directions; ++k) {
+            if (sizes[k] > 0.0) coefficients.row(k) /= sizes[k];
+        }
+        if (!hdfe::detail::ieee_all_finite(coefficients)) return false;
+        const LevelMatrix a = increments[0] * coefficients;
+        const LevelMatrix b = increments[1] * coefficients;
+        const LevelMatrix c = increments[2] * coefficients;
+        for (int j = 0; j < width; ++j) {
+            double* z = column(j);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads) if(threads > 1)
+#endif
+            for (int i = 0; i < n; ++i) {
+                z[i] -= a(indexers[0].group_ids[i], j) + b(indexers[1].group_ids[i], j) +
+                        c(indexers[2].group_ids[i], j);
+            }
+        }
+    }
+    // Block extrapolation can reintroduce a fast component. End on a fresh
+    // forward sweep before checking the fixed-effect moments again.
+    std::vector<double*> columns(width);
+    for (int j = 0; j < width; ++j) columns[j] = column(j);
+    sweep(columns, nullptr, 0);
+    ++result.iterations;
+    return true;
+}
+
+bool repair_cuda_projection(
+    const Eigen::Ref<const Eigen::VectorXd>& y,
+    const Eigen::Ref<const Eigen::MatrixXd>& X,
+    const std::vector<Eigen::VectorXi>& fes,
+    const Eigen::VectorXd* weights,
+    const HdfeOptions& options,
+    AbsorptionResult& result) {
+#ifdef HDFE_USE_CUDA
+    const int budget = options.max_iter - result.iterations;
+    if (budget <= 0 || !result.gpu_used || result.cg_restart_required) return false;
+
+    HdfeOptions repair = options;
+    repair.max_iter = budget;
+    // A collapsed group-only fit uses the same ordinary FE operator.
+    repair.ordinary_krylov_parity_floor = true;
+    const CudaProjectionGeometry geometry(fes, weights, static_cast<int>(y.size()), repair);
+    AbsorptionResult refined;
+    const bool solved = complete_ordinary_projection_cuda(y, X, geometry.inputs, weights, repair, refined);
+    result.iterations += refined.iterations;
+    result.gpu_absorption_iterations += refined.iterations;
+    if (!solved || !refined.converged || refined.fe_levels != result.fe_levels) return false;
+
+    refined.iterations = result.iterations;
+    refined.gpu_absorption_iterations = result.gpu_absorption_iterations;
+    refined.gpu_used = refined.gpu_attempted = refined.gpu_absorption_converged = true;
+    refined.gpu_status_code = 1;
+    certify_cuda_absorption_from_indexers(
+        y, X, fes, weights, options, {}, geometry.indexers, geometry.inputs, refined);
+    if (!refined.precision_certified || !refined.cuda_projection_moments_met) return false;
+    refined.cuda_projection_repaired = true;
+    result = std::move(refined);
+    return true;
+#else
+    (void)y; (void)X; (void)fes; (void)weights; (void)options; (void)result;
+    return false;
+#endif
+}
+
+double mode_parity_floor(const HdfeOptions& options) {
+    HdfeOptions mlsmr_view = options;
+    mlsmr_view.absorption_method = AbsorptionMethod::Mlsmr;
+    return krylov_parity_tolerance(mlsmr_view);
+}
+
+// Package B (strict-residual on CUDA, 17nov2026): D(e), see fe_absorption.hpp.
+GroupMeanReading max_abs_group_mean(const Eigen::Ref<const Eigen::VectorXd>& values,
+                                    const std::vector<Eigen::VectorXi>& fes,
+                                    int threads,
+                                    const Eigen::VectorXd* weights) {
+    GroupMeanReading out;
+    const int n = static_cast<int>(values.size());
+    const int dims = static_cast<int>(fes.size());
+    out.per_effect.assign(static_cast<std::size_t>(dims), 0.0L);
+    if (weights && weights->size() != n)
+        throw std::runtime_error("strict-residual check: weights and residual differ in length");
+    for (const auto& fe : fes) {
+        if (fe.size() != n) {
+            throw std::runtime_error("strict-residual check: an effect and the residual differ in length");
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!hdfe::detail::ieee_finite(values[i])) {
+            out.finite = false;
+            break;
+        }
+    }
+    if (!out.finite) {
+        out.maximum = std::numeric_limits<long double>::infinity();
+        for (auto& value : out.per_effect) value = std::numeric_limits<long double>::infinity();
+        return out;
+    }
+    std::vector<uint8_t> effect_finite(static_cast<std::size_t>(dims), 1);
+    std::atomic<bool> failed{false};
+    const auto measure = [&](int d) {
+        try {
+        // Stage 2a': the codes index the groups directly when they are non-negative
+        // and dense (build_indexer's dense range); sparse or negative identifiers keep
+        // the indexer. Either way each group sums its rows in row order.
+        const Eigen::VectorXi& codes = fes[static_cast<std::size_t>(d)];
+        int min_code = n > 0 ? codes[0] : 0;
+        int max_code = n > 0 ? codes[0] : -1;
+        for (int i = 1; i < n; ++i) {
+            min_code = std::min(min_code, codes[i]);
+            max_code = std::max(max_code, codes[i]);
+        }
+        constexpr long long kDirectCodeCap = 50000000LL;
+        const bool direct = min_code >= 0 && static_cast<long long>(max_code) < kDirectCodeCap &&
+                            static_cast<long long>(max_code) + 1LL <= 2LL * static_cast<long long>(n);
+        FeIndexer idx;
+        if (!direct) {
+            idx = build_indexer(codes);
+        }
+        const std::size_t groups = direct ? static_cast<std::size_t>(max_code + 1)
+                                          : static_cast<std::size_t>(idx.num_groups);
+        std::vector<long double> sums(groups, 0.0L);
+        const int* ids = direct ? codes.data() : idx.group_ids.data();
+        std::vector<long long> counts(weights ? 0 : groups, 0);
+        std::vector<long double> masses(weights ? groups : 0, 0.0L);
+        if (weights) {
+            for (int i = 0; i < n; ++i) {
+                const int g = ids[i];
+                const long double w = (*weights)[i];
+                masses[g] += w;
+                sums[g] += w * static_cast<long double>(values[i]);
+            }
+        } else {
+            for (int i = 0; i < n; ++i) {
+                const int g = ids[i];
+                sums[g] += static_cast<long double>(values[i]);
+                ++counts[g];
+            }
+        }
+        long double worst = 0.0L;
+        for (std::size_t g = 0; g < sums.size(); ++g) {
+            const long double mass = weights ? masses[g] : static_cast<long double>(counts[g]);
+            if (mass == 0.0L) continue;
+            const long double mean = sums[g] / mass;
+            if (!hdfe::detail::ieee_finite(static_cast<double>(mean))) {
+                effect_finite[static_cast<std::size_t>(d)] = 0;
+                worst = std::numeric_limits<long double>::infinity();
+                break;
+            }
+            const long double magnitude = mean < 0.0L ? -mean : mean;
+            if (magnitude > worst) worst = magnitude;
+        }
+        out.per_effect[static_cast<std::size_t>(d)] = worst;
+        } catch (...) {
+            failed.store(true, std::memory_order_relaxed);
+        }
+    };
+#ifdef HDFE_USE_OPENMP
+    const int team = std::max(1, std::min(threads, dims));
+#pragma omp parallel for schedule(static, 1) num_threads(team) if (team > 1)
+    for (int d = 0; d < dims; ++d) {
+        measure(d);
+    }
+#else
+    (void)threads;
+    for (int d = 0; d < dims; ++d) {
+        measure(d);
+    }
+#endif
+    if (failed.load(std::memory_order_relaxed)) {
+        throw std::runtime_error("strict-residual check: the group means could not be formed");
+    }
+    for (int d = 0; d < dims; ++d) {
+        if (!effect_finite[static_cast<std::size_t>(d)]) out.finite = false;
+        out.maximum = std::max(out.maximum, out.per_effect[static_cast<std::size_t>(d)]);
+    }
+    if (!out.finite) out.maximum = std::numeric_limits<long double>::infinity();
+    return out;
+}
+
+// Package B: the host part of the continuation (fe_absorption.hpp): the compact
+// indexers and unit weight sums of the effects, the order of the sweeps, then the
+// device entry continue_strict_residual_cuda.
+bool continue_strict_residual(Eigen::VectorXd& y_tilde,
+                              Eigen::MatrixXd& X_tilde,
+                              const Eigen::Ref<const Eigen::VectorXd>& y_original,
+                              const std::vector<Eigen::VectorXi>& fes,
+                              const std::vector<int>& order_used,
+                              const Eigen::VectorXd& combination,
+                              double tol,
+                              int max_sweeps,
+                              int threads,
+                              StrictContinuationReport& report) {
+    const auto indexers_t0 = std::chrono::steady_clock::now();
+    const int n = static_cast<int>(y_tilde.size());
+    const std::size_t dims = fes.size();
+    if (dims == 0 || n == 0 || y_original.size() != n) return false;
+    std::vector<FeIndexer> indexers(dims);
+    for (std::size_t d = 0; d < dims; ++d) {
+        if (fes[d].size() != n) return false;
+        // As absorb_fixed_effects_v6 builds them (the team variant is
+        // bit-identical to the serial one).
+        indexers[d] = (threads > 1 && n >= 4194304) ? build_indexer_team(fes[d], threads)
+                                                    : build_indexer(fes[d]);
+    }
+    std::vector<Eigen::VectorXd> weight_sums(dims);
+    for (std::size_t d = 0; d < dims; ++d) {
+        weight_sums[d] = compute_weight_sums(indexers[d], nullptr, true, n, 1);
+    }
+    // The order of the effects the fit used; when the delivering route left none
+    // (the device LSMR, the host tail), the order the GPU dispatch of
+    // absorb_fixed_effects_v6 computes for the original data.
+    std::vector<std::size_t> order;
+    bool inherited = order_used.size() == dims;
+    if (inherited) {
+        std::vector<uint8_t> seen(dims, 0);
+        for (const int value : order_used) {
+            if (value < 0 || static_cast<std::size_t>(value) >= dims ||
+                seen[static_cast<std::size_t>(value)]) {
+                inherited = false;
+                break;
+            }
+            seen[static_cast<std::size_t>(value)] = 1;
+            order.push_back(static_cast<std::size_t>(value));
+        }
+    }
+    if (!inherited) {
+        if (dims > 2) {
+            std::vector<FeProfileStats> profiles;
+            profiles.reserve(dims);
+            for (std::size_t d = 0; d < dims; ++d) {
+                profiles.push_back(profile_fe(indexers[d], weight_sums[d], true));
+            }
+            order = order_by_profile(profiles);
+        } else {
+            order = select_sweep_order(y_original, indexers, nullptr, true, nullptr);
+        }
+    }
+    report.order.clear();
+    for (const std::size_t d : order) report.order.push_back(static_cast<int>(d));
+    report.order_inherited = inherited;
+    std::vector<GpuFeInput> fe_inputs(dims);
+    for (std::size_t d = 0; d < dims; ++d) {
+        fe_inputs[d].group_ids = indexers[d].group_ids.data();
+        fe_inputs[d].num_groups = indexers[d].num_groups;
+        fe_inputs[d].num_levels_present = indexers[d].num_levels_present;
+        fe_inputs[d].weight_sums = weight_sums[d].data();
+    }
+    report.seconds_indexers += std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - indexers_t0).count();
+    return continue_strict_residual_cuda(y_tilde, X_tilde, fe_inputs, order, combination, tol,
+                                         max_sweeps, report);
+}
+
+// Package B, stage 2a': the provisional coefficients of the sweep-exit step (see
+// fe_absorption.hpp). The margins keep the step away from every column the
+// regressor's rules could omit: 1e3 above its FE-collinearity constant, and a
+// unit-diagonal Gram whose smallest eigenvalue bounds from below the squared
+// relative residual norm of every column after all the others (the regressor
+// drops a column when that ratio, after the columns kept before it, is at most
+// rank_tol).
+bool strict_sweep_exit_solve(const std::vector<double>& upper,
+                             int cols,
+                             const std::vector<double>& raw_ss,
+                             double rank_tol,
+                             std::vector<double>& b0,
+                             double& lambda_min,
+                             const char*& reason) {
+    constexpr double kFeCollinearMargin = 1.0e3;
+    constexpr double kRankMargin = 1.0e3;
+    b0.clear();
+    lambda_min = -1.0;
+    const int width = cols + 1;
+    if (cols <= 0 || static_cast<int>(raw_ss.size()) != cols ||
+        upper.size() != static_cast<std::size_t>(width) * (width + 1) / 2) {
+        reason = "columns";
+        return false;
+    }
+    Eigen::MatrixXd gram(cols, cols);
+    Eigen::VectorXd rhs(cols);
+    std::size_t position = 0;
+    for (int i = 0; i < width; ++i) {
+        for (int j = i; j < width; ++j) {
+            const double value = upper[position++];
+            if (!hdfe::detail::ieee_finite(value)) {
+                reason = "non-finite";
+                return false;
+            }
+            if (j < cols) {
+                gram(i, j) = value;
+                gram(j, i) = value;
+            } else if (i < cols) {
+                rhs(i) = value;
+            }
+        }
+    }
+    Eigen::VectorXd scale(cols);
+    for (int j = 0; j < cols; ++j) {
+        const double absorbed = gram(j, j);
+        const double raw = raw_ss[static_cast<std::size_t>(j)];
+        if (!hdfe::detail::ieee_finite(raw) || !(raw > 0.0) || !(absorbed > 0.0) ||
+            !(absorbed > kFeCollinearMargin * kFeCollinearTol * raw)) {
+            reason = "fe-collinear";
+            return false;
+        }
+        scale(j) = 1.0 / std::sqrt(absorbed);
+    }
+    const Eigen::MatrixXd unit = scale.asDiagonal() * gram * scale.asDiagonal();
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eigen(unit, Eigen::EigenvaluesOnly);
+    if (eigen.info() != Eigen::Success) {
+        reason = "rank";
+        return false;
+    }
+    lambda_min = eigen.eigenvalues()(0);
+    const double floor = (kRankMargin * rank_tol) * (kRankMargin * rank_tol);
+    if (!hdfe::detail::ieee_finite(lambda_min) || !(lambda_min >= floor)) {
+        reason = "rank";
+        return false;
+    }
+    const Eigen::LDLT<Eigen::MatrixXd> ldlt(unit);
+    if (ldlt.info() != Eigen::Success) {
+        reason = "rank";
+        return false;
+    }
+    const Eigen::VectorXd solution = scale.asDiagonal() *
+        ldlt.solve(Eigen::VectorXd(scale.asDiagonal() * rhs));
+    b0.resize(static_cast<std::size_t>(cols));
+    for (int j = 0; j < cols; ++j) {
+        if (!hdfe::detail::ieee_finite(solution(j))) {
+            b0.clear();
+            reason = "non-finite";
+            return false;
+        }
+        b0[static_cast<std::size_t>(j)] = solution(j);
+    }
+    reason = "";
+    return true;
 }
 
 #include "audit/ordinary_legacy_impl.hpp"

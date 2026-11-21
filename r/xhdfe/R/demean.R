@@ -13,7 +13,10 @@
 #'   No IV part is accepted.
 #' @param data,weights as in \code{\link{xhdfe}}.
 #' @param tol,maxiter,tolerance_mode,absorption_method,symmetric_sweep,backend
-#'   absorber controls, as in \code{\link{xhdfe}}.
+#'   absorber controls, as in \code{\link{xhdfe}}. An explicit
+#'   \code{backend = "cuda"} requires actual device execution, also with
+#'   weights. The regression's \code{weighted_cpu_route} setting does not
+#'   apply to this transformation.
 #' @param threads OpenMP thread request. Must be one nonnegative integer;
 #'   \code{0} selects the automatic policy, while a positive request is
 #'   limited only by runtime-visible processor capacity.
@@ -29,7 +32,9 @@
 #'   \code{krylov_max_final_backward_error}, \code{krylov_max_condition},
 #'   \code{krylov_max_condition_times_backward_error}, \code{precision_certified},
 #'   \code{absorption_method_used}, \code{schwarz_used}, \code{mlsmr_used},
-#'   \code{gpu_used} and \code{threads_used}.  The relative certificate is
+#'   \code{gpu_used}, \code{cuda_tail_code}, \code{cuda_tail} and
+#'   \code{threads_used}. The CUDA-tail fields identify the reported completion
+#'   route. The relative absorption diagnostic is
 #'   the maximum \eqn{\|D'W\widetilde v\|_2 /
 #'   (\|D'W\|_F\|v\|_2)} across transformed columns.
 #' @examples

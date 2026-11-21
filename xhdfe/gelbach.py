@@ -257,7 +257,7 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
               weights=None, fweights=False, absorbed_targets=None,
               x1_names=None, focal=None, gpu=False, connected="diagnose",
               connectivity_fes=None, common_fes=None, sample_info=False,
-              fe_variance_ratio_min=0.35):
+              fe_variance_ratio_min=0.35, weighted_cpu_route=False):
     """Gelbach decomposition of the coefficient movement b_base - b_full.
 
     The result is an accounting identity for the declared base and full
@@ -299,6 +299,10 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     gpu : bool — request CUDA for the full-model absorption phase. This is
         opt-in; CPU remains the reference and any fallback is reported in the
         returned GPU diagnostics.
+    weighted_cpu_route : bool, default False.
+        Request CPU for eligible weighted CUDA fits and report status 7
+        (``weighted_cpu_route``). Bootstrap callers can pass this option
+        through ``decompose_kwargs``.
     weights : optional positive analytic or frequency weights.
     fweights : interpret ``weights`` as positive integer frequency weights.
     absorbed_targets : optional X1 names, zero-based column indices, or a
@@ -563,6 +567,9 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
     X2 = (np.hstack([np.asarray(d, dtype=float) for _, k, d in groups
                      if k == "x2"]) if x2_sizes else None)
     union_fe_lists = common_fe_lists + fe_lists
+    if not isinstance(weighted_cpu_route, (bool, np.bool_)):
+        raise TypeError("weighted_cpu_route must be True or False")
+    route = {"weighted_cpu_route": True} if weighted_cpu_route else {}
     r = core.gelbach_decompose(y, x1, x2=X2, x2_group_sizes=x2_sizes,
                                fes=union_fe_lists if union_fe_lists else None,
                                cluster=(np.ascontiguousarray(ccodes, dtype=np.int64)
@@ -578,7 +585,8 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
                                    connected_mode == "require"
                                ),
                                n_common_fes=len(common_fe_lists),
-                               sample_info=bool(sample_info))
+                               sample_info=bool(sample_info),
+                               **route)
 
     p_ = x1.shape[1]
     k1 = p_ + 1

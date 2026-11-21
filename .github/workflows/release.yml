@@ -975,6 +975,7 @@ jobs:
           SHARED=(
             stata/LICENSE stata/NOTICE
             stata/xhdfe.ado stata/xhdfe.sthlp stata/xhdfe.pkg
+            stata/xhdfe_examples.sthlp
             stata/xhdfe_p.ado stata/xhdfe_estat.ado
             stata/xhdfeakm.ado stata/xhdfeakm.sthlp
             stata/xhdfeconnected.ado stata/xhdfeconnected.sthlp

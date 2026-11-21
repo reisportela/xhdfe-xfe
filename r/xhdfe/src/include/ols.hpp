@@ -48,6 +48,29 @@ struct OlsResult {
     bool augmented_meat_positive_definite = false;
 };
 
+// Phase 5b of the Stata-path plan: the passes of a multi-way clustered fit shared
+// inside the fit (one carrier per pass of the fit's N1 loop, never longer). The OLS
+// stage produces it (run_ols_multiway*): the number of clusters of every mask, which
+// its meats return anyway (mask_counts[mask - 1], masks ascending), and, when
+// want_pair is set, the pair of the two dimensions (combine_clusters(*source,
+// {0, 1})), moved out of the stage instead of freed. The pending state is local to
+// the stage and moved in only after its last range check (ready); a failed attempt
+// leaves the carrier as it was. The intercept's meats and the reconstruction read it
+// (const) only when it is ready, comes from the list they were given and has the
+// right sizes; otherwise they run today's code. XHDFE_CLUSTER_SHARED_PASSES=0, read
+// once per process (cluster_shared_passes_enabled()), keeps today's code everywhere.
+struct MixedNetworkScores;
+struct ClusterPasses {
+    MixedNetworkScores* network = nullptr;
+    const std::vector<Eigen::VectorXi>* source = nullptr;
+    bool want_pair = false;
+    bool ready = false;
+    std::vector<int> mask_counts;
+    Eigen::VectorXi pair;
+};
+
+bool cluster_shared_passes_enabled();
+
 // X_for_residuals: when set (2SLS), the coefficients are solved on X (the
 // instrumented second-stage design) but residuals/rss/sigma2/R2 and the robust
 // or clustered meat use u = y - X_for_residuals * beta (the actual regressors),
@@ -90,7 +113,26 @@ Eigen::MatrixXd multiway_cluster_sandwich(
     const Eigen::VectorXd* weights,
     const std::vector<Eigen::VectorXi>& clusters,
     ClusterDofMethod g_df = ClusterDofMethod::Min,
-    bool g_adj = false);
+    bool g_adj = false,
+    const ClusterPasses* passes = nullptr);
+
+// Low-memory package L3.1-C, C2: the same rebuild for the scores [regressors | 1]
+// without forming them. The regressors are read where they are and the column of
+// ones is taken implicitly; every sum gets the same doubles in the same order as
+// multiway_cluster_sandwich on the materialized matrix. The bread is (p+1) x (p+1).
+Eigen::MatrixXd multiway_cluster_sandwich_with_constant(
+    const Eigen::MatrixXd& bread,
+    const Eigen::Ref<const Eigen::MatrixXd>& regressors,
+    const Eigen::VectorXd& residuals,
+    const Eigen::VectorXd* weights,
+    const std::vector<Eigen::VectorXi>& clusters,
+    ClusterDofMethod g_df = ClusterDofMethod::Min,
+    bool g_adj = false,
+    const ClusterPasses* passes = nullptr);
+
+// XHDFE_MULTIWAY_SCORES_COPY=1 (C2's switch, read once per process): the callers build
+// the n x (p+1) scores with the appended column of ones, as before.
+bool multiway_scores_copy_enabled();
 
 OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            const Eigen::Ref<const Eigen::MatrixXd>& X,
@@ -104,7 +146,8 @@ OlsResult run_ols_multiway(const Eigen::VectorXd& y,
                            double n_effective = -1.0,
                            const Eigen::MatrixXd* X_for_residuals = nullptr,
                            bool num_threads_explicit = false,
-                           ParallelWorkObserver* parallel_observer = nullptr);
+                           ParallelWorkObserver* parallel_observer = nullptr,
+                           ClusterPasses* passes = nullptr);
 
 OlsResult run_ols_with_score_low(const Eigen::VectorXd& y,
     const Eigen::Ref<const Eigen::MatrixXd>& X, const Eigen::VectorXd* weights,
@@ -126,7 +169,8 @@ OlsResult run_ols_multiway_with_score_low(const Eigen::VectorXd& y,
     const Eigen::MatrixXd* score_low,
     const Eigen::VectorXd* normalization_means = nullptr,
     Eigen::VectorXd* intercept_covariance = nullptr,
-    OlsWideCovariance* covariance_wide = nullptr);
+    OlsWideCovariance* covariance_wide = nullptr,
+    ClusterPasses* passes = nullptr);
 
 }  // namespace detail
 }  // namespace hdfe

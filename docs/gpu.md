@@ -39,6 +39,9 @@ contract; its difference from Comparable is not by itself an estimator error.
 - **Linux x86-64** (CUDA builds are Linux + NVIDIA only).
 - The **CUDA toolkit** (`nvcc`) and a working driver. Check with
   `nvcc --version` and `nvidia-smi`.
+- Since 2.34, the toolkit's **cuBLAS and cuSPARSE development files** (the
+  headers `cublas_v2.h` and `cusparse.h`). A full toolkit installation has
+  them; a compiler-only installation does not.
 
 ## Step 1 — let the installer detect your GPU
 
@@ -196,6 +199,12 @@ device is present, or the GPU path fails), the behavior differs by version:
   argument; a fresh process avoids retaining an old native library.
 - **`nvcc: command not found`** — install the CUDA toolkit and put `nvcc` on
   `PATH` (or set `CUDA_HOME`).
+- **`fatal error: cublas_v2.h: No such file or directory`** (or `cusparse.h`)
+  — the toolkit lacks the cuBLAS and cuSPARSE development files. Install the
+  full toolkit or those two components (packages `libcublas-devel` and
+  `libcusparse-devel` in NVIDIA's RPM repositories, `libcublas-dev` and
+  `libcusparse-dev` in its Debian and Ubuntu ones, each with the toolkit
+  version suffix).
 
 For the detailed Stata build and verification checklist, see
 [`../stata/BUILD_CUDA.md`](../stata/BUILD_CUDA.md).

@@ -164,6 +164,9 @@ def child(args) -> int:
         "retry_iterations": int(getattr(reg, "auto_routing_retry_iterations_", 0)),
         "retry_rel": float(getattr(reg, "auto_routing_retry_abs_residual_rel_", 0.0)),
         "retry_seconds": float(getattr(reg, "auto_routing_retry_elapsed_seconds_", 0.0)),
+        # The reduced-system tier (2.32); absent from older modules.
+        "tier_status": int(getattr(reg, "reduced_pcg_status_", 0)),
+        "tier_reason": str(getattr(reg, "reduced_pcg_reason_", "")),
     }
     Path(args.output).write_text(json.dumps(result, sort_keys=True) + "\n")
     np.savez(
@@ -177,7 +180,7 @@ def run_child(script, root, label, module, module_sha, *, dataset="credit2",
               method="auto", tolerance=1e-8,
               tolerance_mode="reghdfe-comparable", weights=False,
               retain_fes=False, threads=12, fe_count=2, iv=False,
-              environment=None):
+              environment=None, tier=False):
     output = root / f"{label}.json"
     arrays = root / f"{label}.npz"
     command = [
@@ -201,6 +204,14 @@ def run_child(script, root, label, module, module_sha, *, dataset="credit2",
         "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
         "MKL_NUM_THREADS": "1", "PYTHONDONTWRITEBYTECODE": "1",
     })
+    # The retry contract runs with the reduced-system tier off: since 2.32 the
+    # tier is on by default and publishes the eligible Auto fits before any
+    # primary, so the retry would not run. The tier legs (tier=True) keep the
+    # tier at its default.
+    if tier:
+        env.pop("XHDFE_REDUCED_PCG", None)
+    else:
+        env["XHDFE_REDUCED_PCG"] = "0"
     if environment:
         env.update(environment)
     subprocess.run(command, check=True, env=env, timeout=120)
@@ -211,8 +222,28 @@ def same_arrays(left, right) -> bool:
     return all(np.array_equal(left[name], right[name]) for name in left.files)
 
 
+def within_contract(left, right, exact_fit=False) -> bool:
+    """b at 1e-9 max(1,|b|) and V at 1e-8 sqrt(V_jj V_kk) of `right`, same sample.
+
+    exact_fit: y lies in the span of X and the effects, so V is rounding noise
+    (about 1e-30 on synthetic_huge4, and two sweep/Krylov routes already differ
+    there by a factor of 100): only b and the sample are compared, and V must
+    stay at rounding level in both."""
+    b, b_ref = left["b"], right["b"]
+    V, V_ref = left["V"], right["V"]
+    same_b = bool(np.array_equal(left["sample"], right["sample"]) and
+                  np.all(np.abs(b - b_ref) <= 1e-9 * np.maximum(1.0, np.abs(b_ref))))
+    if exact_fit:
+        return same_b and float(np.max(np.abs(V))) <= 1e-20 and float(np.max(np.abs(V_ref))) <= 1e-20
+    scale = np.sqrt(np.outer(np.diag(V_ref), np.diag(V_ref)))
+    return same_b and bool(np.all(np.abs(V - V_ref) <= 1e-8 * scale))
+
+
 def parent(args) -> int:
     script = Path(__file__).resolve()
+    # With XHDFE_REDUCED_PCG=0 the test is the 2.31 one; otherwise it adds the
+    # tier legs at the end (the retry contract itself runs with the tier off).
+    tier_on = os.environ.get("XHDFE_REDUCED_PCG", "") != "0"
     with tempfile.TemporaryDirectory(prefix="xhdfe-auto-retry-") as raw:
         root = Path(raw)
         fired, fired_arrays = run_child(
@@ -458,6 +489,106 @@ def parent(args) -> int:
         assert same_arrays(early_cache_write_arrays, early_cache_read_arrays)
         assert same_arrays(early_cache_write_arrays, early_arrays)
 
+        # The reduced-system tier at its default (2.32), unless the parent runs
+        # with XHDFE_REDUCED_PCG=0: the eligible Auto fits above are published
+        # by the tier (method 8, the retry not engaged) within the Comparable
+        # contract of the retry route's result; a fit the tier declines (github)
+        # and the ineligible ones are the retry route's, bit for bit.
+        tier_published = tier_identities = 0
+        if tier_on:
+            # The reference of a published fit is the route with the tier off
+            # where that route reaches the 1e-11 floor (the retry's result,
+            # below the trigger, or MLSMR), and an explicit MLSMR fit where it
+            # is a sweep primary left above the trigger (disabled, failed,
+            # five_fe: relative residual 3.5e-9 to 6.7e-9 on credit2). There
+            # the sweep is 3.4e-8 to 5.1e-8 of the scaled V away from both MLSMR
+            # and the tier, which agree within 6.3e-12 (measured 14 Nov 2026).
+            _, five_fe_mlsmr = run_child(
+                script, root, "five_fe_mlsmr", args.module, args.module_sha256,
+                method="mlsmr", fe_count=5)
+            _, huge_mlsmr = run_child(
+                script, root, "huge_four_fe_mlsmr", args.module, args.module_sha256,
+                method="mlsmr", dataset="synthetic_huge4", fe_count=4)
+            published = (
+                ("fired", {}, fired_arrays, True),
+                ("disabled", {"environment": {"XHDFE_AUTO_ROUTING_RETRY": "0"}},
+                 explicit_arrays, False),
+                ("failed", {"environment": {"XHDFE_TEST_AUTO_ROUTING_RETRY_FAIL": "1"}},
+                 explicit_arrays, True),
+                ("below", {"dataset": "credit"}, below_arrays, True),
+                ("custom", {"tolerance": 1e-10}, np.load(root / "custom.npz"), True),
+                ("actual_mlsmr", {"environment": {
+                    "XHDFE_AUTO_MLSMR_MIN_ROWS": "1", "XHDFE_AUTO_MLSMR_MIN_LEVELS": "1",
+                    "XHDFE_AUTO_MLSMR_RHO_THRESHOLD": "0",
+                    "XHDFE_AUTO_MLSMR_PARITY_SMALL_N_RHO_THRESHOLD": "0"}},
+                 np.load(root / "actual_mlsmr.npz"), True),
+                ("five_fe", {"fe_count": 5}, five_fe_mlsmr, True),
+                ("huge_four_fe", {"dataset": "synthetic_huge4", "fe_count": 4},
+                 huge_mlsmr, True),
+                ("one_thread", {"threads": 1}, np.load(root / "one_thread.npz"), True),
+                ("early", {"dataset": taken}, early_arrays, True),
+                ("stays", {"dataset": "synthetic-uniform-hard"}, stays_arrays, True),
+                ("handoff", {"dataset": "patents", "environment": handoff_cap},
+                 handoff_arrays, True),
+            )
+            tier_fired = None
+            for label, kwargs, reference, policy in published:
+                record, arrays = run_child(
+                    script, root, f"tier_{label}", args.module, args.module_sha256,
+                    tier=True, **kwargs)
+                assert record["returned"] and record["converged"] and record["precision"], label
+                assert record["method"] == 8 and record["tier_status"] == 1, (label, record)
+                assert record["tier_reason"] == "none", (label, record)
+                assert record["policy"] == policy and not record["eligible"], (label, record)
+                assert not record["fired"] and record["status"] == 0, (label, record)
+                assert within_contract(arrays, reference, exact_fit=label == "huge_four_fe"), label
+                if label == "fired":
+                    tier_fired = arrays
+                tier_published += 1
+            # Declined by the tier: the retry route runs from the original data.
+            tier_gate, tier_gate_arrays = run_child(
+                script, root, "tier_gate", args.module, args.module_sha256,
+                dataset="github", tier=True)
+            assert tier_gate["tier_status"] == 2 and tier_gate["status"] == 4, tier_gate
+            assert tier_gate["method"] == 6 and same_arrays(tier_gate_arrays, gate_arrays)
+            tier_identities += 1
+            # Ineligible: unchanged, bit for bit, with the reason.
+            ineligible = (
+                ("explicit", {"method": "mlsmr"}, "method"),
+                ("fast", {"tolerance_mode": "xhdfe-fast"}, "tolerance_mode"),
+                ("weighted", {"weights": True}, "weights"),
+                ("retained", {"retain_fes": True}, "savefe"),
+                ("iv_fit", {"iv": True}, "iv"),
+            )
+            for label, kwargs, reason in ineligible:
+                record, arrays = run_child(
+                    script, root, f"tier_{label}", args.module, args.module_sha256,
+                    tier=True, **kwargs)
+                reference = np.load(root / f"{label if label != 'iv_fit' else 'iv'}.npz")
+                assert record["tier_status"] == 0 and record["tier_reason"] == reason, (label, record)
+                assert same_arrays(arrays, reference), label
+                tier_identities += 1
+            # Cache round trip of a published fit; the old module's entry is
+            # not read (its key has no tier tag), so the read is a fresh fit.
+            tier_cache = root / "tier.cache"
+            tier_write, tier_write_arrays = run_child(
+                script, root, "tier_cache_write", args.module, args.module_sha256, tier=True,
+                environment={"XHDFE_ABSORPTION_CACHE": str(tier_cache),
+                             "XHDFE_ABSORPTION_CACHE_MODE": "write"})
+            tier_read, tier_read_arrays = run_child(
+                script, root, "tier_cache_read", args.module, args.module_sha256, tier=True,
+                environment={"XHDFE_ABSORPTION_CACHE": str(tier_cache),
+                             "XHDFE_ABSORPTION_CACHE_MODE": "read"})
+            assert tier_write["method"] == 8 and tier_read == tier_write
+            assert same_arrays(tier_write_arrays, tier_read_arrays)
+            assert same_arrays(tier_write_arrays, tier_fired)
+            tier_miss, tier_miss_arrays = run_child(
+                script, root, "tier_generation_miss", args.module, args.module_sha256, tier=True,
+                environment={"XHDFE_ABSORPTION_CACHE": str(old_cache_path),
+                             "XHDFE_ABSORPTION_CACHE_MODE": "read"})
+            assert tier_miss["method"] == 8 and same_arrays(tier_miss_arrays, tier_fired)
+            tier_identities += 2
+
     print(
         "AUTO_ROUTING_RETRY_PASS fired_bitidentical=1 kill_switch_old_identity=1 "
         "failure_primary_identity=1 below_trigger=1 exclusions=4 "
@@ -465,7 +596,9 @@ def parent(args) -> int:
         "cache_roundtrip=1 old_generation_miss=1 one_thread_bitidentical=1 "
         "early_taken_bitidentical=1 early_failsafe_identity=1 early_not_taken=2 "
         f"early_handoff=1 early_handoff_today_mlsmr={int(handoff_off['method'] == 6)} "
-        f"early_gate_status={gate['status']} early_kill_switch=1 early_cache_roundtrip=1"
+        f"early_gate_status={gate['status']} early_kill_switch=1 early_cache_roundtrip=1 "
+        f"tier={'on' if tier_on else 'off'} tier_published={tier_published} "
+        f"tier_identities={tier_identities}"
     )
     return 0
 

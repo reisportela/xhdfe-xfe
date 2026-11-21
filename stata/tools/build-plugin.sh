@@ -378,6 +378,7 @@ fi
 stplugin_src="${STPLUGIN_C}"
 srcs=( "${STATA_DIR}/src/xhdfe_plugin.cpp" )
 srcs+=( "${STATA_DIR}/src/hdfe_regressor_v11.cpp" )
+srcs+=( "${STATA_DIR}/src/reduced_schur_pcg.cpp" )
 srcs+=( "${STATA_DIR}/src/auto_team_registry.cpp" )
 srcs+=( "${STATA_DIR}/src/fe_absorption.cpp" )
 srcs+=( "${STATA_DIR}/src/schwarz_demean.cpp" )
@@ -512,6 +513,7 @@ compile_plugin() {
         exit "$rc"
       fi
       objs+=( "${obj}" )
+      srcs+=( "${STATA_DIR}/src/reduced_schur_pcg_cuda_controller.cpp" )
       for src in "${srcs[@]}"; do
         obj="${OBJ_DIR}/$(basename "${src%.*}").o"
         "${CXX}" "${cxx_flags[@]}" -c "${src}" -o "${obj}"
@@ -521,6 +523,18 @@ compile_plugin() {
         fi
         objs+=( "${obj}" )
       done
+      if [[ $rc -eq 0 ]]; then
+        reduced_obj="${OBJ_DIR}/reduced_schur_pcg_cuda.o"
+        "${NVCC}" "${nvcc_flags[@]}" -c "${STATA_DIR}/src/reduced_schur_pcg_cuda.cu" -o "${reduced_obj}"
+        rc=$?
+        if [[ $rc -eq 0 ]]; then objs+=( "${reduced_obj}" ); fi
+      fi
+      if [[ $rc -eq 0 ]]; then
+        network_obj="${OBJ_DIR}/network_cuda.o"
+        "${NVCC}" "${nvcc_flags[@]}" -c "${STATA_DIR}/src/network_cuda.cu" -o "${network_obj}"
+        rc=$?
+        if [[ $rc -eq 0 ]]; then objs+=( "${network_obj}" ); fi
+      fi
       if [[ $rc -eq 0 ]]; then
         cuda_obj="${OBJ_DIR}/fe_absorption_cuda.o"
         "${NVCC}" "${nvcc_flags[@]}" -c "${cuda_src}" -o "${cuda_obj}"
@@ -584,6 +598,8 @@ compile_plugin() {
       link_flags+=( -Xcompiler "-fopenmp" )
     fi
     link_flags+=( "${cuda_gencode_flags[@]}" )
+    # cuBLAS and cuSPARSE are opened on demand by src/network_cuda.cu (dlopen),
+    # so the plugin does not list them as needed libraries.
     "${NVCC}" "${link_flags[@]}" "${objs[@]}" -o "${out}"
   else
     if [[ "${OPENMP_MODE}" == "on" ]]; then

@@ -149,7 +149,8 @@ inputs). Python runtime dependencies must be present in the local environment.
 ## System requirements (not bundled)
 
 - A C++17 compiler (GCC/Clang; MSVC on Windows).
-- For GPU: the NVIDIA CUDA toolkit (\`nvcc\`) and a compatible driver.
+- For GPU: the NVIDIA CUDA toolkit (\`nvcc\`) with its cuBLAS and cuSPARSE
+  development files (\`cublas_v2.h\`, \`cusparse.h\`), and a compatible driver.
 - Python builds: Python >= 3.9 with development headers, CMake >= 3.18, and
   NumPy >= 1.23 already installed.
 - Optional Python formula interface: Formulaic >= 1.2.1,<2 and its pandas/SciPy

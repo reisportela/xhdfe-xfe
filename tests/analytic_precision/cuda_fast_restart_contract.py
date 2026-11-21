@@ -66,7 +66,12 @@ Cases, at tol 1e-8, 1e-8 + 1 ulp and 2e-8, one fresh process per fit:
   the same structure's unhooked fits (no 2.28.1 envelope exists for these structures, so
   accuracy is reported, not graded; V not computed: its small-sample factor follows the
   package's FE degrees of freedom). A boundary case whose hook never fired is
-  NOT_EXERCISED_ROUTE.
+  NOT_EXERCISED_ROUTE. Package B (18nov2026): strict with the automatic method and criterion is
+  now in scope of the strict acceptance of the delivered residual and takes the comparable route
+  (no CG stage on this fixture, so its hook does not fire); strict_legacy is the same request under
+  XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE=1 (the earlier strict branch, which still ships), graded as
+  strict was; where strict_legacy fired the hook, strict's unfired hook is a note (summary notes),
+  not a label.
 * stata (--stata-package DIR): cuda_fast_restart_stata.do through the plugin of DIR with
   the hook at 30: a CPU fit, the forced restart graded against the oracle (b, V, SE; the
   stored residuals come from refine_stored_residuals, a CUDA MAP re-absorption at the public
@@ -415,7 +420,7 @@ def parse_trace(stderr):
                     for m in BREAKDOWN.finditer(stderr)])
 
 
-def trace_env(hook=None):
+def trace_env(hook=None, extra=None):
     env = {k: v for k, v in os.environ.items()
            if not k.startswith('XHDFE_') and k not in ('LD_LIBRARY_PATH', 'OMP_NUM_THREADS')}
     env.update(XHDFE_GPU_BACKEND='cuda', XHDFE_ABSORPTION_CACHE_MODE='off',
@@ -424,11 +429,12 @@ def trace_env(hook=None):
                OPENBLAS_NUM_THREADS='1', MKL_NUM_THREADS='1')
     if hook is not None:
         env['XHDFE_TEST_CUDA_CG_BREAKDOWN'] = hook
+    env.update(extra or {})
     return env
 
 
 def run_fit(module, tol, directory, label, oracle_npz, hook=None, structure_name='3fe',
-            mode='xhdfe-fast', retain_fes=False, convergence='auto', max_iter=MAX_ITER):
+            mode='xhdfe-fast', retain_fes=False, convergence='auto', max_iter=MAX_ITER, extra_env=None):
     """One fit in a fresh process. Never raises: a failed worker is returned with
     worker_failed, its exit code and the tail of its standard error."""
     out = directory/f'{label}.json'
@@ -444,7 +450,7 @@ def run_fit(module, tol, directory, label, oracle_npz, hook=None, structure_name
     started = time.time()
     try:
         run = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), '--worker',
-                              str(job_path)], env=trace_env(hook), capture_output=True,
+                              str(job_path)], env=trace_env(hook, extra_env), capture_output=True,
                              text=True, timeout=1800)
         stderr = run.stderr
         row['returncode'] = run.returncode
@@ -935,11 +941,18 @@ def main():
 
     # Boundaries of the restart's shape (tol 1e-8, hook at BOUNDARY_ITERATION).
     if args.boundary_fits > 0:
-        boundary_cases = [('strict', '3fe', 'strict-residual', False, 'auto', False),
-                          ('savefe', '3fe', 'xhdfe-fast', True, 'auto', False),
-                          ('two_fe', '2fe', 'xhdfe-fast', False, 'reghdfe', True),
-                          ('four_fe', '4fe', 'xhdfe-fast', False, 'auto', True)]
-        for case, struct, mode, retain, convergence, in_shape in boundary_cases:
+        # Package B, stage 2c: `strict` is now in scope of the strict acceptance of the delivered residual (the
+        # comparable route; on cov240k no CG stage, so the hook does not fire); `strict_legacy` is the same request
+        # under XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE=1 (the earlier strict branch, which still ships), graded as HEAD
+        # graded `strict`. Where `strict_legacy` fired the hook, `strict`'s unfired hook is a note, not a label.
+        legacy_env = {'XHDFE_STRICT_CUDA_LEGACY_ACCEPTANCE': '1'}
+        boundary_cases = [('strict', '3fe', 'strict-residual', False, 'auto', False, None),
+                          ('strict_legacy', '3fe', 'strict-residual', False, 'auto', False, legacy_env),
+                          ('savefe', '3fe', 'xhdfe-fast', True, 'auto', False, None),
+                          ('two_fe', '2fe', 'xhdfe-fast', False, 'reghdfe', True, None),
+                          ('four_fe', '4fe', 'xhdfe-fast', False, 'auto', True, None)]
+        unfired = {}
+        for case, struct, mode, retain, convergence, in_shape, extra_env in boundary_cases:
             case_stats = dict(fits=0, hook_fired=0, restarted=0, refused=0, accepted=0,
                               routes={}, in_shape=in_shape, max_metrics={},
                               outside_envelope=0)
@@ -952,7 +965,7 @@ def main():
                 reference = dict(fits=0, refused=0, accepted=0, routes={}, max_metrics={})
                 for i in range(args.boundary_fits):
                     ref = run_fit(module, TOL_1E8, workdir, f'{case}_unhooked_{i+1:02d}', npz,
-                                  None, struct, mode, retain, convergence)
+                                  None, struct, mode, retain, convergence, extra_env=extra_env)
                     reference['fits'] += 1
                     if not record(ref, case+'_unhooked', '1e-8'):
                         continue
@@ -971,7 +984,7 @@ def main():
                 case_stats['unhooked_reference'] = reference
             for i in range(args.boundary_fits):
                 row = run_fit(module, TOL_1E8, workdir, f'{case}_{i+1:02d}', npz,
-                              f'{BOUNDARY_ITERATION}', struct, mode, retain, convergence)
+                              f'{BOUNDARY_ITERATION}', struct, mode, retain, convergence, extra_env=extra_env)
                 case_stats['fits'] += 1
                 if not record(row, case, '1e-8'):
                     continue
@@ -1013,13 +1026,13 @@ def main():
                 for problem in accepted_problems(row, ()):
                     fail(row, problem)
             if case_stats['hook_fired'] == 0:
-                labels.append(f'NOT_EXERCISED_ROUTE: boundary {case} (the hook never fired in '
-                              f"{case_stats['fits']} fits)")
+                unfired[case] = (f'NOT_EXERCISED_ROUTE: boundary {case} (the hook never fired in '
+                                 f"{case_stats['fits']} fits)")
             if not in_shape and case_stats['outside_envelope']:
                 # A demonstrated estimator error on a route the restart does not cover by public
                 # intent (RELATORIO_P3FIX_20261109.md sections 2.5 and 7): neither a PASS nor a
                 # failure of the P3-fix restart; it keeps the run from PASS until it is decided.
-                tag = ('KNOWN_DEFECT_STRICT_RESTART' if case == 'strict'
+                tag = ('KNOWN_DEFECT_STRICT_RESTART' if case.startswith('strict')
                        else 'OUTSIDE_SHAPE_OUT_OF_ENVELOPE')
                 labels.append(f"{tag}: {case}: {case_stats['outside_envelope']} of "
                               f"{case_stats['accepted']} returned fits with a broken CG stage lie "
@@ -1027,6 +1040,13 @@ def main():
                                   f"{k} {case_stats['max_metrics'].get(k, math.inf):.3g}"
                                   for k in keys)+')')
             summary['cases'][case] = case_stats
+        summary['notes'] = []
+        for case, message in unfired.items():
+            if case == 'strict' and summary['cases'].get('strict_legacy', {}).get('hook_fired'):
+                summary['notes'].append(message.replace('NOT_EXERCISED_ROUTE: ', '') +
+                                        '; in scope (no CG stage); the legacy entry fired it')
+            else:
+                labels.append(message)
 
     summary['restart_statistics'] = restart_statistics(rows)
 
@@ -1089,7 +1109,8 @@ def main():
                           tolerances={k: {c: {kk: vv for kk, vv in v[c].items() if kk != 'seconds'}
                                           for c in ('natural', 'forced', 'forced_all')}
                                       for k, v in summary['tolerances'].items()},
-                          cases=summary['cases'], restart_statistics=summary['restart_statistics'],
+                          cases=summary['cases'], notes=summary.get('notes'),
+                          restart_statistics=summary['restart_statistics'],
                           negative_control=summary.get('negative_control'),
                           stata=summary.get('stata')), indent=1, default=str))
     if cleanup is not None:

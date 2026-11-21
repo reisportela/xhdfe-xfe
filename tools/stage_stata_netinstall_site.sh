@@ -104,6 +104,7 @@ shared=(
   stata/xhdfe_p.ado
   stata/xhdfe_estat.ado
   stata/xhdfe.sthlp
+  stata/xhdfe_examples.sthlp
   stata/xhdfeakm.ado
   stata/xhdfeakm.sthlp
   stata/xhdfeconnected.ado
@@ -397,6 +398,7 @@ f xhdfe.ado
 f xhdfe_p.ado
 f xhdfe_estat.ado
 f xhdfe.sthlp
+f xhdfe_examples.sthlp
 f xhdfeakm.ado
 f xhdfeakm.sthlp
 f xhdfeconnected.ado

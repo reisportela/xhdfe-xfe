@@ -162,7 +162,24 @@ public:
     // throws). A language adapter uses it to size parallel work done before
     // fit(), such as reading the data, under the same switches as the fit.
     int resolved_thread_count(int n_rows, int num_fes) const;
-    AbsorptionMethod absorption_method_used() const noexcept { return method_used_; }
+    // ReducedPcg when the reduced-system tier published the fit, KrylovPcg when
+    // the fit's route was forced to the Krylov-PCG absorber and that absorber
+    // produced the published transform, otherwise the route's method.
+    AbsorptionMethod absorption_method_used() const noexcept {
+        if (reduced_pcg_status_ == 1) return AbsorptionMethod::ReducedPcg;
+        return krylov_pcg_published_ ? AbsorptionMethod::KrylovPcg : method_used_;
+    }
+    // The reduced-system tier in this fit: status 0 not applicable (tier off,
+    // ineligible, not reached), 1 accepted (the tier published the fit, fresh
+    // or read back from the absorption cache), 2 declined (the route's chain
+    // ran from the original data); the reason ("none" when accepted, the
+    // decline or ineligibility reason otherwise, "off" with
+    // XHDFE_REDUCED_PCG=0, "cache" when another transform came from the
+    // absorption cache); the iterations spent in an attempt that was not
+    // published.
+    int reduced_pcg_status() const noexcept { return reduced_pcg_status_; }
+    const std::string& reduced_pcg_reason() const noexcept { return reduced_pcg_reason_; }
+    int reduced_pcg_discarded_iterations() const noexcept { return reduced_pcg_discarded_iterations_; }
     bool gpu_used() const noexcept { return gpu_used_; }
     int gpu_status_code() const noexcept { return gpu_status_code_; }
     bool gpu_attempted() const noexcept { return gpu_attempted_; }
@@ -177,6 +194,26 @@ public:
     const FeComponentStats& first_pair_component_stats() const noexcept {
         return first_pair_component_stats_;
     }
+
+    // Package B (17nov2026): the per-call mark of a front end that collapses
+    // group() itself and then calls fit() (the Stata plugin without
+    // individual()). Set for that one call by this guard and restored on every
+    // exit, an exception included. Read only by the scope of the strict-residual
+    // CUDA acceptance; it changes no number, route, cache key or diagnostic.
+    class GroupedCallMark {
+    public:
+        explicit GroupedCallMark(HdfeRegressorV11& regressor) noexcept
+            : regressor_(regressor), previous_(regressor.grouped_call_mark_) {
+            regressor_.grouped_call_mark_ = true;
+        }
+        ~GroupedCallMark() noexcept { regressor_.grouped_call_mark_ = previous_; }
+        GroupedCallMark(const GroupedCallMark&) = delete;
+        GroupedCallMark& operator=(const GroupedCallMark&) = delete;
+
+    private:
+        HdfeRegressorV11& regressor_;
+        bool previous_;
+    };
 
 private:
     enum class LifecycleState {
@@ -219,6 +256,12 @@ private:
     void invalidate_semantics() noexcept;
     void reset_moved_from() noexcept;
     AbsorptionMethod select_method(std::size_t num_fes) const;
+    // The method an absorption-cache record stores: absorption_method_used()
+    // without KrylovPcg, which is reported, never stored (a hit on such a
+    // transform reports the stored sweep method, as before code 9 existed).
+    AbsorptionMethod cached_method_used() const noexcept {
+        return reduced_pcg_status_ == 1 ? AbsorptionMethod::ReducedPcg : method_used_;
+    }
     void apply_common_postprocessing(const Eigen::Ref<const Eigen::VectorXd>& y,
                                      const Eigen::Ref<const Eigen::MatrixXd>& X,
                                      const Eigen::VectorXd* weights,
@@ -238,6 +281,8 @@ private:
     std::string thread_limit_reason_ = "none";
     std::shared_ptr<detail::ParallelWorkObserver> parallel_observer_;
     bool suppress_auto_routing_retry_ = false;
+    // Package B: set only by GroupedCallMark (not copied, not moved).
+    bool grouped_call_mark_ = false;
     AbsorptionMethod method_used_ = AbsorptionMethod::GaussSeidel;
     LifecycleState lifecycle_state_ = LifecycleState::Empty;
     std::uint64_t generation_ = 0;
@@ -251,6 +296,13 @@ private:
     int gpu_absorption_iterations_ = 0;
     int cuda_tail_code_ = 0;
     FeComponentStats first_pair_component_stats_;
+    int reduced_pcg_status_ = 0;
+    std::string reduced_pcg_reason_ = "not_reached";
+    int reduced_pcg_discarded_iterations_ = 0;
+    // Point 14 (17nov2026): the published transform came from the Krylov-PCG
+    // absorber under a forced Krylov route (absorption_method_used reports
+    // KrylovPcg). Reset with every fit; read by nothing else.
+    bool krylov_pcg_published_ = false;
 };
 
 }  // namespace v11

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(xhdfe VERSION 2.31.1.20261112 LANGUAGES CXX)
+project(xhdfe VERSION 2.34.1.20261121 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -165,6 +165,7 @@ set(XHDFE_SOURCES
     src/hdfe_regressor_v11.cpp
     src/auto_team_registry.cpp
     src/fe_absorption.cpp
+    src/reduced_schur_pcg.cpp
     src/schwarz_demean.cpp
     src/akm_kss.cpp
     src/akm_projection.cpp
@@ -173,6 +174,9 @@ set(XHDFE_SOURCES
 )
 if(XHDFE_ENABLE_CUDA)
     list(APPEND XHDFE_SOURCES
+        src/reduced_schur_pcg_cuda_controller.cpp
+        src/reduced_schur_pcg_cuda.cu
+        src/network_cuda.cu
         src/fe_absorption_cuda.cu
         src/akm_kss_cuda.cu
         src/fe_absorption_cuda_certificate.cpp
@@ -219,6 +223,26 @@ endif()
 if(XHDFE_ENABLE_CUDA)
     target_compile_definitions(xhdfe PUBLIC HDFE_USE_CUDA)
     target_compile_options(xhdfe PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr>)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # src/network_cuda.cu opens cuBLAS and cuSPARSE on demand (dlopen), so
+        # the artefacts do not list them as needed libraries. Their directories
+        # stay on the build run path of the targets defined below, where linking
+        # them used to put them, so that the same files are found.
+        set(_xhdfe_cuda_math_rpath "")
+        foreach(_xhdfe_cuda_lib IN ITEMS cublas cublasLt cusparse nvJitLink)
+            if(TARGET CUDA::${_xhdfe_cuda_lib})
+                get_target_property(_xhdfe_cuda_lib_path CUDA::${_xhdfe_cuda_lib} IMPORTED_LOCATION)
+                if(_xhdfe_cuda_lib_path)
+                    get_filename_component(_xhdfe_cuda_lib_dir "${_xhdfe_cuda_lib_path}" DIRECTORY)
+                    list(APPEND _xhdfe_cuda_math_rpath "${_xhdfe_cuda_lib_dir}")
+                endif()
+            endif()
+        endforeach()
+        list(REMOVE_DUPLICATES _xhdfe_cuda_math_rpath)
+        list(APPEND CMAKE_BUILD_RPATH ${_xhdfe_cuda_math_rpath})
+    else()
+        target_link_libraries(xhdfe PRIVATE CUDA::cublas CUDA::cusparse)
+    endif()
 endif()
 if(XHDFE_ENABLE_METAL)
     target_compile_definitions(xhdfe PUBLIC HDFE_USE_METAL)
@@ -346,6 +370,85 @@ else()
 endif()
 
 if(BUILD_TESTING)
+    foreach(_reduced_contract IN ITEMS memory_index controller)
+        set(_target xhdfe_reduced_cuda_${_reduced_contract}_contract)
+        add_executable(${_target} tests/reduced_cuda_${_reduced_contract}_contract.cpp)
+        target_include_directories(${_target} PRIVATE src)
+        target_link_libraries(${_target} PRIVATE xhdfe)
+        # The controller parity test uses a CPU operator and needs no device.
+        target_compile_definitions(${_target} PRIVATE HDFE_USE_CUDA)
+        xhdfe_enable_native_tuning(${_target})
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(${_target} PRIVATE -O3 -ffast-math
+                -fno-finite-math-only -funroll-loops -ftree-vectorize
+                -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math
+                -fassociative-math -freciprocal-math)
+        endif()
+        add_test(NAME ${_target} COMMAND $<TARGET_FILE:${_target}>)
+    endforeach()
+    # Point 19 (17nov2026): the reduced tier's sum of the remaining levels, formed in 64
+    # bits before anything reads it (build_geometry). Header-level; the signed-overflow
+    # sanitizer in trap mode (no sanitizer runtime needed) stops the test on any int sum
+    # that overflows, on top of the production flags.
+    add_executable(xhdfe_reduced_pcg_level_sum_contract tests/reduced_pcg_level_sum_contract.cpp)
+    target_include_directories(xhdfe_reduced_pcg_level_sum_contract PRIVATE src)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(xhdfe_reduced_pcg_level_sum_contract PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        xhdfe_enable_native_tuning(xhdfe_reduced_pcg_level_sum_contract)
+        target_compile_options(xhdfe_reduced_pcg_level_sum_contract PRIVATE -O3 -ffast-math
+            -fno-finite-math-only -funroll-loops -ftree-vectorize
+            -fomit-frame-pointer -fno-signed-zeros -fno-trapping-math
+            -fassociative-math -freciprocal-math
+            -fsanitize=signed-integer-overflow -fno-sanitize-recover=all
+            -fsanitize-undefined-trap-on-error)
+        target_link_options(xhdfe_reduced_pcg_level_sum_contract PRIVATE
+            -fsanitize=signed-integer-overflow -fno-sanitize-recover=all
+            -fsanitize-undefined-trap-on-error)
+    endif()
+    add_test(NAME xhdfe_reduced_pcg_level_sum_contract
+             COMMAND $<TARGET_FILE:xhdfe_reduced_pcg_level_sum_contract>)
+    if(XHDFE_ENABLE_CUDA)
+        # The CUDA operator's device smoke (package 2): it compiles the operator source
+        # itself with XHDFE_REDUCED_CUDA_TEST_HOOKS (the source cells of the device-built
+        # arrays and the count of live device bytes exist only in such builds) and the
+        # library's CUDA flags, so it does not link the library's copy of the operator.
+        add_executable(xhdfe_reduced_cuda_operator_smoke
+            tests/reduced_cuda_operator_smoke.cpp src/reduced_schur_pcg_cuda.cu)
+        target_include_directories(xhdfe_reduced_cuda_operator_smoke PRIVATE src include tests/reduced_cuda_bench)
+        target_link_libraries(xhdfe_reduced_cuda_operator_smoke PRIVATE Eigen3::Eigen CUDA::cudart)
+        target_compile_definitions(xhdfe_reduced_cuda_operator_smoke PRIVATE
+            HDFE_USE_CUDA XHDFE_REDUCED_CUDA_TEST_HOOKS)
+        target_compile_options(xhdfe_reduced_cuda_operator_smoke PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3 --expt-relaxed-constexpr>)
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(xhdfe_reduced_cuda_operator_smoke PRIVATE OpenMP::OpenMP_CXX)
+            target_compile_definitions(xhdfe_reduced_cuda_operator_smoke PRIVATE HDFE_USE_OPENMP)
+            foreach(_xhdfe_omp_flag IN LISTS _xhdfe_cuda_host_openmp_flags)
+                target_compile_options(xhdfe_reduced_cuda_operator_smoke PRIVATE
+                    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=${_xhdfe_omp_flag}>")
+            endforeach()
+        endif()
+        xhdfe_enable_native_tuning(xhdfe_reduced_cuda_operator_smoke)
+        add_test(NAME xhdfe_reduced_cuda_operator_smoke
+                 COMMAND $<TARGET_FILE:xhdfe_reduced_cuda_operator_smoke>)
+        # The rational oracle's runner against the library's operator; run by
+        # tests/reduced_cuda_operator_oracle.py with the oracle's fixtures (not a ctest:
+        # the fixtures live outside the repository).
+        add_executable(xhdfe_reduced_cuda_operator_oracle tests/reduced_cuda_operator_oracle.cpp)
+        target_include_directories(xhdfe_reduced_cuda_operator_oracle PRIVATE src)
+        target_link_libraries(xhdfe_reduced_cuda_operator_oracle PRIVATE xhdfe)
+        xhdfe_enable_native_tuning(xhdfe_reduced_cuda_operator_oracle)
+        # Package C: fit identity and status, the partial-out device route, a cache hit, concurrent fits and a
+        # refusal inside the CPU path. Requires a visible CUDA device.
+        find_package(Threads REQUIRED)
+        add_executable(xhdfe_cuda_weighted_cpu_route_contract tests/cuda_weighted_cpu_route_contract.cpp)
+        target_link_libraries(xhdfe_cuda_weighted_cpu_route_contract PRIVATE xhdfe Threads::Threads)
+        xhdfe_enable_native_tuning(xhdfe_cuda_weighted_cpu_route_contract)
+        add_test(NAME xhdfe_cuda_weighted_cpu_route_contract
+                 COMMAND $<TARGET_FILE:xhdfe_cuda_weighted_cpu_route_contract>)
+    endif()
     add_executable(xhdfe_wide_product_probe tests/wide_product_probe.cpp)
     target_include_directories(xhdfe_wide_product_probe PRIVATE src include)
     target_link_libraries(xhdfe_wide_product_probe PRIVATE Eigen3::Eigen)
@@ -361,6 +464,16 @@ if(BUILD_TESTING)
     target_include_directories(xhdfe_ac_arena_storage_contract PRIVATE src)
     add_test(NAME xhdfe_ac_arena_storage_contract
              COMMAND $<TARGET_FILE:xhdfe_ac_arena_storage_contract>)
+    # 17nov2026: the reduced tier's buffers on the branch Apple targets take
+    # (posix_memalign and std::free), forced here by its macro (POSIX hosts).
+    if(NOT WIN32)
+        add_executable(xhdfe_reduced_pcg_buffer_alloc_contract tests/reduced_pcg_buffer_alloc_contract.cpp)
+        target_include_directories(xhdfe_reduced_pcg_buffer_alloc_contract PRIVATE src)
+        target_compile_definitions(xhdfe_reduced_pcg_buffer_alloc_contract PRIVATE
+            XHDFE_REDUCED_PCG_POSIX_MEMALIGN)
+        add_test(NAME xhdfe_reduced_pcg_buffer_alloc_contract
+                 COMMAND $<TARGET_FILE:xhdfe_reduced_pcg_buffer_alloc_contract>)
+    endif()
     add_executable(xhdfe_auto_team_registry_contract
                    tests/auto_team_registry_contract.cpp
                    src/auto_team_registry.cpp)

@@ -5,17 +5,17 @@
 \title{xhdfe: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend}
 \description{
 The \pkg{xhdfe} package estimates linear models with multiple
-high-dimensional fixed effects through a compiled C++ backend -- the very
-same estimator core (version 2.31.1) behind the Stata \code{xhdfe} command
-and the Python \code{xhdfe} package. CPU behavior is the reference
-implementation; the optional CUDA GPU absorber is tested against it on the
-explicitly certified surfaces and never silently replaces it. Where possible the package mirrors
+high-dimensional fixed effects through the compiled C++ estimator shared
+with the Stata and Python interfaces. The CPU absorber is the reference
+implementation. Use \code{backend = "cuda"} to require CUDA on supported
+fits. Where possible the package mirrors
 \code{reghdfe}'s reporting conventions and defaults, while also exposing
 \pkg{fixest}-style small-sample corrections and design ideas drawn from
-\code{pyfixest} and \code{FixedEffectModels.jl}. Under the default
-\code{"reghdfe-comparable"} tolerance mode, coefficients match
-\code{reghdfe} at the same nominal tolerance (down to problem
-conditioning).
+\code{pyfixest}, \code{FixedEffectModels.jl}, the \code{within} solvers of
+Fischer and Schroeder, and \code{fereg} by Schmieder (see the
+Acknowledgements section). The default \code{"reghdfe-comparable"}
+mode targets comparable within-projection accuracy. See \link{xhdfe}
+for the restrictions on specific designs and backends.
 }
 \section{Features}{
 
@@ -46,7 +46,9 @@ conditioning).
     the Stata \code{group()} / \code{individual()} machinery.
   \item An optional CUDA GPU absorber with a fail-closed contract:
     a requested GPU backend that cannot actually be used raises an
-    error instead of silently falling back to the CPU.
+    error. \code{weighted_cpu_route = TRUE} requests a CPU fit when
+    eligible and reports \code{gpu_status = "weighted_cpu_route"} (see
+    \code{\link{xhdfe}}).
 }
 }
 
@@ -74,10 +76,19 @@ established high-dimensional fixed-effects estimators:
     \url{https://github.com/sergiocorreia/reghdfe}
   \item fixest (R, Laurent Berge): \url{https://github.com/lrberge/fixest}
   \item pyfixest (Python, Alexander Fischer and collaborators):
+    \url{https://pyfixest.org/},
     \url{https://github.com/py-econometrics/pyfixest}
   \item FixedEffectModels.jl (Julia, Matthieu Gomez and collaborators):
     \url{https://github.com/FixedEffects/FixedEffectModels.jl}
+  \item within (Rust and Python, Alexander Fischer and Kristof Schroeder):
+    \url{https://github.com/py-econometrics/within}
+  \item fereg (Stata, Johannes F. Schmieder):
+    \url{https://github.com/johannes-schmieder/fereg}
 }
+Comparison packages, current releases checked on 14 November 2026:
+reghdfe 6.14.1 (8 July 2026), fixest 0.14.2 (CRAN, 26 June 2026),
+pyfixest 0.70.0, FixedEffectModels.jl 2.2.0 (2 November 2026) and fereg
+0.6.0.
 }
 
 \section{Authors}{
@@ -99,6 +110,34 @@ no software tool or AI system is credited as author or co-author.
 interoperate with \code{reghdfe} (Sergio Correia), \pkg{fixest} (Laurent
 Berge), \code{pyfixest} (Alexander Fischer and collaborators), and
 \code{FixedEffectModels.jl} (Matthieu Gomez and collaborators). The
+\code{within} materials of Alexander Fischer and Kristof Schroeder, with
+their 2026 paper, were the direct starting point for the
+graph-preconditioned MLSMR/additive-Schwarz route. The reduced-system tier
+of version 2.32 (\code{"reduced-pcg"}) follows the design implemented in
+\code{fereg} 0.6.0 and described in Schmieder (2026), and cites it as such:
+exact elimination of the fixed effect with the most levels and
+Jacobi-preconditioned conjugate gradients on the remaining system, for two
+to five fixed effects, with up to eight columns per pass, a limit of 1,500
+iterations for that stage and a stall test of the same form (the residual
+must halve within each window of iterations). As that paper notes, the
+elimination is the block reduction of Somaini and Wolak (2016), and
+iterative solutions have precedents in Abowd, Creecy and Kramarz (2002) and
+in Mittag (2019). \pkg{xhdfe} does not implement what Schmieder (2026)
+presents as \code{fereg}'s distinguishing contribution in this step, the
+escalation to stronger preconditioners, including combinatorial multigrid,
+on poorly connected data: where the Jacobi-preconditioned iteration stalls,
+\pkg{xhdfe} hands the fit to its previous routes. \pkg{xhdfe}'s part is an
+independent C++ implementation inside its own routing, certificate,
+fallbacks and diagnostics. \pkg{xhdfe} contains no \code{fereg} source code;
+its C++ implementation was written after studying the paper and
+\code{fereg}'s public source. Two changes of
+version 2.31.0 followed benchmarks against \code{fereg}: reading the Stata
+data in parallel on qualified hosts, as \code{fereg} does, and larger
+automatic thread teams (one thread per 25,000 rows instead of 500,000),
+where \code{fereg} by default uses all logical processors and sizes the
+parallel work of each stage by its amount of work; \code{fereg} credits the
+precedent of parallel copying from Stata to David Roodman's \code{julia}
+package (Roodman 2025). The
 authors thank Paulo Guimaraes (Banco de Portugal), Marta Silva (Banco de
 Portugal), and Nelson Areal (EEG/Universidade do Minho). An earlier proof
 of concept was shared at BPLIM's "Speeding Up Empirical Research"
@@ -111,7 +150,7 @@ acknowledged. The usual disclaimer applies.
 
 \references{
 Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-effects regression via a C++ backend." Version 2.31.1.
+effects regression via a C++ backend." Version 2.34.1.
 \url{https://github.com/reisportela/xhdfe-xfe}
 
 Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -139,11 +178,42 @@ arXiv:2601.21749.
 
 Fischer, Alexander, and collaborators. "pyfixest: Fast high-dimensional
 fixed effect estimation in Python." Python package.
+\url{https://pyfixest.org/} and
 \url{https://github.com/py-econometrics/pyfixest}
 
 FixedEffects.jl contributors. 2025. "FixedEffectModels.jl: Linear models
 with instrumental variables and high dimensional categorical variables."
 Julia package. \url{https://github.com/FixedEffects/FixedEffectModels.jl}
+
+Abowd, John M., Robert H. Creecy, and Francis Kramarz. 2002. "Computing
+person and firm effects using linked longitudinal employer-employee data."
+Longitudinal Employer-Household Dynamics Technical Paper TP-2002-06, U.S.
+Census Bureau.
+
+Mittag, Nikolas. 2019. "A simple method to estimate large fixed effects
+models applied to wage determinants." Labour Economics 61: 101766.
+\doi{10.1016/j.labeco.2019.101766}
+
+Somaini, Paulo, and Frank A. Wolak. 2016. "An algorithm to estimate the
+two-way fixed effects model." Journal of Econometric Methods 5(1):
+143-152. \doi{10.1515/jem-2014-0008}
+
+Roodman, David. 2025. "Julia as a universal platform for statistical
+software development." Stata Journal 25(2): 255-284.
+\doi{10.1177/1536867X251341105}
+
+Fischer, Alexander, and Kristof Schroeder. 2026. "Graph Preconditioning
+for High-Dimensional Fixed Effects Regression." Mimeo, draft of June 2026.
+\url{https://github.com/py-econometrics/within-paper}
+
+Fischer, Alexander, and Kristof Schroeder. "within: Fast solvers for
+high-dimensional fixed effects." Rust crate and Python package.
+\url{https://github.com/py-econometrics/within}
+
+Schmieder, Johannes. 2026. "fereg: Fast high-dimensional fixed-effects
+regressions in Stata." CEPR Discussion Paper No. 22170. CEPR Press, Paris
+& London. \url{https://cepr.org/publications/dp22170}; software:
+\url{https://github.com/johannes-schmieder/fereg}
 }
 \seealso{
 \code{\link{xhdfe}} for the formula interface,

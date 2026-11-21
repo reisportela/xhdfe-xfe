@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.2  12nov2026}{...}
+{* *! version 1.0.2  21nov2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachetable" "help xhdfegelbachetable"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachbootstrap} {hline 2}}Full-refit pairs bootstrap for Gelbach coefficient-movement accounting{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.2 (12nov2026), distributed with xhdfegelbach 1.6.2.}{p_end}
+{pstd}{bf:Version 1.0.2 (21nov2026), distributed with xhdfegelbach 1.6.2.}{p_end}
 
 
 {title:Syntax}
@@ -32,7 +32,7 @@
 {synopt :{opt minvalid(#)}}minimum successful refits; default ceil(0.9*reps){p_end}
 {synopt :{opt bootci(type)}}{cmd:percentile} (default) or {cmd:basic}{p_end}
 {synopt :{opt level(#)}}bootstrap confidence level; default {cmd:c(level)}{p_end}
-{synopt :{opt requiregpu}}fail if requested CUDA is not really used{p_end}
+{synopt :{opt requiregpu}}require real CUDA use for the point estimate and every counted refit{p_end}
 {synopt :{opt sharetol(#)}}share-denominator threshold; default 1e-12{p_end}
 {synoptline}
 {p2colreset}{...}
@@ -41,11 +41,16 @@
 The following {help xhdfegelbach} point-estimate options are accepted:
 {opt vce()}, {opt cluster()}, {opt gamma0}, {opt cov0},
 {opt absorbedtargets()}, {opt focal()}, {opt tol()}, {opt threads()},
-{opt gpu}, {opt verbose}, {opt connected()} and {opt connectivityfes()}.
-The reporting-only {opt shares()}, {opt sharetmin()}, {opt sampleaudit} and
-{opt generate()} options are not bootstrap arguments; construct shares and
-tables from the returned draw/interval objects.
-The point VCE and the bootstrap unit are separate choices.{p_end}
+{opt gpu}, {opt weightedcpuroute(on|off)}, {opt verbose}, {opt connected()} and {opt connectivityfes()}.
+{opt verbose} applies to the point fit. The point VCE and the resampling unit
+are separate choices. Use {helpb xhdfegelbachetable} to report shares and
+intervals from the returned point and bootstrap matrices.{p_end}
+
+{pstd}
+{opt requiregpu} requires {opt gpu}. A point fit without real GPU work
+stops with error 459, including an eligible {opt weightedcpuroute(on)} fit.
+A replication without real GPU work receives code 459 in the ledger and
+does not count towards {opt minvalid()}.{p_end}
 
 
 {title:Description}
@@ -72,10 +77,8 @@ re-estimated point functionals enter the empirical bootstrap distribution.{p_end
 
 {pstd}
 The caller's Stata RNG state is restored on success and on a fail-closed
-completion. Repeating a call with the same seed and estimator build reproduces
-the draw matrices exactly. Python uses PCG64 child streams and R uses
-L'Ecuyer-CMRG streams, so the same integer seed is reproducible within each
-frontend but does not imply identical resamples across frontends. Every
+completion. Use the same seed to repeat the Stata resampling sequence.
+Python and R use their own random-number streams. Every
 attempted draw is retained in
 {cmd:r(bootstrap_ledger)} with validity, return code, drawn/retained rows,
 singletons, identity gap and GPU use. Fewer than {opt minvalid()} successful
@@ -133,7 +136,7 @@ point covariance contract {cmd:r(cov)}, {cmd:r(total_cov)},
 {synopt:{cmd:r(gpu_used_point)}}real CUDA use in the point estimate{p_end}
 {synopt:{cmd:r(gpu_used_all_valid)}}real CUDA use in every valid refit{p_end}
 {synopt:{cmd:r(point_gpu_backend)}, {cmd:r(point_gpu_status)}}point backend diagnostics{p_end}
-{synopt:{cmd:r(point_cuda_tail)}}three-FE Comparable CUDA completion of the point estimate:
+{synopt:{cmd:r(point_cuda_tail)}}CUDA completion of the point estimate:
 {cmd:none}, {cmd:device-lsmr}, or {cmd:host-mlsmr} (see {help xhdfe}){p_end}
 {synopt:{cmd:r(interval_status)}}nonregularity qualification{p_end}
 {synopt:{cmd:r(rng)}}Stata RNG reproducibility convention{p_end}
@@ -145,16 +148,14 @@ point covariance contract {cmd:r(cov)}, {cmd:r(total_cov)},
 
 {title:Examples}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ age) focal(educ)}
-{cmd:x2groups("human = ability : job = tenure exper") commonfes(year)}
-{cmd:fes(firm) method(pairs) reps(499) seed(42)}{p_end}
-{phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown) saving(gelbach.md) replace}{p_end}
+{pstd}Resample observations from the public automobile dataset.
+The small replication count is for illustration.{p_end}
+{phang2}{cmd:. use "https://www.stata-press.com/data/r19/auto.dta", clear}{p_end}
+{phang2}{cmd:. xhdfegelbachbootstrap price, x1(weight)}
+{cmd:x2groups("size = length : efficiency = mpg") method(pairs) reps(39) seed(42)}{p_end}
+{phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown) interval(bootstrap)}{p_end}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ)}
-{cmd:x2groups("job = tenure exper") fes(firm) method(cluster_pairs)}
-{cmd:bootcluster(worker) reps(499) seed(42) bootci(basic)}{p_end}
-{phang2}{cmd:. matrix list r(bootstrap_ledger)}{p_end}
-
+{pstd}See {help xhdfe_examples##cluster_bootstrap:cluster-pairs resampling on the Grunfeld panel}.{p_end}
 
 {title:Also see}
 

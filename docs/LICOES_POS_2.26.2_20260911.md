@@ -794,3 +794,44 @@ completo, amostra podada, omissões, desequilíbrio, escalas e ruído baixo),
 também exercitam esta inferência. As recusas esperadas são contadas à parte.
 A evidência original, os binários falhados e as quatro revisões Fable estão
 preservados em `Verifications/issue18_codex_20261111/`.
+
+## 15nov2026 — experimento do operador reduzido CUDA Comparable
+
+A hipótese delimitada transpõe apenas o produto iterativo implícito `S*p`
+para CUDA FP64. A recorrência, substituição do resíduo, confirmação D10 e
+certificado mantêm os cálculos CPU nos pontos anteriores. O controlador
+original CPU permanece byte a byte igual; o experimento fica desligado por
+omissão, exclui Fast e contorna caches persistentes e perfis de mobilidade.
+Não se ajustam tolerâncias para obter entrada no tier ou um ganho de tempo.
+
+- **Recusa indevida do verificador de admissão:** o primeiro adapter somava
+  o bound CPU, que já inclui o workspace iterativo, com o layout CUDA de
+  construção. O layout e o cursor morrem antes desse workspace ser alocado.
+  A admissão privada CUDA passa a tomar o máximo dos picos por fases, contando
+  os buffers próprios residentes de `Geometry` e o estado host do operador,
+  sem duplicar as vistas `cc`/`cell_ptr`. O budget original e o solver CPU
+  ficam intactos. A falta de um controlo por formas atrasou a deteção.
+- **Erro demonstrado de índices no protótipo:** somar a lane ou o último
+  stride a um índice `int` próximo de `INT_MAX` podia transbordar antes da
+  comparação com o fim. Os dois kernels usam contadores `size_t`, convertendo
+  para `int` apenas dentro do intervalo provado. O controlo offline reproduz
+  5.120 combinações sem alocar biliões de células. Não é uma alteração de
+  álgebra, precisão ou desempenho.
+- **Erros do harness, sem alteração do estimador:** as injeções de recusa
+  existentes recebem nomes, não números; a CUDA antiga não promete repetição
+  bit a bit das suas reduções; e já recusa a leitura de transforms do cache
+  quando é pedida GPU. Os controlos respeitam estas convenções e os limites
+  numéricos pré-existentes, preservando os ensaios iniciais. Stata também
+  baseou o nome do log nos argumentos finais: o leg concluído foi validado no
+  log real, e só o leg pendente foi executado. R reutiliza as dependências
+  existentes em bibliotecas de leitura explícitas; não se instalaram pacotes.
+
+Reprodutores permanentes: `tests/reduced_cuda_memory_index_contract.cpp`,
+`tests/reduced_cuda_controller_contract.cpp` e o seu controlo de fonte,
+`tests/reduced_cuda_operator_smoke.cpp`,
+`tests/reduced_cuda_runtime_contract.py`,
+`tests/stata/reduced_cuda_runtime_contract.do` e
+`tests/reduced_cuda_r_contract.R`/`tests/reduced_cuda_r_threads.R`.
+O oráculo racional independente e os recibos estão em
+`Verifications/reduced_cuda_comparable_20261115_01/`. A validação dirigida não
+constitui promoção por omissão nem certificação da matriz completa.

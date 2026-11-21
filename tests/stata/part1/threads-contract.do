@@ -5,8 +5,19 @@ set more off
 local ROOT "/home/mangelo/Documents/GitHub/xhdfe"
 local ROOT_ENV : environment XHDFE_REPO_ROOT
 if ("`ROOT_ENV'" != "") local ROOT "`ROOT_ENV'"
-adopath ++ "`ROOT'/stata"
+* The package comes from the documented override XHDFE_STATA_ADOPATH when it
+* is set (as in _helpers.do), from the repository otherwise; ROOT still names
+* the sources read below. The loaded xhdfe.ado is asserted.
+local adopath : environment XHDFE_STATA_ADOPATH
+if (`"`adopath'"' == "") local adopath `"`ROOT'/stata"'
+while (strlen(`"`adopath'"') > 1 & substr(`"`adopath'"', -1, 1) == "/") {
+    local adopath = substr(`"`adopath'"', 1, strlen(`"`adopath'"') - 1)
+}
+adopath ++ `"`adopath'"'
 discard
+quietly findfile xhdfe.ado
+assert `"`r(fn)'"' == `"`adopath'/xhdfe.ado"'
+display as text `"xhdfe.ado: `r(fn)'"'
 
 set obs 600000
 generate long row = _n - 1

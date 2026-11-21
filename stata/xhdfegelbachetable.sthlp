@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.0.0  12nov2026}{...}
+{* *! version 1.0.0  21nov2026}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
 {vieweralsosee "xhdfegelbachbootstrap" "help xhdfegelbachbootstrap"}{...}
 {vieweralsosee "xhdfegelbachcoefplot" "help xhdfegelbachcoefplot"}{...}
@@ -9,7 +9,7 @@
 {p2col :{cmd:xhdfegelbachetable} {hline 2}}Multi-panel Gelbach tables{p_end}
 {p2colreset}{...}
 
-{pstd}{bf:Version 1.0.0 (12nov2026), distributed with xhdfegelbach 1.6.2.}{p_end}
+{pstd}{bf:Version 1.0.0 (21nov2026), distributed with xhdfegelbach 1.6.2.}{p_end}
 
 
 {title:Syntax}
@@ -30,9 +30,9 @@
 {synopt :{opt labels(spec)}}colon-separated {it:group = display label} entries{p_end}
 {synopt :{opt noother}}suppress the default {cmd:Other (filtered)} aggregate and warn that filtered rows do not close{p_end}
 {synopt :{opt digits(#)}}printed decimal places, 0 through 12; default 3{p_end}
-{synopt :{opt caption(text)}}optional table caption{p_end}
-{synopt :{opt notes(text)}}additional table note{p_end}
-{synopt :{opt level(#)}}analytic confidence level when no bootstrap is present; default {cmd:c(level)}{p_end}
+{synopt :{opt caption(text)}}caption for Markdown, LaTeX or HTML files{p_end}
+{synopt :{opt notes(text)}}additional note in the Results window and supported file formats{p_end}
+{synopt :{opt level(#)}}analytic confidence level; default {cmd:c(level)}{p_end}
 {synopt :{opt interval(type)}}{cmd:auto} (default), {cmd:normal}, or require {cmd:bootstrap}{p_end}
 {synopt :{opt sharetol(#)}}override the inherited absolute share-denominator threshold{p_end}
 {synopt :{opt sharetmin(#)}}override the inherited weak-denominator t threshold{p_end}
@@ -60,8 +60,9 @@ After {cmd:xhdfegelbachbootstrap}, percentile/basic intervals and bootstrap
 SEs are used automatically wherever available, including each component row
 from {cmd:r(bootstrap_delta_ci)}; {cmd:confidence_method} is stamped
 {cmd:bootstrap_percentile} or {cmd:bootstrap_basic}. {opt interval(normal)}
-forces analytic reporting, while {opt interval(bootstrap)} fails unless an
-immediate bootstrap result is available. After the point command,
+forces analytic reporting at {opt level()}, including after a bootstrap.
+{opt interval(bootstrap)} needs an immediate bootstrap result. Its interval
+endpoints keep the confidence level set when bootstrapping. After the point command,
 analytic normal/delta-method intervals are used where the public covariance
 contract permits them. This includes component/base and component/movement
 share intervals from the joint covariance, denominator variance and relevant
@@ -88,13 +89,15 @@ not causal mediation, and preserve the bootstrap nonregularity warning.{p_end}
 
 {title:Examples}
 
-{phang2}{cmd:. xhdfegelbachbootstrap lwage, x1(educ)}
-{cmd:x2groups("human = ability : job = tenure exper") commonfes(year)}
-{cmd:fes(firm) method(pairs) reps(499) seed(42)}{p_end}
-{phang2}{cmd:. xhdfegelbachetable, panels(all) format(markdown)}
-{cmd:keep("human|job") labels("human = Human capital : job = Job controls")}
-{cmd:saving(gelbach.md) replace}{p_end}
+{pstd}The {help xhdfe_examples##gelbach:NLS wage example} shows a table
+from a point decomposition. The
+{help xhdfe_examples##bootstrap:public automobile example} produces a
+table with bootstrap intervals.{p_end}
 
+{pstd}After the point decomposition in the NLS example, show the levels panel
+and relabel the selected component. The remaining components are pooled.{p_end}
+{phang2}{cmd:. xhdfegelbachetable, focal(tenure) panels(levels) format(markdown)}
+{cmd:keep("experience") labels("experience = Experience")}{p_end}
 
 {title:Also see}
 

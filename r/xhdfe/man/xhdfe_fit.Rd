@@ -23,7 +23,8 @@ xhdfe_fit(y, X, fes = NULL,
           level = 95,
           threads = 0, default_threads = 0, max_threads = 0,
           min_parallel_rows = 20000, target_rows_per_thread = 0,
-          backend = c("default", "cpu", "cuda", "metal"))
+          backend = c("default", "cpu", "cuda", "metal"),
+          reduced_pcg = NULL, reduced_pcg_cuda = NULL, weighted_cpu_route = FALSE)
 }
 \arguments{
 \item{y}{numeric outcome vector (no \code{NA}s).}
@@ -163,6 +164,16 @@ heuristics; see \code{\link{xhdfe}}.}
 \item{backend}{\code{"default"}, \code{"cpu"}, \code{"cuda"}, or
 \code{"metal"}, with the same fail-closed GPU contract as
 \code{\link{xhdfe}}; see its \emph{GPU backends} section.}
+
+\item{reduced_pcg}{\code{NULL} (default), \code{TRUE} or \code{FALSE}: the
+reduced-system tier for this fit; see \code{\link{xhdfe}}.}
+
+\item{weighted_cpu_route}{Logical scalar, default \code{FALSE}. With
+\code{TRUE}, request CPU for eligible weighted CUDA fits. See \code{\link{xhdfe}}.}
+
+\item{reduced_pcg_cuda}{\code{NULL} (default), \code{TRUE} or \code{FALSE}:
+the experimental CUDA variant of that tier for this fit, on CUDA fits
+only; see \code{\link{xhdfe}}.}
 }
 \value{
 The same \code{"xhdfe"} object documented in
