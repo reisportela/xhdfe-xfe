@@ -136,5 +136,5 @@ provenance", "Acknowledgements" and "References") and `help xhdfe`
 
 `xhdfe` contains no source code of either `fereg`.
 
-See [the validation record](VALIDATION_2.34.1.20261121.md) for what was run,
-on which data and with which results.
+See [the validation record](https://github.com/reisportela/xhdfe-xfe/blob/main/docs/releases/VALIDATION_2.34.1.20261121.md)
+for what was run, on which data and with which results.

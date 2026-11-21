@@ -26,7 +26,8 @@ Before publication, the exact assets of that draft were checked on a Linux
 host with an NVIDIA H100:
 
 - All thirteen assets match `SHA256SUMS.txt` and their GitHub digests; the
-  five that were executed were also hashed locally.
+  five used in these checks (the two Linux bundles, the wheel, the
+  net-install site archive and the checksum file) were also hashed locally.
 - The Linux CPU and CUDA Stata plugins ran in licensed Stata from an adopath
   holding only the unpacked bundle, without NVIDIA libraries on the loader
   path: ordinary fits in both tolerance modes against a closed-form oracle,
@@ -51,7 +52,12 @@ host with an NVIDIA H100:
 After publication, a fresh `net install` of `xhdfe` and `xfepout` from the
 public address into an empty folder matched the published site byte for byte
 in its 38 installed and ancillary files, `xhdfe_examples.sthlp` among them,
-and the installed package passed the ordinary fit.
+and the installed package passed the ordinary fit. From such an installation,
+`xhdfegpu` with its defaults downloaded the source archive from the public
+site (the same bytes as the release asset), built the CUDA plugins for the
+host's H100 in about twelve and a half minutes and installed them; a GPU fit
+with real GPU use asserted then agreed with the CPU fit to 3.3e-14 in the
+coefficients and 1.6e-15 in the standard errors.
 
 ## Agreement with the published 2.31.1
 
