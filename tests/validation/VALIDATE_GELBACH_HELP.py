@@ -59,7 +59,7 @@ def validate_python_help() -> None:
         "cov0", "tol", "num_threads", "weights", "fweights",
         "absorbed_targets", "x1_names", "focal", "gpu", "connected",
         "connectivity_fes", "common_fes", "sample_info",
-        "fe_variance_ratio_min",
+        "fe_variance_ratio_min", "weighted_cpu_route",
     ], "unexpected Python decompose signature")
     require(parameter_names(gelbach.tidy) == [
         "result", "focal", "include_intercept", "include_total",
@@ -240,7 +240,7 @@ def validate_stata_help() -> None:
         "linear probability model", "joint_base_covariance_delta_method",
         "not_certified_with_common_fes",
         "not_applicable_common_fe_intercept",
-        "examples/gelbach_example.do", "examples/gelbach_absorbed_target.do",
+        "xhdfe_examples##gelbach", "xhdfe_examples##gelbach_absorbed",
     ], "Stata Gelbach help")
 
     companions = {

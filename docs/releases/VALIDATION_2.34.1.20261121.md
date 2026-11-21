@@ -49,10 +49,10 @@ measurement the two runs differ by more than 15 %.
   processors, 21.9 s against 35.7 s at 16.
 - `akm_v02_secondreg_small` (firm-specific slopes) takes the same route in
   both versions by default, with the same 3,013 iterations and identical
-  results: 34.4 s against 39.9 s at 16 processors. At 4 processors the
-  two-run medians, 80.3 s and 75.5 s, were not measured in alternation and
-  their ranges overlap. With the experimental firm-slope solver switched on,
-  2.34.1 takes 2.2 s at 4 processors and 1.2 s at 16.
+  results: 34.4 s against 39.9 s at 16 processors. At 4 processors, five
+  alternated pairs give medians of 75.6 s and 79.0 s and a median ratio of
+  0.97, with 2.34.1 slower in two of them. With the experimental firm-slope
+  solver switched on, 2.34.1 takes 2.2 s at 4 processors and 1.2 s at 16.
 - `marta_group_individual_3m` (`group()` and `individual()`) takes the same
   route in both versions, with identical results: 7.7 s against 8.3 s at 4
   processors. At 16 processors, ten alternated pairs give a median ratio of
@@ -96,8 +96,8 @@ interfaces, on CPU and on CUDA.
 
 ## Help files and release checks
 
-- The 21 example blocks of `help xhdfe_examples` run on this package with
-  public Stata Press data, including the CUDA block.
+- The 21 code blocks of the 20 examples of `help xhdfe_examples` run on this
+  package with public Stata Press data, including the CUDA block.
 - The options, changed defaults, stored-result names, cross-references and
   version lines of the nine Stata help files were checked against the ado
   files; the "Known limitations" of `help xhdfe` match the release notes.
@@ -105,7 +105,17 @@ interfaces, on CPU and on CUDA.
   corrected to carry `xhdfe_examples.sthlp`, and the site validator now
   compares the staged package with the package file of the repository.
 - The source archive that `xhdfegpu` downloads, built from a clean export,
-  carries the sources added since 2.31.1 and passes its validator.
+  carries the sources added since 2.31.1 and passes its validator. The CUDA
+  plugins built from that archive with its own scripts (`sm_90`, OpenMP) load
+  from an isolated adopath: on a public dataset, a GPU fit with real GPU use
+  asserted agrees with the CPU fit to 3.3e-14 in the coefficients and 1.6e-15
+  in the standard errors, and `xfepout` runs.
+- The R package, built and checked from the committed tree with the commands
+  of the release workflow (`R CMD build` and `R CMD check`, R 4.6.0, CPU): no
+  error, one warning (the source-file extensions, as in 2.31.1) and one note
+  (the compiled code writes to the standard output and error streams). Its
+  tests give 1,192 passes and no failure; 8 are skipped for inputs or builds
+  that check does not have.
 - `tests/release_lint.sh` and `tools/validate_release_metadata.py` pass.
 
 ## Builds on other platforms

@@ -1605,8 +1605,9 @@ graph-preconditioned route are those that Fischer and Schroeder take from the La
 {pstd}
 Comparison packages, current releases checked at their sources on 21 November 2026: {cmd:reghdfe} 6.14.1
 (8 July 2026), {cmd:fixest} 0.14.2 (CRAN, 26 June 2026), {cmd:pyfixest} 0.70.0 (8 November 2026),
-{cmd:FixedEffectModels.jl} 2.2.1 (16 November 2026), {cmd:reghdfejl} 1.1.9 (12 October 2026), {cmd:fereg} by
-Schmieder 0.6.7 (20 November 2026) and {cmd:fereg} by Liu 0.5.0 (21 November 2026).{p_end}
+{cmd:FixedEffectModels.jl} 2.2.1 (16 November 2026), {cmd:fereg} by Schmieder 0.6.7 (20 November 2026) and
+{cmd:fereg} by Liu 0.5.0 (21 November 2026). {cmd:reghdfejl} was benchmarked at 1.1.9, its GitHub release of
+12 October 2026.{p_end}
 
 {pstd}
 We thank Paulo Guimaraes (Banco de Portugal), Marta Silva
