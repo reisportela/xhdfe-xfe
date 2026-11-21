@@ -13,6 +13,46 @@ this release is that of development commit `a0c1d8b6f`; the commits after it
 change help files and documentation, release metadata, packaging lists and
 release scripts.
 
+## Published artifacts
+
+The release was published on 21 November 2026 at 17:50:39 UTC.
+[Preflight run 44923004907](https://github.com/reisportela/xhdfe-xfe/actions/runs/44923004907)
+and [version-tag run 44927844827](https://github.com/reisportela/xhdfe-xfe/actions/runs/44927844827)
+passed on Linux, Windows and macOS, including the assembly of the release
+assets, and [publication run 44932190374](https://github.com/reisportela/xhdfe-xfe/actions/runs/44932190374)
+published the draft of the version-tag run and its net-install site.
+
+Before publication, the exact assets of that draft were checked on a Linux
+host with an NVIDIA H100:
+
+- All thirteen assets match `SHA256SUMS.txt` and their GitHub digests; the
+  five that were executed were also hashed locally.
+- The Linux CPU and CUDA Stata plugins ran in licensed Stata from an adopath
+  holding only the unpacked bundle, without NVIDIA libraries on the loader
+  path: ordinary fits in both tolerance modes against a closed-form oracle,
+  the changes since 2.31.1 (the reduced-system route and `reducedpcg(off)`,
+  `savefe`, an absorbed regressor with slopes, a weighted fit), `xfepout` and
+  an eight-million-row CPU smoke.
+- On the 46-million-row panel `main_95_21_ready` at 16 processors, the CPU
+  plugin reproduces the result of the development build (coefficients within
+  2.1e-16, standard errors within 1.1e-15, same sample, route and iterations)
+  in 28.2 s. It is the portable build; the development build, compiled for
+  the host's instruction set, takes 21 to 22 s. The CUDA plugin, with real GPU
+  use asserted, agrees with the CPU plugin to 8.7e-18 and 8.1e-15 and takes
+  8.9 s.
+- The CUDA plugin lists no cuBLAS or cuSPARSE dependency. The optional
+  firm-slope route ran with the NVIDIA libraries on the loader path
+  (coefficients within 3.3e-13 and standard errors within 1.8e-9 of the
+  default route) and, without them, stopped with the documented error and
+  left no estimates.
+- The manylinux wheel, installed in a new environment, reproduces the Stata
+  result.
+
+After publication, a fresh `net install` of `xhdfe` and `xfepout` from the
+public address into an empty folder matched the published site byte for byte
+in its 38 installed and ancillary files, `xhdfe_examples.sthlp` among them,
+and the installed package passed the ordinary fit.
+
 ## Agreement with the published 2.31.1
 
 `core24s1` suite, Stata, `reghdfe-comparable`, CPU, tolerance 1e-8, the
@@ -128,7 +168,7 @@ complete: the build container lacked the cuBLAS and cuSPARSE headers that
 `src/network_cuda.cu` includes since 2.34.0, which the release build script
 now installs. The matrix runs of the public repository for the preflight and
 version tags of this release, which build the published binaries on all three
-platforms, are recorded on the release page.
+platforms, are listed under "Published artifacts" above.
 
 ## Not executed for this release
 
