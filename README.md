@@ -1,89 +1,60 @@
 # xhdfe
 
-**Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
+**Linear regression with high-dimensional fixed effects in Stata, Python and R on one C++ core.**
 
 `Version 2.34.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
-Version 2.34.2 optimises eligible CPU reduced-system fits and parallelises
-parts of large regressions, including the preparation of the Stata estimation
-sample. See [the release notes](docs/releases/RELEASE_NOTES_2.34.2.20261122.md).
+[Installation and examples](#choose-your-language) ·
+[Release notes](docs/releases/RELEASE_NOTES_2.34.2.20261122.md) ·
+[22 November 2026 validation](docs/releases/VALIDATION_2.34.2.20261122.md)
 
-Version 2.34.1 brings to the public release the work of versions 2.32 to 2.34:
-the reduced-system route for `reghdfe-comparable` fits on CPU, corrections to
-`savefe`, to heterogeneous slopes and to weighted projections, lower memory use,
-and CUDA libraries that load on demand. See
-[the release notes](docs/releases/RELEASE_NOTES_2.34.1.20261121.md) and
-[the validation record](docs/releases/VALIDATION_2.34.1.20261121.md).
+## When to use xhdfe
 
-Version 2.31.1 added to `xhdfeakm` 1.9.0 an
-explicit person-year-centred point estimator and full-model worker projection
-inference while retaining the legacy default. See [the option and its statistical limits](docs/akm-projection-inference.md)
-and [its validation record](docs/releases/VALIDATION_2.31.1.20261112.md).
+- **Fit the same linear specification in Stata, Python or R.** The three
+  interfaces share a C++ estimator for OLS and 2SLS, with absorbed interactions
+  and heterogeneous slopes, weights and multiway clustering. Stata follows
+  `reghdfe` conventions. `numthreads(#)` requests OpenMP in the same Stata
+  process and `parallel()` is accepted for compatibility. CPU is the reference
+  backend and supported models can use NVIDIA CUDA.
+  [Syntax comparison](docs/comparison.md) · [GPU guide](docs/gpu.md)
+- **Work with group-level outcomes and individual fixed effects.** For example,
+  use `group(patent_id) individual(inventor_id)` to fit patent-level outcomes
+  with inventor effects. `reghdfe` also supports this group-outcome/individual-FE
+  design. The tagged Stata help for Liu's `fereg` and `reghdfejl` lists it as
+  unsupported. In Stata `xhdfe`, `savefe` and `savefes()` are unavailable when
+  `group()` and `individual()` are specified together.
+  [xhdfe help](stata/xhdfe.sthlp) · [reghdfe help](https://scorreia.com/help/reghdfe.html#opt_group_fes) · [Liu 0.5.0 help](https://github.com/leoliu0/fereg/blob/v0.5.0/stata/fereg.sthlp) · [reghdfejl 1.1.9 help](https://github.com/droodman/reghdfejl/blob/v1.1.9/reghdfejl.sthlp)
+- **Prepare a worker–firm sample and compute leave-out variance components.**
+  In Stata, use `xhdfeconnected` to construct the leave-one-out sample, then
+  `xhdfeakm` for AKM plug-in, AGSU and KSS decompositions and inference for
+  supported components. KSS variance decomposition extends beyond the
+  estimation and FE recovery documented for the two Stata `fereg` distributions.
+  Saggio's `LeaveOutTwoWay` also implements the KSS estimator.
+  [AKM and KSS walkthrough](docs/akm-kss.md) · [Inference scope](docs/akm-projection-inference.md) · [LeaveOutTwoWay](https://github.com/rsaggio87/LeaveOutTwoWay)
+- **Explain several coefficient movements in one Gelbach decomposition.** For
+  example, decompose changes in the education and experience coefficients when
+  adding covariate blocks and firm effects to a model with common year effects.
+  `xhdfe` reports the joint covariance for contrasts across contributions and
+  supports a separately declared FE-absorbed target. PyFixest's `decompose()`
+  also implements Gelbach, with one focal coefficient per call.
+  [xhdfe Gelbach help](stata/xhdfegelbach.sthlp) · [PyFixest decomposition](https://pyfixest.org/reference/estimation.models.feols_.Feols.decompose.html)
 
-This release also includes the [2.31.0 source changes](docs/releases/RELEASE_NOTES_2.31.0.20261111.md),
-which correct Student-t inference on Windows, where an x87 precision-control
-incompatibility could reject valid fits with `r(198)`. Stata `residuals()` now
-stores the fit's own residuals in Fast and Comparable mode, without an extra
-absorption. Weighted reghdfe-comparable fits on CPU below the automatic
-selector's thresholds now take the bounded MLSMR retry.
-Unweighted CPU results are bit-for-bit unchanged, and Fast and Comparable keep
-their distinct contracts. See the
-[release notes and validation](docs/releases/RELEASE_NOTES_2.31.0.20261111.md)
-for the exact tests, known limitations and platform coverage.
+## What other packages offer
 
----
+`xhdfe` focuses on linear OLS and 2SLS. These packages provide options for
+other estimators, inference or execution workflows.
 
-## What is xhdfe?
+| Package | Capabilities outside xhdfe 2.34.2 | Documentation |
+| --- | --- | --- |
+| `reghdfe` 6.14.1 and the Stata ecosystem | `reghdfe, parallel(#)` runs separate Stata processes using `parallel`. `ivreghdfe` 1.1.4 provides LIML and two-step GMM with absorbed effects. `ppmlhdfe` provides Poisson PML with separation checks. | [reghdfe help](https://scorreia.com/help/reghdfe.html) · [ivreghdfe](https://github.com/sergiocorreia/ivreghdfe#comparison-with-other-commands) · [ppmlhdfe help](https://scorreia.com/help/ppmlhdfe.html) |
+| Johannes F. Schmieder's `fereg` 0.6.8 (Stata) | `feppml` for Poisson PML, `memory(low)` and `poolsize(#)` for low-memory work blocks, and explicit combinatorial multigrid (CMG) preconditioning. `solver(cg, reduce(eliminate) precondition(cmg))` is an experimental route for two categorical intercept effects. | [Tagged README](https://github.com/johannes-schmieder/fereg/blob/v0.6.8/README.md) |
+| Leo Liu's `fereg` 0.5.0 (Stata, Python and R) | One Rust core with Poisson PML and fixed-effects logit. The Stata `felogit` provides incidental-parameter bias corrections and average partial effects. The linear estimator offers Conley spatial standard errors. | [Tagged README](https://github.com/leoliu0/fereg/blob/v0.5.0/README.md) |
+| `fixest` 0.14.2 (R) | Fixed-effects GLMs via `feglm()`, cohort-specific staggered DiD with `sunab()` and spatial inference with Conley covariance. | [GLMs](https://lrberge.github.io/fixest/reference/feglm.html) · [Staggered DiD](https://lrberge.github.io/fixest/reference/sunab.html) · [Conley covariance](https://lrberge.github.io/fixest/reference/vcov_conley.html) |
+| PyFixest 0.70.0 (Python) | Dedicated difference-in-differences estimators such as `did2s()`, fixed-effects GLMs and wild cluster bootstrap tests for eligible OLS fits. | [0.70.0 documentation](https://pyfixest.org/changelog.html) · [Estimation methods](https://pyfixest.org/reference/) |
+| `FixedEffectModels.jl` 2.2.1 (Julia) and `reghdfejl` 1.1.9 (Stata) | Julia-native model fitting and experimental Apple Metal demeaning in single precision. The Stata wrapper calls Julia and offers parallel pairs-bootstrap standard errors through `vce(bootstrap, ...)`. | [GPU methods in 2.2.1](https://github.com/FixedEffects/FixedEffectModels.jl/blob/v2.2.1/README.md#gpus) · [reghdfejl 1.1.9 help](https://github.com/droodman/reghdfejl/blob/v1.1.9/reghdfejl.sthlp) |
 
-`xhdfe` estimates linear models with any number of high-dimensional fixed
-effects (HDFE) — the worker–firm, patent–inventor, and multi-way panel designs
-common in applied economics. It follows the defaults and reporting conventions
-of [`reghdfe`](https://github.com/sergiocorreia/reghdfe) (Correia 2016). Under
-the default `reghdfe-comparable` tolerance mode, numerical validation uses
-independent finite-sample oracles, with `reghdfe` assessed separately as a comparator. A
-Stata command, a Python package, and an R package all call the **same compiled
-C++ core**. CPU is the reference backend; an optional CUDA GPU absorber is
-available for large problems.
-
-As a historical illustration, the table below reports median estimator-call runtimes for
-an AKM-style wage regression using Portuguese matched employer-employee data.
-The specification uses 55,947,171 observations and absorbs 5,948,793 worker,
-799,265 firm, and 36 year fixed effects. It includes common seniority controls
-and clusters standard errors at the worker level:
-
-| Implementation | Backend | Seconds | Speedup vs. `reghdfe` |
-| --- | ---: | ---: | ---: |
-| `reghdfe`, Stata | CPU | 3,667.5 | 1.0x |
-| `FixedEffectModels.jl` | CPU | 916.3 | 4.0x |
-| `fixest` | CPU | 486.5 | 7.5x |
-| `pyfixest` | CPU | 110.4 | 33.2x |
-| `FixedEffectModels.jl` | CUDA | 105.7 | 34.7x |
-| `xhdfe`, Stata | CPU | 61.3 | 59.8x |
-| `xhdfe`, Python | CPU | 53.6 | 68.4x |
-| `xhdfe`, Stata | CUDA | 22.7 | 161.7x |
-| `xhdfe`, Python | CUDA | 14.5 | 252.2x |
-
-These timings were measured before 24 August 2026 (the table has been in this
-README since release 2.25.0, commit `0d54ecae`) with the releases of each
-package available then; they predate the current releases listed under
-[Algorithmic and software provenance](#algorithmic-and-software-provenance) and
-the release of `fereg`, and they are not a comparison with those releases.
-The `xhdfe` rows use the speed-oriented `xhdfe-fast` mode; the default
-`reghdfe-comparable` mode is somewhat slower but matches `reghdfe` more tightly.
-These historical timings do not benchmark every current workflow.
-The [2.29.0 validation record](docs/releases/VALIDATION_2.29.0.20261014.md)
-covers core24 across eight language, backend and tolerance-mode combinations,
-including the four CUDA Comparable cells that 2.28.1 refused. It records
-numerical checks, recovery coverage, performance comparisons and remaining
-CUDA limitations. Its timings and platform receipts identify the artifacts
-tested. The [2.29.1 validation record](docs/releases/VALIDATION_2.29.1.20261014.md)
-separately records the corrective release's tests and coverage, and the
-[2.30.1 validation record](docs/releases/VALIDATION_2.30.1.20261020.md) records
-the integrated fixes and the ready-only performance scope of that release. The
-[2.31.0 validation record](docs/releases/VALIDATION_2.31.0.20261111.md) records
-that source base's acceptance against `reghdfe` at a tight tolerance and against the
-previously validated build.
-GPU execution alone does not certify every output.
+PyFixest and `FixedEffectModels.jl` also offer CUDA demeaning for supported
+models. [PyFixest backends](https://pyfixest.org/changelog.html) · [Julia GPU methods](https://github.com/FixedEffects/FixedEffectModels.jl/blob/v2.2.1/README.md#gpus)
 
 ## Features
 
@@ -98,7 +69,9 @@ GPU execution alone does not certify every output.
 - **Fixed-effect recovery** — `savefe` / `savefes` (Stata), `fixef()` (R), `retain_fes` (Python).
 - **Group-level outcomes with individual fixed effects** — the `group()` / `individual()` machinery.
 - **Mobility groups** and connected-component diagnostics.
-- **Optional GPU** — CUDA absorber with status reporting. Stata and R reject an unfulfilled explicit request; Python callers must inspect GPU-use diagnostics.
+- **Optional GPU** — An unfulfilled explicit CUDA request raises an error by
+  default in Stata, Python and R. Check `e(gpu_used)`, `gpu_used_` or `gpu_used`
+  to confirm GPU execution. [Supported paths and diagnostics](docs/gpu.md)
 - **AKM / worker-firm post-estimation** — plug-in, AGSU, and KSS leave-out
   variance decompositions; exact or Johnson-Lindenstrauss leverages; component
   inference; and leave-one-out connected-set preparation. See
@@ -465,14 +438,28 @@ Run `help xhdfeakm`, `help xhdfegelbach`, `python -m xhdfe gelbach`, or
 
 ### Validation and accuracy
 
-Under the default `reghdfe-comparable` tolerance mode, `xhdfe` coefficients,
-standard errors, and recovered fixed effects are validated against `reghdfe` at
-the same nominal tolerance, subject to the conditioning of each problem.
-Certification covers convergence, numerical agreement, backend use, and
-cross-frontend parity on tested CPU and CUDA builds. It certifies those builds
-and cases, not every possible research design. Users should validate their own
-specifications; see [`docs/certification/`](docs/certification/) and
-[`DISCLAIMER.md`](DISCLAIMER.md).
+The default `reghdfe-comparable` mode is evaluated against independent
+finite-sample oracles and `reghdfe` on the designs covered by the validation
+suite. The 22 November 2026 release compared 2.34.2 with 2.34.1 across 24
+`core24s1` specifications in Stata and the C++ binding, on CPU and H100, in Fast
+and Comparable modes. The record identifies the timed calls, the sample and
+numerical checks, and the scope of the published-artifact checks. At 16 threads,
+the sum of the Stata CPU Comparable median times across those specifications
+was 136.375 s for 2.34.1 and 109.462 s for 2.34.2.
+[2.34.2 validation](docs/releases/VALIDATION_2.34.2.20261122.md) ·
+[Certification scope](docs/certification/) · [Disclaimer](DISCLAIMER.md)
+
+Earlier release records document the CPU reduced-system route and recovery
+changes in 2.34.1, the scope of worker projection inference in 2.31.1, and
+Windows inference and residual storage fixes in 2.31.0.
+[2.34.1 release notes](docs/releases/RELEASE_NOTES_2.34.1.20261121.md) ·
+[2.34.1 validation](docs/releases/VALIDATION_2.34.1.20261121.md) ·
+[2.31.1 validation](docs/releases/VALIDATION_2.31.1.20261112.md) ·
+[2.31.0 release notes](docs/releases/RELEASE_NOTES_2.31.0.20261111.md) ·
+[2.31.0 validation](docs/releases/VALIDATION_2.31.0.20261111.md)
+
+The earlier worker–firm timings remain in the README archive.
+[Archived 2026 benchmark](https://github.com/reisportela/xhdfe-xfe/blob/1842265accd347ee5c462c07f73f80d3a0631376/README.md#L48-L72)
 
 ### Algorithmic and software provenance
 
@@ -482,7 +469,7 @@ software. The roles of the principal packages were distinct:
 | Project | Role in the development of `xhdfe` |
 | --- | --- |
 | [`reghdfe`](https://github.com/sergiocorreia/reghdfe), by Sergio Correia | Canonical econometric and Stata-behaviour reference for the estimator, defaults, reporting, and validation. |
-| [`fixest`](https://github.com/lrberge/fixest), by Laurent Bergé and contributors | Algorithmic and performance reference for accelerated MAP, including the Irons-Tuck route used by the headline `xhdfe` GPU benchmarks. |
+| [`fixest`](https://github.com/lrberge/fixest), by Laurent Bergé and contributors | Algorithmic and performance reference for accelerated MAP, including the Irons-Tuck route used by the historical `xhdfe` GPU benchmarks. |
 | [`pyfixest`](https://github.com/py-econometrics/pyfixest) ([pyfixest.org](https://pyfixest.org/)), by Alexander Fischer and contributors | Public code and documentation studied during development, plus interface, DGP, numerical, and cross-language benchmark references. |
 | [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
 | [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
@@ -490,12 +477,9 @@ software. The roles of the principal packages were distinct:
 | [`fereg`](https://github.com/leoliu0/fereg), by Leo Liu | A different package with the same name, for Stata, Python and R on one Rust core. The November 2026 comparison informed the CPU operator and parallel fit changes in xhdfe 2.34.2. |
 | [`reghdfejl`](https://github.com/droodman/reghdfejl), by David Roodman | Stata front end to `FixedEffectModels.jl` through his [`julia`](https://github.com/droodman/julia.ado) package; comparison engine in the Stata benchmarks. `julia` is the precedent that `fereg` credits for copying Stata data in parallel, which `xhdfe` adopted in version 2.31.0. |
 
-Comparison packages, current releases checked at their sources on 21 November
-2026: `reghdfe` 6.14.1 (8 July 2026), `fixest` 0.14.2 (CRAN, 26 June 2026),
-`pyfixest` 0.70.0 (8 November 2026), `FixedEffectModels.jl` 2.2.1 (16 November
-2026), `fereg` by Schmieder 0.6.7 (20 November 2026) and `fereg` by Liu 0.5.0
-(21 November 2026). `reghdfejl` was benchmarked at 1.1.9, its GitHub release
-of 12 October 2026.
+The November 2026 Stata comparisons used `reghdfejl` 1.1.9. The local
+22 November comparison used the Stata distributions of Schmieder's `fereg`
+0.6.8 and Liu's `fereg` 0.5.0.
 
 Fischer and Schröder's public `within` materials and their 2026 mimeo,
 *Graph Preconditioning for High-Dimensional Fixed Effects Regression*, were the
@@ -505,13 +489,11 @@ bipartite-Laplacian representation, approximate-Cholesky local solves, and
 additive-Schwarz preconditioner inside modified LSMR are their underlying
 algorithmic contribution and should be cited as such.
 
-The headline GPU benchmarks instead use Irons-Tuck-accelerated MAP, as in
-`fixest`; the native CUDA kernels do not implement the Fischer–Schröder graph
-preconditioner. `xhdfe` contributes the integrated C++/OpenMP and CUDA
-implementation, three language frontends, broader feature surface, execution
-and batching choices, routing and fallbacks, diagnostics, precision
-certification, and cross-platform validation. These contributions do not alter
-the credit for the algorithms on which they build.
+The historical GPU benchmarks used Irons-Tuck-accelerated MAP, as in `fixest`.
+The Fischer–Schröder graph preconditioner runs on CPU. `xhdfe` integrates these
+methods into its C++/OpenMP and CUDA implementation, with Stata, Python and R
+frontends, worker–firm and Gelbach workflows, and its own batching, routing,
+fallbacks, diagnostics and cross-platform validation.
 
 The reduced-system route of version 2.32 (`reduced-pcg`) follows the design
 implemented in `fereg` 0.6.0 and described in Schmieder (2026), *fereg: Fast
