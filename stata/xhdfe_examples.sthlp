@@ -1,8 +1,17 @@
 {smcl}
-{* *! version 2.34.1 21nov2026}{...}
+{* *! version 2.34.2 22nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:xhdfe examples with public data}
+
+{pstd}After installing {cmd:xhdfe}, use {cmd:net get} from the directory
+where you want the two standalone examples. They use datasets supplied
+with Stata, so running the do-files requires no network access.{p_end}
+{asis}
+    net get xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata")
+    do xhdfe_example_cluster.do
+    do xhdfe_example_partial_out.do
+{smcl}
 
 {pstd}Copy a block into the Do-file Editor and run it on its own.
 Each {cmd:use} loads the dataset from its public URL and replaces
