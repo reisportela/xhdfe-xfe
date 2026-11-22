@@ -13,7 +13,7 @@ concurrency:
 env:
   XHDFE_RELEASE_BUILD: '1'
   XHDFE_CUDA_ARCHS: '75,80,86,89,90'
-  EXPECTED_VERSION: '2.34.1.20261121'
+  EXPECTED_VERSION: '2.34.2.20261122'
 
 jobs:
   # Linux CPU/CUDA Stata plugins plus Linux Python and R packages.
@@ -473,6 +473,6 @@ jobs:
     name: Build and validate native Windows OpenMP plugins
     uses: ./.github/workflows/windows-native.yml
     with:
-      expected_version: '2.34.1.20261121'
+      expected_version: '2.34.2.20261122'
     permissions:
       contents: read

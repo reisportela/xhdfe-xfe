@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.34.1 21nov2026}{...}
+{* *! version 2.34.2 22nov2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -1587,9 +1587,9 @@ Schmieder's {cmd:fereg}, from 0.6.0 to 0.6.7, on public benchmark datasets and o
 same month we studied {cmd:fereg} by Leo Liu, a different package with the same name for Stata, Python and R,
 whose solver, in its author's words, "eliminates the largest fixed effect exactly and solves the remaining
 system with a preconditioned conjugate-gradient method on cell-compressed sufficient statistics". We compared
-it with xhdfe's reduced-system tier on a large panel to learn where the time of that tier goes. Version 2.34.1
-contains no source code and no algorithmic change taken from that package; anything a later version adopts
-from that study will be credited here. {cmd:reghdfejl}, by David Roodman, runs {cmd:FixedEffectModels.jl}
+it with xhdfe's reduced-system tier on a large panel. The comparison informed version 2.34.2's
+CPU operator prefetch and work on Stata input, fit statistics and sample marking, implemented
+in xhdfe. {cmd:reghdfejl}, by David Roodman, runs {cmd:FixedEffectModels.jl}
 from Stata through his {cmd:julia} package and is a comparison engine in the Stata benchmarks.{p_end}
 
 {pstd}
@@ -1631,7 +1631,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.34.1.
+regression via a C++ backend." Version 2.34.2.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}

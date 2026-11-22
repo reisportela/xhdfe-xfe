@@ -16,6 +16,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,7 @@
 #include "hdfe/akm_kss.hpp"
 #include "hdfe/hdfe_regressor_v11.hpp"
 #include "hdfe/ieee_bits.hpp"
+#include "hdfe/parallel_work_observer.hpp"
 #include "fe_absorption_cuda.hpp"
 #include "xhdfe_wide_id_rank.hpp"
 
@@ -40,6 +42,7 @@
 // to how the sort orders equal keys, so results are bit-for-bit unchanged.
 #if defined(__GNUC__) && defined(_OPENMP) && __has_include(<parallel/algorithm>)
 #include <parallel/algorithm>
+#define XHDFE_HAS_GNU_PARALLEL_SORT 1
 #define XHDFE_PARALLEL_SORT(first, last, cmp) __gnu_parallel::sort((first), (last), (cmp))
 #else
 #define XHDFE_PARALLEL_SORT(first, last, cmp) std::sort((first), (last), (cmp))
@@ -58,6 +61,7 @@ using hdfe::StatsStyle;
 using hdfe::ToleranceMode;
 using hdfe::ClusterDofMethod;
 using hdfe::detail::HeterogeneousSlopeTerm;
+using hdfe::detail::ParallelWorkObserver;
 using hdfe::v11::GroupAggregation;
 using hdfe::v11::HdfeRegressorV11;
 using hdfe::v11::ThreadingOptions;
@@ -779,19 +783,18 @@ void maybe_save_thread_diagnostics(
     const std::optional<std::string>& s_openmp_enabled,
     const std::optional<std::string>& s_thread_limit_code,
     const HdfeRegressorV11& reg,
-    int read_threads_used,
-    int read_workers_active) {
-    // The parallel input read is xhdfe parallel work as well: report the
-    // largest team and the most active workers seen in the read or the fit.
+    int plugin_threads_used,
+    int plugin_workers_active) {
+    // Include the observed plugin work in the command-wide maxima.
     maybe_save_scalar(s_threads_used,
-                      static_cast<double>(std::max(reg.threads_used(), read_threads_used)));
+                      static_cast<double>(std::max(reg.threads_used(), plugin_threads_used)));
     maybe_save_scalar(s_threads_requested,
                       static_cast<double>(reg.threads_requested()));
     maybe_save_scalar(s_threads_effective,
                       static_cast<double>(reg.threads_effective()));
     maybe_save_scalar(s_parallel_workers_active,
                       static_cast<double>(std::max(reg.parallel_workers_active(),
-                                                   read_workers_active)));
+                                                   plugin_workers_active)));
     maybe_save_scalar(s_thread_capacity,
                       static_cast<double>(reg.thread_capacity()));
     maybe_save_scalar(s_openmp_enabled, reg.openmp_enabled() ? 1.0 : 0.0);
@@ -1287,7 +1290,7 @@ struct ParallelReadPlan {
     bool read_fallback = false;
     // The team read of wide identifier columns (read_wide_id_on_team), kept or
     // discarded: the largest team observed and the most active workers of its
-    // read and rank regions, over all the columns it took.
+    // read, ordering and rank regions, over all the columns it took.
     bool wide_ran = false;
     int wide_team = 0;
     int wide_workers = 0;
@@ -1745,6 +1748,76 @@ void touch_destination_bytes(void* data, std::size_t bytes) {
     p[bytes - 1] = 0;
 }
 
+// True when pairs[0..n) are already in ascending order of value, which is what
+// a dataset sorted by the column gives: each of `blocks` fixed blocks compares
+// every pair with the one before it, the first with the previous block's last.
+bool pairs_ascending_on_team(const xhdfe_wide_id::Pair* pairs, int n, long long blocks,
+                             int threads, ParallelWorkObserver& observer) {
+    if (n <= 1) {
+        return true;
+    }
+    std::atomic<int> descent{0};
+    observer.begin_region(threads);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(threads)
+#else
+    (void)threads;
+#endif
+    for (long long b = 0; b < blocks; ++b) {
+        if (descent.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        const long long lo = std::max(1LL, b * kParallelReadBlockRows);
+        const long long hi = std::min<long long>(n, (b + 1) * kParallelReadBlockRows);
+        observer.observe_work();
+        for (long long j = lo; j < hi; ++j) {
+            if (pairs[j].value < pairs[j - 1].value) {
+                descent.store(1, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+    observer.end_region();
+    return descent.load() == 0;
+}
+
+void sort_wide_id_pairs(xhdfe_wide_id::Pair* first, int n, const ParallelReadPlan& plan,
+                        int& sort_team, int& sort_workers) {
+    const auto less = [](const xhdfe_wide_id::Pair& a, const xhdfe_wide_id::Pair& b) {
+        return a.value < b.value;
+    };
+#if defined(XHDFE_HAS_GNU_PARALLEL_SORT) && defined(HDFE_USE_OPENMP)
+    // GNU sort can use the ambient team, which can be wider than the input
+    // read in automatic mode. Observe only when this can raise a maximum.
+    const int capacity = std::min({n, omp_get_max_threads(), omp_get_thread_limit()});
+    if (!omp_in_parallel() && capacity > 1 &&
+        capacity > std::min(parallel_read_threads_used(plan), parallel_read_workers_active(plan))) {
+        ParallelWorkObserver observer;
+        observer.begin_region(capacity);
+        static std::atomic<std::uint64_t> sort_epoch{0};
+        const std::uint64_t epoch = sort_epoch.fetch_add(1, std::memory_order_relaxed) + 1;
+        const auto observed_less = [&](const xhdfe_wide_id::Pair& a, const xhdfe_wide_id::Pair& b) {
+            static thread_local std::uint64_t last_epoch = 0;
+            if (last_epoch != epoch) {
+                last_epoch = epoch;
+                observer.observe_work();
+            }
+            return less(a, b);
+        };
+        XHDFE_PARALLEL_SORT(first, first + n, observed_less);
+        observer.end_region();
+        sort_team = observer.max_team_size();
+        sort_workers = observer.active_workers();
+        return;
+    }
+#else
+    (void)plan;
+    (void)sort_team;
+    (void)sort_workers;
+#endif
+    XHDFE_PARALLEL_SORT(first, first + n, less);
+}
+
 // The read region: pairs[i] = (value of row obs.obs_no(i), i). False on any
 // anomaly; the caller then discards the buffer.
 bool read_wide_id_pairs_parallel(const ObservationMap& obs, int var_idx,
@@ -1826,6 +1899,10 @@ bool read_wide_id_on_team(ParallelReadPlan& plan, bool parallel_pass_done,
     int team = 1;
     int read_team = 0;
     int read_workers = 0;
+    int order_team = 0;
+    int order_workers = 0;
+    int sort_team = 0;
+    int sort_workers = 0;
     xhdfe_wide_id::RankResult ranked;
     const int n = obs.n;
     const long long blocks =
@@ -1863,11 +1940,21 @@ bool read_wide_id_on_team(ParallelReadPlan& plan, bool parallel_pass_done,
                 } else {
                     const auto code_t0 = std::chrono::steady_clock::now();
                     xhdfe_wide_id::Pair* const first = pairs.get();
-                    XHDFE_PARALLEL_SORT(first, first + n,
-                                        [](const xhdfe_wide_id::Pair& a,
-                                           const xhdfe_wide_id::Pair& b) {
-                                            return a.value < b.value;
-                                        });
+                    // A column read in ascending order is ranked as read: the
+                    // codes depend only on the values (rank_sorted), so the sort
+                    // would not change one.
+                    ParallelWorkObserver order_observer;
+                    const bool ascending = pairs_ascending_on_team(first, n, blocks, team,
+                                                                   order_observer);
+                    order_team = order_observer.max_team_size();
+                    order_workers = order_observer.active_workers();
+                    plan.wide_team = std::max(plan.wide_team, order_team);
+                    plan.wide_workers = std::max(plan.wide_workers, order_workers);
+                    if (!ascending) {
+                        sort_wide_id_pairs(first, n, plan, sort_team, sort_workers);
+                        plan.wide_team = std::max(plan.wide_team, sort_team);
+                        plan.wide_workers = std::max(plan.wide_workers, sort_workers);
+                    }
                     ranked = xhdfe_wide_id::rank_sorted(first, n, codes.data(), blocks, team);
                     plan.wide_team = std::max(plan.wide_team, ranked.team);
                     plan.wide_workers = std::max(plan.wide_workers, ranked.workers);
@@ -1891,6 +1978,8 @@ bool read_wide_id_on_team(ParallelReadPlan& plan, bool parallel_pass_done,
         std::cerr << "plugin_profile label=wide_id_read what=" << what << " var=" << var_idx
                   << " path=" << (ok ? "team" : "column_reader") << " reason=" << reason
                   << " team=" << read_team << " workers=" << read_workers
+                  << " order_team=" << order_team << " order_workers=" << order_workers
+                  << " sort_team=" << sort_team << " sort_workers=" << sort_workers
                   << " rank_team=" << (ok ? ranked.team : 0)
                   << " rank_workers=" << (ok ? ranked.workers : 0) << " rows=" << n
                   << " distinct=" << (ok ? ranked.distinct : 0) << '\n';
@@ -1910,6 +1999,133 @@ void log_parallel_read_mode(const ParallelReadPlan& plan) {
               << " pretouch=" << (plan.pretouch ? 1 : 0)
               << " select_workers=" << plan.select_workers
               << " requested=" << plan.requested_threads << '\n';
+}
+
+// --- Write-back of e(sample) when nothing else is stored -----------------------
+// With e(sample) prefilled by the ado and no residuals, group or effects to
+// store, the write-back only checks sample_index and finds the rows to clear.
+// Those two passes over the rows run by blocks on the fit's team; the stores
+// that clear the dropped rows stay serial, in ascending row order, as before.
+// No interface function is called inside a region.
+constexpr int kWritebackTeamMinRows = 1 << 20;
+constexpr int kWritebackMaxBufferedRows = (8 << 20) / sizeof(int);
+
+// Reuse the fit's team width, allowing work for at most one thread per block.
+int writeback_team(const HdfeRegressorV11& reg, int rows) {
+#if defined(_OPENMP) && defined(HDFE_USE_OPENMP)
+    if (rows >= kWritebackTeamMinRows && !omp_in_parallel()) {
+        const int blocks = rows / kParallelReadBlockRows + (rows % kParallelReadBlockRows != 0);
+        return std::min(reg.threads_effective(), blocks);
+    }
+#else
+    (void)reg;
+    (void)rows;
+#endif
+    return 1;
+}
+
+// keep[sample_index(i)] = 1 for every i (keep may be empty: then only the
+// check). False when an index lies outside [0, n), which the caller reports as
+// the serial loop does; no store has been made by then in either path.
+bool mark_kept_rows_on_team(const Eigen::VectorXi& sample_index, int n,
+                            std::vector<uint8_t>& keep, int team,
+                            ParallelWorkObserver& observer) {
+    const int rows = static_cast<int>(sample_index.size());
+    const long long blocks =
+        (static_cast<long long>(rows) + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    const int* const index = sample_index.data();
+    uint8_t* const mark = keep.empty() ? nullptr : keep.data();
+    std::atomic<int> invalid{0};
+    observer.begin_region(team);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#else
+    (void)team;
+#endif
+    for (long long b = 0; b < blocks; ++b) {
+        if (invalid.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        const int lo = static_cast<int>(b * kParallelReadBlockRows);
+        const int hi = static_cast<int>(
+            std::min<long long>(rows, static_cast<long long>(lo) + kParallelReadBlockRows));
+        observer.observe_work();
+        for (int i = lo; i < hi; ++i) {
+            const int orig = index[i];
+            if (orig < 0 || orig >= n) {
+                invalid.store(1, std::memory_order_relaxed);
+                break;
+            }
+            if (mark != nullptr) {
+#ifdef _OPENMP
+#pragma omp atomic write
+#endif
+                mark[orig] = 1;
+            }
+        }
+    }
+    observer.end_region();
+    return invalid.load() == 0;
+}
+
+// Collect a bounded list of dropped rows in ascending order.
+std::optional<std::vector<int>> unmarked_rows_on_team(const std::vector<uint8_t>& keep,
+                                                      int team, ParallelWorkObserver& observer) {
+    const int n = static_cast<int>(keep.size());
+    const long long blocks =
+        (static_cast<long long>(n) + kParallelReadBlockRows - 1) / kParallelReadBlockRows;
+    std::vector<int> count(static_cast<std::size_t>(blocks) + 1, 0);
+    const uint8_t* const mark = keep.data();
+    observer.begin_region(team);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#else
+    (void)team;
+#endif
+    for (long long b = 0; b < blocks; ++b) {
+        const int lo = static_cast<int>(b * kParallelReadBlockRows);
+        const int hi = static_cast<int>(
+            std::min<long long>(n, static_cast<long long>(lo) + kParallelReadBlockRows));
+        observer.observe_work();
+        int found = 0;
+        for (int i = lo; i < hi; ++i) {
+            found += mark[i] == 0 ? 1 : 0;
+        }
+        count[static_cast<std::size_t>(b) + 1] = found;
+    }
+    observer.end_region();
+    for (long long b = 0; b < blocks; ++b) {
+        count[static_cast<std::size_t>(b) + 1] += count[static_cast<std::size_t>(b)];
+    }
+    if (count.back() > kWritebackMaxBufferedRows) {
+        return std::nullopt;
+    }
+    std::vector<int> rows(static_cast<std::size_t>(count.back()));
+    if (rows.empty()) {
+        return rows;
+    }
+    int* const out = rows.data();
+    observer.begin_region(team);
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#endif
+    for (long long b = 0; b < blocks; ++b) {
+        int position = count[static_cast<std::size_t>(b)];
+        if (position == count[static_cast<std::size_t>(b) + 1]) {
+            continue;
+        }
+        const int lo = static_cast<int>(b * kParallelReadBlockRows);
+        const int hi = static_cast<int>(
+            std::min<long long>(n, static_cast<long long>(lo) + kParallelReadBlockRows));
+        observer.observe_work();
+        for (int i = lo; i < hi; ++i) {
+            if (mark[i] == 0) {
+                out[position++] = i;
+            }
+        }
+    }
+    observer.end_region();
+    return rows;
 }
 
 // Helpers for group/individual singleton dropping (mirrors v11 core logic).
@@ -4601,12 +4817,6 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_fe_recovery_converged, r.fe_recovery_converged ? 1.0 : 0.0);
         maybe_save_scalar(s_fe_recovery_iterations, static_cast<double>(r.fe_recovery_iterations));
         maybe_save_scalar(s_fe_recovery_max_delta, r.fe_recovery_max_delta);
-        maybe_save_thread_diagnostics(
-            s_threads_used, s_threads_requested, s_threads_effective,
-            s_parallel_workers_active, s_thread_capacity,
-            s_openmp_enabled, s_thread_limit_code, reg,
-            parallel_read_threads_used(parallel_read),
-            parallel_read_workers_active(parallel_read));
         maybe_save_scalar(s_gpu_used, reg.gpu_used() ? 1.0 : 0.0);
         maybe_save_gpu_diagnostics(s_gpu_status_code, s_gpu_attempted,
                                    s_gpu_absorption_converged,
@@ -4643,7 +4853,19 @@ STDLL stata_call(int argc, char* argv[]) {
             writeback_timer.emplace("plugin_writeback_standard");
         }
         const auto writeback_standard_t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < r.nobs; ++i) {
+        const int mark_team =
+            esample_prefilled && !store_resid && !store_groupvar && !store_fes
+                ? writeback_team(reg, r.nobs)
+                : 1;
+        std::optional<ParallelWorkObserver> writeback_observer;
+        if (mark_team > 1) {
+            writeback_observer.emplace();
+            if (!mark_kept_rows_on_team(r.sample_index, n, keep, mark_team,
+                                        *writeback_observer)) {
+                throw_with_prefix("xhdfe plugin: ", "invalid sample_index");
+            }
+        }
+        for (int i = 0; mark_team <= 1 && i < r.nobs; ++i) {
             const int orig = r.sample_index(i);
             if (orig < 0 || orig >= n) {
                 throw_with_prefix("xhdfe plugin: ", "invalid sample_index");
@@ -4693,17 +4915,45 @@ STDLL stata_call(int argc, char* argv[]) {
         // When the ado prefills e(sample)=1 for the candidate sample, clear dropped observations
         // only. This avoids O(nobs) SF_vstore calls on large panels when singletons are dropped.
         if (!keep.empty()) {
-            for (int i = 0; i < n; ++i) {
-                if (keep[static_cast<std::size_t>(i)]) {
-                    continue;
-                }
+            const auto clear_row = [&](int i) {
                 const int obs_no = obs.obs_no(i);
                 const ST_retcode rc = SF_vstore(idx_esample_out, obs_no, 0.0);
                 if (rc) {
                     throw_with_prefix("xhdfe plugin: ", "failed to clear e(sample)");
                 }
+            };
+            std::optional<std::vector<int>> dropped_rows;
+            if (writeback_observer && n - r.nobs <= kWritebackMaxBufferedRows) {
+                try {
+                    dropped_rows = unmarked_rows_on_team(keep, mark_team, *writeback_observer);
+                } catch (const std::bad_alloc&) {
+                    // The original scan needs no temporary list.
+                }
+            }
+            if (dropped_rows) {
+                for (const int i : *dropped_rows) {
+                    clear_row(i);
+                }
+            } else {
+                for (int i = 0; i < n; ++i) {
+                    if (!keep[static_cast<std::size_t>(i)]) {
+                        clear_row(i);
+                    }
+                }
             }
         }
+        const int writeback_workers = writeback_observer ? writeback_observer->active_workers() : 1;
+        const int writeback_threads = writeback_observer ? writeback_observer->max_team_size() : 1;
+        if (plugin_cpu_profile_enabled()) {
+            std::cerr << "plugin_profile label=writeback_work team=" << writeback_threads
+                      << " workers=" << writeback_workers << '\n';
+        }
+        maybe_save_thread_diagnostics(
+            s_threads_used, s_threads_requested, s_threads_effective,
+            s_parallel_workers_active, s_thread_capacity,
+            s_openmp_enabled, s_thread_limit_code, reg,
+            std::max(parallel_read_threads_used(parallel_read), writeback_threads),
+            std::max(parallel_read_workers_active(parallel_read), writeback_workers));
         plugin_cpu_profile_log_elapsed("writeback_standard", writeback_standard_t0);
         plugin_cpu_profile_log_elapsed("plugin_total", plugin_total_t0);
 

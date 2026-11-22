@@ -2,7 +2,11 @@
 
 **Linear regression with multiple high-dimensional fixed effects — in Stata, Python and R, on one fast C++ core.**
 
-`Version 2.34.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.34.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+
+Version 2.34.2 optimises eligible CPU reduced-system fits and parallelises
+parts of large regressions, including the preparation of the Stata estimation
+sample. See [the release notes](docs/releases/RELEASE_NOTES_2.34.2.20261122.md).
 
 Version 2.34.1 brings to the public release the work of versions 2.32 to 2.34:
 the reduced-system route for `reghdfe-comparable` fits on CPU, corrections to
@@ -483,7 +487,7 @@ software. The roles of the principal packages were distinct:
 | [`FixedEffectModels.jl`](https://github.com/FixedEffects/FixedEffectModels.jl), by Matthieu Gomez and contributors | Reference for diagonally preconditioned LSMR and for cross-language numerical and performance comparisons. |
 | [`within`](https://github.com/py-econometrics/within), by Alexander Fischer and Kristof Schröder | Direct algorithmic starting point for `xhdfe`'s graph-preconditioned MLSMR/additive-Schwarz route. |
 | [`fereg`](https://github.com/johannes-schmieder/fereg), by Johannes F. Schmieder | Design followed by the reduced-system route (`reduced-pcg`) of version 2.32, as implemented in `fereg` 0.6.0 and described in Schmieder (2026) ([author's copy](https://johannes-schmieder.com/papers/fereg.pdf), [CEPR DP22170](https://cepr.org/publications/dp22170)); benchmark that led to two changes of version 2.31.0 and reference of the performance work of November 2026. |
-| [`fereg`](https://github.com/leoliu0/fereg), by Leo Liu | A different package with the same name, for Stata, Python and R on one Rust core. Studied in November 2026 as an independent implementation of exact elimination with conjugate gradients and as a performance reference. Version 2.34.1 contains no change taken from it. |
+| [`fereg`](https://github.com/leoliu0/fereg), by Leo Liu | A different package with the same name, for Stata, Python and R on one Rust core. The November 2026 comparison informed the CPU operator and parallel fit changes in xhdfe 2.34.2. |
 | [`reghdfejl`](https://github.com/droodman/reghdfejl), by David Roodman | Stata front end to `FixedEffectModels.jl` through his [`julia`](https://github.com/droodman/julia.ado) package; comparison engine in the Stata benchmarks. `julia` is the precedent that `fereg` credits for copying Stata data in parallel, which `xhdfe` adopted in version 2.31.0. |
 
 Comparison packages, current releases checked at their sources on 21 November
@@ -544,10 +548,9 @@ studied [`fereg`](https://github.com/leoliu0/fereg) by Leo Liu, whose solver, in
 its author's words, "eliminates the largest fixed effect exactly and solves the
 remaining system with a preconditioned conjugate-gradient method on
 cell-compressed sufficient statistics". We compared it with `xhdfe`'s
-reduced-system route on a large panel to learn where the time of that route
-goes. Version 2.34.1 contains no source code and no algorithmic change taken
-from that package; anything a later version adopts from that study will be
-credited here.
+reduced-system route on a large panel. The comparison informed the CPU
+operator prefetch and the work on Stata input, fit statistics and sample
+marking in version 2.34.2. These changes were implemented in xhdfe.
 
 The numerical methods that `xhdfe` exposes are established ones and are cited
 as such in the [References](#references): partialling out by the
@@ -574,7 +577,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.34.1.
+> effects regression via a C++ backend.* Version 2.34.2.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

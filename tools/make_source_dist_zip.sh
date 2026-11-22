@@ -82,6 +82,8 @@ chmod +x "${PKG}/build_macos.sh"
 # the autonomous release bundle combines this source tree with the native
 # Linux/Windows/macOS binaries from the generated net-install site.
 for f in "${ROOT_DIR}"/stata/*.ado "${ROOT_DIR}"/stata/*.sthlp \
+         "${ROOT_DIR}/stata/xhdfe_example_cluster.do" \
+         "${ROOT_DIR}/stata/xhdfe_example_partial_out.do" \
          "${ROOT_DIR}"/stata/*.pkg "${ROOT_DIR}"/stata/stata.toc; do
   cp -a "$f" "${PKG}/stata/"
 done

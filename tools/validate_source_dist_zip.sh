@@ -68,6 +68,8 @@ required_entries=(
   "xhdfe-src/stata/tools/_deps/stplugin.h"
   "xhdfe-src/stata/LICENSE"
   "xhdfe-src/stata/NOTICE"
+  "xhdfe-src/stata/xhdfe_example_cluster.do"
+  "xhdfe-src/stata/xhdfe_example_partial_out.do"
   "xhdfe-src/tools/check_no_raw_isfinite.cmake"
   "xhdfe-src/tools/check_verifier_device_fma.sh"
   "xhdfe-src/tools/validate_python_release_artifacts.py"

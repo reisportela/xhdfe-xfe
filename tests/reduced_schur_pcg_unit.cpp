@@ -1009,6 +1009,125 @@ int main() {
                     run.rep.geometry_seconds, run.rep.iterate_seconds);
     }
 
+    // The kernel of the operator's segment pass for large effects
+    // (Config::prefetch_cells, internal::hinted_segment_part, 21nov2026) gives
+    // the bits of the loop it replaces. A mobility panel whose firm rows exceed
+    // internal::kPrefetchMinBytes at every lane width, solved with the kernel
+    // off and on: at 4 lanes at three distances and at 1 and 16 threads; at 1,
+    // 2 and 8 lanes at the default distance (the 8-lane group carries a zero
+    // column and a column in the span of the eliminated effect); three random
+    // panels with one, three and four remaining effects. Report::hinted_applies
+    // shows that the kernel ran (where the build has it:
+    // internal::kHintedSegmentKernel). Then the two shapes that keep the loop
+    // whatever the field says: every other row three
+    // times over with the cells merged (multiplicities), and the mid-size panel
+    // (rows that fit in cache). Kept out of the digest, so that the digest
+    // still compares with the builds before the kernel.
+    {
+        const std::uint64_t digest_before = g_digest;
+        const auto same_run = [](const Run& off, const Run& on) {
+            bool same = on.rep.solved == off.rep.solved && on.rep.decline == off.rep.decline &&
+                        on.rep.iterations == off.rep.iterations;
+            for (std::size_t c = 0; same && c < off.rep.columns.size(); ++c) {
+                const auto& a = off.rep.columns[c];
+                const auto& b = on.rep.columns[c];
+                same = a.stop == b.stop && a.iterations == b.iterations && same_bits(a.tau, b.tau) && same_bits(a.chat, b.chat);
+            }
+            for (std::size_t c = 0; same && c < off.res.size(); ++c)
+                same = std::memcmp(off.res[c].data(), on.res[c].data(), sizeof(double) * off.res[c].size()) == 0;
+            return same;
+        };
+        const Design big = mobility_panel(401, 900000, 270000, 20, 0.15);
+        for (const int lanes : {4, 1, 2, 8}) {
+            Design d = big;
+            if (lanes == 1) d.cols.resize(1);
+            if (lanes == 2) d.cols.resize(2);
+            if (lanes == 8) {
+                d.cols.push_back(std::vector<double>(static_cast<std::size_t>(d.n), 0.0));  // zero column
+                std::vector<double> span(static_cast<std::size_t>(d.n));                    // a worker effect only
+                for (int i = 0; i < d.n; ++i) span[static_cast<std::size_t>(i)] = 0.001 * (d.codes[0][static_cast<std::size_t>(i)] % 977);
+                d.cols.push_back(span);
+                std::vector<double> mix(static_cast<std::size_t>(d.n));
+                for (int i = 0; i < d.n; ++i)
+                    mix[static_cast<std::size_t>(i)] = d.cols[1][static_cast<std::size_t>(i)] * d.cols[2][static_cast<std::size_t>(i)] * 1.0e-3;
+                d.cols.push_back(mix);
+            }
+            const std::size_t bytes = static_cast<std::size_t>(d.levels[1]) * static_cast<std::size_t>(lanes) * sizeof(double);
+            CHECK(bytes >= rp::internal::kPrefetchMinBytes, "kernel lanes=%d: %zu bytes below the threshold", lanes, bytes);
+            for (const int t : {1, 16}) {
+                if (lanes != 4 && t == 1) continue;
+                rp::Config cfg = base_config(t);
+                cfg.prefetch_cells = 0;
+                const Run off = run_kernel(d, cfg);
+                CHECK(off.rep.solved && off.rep.lanes == lanes && !off.rep.merged && off.rep.hinted_applies == 0,
+                      "kernel lanes=%d: solved=%d lanes=%d merged=%d hinted_applies=%lld", lanes, off.rep.solved ? 1 : 0, off.rep.lanes,
+                      off.rep.merged ? 1 : 0, off.rep.hinted_applies);
+                for (const int ahead : {48, 1, 4096}) {
+                    if (lanes != 4 && ahead != 48) continue;
+                    cfg.prefetch_cells = ahead;
+                    const Run on = run_kernel(d, cfg);
+                    CHECK(on.rep.iterations > 0 && (rp::internal::kHintedSegmentKernel ? on.rep.hinted_applies >= on.rep.iterations
+                                                                                        : on.rep.hinted_applies == 0),
+                          "kernel lanes=%d threads=%d distance %d: %lld applies through the kernel, %d iterations", lanes, t, ahead,
+                          on.rep.hinted_applies, on.rep.iterations);
+                    CHECK(same_run(off, on), "kernel lanes=%d threads=%d: distance %d differs from the loop", lanes, t, ahead);
+                }
+                std::printf("  kernel lanes=%d threads=%d: n=%d cols=%zu iterations=%d\n", lanes, t, d.n, d.cols.size(), off.rep.iterations);
+            }
+        }
+        for (const std::vector<int>& remaining :
+             {std::vector<int>{90000}, std::vector<int>{90000, 400, 30}, std::vector<int>{90000, 400, 30, 6}}) {
+            const Design d = random_panel(31 + static_cast<unsigned>(remaining.size()), 300000, 8, remaining, 2);
+            for (const int t : {1, 16}) {
+                rp::Config cfg = base_config(t);
+                cfg.prefetch_cells = 0;
+                const Run off = run_kernel(d, cfg);
+                cfg.prefetch_cells = 48;
+                const Run on = run_kernel(d, cfg);
+                CHECK(off.rep.solved && off.rep.lanes == 4 && off.rep.hinted_applies == 0 && on.rep.iterations > 0 &&
+                          (rp::internal::kHintedSegmentKernel ? on.rep.hinted_applies >= on.rep.iterations : on.rep.hinted_applies == 0),
+                      "kernel %zu remaining effects threads=%d: solved=%d lanes=%d applies off=%lld on=%lld iterations=%d", remaining.size(), t,
+                      off.rep.solved ? 1 : 0, off.rep.lanes, off.rep.hinted_applies, on.rep.hinted_applies, on.rep.iterations);
+                CHECK(same_run(off, on), "kernel %zu remaining effects threads=%d: differs from the loop", remaining.size(), t);
+                std::printf("  kernel %zu remaining effects threads=%d: n=%d iterations=%d large=%d\n", remaining.size(), t, d.n,
+                            off.rep.iterations, off.rep.large_effects);
+            }
+        }
+        {
+            const Design base = mobility_panel(402, 250000, 80000, 20, 0.15);
+            Design d = base;
+            for (auto& c : d.codes) c.clear();
+            for (auto& col : d.cols) col.clear();
+            for (int i = 0; i < base.n; ++i)
+                for (int r = 0; r < (i % 2 == 0 ? 3 : 1); ++r) {  // rows stay sorted by worker
+                    for (std::size_t b = 0; b < base.codes.size(); ++b) d.codes[b].push_back(base.codes[b][static_cast<std::size_t>(i)]);
+                    for (std::size_t c = 0; c < base.cols.size(); ++c) d.cols[c].push_back(base.cols[c][static_cast<std::size_t>(i)] + 0.25 * r);
+                }
+            d.n = static_cast<int>(d.codes[0].size());
+            const Design small = mobility_panel(401, 400000, 20000, 20, 0.15);
+            for (const Design* shape : std::initializer_list<const Design*>{&d, &small}) {
+                const bool repeated = shape == &d;
+                for (const int t : {1, 16}) {
+                    rp::Config cfg = base_config(t);
+                    if (repeated) cfg.force_merge = 1;
+                    cfg.prefetch_cells = 0;
+                    const Run off = run_kernel(*shape, cfg);
+                    CHECK(off.rep.solved && off.rep.merged == repeated, "kernel %s: solved=%d merged=%d", repeated ? "repeated cells" : "small rows",
+                          off.rep.solved ? 1 : 0, off.rep.merged ? 1 : 0);
+                    cfg.prefetch_cells = 48;
+                    const Run on = run_kernel(*shape, cfg);
+                    CHECK(on.rep.hinted_applies == 0, "kernel %s threads=%d: the kernel ran on a shape that keeps the loop",
+                          repeated ? "repeated cells" : "small rows", t);
+                    CHECK(same_run(off, on), "kernel %s threads=%d: the field changed a shape that keeps the loop",
+                          repeated ? "repeated cells" : "small rows", t);
+                    std::printf("  kernel not used (%s) threads=%d: n=%d iterations=%d merged=%d\n", repeated ? "repeated cells" : "small rows", t,
+                                shape->n, off.rep.iterations, off.rep.merged ? 1 : 0);
+                }
+            }
+        }
+        g_digest = digest_before;
+    }
+
     // The merge scratch at 48 threads on the skewed shape (2.32, review round
     // 14): the results against the oracle and equal at every team size, and the
     // bound the kernel reports before allocating at least the peak it then

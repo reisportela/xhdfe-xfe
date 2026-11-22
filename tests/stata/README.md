@@ -214,6 +214,17 @@ the serial reader kept for alias variables, and no parallel pass in the serial
 run. The four-thread pair is skipped with a message on hosts with fewer than
 four logical processors.
 
+The post-fit contract takes the Stata package directory and a new output
+directory. On Stata/MP with four available OpenMP workers, run:
+
+```bash
+python3 -B tests/stata/postfit_parallel_contract.py stata NEW_OUTPUT_DIRECTORY
+```
+
+It compares coefficients, clustered variance, sums of squares and singleton
+selection with native Stata. The profile must show the ordering and
+`e(sample)` work in a full team and in a team limited by `OMP_THREAD_LIMIT`.
+
 ## First-stage diagnostics
 
 The standalone `iv_firststage_contract.do` uses 6,000 synthetic observations.

@@ -70,6 +70,24 @@ bool chat_stop_switch() {
     return on;
 }
 
+// XHDFE_REDUCED_PCG_PREFETCH: how many cells ahead the segment pass of the
+// tier's operator requests the rows of the effects that do not fit in cache
+// (rp::Config::prefetch_cells). "0" keeps the loop of 2.34.1 for every
+// shape; an integer from 1 to 4096 replaces the default distance; anything
+// else, or nothing, keeps the default. The bits of the fit do not depend on
+// it. Read once per process.
+int prefetch_cells_switch(int fallback) {
+    static const int value = [] {
+        const char* e = std::getenv("XHDFE_REDUCED_PCG_PREFETCH");
+        if (e == nullptr || e[0] == '\0') return -1;
+        char* end = nullptr;
+        const long parsed = std::strtol(e, &end, 10);
+        if (end == e || *end != '\0' || parsed < 0 || parsed > 4096) return -1;
+        return static_cast<int>(parsed);
+    }();
+    return value >= 0 ? value : fallback;
+}
+
 // XHDFE_TEST_REDUCED_PCG_DECLINE: decline at a fixed stage (tests only);
 // bad_alloc throws std::bad_alloc during the adapter's setup, which only the
 // last-resort exit below can turn into a decline.
@@ -556,6 +574,7 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
         config.trigger = accept_trigger;
         config.companion = companion_enabled();
         config.chat_stop = chat_stop;
+        config.prefetch_cells = prefetch_cells_switch(config.prefetch_cells);
         config.max_iter = std::max(1, std::min(1500, options.max_iter));
         // The columns and the identifiers of the fit (rp::admission_budget).
         config.memory_budget = rp::admission_budget(n, cols, k);

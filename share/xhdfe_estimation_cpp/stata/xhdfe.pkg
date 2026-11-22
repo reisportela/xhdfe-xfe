@@ -1,15 +1,18 @@
-v 2.34.1
+v 2.34.2
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d Installs xhdfe and its companion commands (xfepout, xhdfeakm, xhdfeconnected,
 d xhdfegelbach, xhdfegpu) plus platform-specific plugin binaries.
 d If a bundled plugin is not compatible with your platform, build it from source in the repo:
 d   `bash stata/tools/build-plugin.sh`
+d Use net get xhdfe to copy the two example do-files to your working directory.
 f xhdfe.ado
 f xhdfe_p.ado
 f xhdfe_estat.ado
 f xhdfe.sthlp
 f xhdfe_examples.sthlp
+f xhdfe_example_cluster.do
+f xhdfe_example_partial_out.do
 f xhdfeakm.ado
 f xhdfeakm.sthlp
 f xhdfeconnected.ado

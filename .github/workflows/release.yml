@@ -976,6 +976,7 @@ jobs:
             stata/LICENSE stata/NOTICE
             stata/xhdfe.ado stata/xhdfe.sthlp stata/xhdfe.pkg
             stata/xhdfe_examples.sthlp
+            stata/xhdfe_example_cluster.do stata/xhdfe_example_partial_out.do
             stata/xhdfe_p.ado stata/xhdfe_estat.ado
             stata/xhdfeakm.ado stata/xhdfeakm.sthlp
             stata/xhdfeconnected.ado stata/xhdfeconnected.sthlp
@@ -1285,6 +1286,9 @@ jobs:
             "$GITHUB_WORKSPACE/netinstall_site/stata"
           ( cd "$GITHUB_WORKSPACE/netinstall_site" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/xhdfe_xfe-stata-netinstall-site.zip" . )
           echo "built release_assets/xhdfe_xfe-stata-netinstall-site.zip"
+          python3 -B tools/build_stata_ssc_zip.py \
+            release_assets/xhdfe_xfe-stata-netinstall-site.zip "$EXPECTED_VERSION" \
+            "release_assets/xhdfe-ssc-${EXPECTED_VERSION}.zip"
 
           (
             cd release_assets
@@ -1371,6 +1375,10 @@ jobs:
 
           ### Online net-install site snapshot
           - \`xhdfe_xfe-stata-netinstall-site.zip\` — the exact \`stata/\` tree published to \`gh-pages\` for online \`net install\`.
+
+          ### SSC submission payload
+          - \`xhdfe-ssc-${EXPECTED_VERSION}.zip\` — the flat component files listed
+            by the staged xhdfe package, including its two example do-files.
 
           ### Integrity
           - \`SHA256SUMS.txt\` — SHA-256 digest for every separately downloadable release asset.

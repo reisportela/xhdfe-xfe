@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.9.0  21nov2026}{...}
+{* *! version 1.9.0  22nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}

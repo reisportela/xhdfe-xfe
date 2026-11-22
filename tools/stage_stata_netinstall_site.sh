@@ -105,6 +105,8 @@ shared=(
   stata/xhdfe_estat.ado
   stata/xhdfe.sthlp
   stata/xhdfe_examples.sthlp
+  stata/xhdfe_example_cluster.do
+  stata/xhdfe_example_partial_out.do
   stata/xhdfeakm.ado
   stata/xhdfeakm.sthlp
   stata/xhdfeconnected.ado
@@ -394,11 +396,14 @@ EOF
 
   if [[ "$cmd" == "xhdfe" ]]; then
     cat >> "$pkg" <<'EOF'
+d Use net get xhdfe to copy the two example do-files to your working directory.
 f xhdfe.ado
 f xhdfe_p.ado
 f xhdfe_estat.ado
 f xhdfe.sthlp
 f xhdfe_examples.sthlp
+f xhdfe_example_cluster.do
+f xhdfe_example_partial_out.do
 f xhdfeakm.ado
 f xhdfeakm.sthlp
 f xhdfeconnected.ado

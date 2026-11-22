@@ -62,6 +62,7 @@
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 #include "hdfe/student_t_detail.hpp"
+#include "hdfe/x87_precision.hpp"
 #include "sparse_rank.hpp"
 #include "iv.hpp"
 #include "iv_input.hpp"
@@ -472,6 +473,141 @@ private:
     int previous_threads_ = 1;
 #endif
 };
+
+// A serial computation that the calling thread used to run may run on a worker
+// of a team and give the same bits only under the same floating-point controls,
+// which belong to each thread: the x87 control word (x87_precision.hpp) and
+// MXCSR (rounding, flush-to-zero, denormals-are-zero). A task loads the
+// controls of the thread that opened the region and restores its own on exit.
+// Other targets keep these reductions on the calling thread.
+#if defined(HDFE_USE_OPENMP) && defined(__x86_64__) && defined(XHDFE_X87_PRECISION_CONTROL)
+struct FpControls {
+    unsigned short x87 = 0;
+    unsigned int mxcsr = 0;
+
+    bool traps_masked() const noexcept {
+        return (x87 & 0x3fu) == 0x3fu && (mxcsr & 0x1f80u) == 0x1f80u;
+    }
+};
+
+FpControls current_fp_controls() noexcept {
+    FpControls controls;
+    controls.x87 = detail::x87::control_word();
+    __asm__ __volatile__("stmxcsr %0" : "=m"(controls.mxcsr) : : "memory");
+    return controls;
+}
+
+void load_fp_controls(const FpControls& controls) noexcept {
+    detail::x87::load_control_word(controls.x87);
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(controls.mxcsr) : "memory");
+}
+
+class ScopedFpControls {
+public:
+    explicit ScopedFpControls(const FpControls& wanted) noexcept
+        : saved_(current_fp_controls()) {
+        changed_ = saved_.x87 != wanted.x87 || saved_.mxcsr != wanted.mxcsr;
+        if (changed_) {
+            load_fp_controls(wanted);
+        }
+    }
+    ~ScopedFpControls() {
+        if (changed_) {
+            load_fp_controls(saved_);
+        }
+    }
+    ScopedFpControls(const ScopedFpControls&) = delete;
+    ScopedFpControls& operator=(const ScopedFpControls&) = delete;
+
+private:
+    FpControls saved_;
+    bool changed_ = false;
+};
+#endif
+
+// Runs task(0), ..., task(count - 1), each one whole serial computation that
+// writes only its own outputs, on a team of up to `threads` (task 0 is taken
+// first: callers give it the longest chain). With one thread they run in that
+// order on the calling thread. A task's exception is rethrown after the region,
+// the lowest task's first, as the serial order would have met it.
+template <class Task>
+void run_serial_tasks_on_team(std::size_t count, const Task& task, int threads,
+                              detail::ParallelWorkObserver& observer) {
+#if defined(HDFE_USE_OPENMP) && defined(__x86_64__) && defined(XHDFE_X87_PRECISION_CONTROL)
+    if (threads > 1 && count > 1 && !omp_in_parallel()) {
+        const FpControls controls = current_fp_controls();
+        // Keep a caller with unmasked FP traps on its original thread.
+        if (controls.traps_masked()) {
+            const int team = static_cast<int>(std::min(count, static_cast<std::size_t>(threads)));
+            detail::InlineOrDynamicBuffer<std::exception_ptr> failed(count);
+            observer.begin_region(team);
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team)
+            for (std::size_t t = 0; t < count; ++t) {
+                observer.observe_work();
+                const ScopedFpControls scope(controls);
+                try {
+                    task(t);
+                } catch (...) {
+                    failed[t] = std::current_exception();
+                }
+            }
+            observer.end_region();
+            for (std::size_t t = 0; t < count; ++t) {
+                if (failed[t]) {
+                    std::rethrow_exception(failed[t]);
+                }
+            }
+            return;
+        }
+    }
+#else
+    (void)threads;
+    (void)observer;
+#endif
+    for (std::size_t t = 0; t < count; ++t) {
+        task(t);
+    }
+}
+
+// dst = src, element for element, copied by fixed blocks on a team, so that
+// neither the first touch of a fresh dst nor the copy runs on one thread. A
+// plain assignment below kAssignByBlocksMinElements or with one thread.
+constexpr Eigen::Index kAssignByBlocksMinElements = Eigen::Index(1) << 20;
+constexpr Eigen::Index kAssignByBlocksBlock = Eigen::Index(1) << 18;
+
+template <class Vector>
+void assign_by_blocks(Vector& dst, const Vector& src, int threads,
+                      detail::ParallelWorkObserver& observer) {
+    const Eigen::Index n = src.size();
+    const Eigen::Index blocks = n / kAssignByBlocksBlock + (n % kAssignByBlocksBlock != 0);
+    int team = 1;
+#ifdef HDFE_USE_OPENMP
+    if (!omp_in_parallel() && n >= kAssignByBlocksMinElements) {
+        team = static_cast<int>(std::min<Eigen::Index>(std::max(1, threads), blocks));
+    }
+#else
+    (void)threads;
+#endif
+    if (team <= 1 || &dst == &src) {
+        dst = src;
+        return;
+    }
+    dst.resize(n);
+    using Scalar = typename Vector::Scalar;
+    const Scalar* const from = src.data();
+    Scalar* const to = dst.data();
+    observer.begin_region(team);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#endif
+    for (Eigen::Index b = 0; b < blocks; ++b) {
+        const Eigen::Index lo = b * kAssignByBlocksBlock;
+        const Eigen::Index count = std::min(n - lo, kAssignByBlocksBlock);
+        observer.observe_work();
+        std::memcpy(to + lo, from + lo, static_cast<std::size_t>(count) * sizeof(Scalar));
+    }
+    observer.end_region();
+}
 
 
 double weighted_sum_of_squares(const Eigen::Ref<const Eigen::VectorXd>& values,
@@ -9750,8 +9886,95 @@ int find_matching_fe_index(const Eigen::VectorXi& clusters,
     return -1;
 }
 
+// The two full scans of fe_nested_within_cluster (identity with the cluster
+// vector, bounds of fe) by blocks on a team: a flag per region and an exact
+// minimum and maximum per block, combined in block order. Serial below
+// kNestedScanMinRows rows or with one thread.
+constexpr int kNestedScanMinRows = 1 << 20;
+constexpr int kNestedScanBlock = 1 << 16;
+
+int nested_scan_blocks(int n) {
+    return n / kNestedScanBlock + (n % kNestedScanBlock != 0);
+}
+
+int nested_scan_team(int n, int threads) {
+    int team = 1;
+#ifdef HDFE_USE_OPENMP
+    if (!omp_in_parallel() && n >= kNestedScanMinRows) {
+        team = std::max(1, std::min(threads, nested_scan_blocks(n)));
+    }
+#else
+    (void)n;
+    (void)threads;
+#endif
+    return team;
+}
+
+bool equal_by_blocks(const int* a, const int* b, int n, int team,
+                     detail::ParallelWorkObserver& observer) {
+    const int blocks = nested_scan_blocks(n);
+    std::atomic<int> differ{0};
+    observer.begin_region(team);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#else
+    (void)team;
+#endif
+    for (int block = 0; block < blocks; ++block) {
+        if (differ.load(std::memory_order_relaxed)) {
+            continue;
+        }
+        const int lo = block * kNestedScanBlock;
+        const int hi = lo + std::min(n - lo, kNestedScanBlock);
+        observer.observe_work();
+        for (int i = lo; i < hi; ++i) {
+            if (a[i] != b[i]) {
+                differ.store(1, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+    observer.end_region();
+    return differ.load() == 0;
+}
+
+void bounds_by_blocks(const int* a, int n, int team, int& min_out, int& max_out,
+                      detail::ParallelWorkObserver& observer) {
+    const int blocks = nested_scan_blocks(n);
+    std::vector<int> low(static_cast<std::size_t>(blocks));
+    std::vector<int> high(static_cast<std::size_t>(blocks));
+    observer.begin_region(team);
+#ifdef HDFE_USE_OPENMP
+#pragma omp parallel for schedule(static) num_threads(team)
+#else
+    (void)team;
+#endif
+    for (int block = 0; block < blocks; ++block) {
+        const int lo = block * kNestedScanBlock;
+        const int hi = lo + std::min(n - lo, kNestedScanBlock);
+        observer.observe_work();
+        int minimum = a[lo];
+        int maximum = a[lo];
+        for (int i = lo + 1; i < hi; ++i) {
+            minimum = std::min(minimum, a[i]);
+            maximum = std::max(maximum, a[i]);
+        }
+        low[static_cast<std::size_t>(block)] = minimum;
+        high[static_cast<std::size_t>(block)] = maximum;
+    }
+    observer.end_region();
+    min_out = low[0];
+    max_out = high[0];
+    for (int block = 1; block < blocks; ++block) {
+        min_out = std::min(min_out, low[static_cast<std::size_t>(block)]);
+        max_out = std::max(max_out, high[static_cast<std::size_t>(block)]);
+    }
+}
+
 bool fe_nested_within_cluster(const Eigen::VectorXi& fe,
-                              const Eigen::VectorXi& clusters) {
+                              const Eigen::VectorXi& clusters,
+                              int threads = 1,
+                              detail::ParallelWorkObserver* observer = nullptr) {
     if (fe.size() != clusters.size()) {
         return false;
     }
@@ -9762,13 +9985,18 @@ bool fe_nested_within_cluster(const Eigen::VectorXi& fe,
     if (fe.data() == clusters.data()) {
         return true;
     }
+    const int team = observer ? nested_scan_team(n, threads) : 1;
     if (fe(0) == clusters(0) && fe(n / 2) == clusters(n / 2) &&
         fe(n - 1) == clusters(n - 1)) {
         bool identical = true;
-        for (int i = 0; i < n; ++i) {
-            if (fe(i) != clusters(i)) {
-                identical = false;
-                break;
+        if (team > 1) {
+            identical = equal_by_blocks(fe.data(), clusters.data(), n, team, *observer);
+        } else {
+            for (int i = 0; i < n; ++i) {
+                if (fe(i) != clusters(i)) {
+                    identical = false;
+                    break;
+                }
             }
         }
         if (identical) {
@@ -9777,10 +10005,14 @@ bool fe_nested_within_cluster(const Eigen::VectorXi& fe,
     }
     int min_id = fe(0);
     int max_id = fe(0);
-    for (int i = 1; i < n; ++i) {
-        const int v = fe(i);
-        min_id = std::min(min_id, v);
-        max_id = std::max(max_id, v);
+    if (team > 1) {
+        bounds_by_blocks(fe.data(), n, team, min_id, max_id, *observer);
+    } else {
+        for (int i = 1; i < n; ++i) {
+            const int v = fe(i);
+            min_id = std::min(min_id, v);
+            max_id = std::max(max_id, v);
+        }
     }
     const long long range_ll =
         static_cast<long long>(max_id) - static_cast<long long>(min_id) + 1LL;
@@ -10979,7 +11211,13 @@ void HdfeRegressorV11::apply_common_postprocessing(const Eigen::Ref<const Eigen:
     results_.pvalues = ols_result.pvalues;
     results_.conf_int = ols_result.conf_int;
     results_.covariance = ols_result.covariance;
-    results_.residuals = ols_result.residuals;
+    // The fit's team (ScopedParallelRuntime) copies the n residuals.
+    int copy_threads = 1;
+#ifdef HDFE_USE_OPENMP
+    copy_threads = omp_get_max_threads();
+#endif
+    assign_by_blocks(results_.residuals, ols_result.residuals, copy_threads,
+                     *parallel_observer_);
     results_.omitted_reason.clear();
     results_.fe_collinear_ss_ratio.resize(0);
     results_.nobs = static_cast<int>(y.size());
@@ -13921,17 +14159,50 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         // A pure slope can supply it when it is constant within every group.
         const bool model_has_intercept =
             options_.fit_intercept || absorbed_constant;
+        auto transformed_X = absorption.X_tilde.leftCols(design_cols);
+        const int transformed_full_cols = static_cast<int>(transformed_X.cols());
+        const bool transformed_has_intercept =
+            (options_.fit_intercept && !drop_intercept && transformed_full_cols > 0);
+        const int transformed_slope_cols =
+            transformed_has_intercept ? (transformed_full_cols - 1) : transformed_full_cols;
+        // The sums of squares of y and of y-tilde and the squared norms of each
+        // slope column before and after the absorption (read by the collinearity
+        // test below) are independent. Each reduction is computed whole with
+        // the same expression regardless of team size.
         double total_tss = 0.0;
-        if (model_has_intercept) {
-            total_tss = compute_total_sum_of_squares(y_use, w_ptr, &sum_weights_for_stats);
-        } else {
-            total_tss = weighted_sum_of_squares(y_use, w_ptr);
-            sum_weights_for_stats =
-                w_ptr ? w_ptr->sum() : static_cast<double>(y_use.size());
+        double within_tss = 0.0;
+        const bool with_fe = !fes_use.empty();
+        const std::size_t stats_tasks = with_fe ? 2 : 1;
+        const std::size_t norm_cols = static_cast<std::size_t>(transformed_slope_cols);
+        detail::InlineOrDynamicBuffer<double> raw_ss_by_col(norm_cols);
+        detail::InlineOrDynamicBuffer<double> tilde_ss_by_col(norm_cols);
+        run_serial_tasks_on_team(
+            stats_tasks + 2 * norm_cols,
+            [&](std::size_t task) {
+                if (task == 0) {
+                    if (model_has_intercept) {
+                        total_tss = compute_total_sum_of_squares(
+                            y_use, w_ptr, &sum_weights_for_stats);
+                    } else {
+                        total_tss = weighted_sum_of_squares(y_use, w_ptr);
+                        sum_weights_for_stats =
+                            w_ptr ? w_ptr->sum() : static_cast<double>(y_use.size());
+                    }
+                } else if (task < stats_tasks) {
+                    within_tss = weighted_sum_of_squares(absorption.y_tilde, w_ptr);
+                } else {
+                    const std::size_t j = (task - stats_tasks) / 2;
+                    if ((task - stats_tasks) % 2 == 0) {
+                        raw_ss_by_col[j] = X_use.col(j).squaredNorm();
+                    } else {
+                        tilde_ss_by_col[j] = transformed_X.col(j).squaredNorm();
+                    }
+                }
+            },
+            tuned.num_threads, *tuned.parallel_observer);
+        if (!with_fe) {
+            within_tss = total_tss;
         }
-        const double within_tss = fes_use.empty()
-                                      ? total_tss
-                                      : weighted_sum_of_squares(absorption.y_tilde, w_ptr);
         cpu_profile_log_elapsed("fit_stats", stats_t0);
         if (read_env_bool("XHDFE_DEBUG_SOLVER").value_or(false)) {
             std::cerr << "xhdfe solver: use_krylov=" << (tuned.use_krylov ? 1 : 0)
@@ -13941,12 +14212,6 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                       << " cache_hit=" << (cache_hit ? 1 : 0) << "\n";
         }
 
-        auto transformed_X = absorption.X_tilde.leftCols(design_cols);
-        const int transformed_full_cols = static_cast<int>(transformed_X.cols());
-        const bool transformed_has_intercept =
-            (options_.fit_intercept && !drop_intercept && transformed_full_cols > 0);
-        const int transformed_slope_cols =
-            transformed_has_intercept ? (transformed_full_cols - 1) : transformed_full_cols;
         const int rank_anchor_col = has_slopes_use && transformed_has_intercept
                                         ? transformed_full_cols - 1 : -1;
 
@@ -13967,8 +14232,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const auto collinearity_t0 = std::chrono::steady_clock::now();
         std::optional<bool> exact_single_level_projection;
         for (int j = 0; j < transformed_slope_cols; ++j) {
-            const double raw_ss = X_use.col(j).squaredNorm();
-            const double tilde_ss = transformed_X.col(j).squaredNorm();
+            const double raw_ss = raw_ss_by_col[static_cast<std::size_t>(j)];
+            const double tilde_ss = tilde_ss_by_col[static_cast<std::size_t>(j)];
             if (options_.capture_fe_collinear_ss_ratio) {
                 fe_collinear_ss_ratio[j] =
                     raw_ss > 0.0 ? tilde_ss / raw_ss
@@ -15224,7 +15489,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (nested_flags[d]) {
                             continue;
                         }
-                        if (fe_nested_within_cluster(fes_use[d], cl)) {
+                        if (fe_nested_within_cluster(fes_use[d], cl, tuned.num_threads,
+                                                     tuned.parallel_observer)) {
                             nested_flags[d] = 1;
                         }
                     }
@@ -15265,7 +15531,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     if (nested_flags[d]) {
                         continue;
                     }
-                    fes_nonnested.push_back(fes_use[d]);
+                    fes_nonnested.emplace_back();
+                    assign_by_blocks(fes_nonnested.back(), fes_use[d], tuned.num_threads,
+                                     *tuned.parallel_observer);
                     levels_nonnested.push_back(dof.levels[d]);
                     map_nonnested.push_back(static_cast<int>(d));
                     slopes_nonnested.push_back(slope_only_flags[d]);
@@ -15303,7 +15571,9 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         if (nested_flags[d]) {
                             continue;
                         }
-                        fes_nonnested.push_back(fes_use[d]);
+                        fes_nonnested.emplace_back();
+                        assign_by_blocks(fes_nonnested.back(), fes_use[d], tuned.num_threads,
+                                         *tuned.parallel_observer);
                         levels_nonnested.push_back(dof.levels[d]);
                         map_nonnested.push_back(static_cast<int>(d));
                         slopes_nonnested.push_back(slope_only_flags[d]);

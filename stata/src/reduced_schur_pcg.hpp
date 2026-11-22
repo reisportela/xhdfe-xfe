@@ -63,6 +63,18 @@
 #define RPCG_EXACT_FP_BODY
 #endif
 
+// The kernel of the operator's segment pass for large effects
+// (internal::hinted_segment_part) needs the vector types of GCC, and is offered
+// only where its sums are known to be the loop's. With Clang they are not: the
+// loop's sums over four remaining effects come out reassociated under the
+// build's fast-math flags and the kernel's do not (Clang 20, 21nov2026), so
+// Clang builds keep the loop for every shape.
+#if defined(__GNUC__) && !defined(__clang__)
+#define RPCG_HINTED_SEGMENT_KERNEL 1
+#else
+#define RPCG_HINTED_SEGMENT_KERNEL 0
+#endif
+
 namespace hdfe {
 namespace reduced_pcg {
 
@@ -144,6 +156,15 @@ struct Config {
     double merge_threshold = 0.8;
     int merge_sample_stride = 64;
     bool dominant_origin = true;     // certificate scale rule of reghdfe-comparable
+    // Segment pass of the operator (apply_operator, phase A). Where an effect's
+    // rows of the reduced vector do not fit in cache (internal::kPrefetchMinBytes)
+    // and no cell is repeated, the pass goes through a kernel that requests those
+    // rows this many cells ahead (software prefetch) and adds the rows as
+    // vectors (internal::hinted_segment_part; GCC builds only). 0 keeps the loop
+    // of 2.34.1 for every shape. The kernel forms the same sums in the same
+    // order, so the bits do not depend on this field: checked by the unit
+    // test (21nov2026, Verifications/fereg_liu_study_20261121/).
+    int prefetch_cells = 48;
     // Admission: an attempt whose memory_bound() exceeds this is declined
     // (Decline::Memory) before it allocates; the adapter sets admission_budget().
     std::size_t memory_budget = std::numeric_limits<std::size_t>::max();
@@ -201,6 +222,7 @@ struct Report {
     double iterate_seconds = 0.0;
     double recover_seconds = 0.0;
     double residual_seconds = 0.0;
+    long long hinted_applies = 0;  // applies of the operator that went through internal::hinted_segment_part
 };
 
 // Admission budget of one attempt (2.32): 16 bytes per row for every numeric
@@ -224,6 +246,17 @@ constexpr double kEps = std::numeric_limits<double>::epsilon();
 constexpr double kInf = std::numeric_limits<double>::infinity();
 constexpr int kVectorUnit = 4096;
 constexpr int kStats = 5;  // sum v^2, sum (v - mean_l)^2, sum v, sum (v - v0), sum (v - v0)^2
+// hinted_segment_part takes the operator's segment pass when an effect's rows of
+// the reduced vector take at least this many bytes (levels * lanes * 8), about
+// where they stop fitting in a core's cache. A rule of the data and the columns
+// only, and a cautious one. On synthetic mobility panels of 3 M rows (21nov2026,
+// 1 and 16 threads) the kernel saved 11 to 32 % of an iteration at 8 lanes at
+// every size from 0.1 to 9 MB; at 4 lanes it was within 2 % of the loop up to
+// 0.5 MB and saved 14 to 26 % from 1.5 MB at 16 threads. Shapes below the
+// threshold keep the loop of 2.34.1 until they are measured on real panels.
+constexpr std::size_t kPrefetchMinBytes = std::size_t{2} << 20;
+constexpr int kMaxRemaining = 4;  // the tier takes at most 5 effects: 4 remain
+constexpr bool kHintedSegmentKernel = RPCG_HINTED_SEGMENT_KERNEL != 0;
 
 inline bool finite(double value) noexcept {
     std::uint64_t bits = 0;
@@ -960,6 +993,8 @@ struct Work {
     std::vector<Buffer<double>> partials;  // per large effect: items * W
     Buffer<double> units;    // vector units * 8 * W
     Buffer<double> stats;    // row parts * kStats * W
+    int prefetch_cells = 0;  // Config::prefetch_cells of the solve (0: the loop of 2.34.1)
+    long long hinted_applies = 0;  // applies whose segment pass went through hinted_segment_part
 };
 
 template <int W>
@@ -972,6 +1007,95 @@ inline void gather_cell(const Geometry& g, const double* in, int c, double* u) {
     }
 }
 
+#if RPCG_HINTED_SEGMENT_KERNEL
+// A row of W lanes as one value: a vector type of GCC, unaligned and allowed
+// to alias double.
+template <int W>
+struct LaneRow;
+template <>
+struct LaneRow<1> {
+    typedef double type __attribute__((may_alias));
+};
+template <>
+struct LaneRow<2> {
+    typedef double type __attribute__((vector_size(16), aligned(8), may_alias));
+};
+template <>
+struct LaneRow<4> {
+    typedef double type __attribute__((vector_size(32), aligned(8), may_alias));
+};
+template <>
+struct LaneRow<8> {
+    typedef double type __attribute__((vector_size(64), aligned(8), may_alias));
+};
+
+// One part of the operator's segment pass for the shapes of
+// Config::prefetch_cells: multiplicity one everywhere and at least one effect
+// whose rows of `in` do not fit in cache. The sums of the loop in
+// apply_operator as GCC compiles it, lane by lane and in the same order, here
+// kept as written: the same bits (tests/reduced_schur_pcg_unit.cpp). Each row is
+// one vector addition (left to the vectoriser, the second gather of that loop
+// came out as W scalar additions per row); the rows of the effects in `hinted`
+// are requested `ahead` cells before they are gathered; and the cell loop
+// reads its pointers from this frame. Cells are visited in increasing order,
+// so the hint runs across segments and parts; a segment uses it when all its
+// cells have a cell `ahead` positions on, which leaves out only the last cells
+// of the codes.
+template <int W>
+RPCG_EXACT_FP inline void hinted_segment_part(const Geometry& g, const double* in, double* T, double* mine, int b,
+                                              const int* hinted, int hints, int ahead) {
+    RPCG_EXACT_FP_BODY
+    typedef typename LaneRow<W>::type Row;
+    const int nb = g.nb;
+    const double* row[kMaxRemaining];
+    const int* code[kMaxRemaining];
+    for (int j = 0; j < nb; ++j) {
+        row[j] = in + static_cast<std::size_t>(g.offset[static_cast<std::size_t>(j)]) * W;
+        code[j] = g.cc[static_cast<std::size_t>(j)];
+    }
+    const double* ahead_row[kMaxRemaining];
+    const int* ahead_code[kMaxRemaining];
+    for (int q = 0; q < hints; ++q) {
+        ahead_row[q] = row[hinted[q]];
+        ahead_code[q] = code[hinted[q]] + ahead;
+    }
+    const int smalls = mine != nullptr ? static_cast<int>(g.small_list.size()) : 0;
+    double* small_row[kMaxRemaining];
+    const int* small_code[kMaxRemaining];
+    for (int q = 0; q < smalls; ++q) {
+        small_row[q] = mine + static_cast<std::size_t>(g.small_offset[static_cast<std::size_t>(q)]) * W;
+        small_code[q] = code[g.small_list[static_cast<std::size_t>(q)]];
+    }
+    const long long ahead_end = g.C - ahead;
+    for (int s = g.op_bounds[static_cast<std::size_t>(b)]; s < g.op_bounds[static_cast<std::size_t>(b) + 1U]; ++s) {
+        const int l = g.op_seg[static_cast<std::size_t>(s)];
+        const int c0 = g.cell_ptr[l], c1 = g.cell_ptr[l + 1];
+        const bool look = c1 <= ahead_end;
+        Row t = {};
+        for (int c = c0; c < c1; ++c) {
+            if (look)
+                for (int q = 0; q < hints; ++q)
+                    __builtin_prefetch(ahead_row[q] + static_cast<std::size_t>(ahead_code[q][c]) * W, 0, 3);
+            Row u = {};
+            for (int j = 0; j < nb; ++j)
+                u += *reinterpret_cast<const Row*>(row[j] + static_cast<std::size_t>(code[j][c]) * W);
+            t += u;
+        }
+        t *= g.seg_inv[static_cast<std::size_t>(l)];
+        std::memcpy(T + static_cast<std::size_t>(l) * W, &t, sizeof(Row));
+        if (smalls == 0) continue;
+        for (int c = c0; c < c1; ++c) {
+            Row u = {};
+            for (int j = 0; j < nb; ++j)
+                u += *reinterpret_cast<const Row*>(row[j] + static_cast<std::size_t>(code[j][c]) * W);
+            const Row d = u - t;
+            for (int q = 0; q < smalls; ++q)
+                *reinterpret_cast<Row*>(small_row[q] + static_cast<std::size_t>(small_code[q][c]) * W) += d;
+        }
+    }
+}
+#endif
+
 // out = S in. Phase A by segment (means of D2 in, private blocks of the small
 // effects); phase B by level of each large effect, with an owner per item.
 template <int W>
@@ -980,6 +1104,26 @@ inline void apply_operator(const Geometry& g, const Team& team, const double* in
     const int op_parts = static_cast<int>(g.op_bounds.size()) - 1;
     const std::size_t small_width = static_cast<std::size_t>(g.small_levels) * W;
     double* priv = work.priv.data();
+#if RPCG_HINTED_SEGMENT_KERNEL
+    // The shapes of Config::prefetch_cells go through hinted_segment_part.
+    const int ahead = work.prefetch_cells;
+    int hinted[kMaxRemaining];
+    int hints = 0;
+    if (ahead > 0 && ahead < g.C && g.mult == nullptr && g.nb <= kMaxRemaining)
+        for (int j = 0; j < g.nb; ++j) {
+            const std::size_t levels = static_cast<std::size_t>(g.offset[static_cast<std::size_t>(j) + 1U] -
+                                                                g.offset[static_cast<std::size_t>(j)]);
+            if (levels * W * sizeof(double) >= kPrefetchMinBytes) hinted[hints++] = j;
+        }
+    if (hints > 0) {
+        ++work.hinted_applies;
+        team.run(op_parts, [&](int b) {
+            double* mine = small_width > 0 ? priv + static_cast<std::size_t>(b) * small_width : nullptr;
+            if (mine != nullptr) std::fill(mine, mine + small_width, 0.0);
+            hinted_segment_part<W>(g, in, T, mine, b, hinted, hints, ahead);
+        });
+    } else
+#endif
     team.run(op_parts, [&](int b) {
         double* mine = small_width > 0 ? priv + static_cast<std::size_t>(b) * small_width : nullptr;
         if (mine != nullptr) std::fill(mine, mine + small_width, 0.0);
@@ -1736,6 +1880,7 @@ inline Report solve(const Problem& p, const Config& cfg) {
             return rep;
         }
         internal::Work work;
+        work.prefetch_cells = std::max(0, cfg.prefetch_cells);
         const std::size_t W = static_cast<std::size_t>(lanes);
         const std::size_t m = static_cast<std::size_t>(g.m), L = static_cast<std::size_t>(g.L);
         const int op_parts = static_cast<int>(g.op_bounds.size()) - 1;
@@ -1760,6 +1905,7 @@ inline Report solve(const Problem& p, const Config& cfg) {
                 case 4: d = internal::run_group<4>(p, cfg, g, team, work, col0, width, rep); break;
                 default: d = internal::run_group<8>(p, cfg, g, team, work, col0, width, rep); break;
             }
+            rep.hinted_applies = work.hinted_applies;
             if (d != Decline::None) {
                 rep.decline = d;
                 return rep;

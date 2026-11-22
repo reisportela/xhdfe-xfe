@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.34.1.20261121. Use `python -m xhdfe --version`
+Package documentation version: 2.34.2.20261122. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 Version 2.32.0 adds the reduced-system tier, on by default for eligible CPU

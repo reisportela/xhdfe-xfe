@@ -1,6 +1,6 @@
 # Invariant AKM components and worker projection inference
 
-Package documentation version: 2.34.1.20261121.
+Package documentation version: 2.34.2.20261122.
 
 `sigma_centering="person_year"` (Stata: `sigmacentering(personyear)`) makes
 the corrected point components invariant to a common change in the outcome's
