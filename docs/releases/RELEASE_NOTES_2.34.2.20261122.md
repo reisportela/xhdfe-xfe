@@ -20,3 +20,5 @@
 The comparison with Leo Liu's [`fereg`](https://github.com/leoliu0/fereg)
 informed the operator and fit changes. The reduced-system design also draws on
 Johannes F. Schmieder's [`fereg`](https://github.com/johannes-schmieder/fereg).
+
+[Validation and scope](VALIDATION_2.34.2.20261122.md)

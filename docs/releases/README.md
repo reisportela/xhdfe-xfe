@@ -5,7 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
-| 2.34.2 | 22 November 2026 | [CPU reduced-system prefetch, parallel fit post-processing and Stata sample bookkeeping](RELEASE_NOTES_2.34.2.20261122.md) |
+| 2.34.2 | 22 November 2026 | [CPU reduced-system prefetch, parallel fit post-processing and Stata sample bookkeeping](RELEASE_NOTES_2.34.2.20261122.md) · [validation and scope](VALIDATION_2.34.2.20261122.md) |
 | 2.34.1 | 21 November 2026 | [Reduced-system route for Comparable fits on CPU, corrections to savefe, slopes and weighted projections, CUDA libraries on demand](RELEASE_NOTES_2.34.1.20261121.md); [validation and scope](VALIDATION_2.34.1.20261121.md) |
 | 2.31.1 | 12 November 2026 | [Invariant AKM components and worker projection inference](RELEASE_NOTES_2.31.1.20261112.md); [validation and scope](VALIDATION_2.31.1.20261112.md) |
 | 2.31.0 | 11 November 2026 | [Student-t on Windows, Stata residuals() from the fit, weighted Comparable retry on CPU](RELEASE_NOTES_2.31.0.20261111.md); [validation and scope](VALIDATION_2.31.0.20261111.md) |
