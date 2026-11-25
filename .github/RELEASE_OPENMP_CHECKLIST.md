@@ -2,22 +2,19 @@
 
 ## 2.35.1.20261125 gates
 
-- [x] Local Linux installer protocol, source archive and SSC package tests.
-  Fresh Stata/MP installations put both helpers alongside the ado.
-- [x] On local portable and native Linux CUDA builds, licensed Stata/MP
-  returns the build metadata of both plugins.
-- [ ] Preflight and version-tag receipts for the final Stata plugins.
-  `--expect-buildinfo` must match the portable CPU target, dated build
-  version, CUDA flag, exact SM list and OpenMP. Check the Linux CPU and CUDA
-  pairs, Windows pair, both thin and final macOS slices and the macOS serial
-  negative controls.
-- [ ] Verify the exact Linux CPU and CUDA release assets in licensed Stata/MP,
-  including numerical agreement, useful workers and real CUDA execution on H100.
-- [ ] Licensed native Stata/MP on macOS arm64, macOS x86_64 and Windows is
-  **NOT_RUN**. The native plugin-interface probes cover actual estimator
-  workers, numerical agreement and build metadata on those platforms.
-- [ ] Verify the published asset digests and the fresh installed files in the
-  public Stata site and SSC payload.
+- [x] Installer and fresh Linux site tests verified the two required helper files.
+- [x] Preflight and version-tag receipts verified OpenMP, portable build metadata,
+  the expected CUDA architectures and useful estimator workers on the final
+  Linux, Windows and macOS artifacts. The macOS serial controls passed.
+- [x] Licensed Linux Stata/MP checked the exact CPU and CUDA binaries, numerical
+  agreement and real H100 execution. The native installer passed end to end in
+  an isolated PLUS, and both canonical checkouts passed their local gates.
+- [ ] Licensed Stata/MP on macOS arm64, macOS x86_64 and Windows is **NOT_RUN**.
+  Native plugin-interface and worker probes are recorded separately above.
+- [x] Final asset digests, Stata site bytes, a fresh Linux installation and
+  the flat SSC package matched the approved payload.
+
+[Preflight 45658833721](https://github.com/reisportela/xhdfe-xfe/actions/runs/45658833721) · [Version tag 45669489138](https://github.com/reisportela/xhdfe-xfe/actions/runs/45669489138) · [Publication 45685145559](https://github.com/reisportela/xhdfe-xfe/actions/runs/45685145559)
 
 [Validation and scope](../docs/releases/VALIDATION_2.35.1.20261125.md)
 

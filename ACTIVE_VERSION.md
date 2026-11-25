@@ -1,6 +1,25 @@
 # Pastas locais ativas do xhdfe
 
-## Release ativa 2.35.0.20261125
+## Release ativa 2.35.1.20261125
+
+O tag público aponta para `043d322cd43a064972e5c6f29bf74a8590cd3493`. Os 14
+ativos correspondem ao rascunho autenticado e os 54 ficheiros do
+site Stata foram conferidos depois da publicação. A instalação Linux do site
+confirmou os aliases, os auxiliares do instalador e os exemplos.
+[Release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.35.1.20261125) · [Validação](docs/releases/VALIDATION_2.35.1.20261125.md)
+
+A validação local dos dois checkouts Linux confirmou `xhdfe` 2.35.1 e
+`xfepout` 1.14.7 em CPU e H100 com quatro trabalhadores. O Python e os
+controlos de liveness passaram nas entradas canónicas. A versão do pacote e
+ambos os aliases foram verificados em novas sessões.
+
+Stata/MP licenciado em macOS arm64, macOS x86_64 e Windows fica em **NOT_RUN**.
+Os testes nativos da interface dos plugins e de trabalhadores OpenMP nesses
+destinos constam das execuções da release.
+
+[Preflight 45658833721](https://github.com/reisportela/xhdfe-xfe/actions/runs/45658833721) · [Version tag 45669489138](https://github.com/reisportela/xhdfe-xfe/actions/runs/45669489138) · [Publication 45685145559](https://github.com/reisportela/xhdfe-xfe/actions/runs/45685145559)
+
+## Release 2.35.0.20261125
 
 O tag público aponta para `d8e6577d1f7c693564d1380c0821de7f4f248f1c`. Os 14
 ativos conservaram os hashes do rascunho, e os 52
