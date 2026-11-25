@@ -756,10 +756,21 @@ solutions. The reliability, precision, and `reghdfe` compatibility of `xhdfe`
 have materially benefited from her persistence, judgement, and detailed
 feedback.
 
-We especially thank Sergio Correia for feedback on benchmarking, tolerances, and
-`reghdfe`-comparable validation. We thank Alexander Fischer and Kristof Schröder
-for making the `within` materials available and for direct discussion of their
-graph-preconditioned fixed-effects solver. All remaining errors are ours.
+We especially thank Sergio Correia for developing [`reghdfe`](https://scorreia.com/software/reghdfe/)
+and for making his benchmark datasets available in
+[Datasets for benchmarking high-dimensional fixed-effect algorithms and their implementations](https://scorreia.com/data/hdfe/index.html).
+We are grateful for his feedback on benchmarking, tolerances, and
+`reghdfe`-comparable validation.
+
+We thank Alex Fischer for taking the time to discuss our work and for sharing
+[PyFixest](https://pyfixest.org/) with us.
+
+We thank Alexander Fischer and Kristof Schröder for sharing their paper,
+[*Graph Preconditioning for High-Dimensional Fixed Effects Regression*](https://github.com/py-econometrics/within-paper).
+We also thank them for making the `within` materials available and for discussing
+their graph-preconditioned fixed-effects solver with us.
+
+All remaining errors are ours.
 
 ## References
 
