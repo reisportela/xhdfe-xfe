@@ -7156,9 +7156,11 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
             std::vector<int> region_groups(pairs.size(), 0);
             std::exception_ptr region_error;
             std::atomic<bool> region_failed{false};
-            const bool fail_second_pair = dof_pairs_fail_test();
 #ifdef HDFE_USE_OPENMP
+            const bool fail_second_pair = dof_pairs_fail_test();
 #pragma omp parallel for schedule(static) num_threads(use_threads)
+#else
+            constexpr bool fail_second_pair = false;
 #endif
             for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
                 if (region_failed.load(std::memory_order_relaxed)) {
