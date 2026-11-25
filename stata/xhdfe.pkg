@@ -1,4 +1,4 @@
-v 2.35.0
+v 2.35.1
 d xhdfe: High-dimensional fixed effects regression via a C++ plugin
 d
 d Online Stata package with a platform-specific plugin selected by Stata g lines.
@@ -25,6 +25,8 @@ f xhdfegelbachcoefplot.ado
 f xhdfegelbachcoefplot.sthlp
 f xhdfegpu.ado
 f xhdfegpu.sthlp
+F xhdfegpu-install.sh
+F xhdfegpu-smoke.do
 f xfepout.ado
 f xfepout.sthlp
 f LICENSE

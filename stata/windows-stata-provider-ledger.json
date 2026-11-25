@@ -8,16 +8,16 @@
   "linkage": "static",
   "plugins": [
     {
-      "link_map_sha256": "6ed6b600a527d3923fc57611219ece37d630029c1d18826ecdea0200f4ec6e23",
+      "link_map_sha256": "12439b3f3b5aa74aaeb0e5a229385cd78ded00ed412bc20de7ac4f1c973bc88e",
       "name": "xfepout.plugin.windows",
-      "sha256": "973cca1b0fa97baaffa09b81b20e1a87d39f1a11867d5e45e746b00a6591ac55",
-      "size": 9524736
+      "sha256": "d20ef7cbe4ec951e8773617db4a799195ee97fe483c3f8e4cdcc174870b66dae",
+      "size": 9525760
     },
     {
-      "link_map_sha256": "fe9a8517d8fd97c41a68c407405b0e8e4537cee0cd7bfeaa63d8814db60eb219",
+      "link_map_sha256": "001e7ea296695abd4d855084f65e1842b0f99e11bfd69c370f465688d6f98f4e",
       "name": "xhdfe.plugin.windows",
-      "sha256": "21538c8cf315e85fa1e96d416894a2d9535e0ce0d395e757b4e891a92cf829c4",
-      "size": 11698176
+      "sha256": "daf8c579da0f5d94782f73578d177368909799129a5b3dd4ecad2d738acd7256",
+      "size": 11699200
     }
   ],
   "schema_version": 1,

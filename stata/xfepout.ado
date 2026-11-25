@@ -1,4 +1,4 @@
-*! version 1.14.6 25nov2026
+*! version 1.14.7 25nov2026
 program define xfepout, eclass sortpreserve
     version 16.0
 
@@ -6,6 +6,14 @@ program define xfepout, eclass sortpreserve
     // Notes:
     // - This is a building block (like hdfe), so it intentionally prints no table by default.
     // - We require explicit numeric variables in varlist (no factor/time-series operators in the varlist).
+
+    if (`"`0'"' == ", _xhdfegpu_buildinfo") {
+        _xfepout_plugin_buildinfo
+        foreach key in protocol role cpu cuda sms openmp compiler version {
+            c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+        }
+        exit
+    }
 
     capture syntax, version
     if (!_rc) {
@@ -1091,7 +1099,14 @@ program define xfepout, eclass sortpreserve
     }
 end
 
+program define _xfepout_plugin_buildinfo
+    plugin call __xfepout_plugin_dispatch, "task=buildinfo"
+    foreach key in protocol role cpu cuda sms openmp compiler version {
+        c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+    }
+end
+
 program define _xfepout_package_version, rclass
     version 16.0
-    return local package_version "1.14.6 25nov2026"
+    return local package_version "1.14.7 25nov2026"
 end

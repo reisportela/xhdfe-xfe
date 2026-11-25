@@ -1,6 +1,14 @@
-*! version 2.35.0 25nov2026
+*! version 2.35.1 25nov2026
 program define xhdfe, eclass
     version 16.0
+
+    if (`"`0'"' == ", _xhdfegpu_buildinfo") {
+        _xhdfe_plugin_buildinfo
+        foreach key in protocol role cpu cuda sms openmp compiler version {
+            c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+        }
+        exit
+    }
 
     capture syntax, version
     if (!_rc) {
@@ -54,9 +62,16 @@ program define _xhdfe_estimate_sortpreserve, eclass sortpreserve
     _xhdfe_estimate `0'
 end
 
+program define _xhdfe_plugin_buildinfo
+    plugin call __xhdfe_plugin_dispatch, "task=buildinfo"
+    foreach key in protocol role cpu cuda sms openmp compiler version {
+        c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+    }
+end
+
 program define _xhdfe_package_version, rclass
     version 16.0
-    return local package_version "2.35.0 25nov2026"
+    return local package_version "2.35.1 25nov2026"
 end
 
 program define _xhdfe_estimate, eclass
