@@ -5,6 +5,7 @@
 // Included only by src/reduced_schur_pcg.cpp, which implements it, and by
 // src/hdfe_regressor_v11.cpp, which calls it once per ordinary absorption.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,6 +38,40 @@ bool reduced_pcg_effective(const HdfeOptions& options);
 // both are as before D10, bit for bit.
 bool reduced_pcg_chat_stop_applies(const HdfeOptions& options, double accept_trigger);
 
+// The built-in values (package D, 23nov2026), one place each, read by the code
+// and by the tests: the finer blocks of the CPU tier's segment pass for a fit
+// with no request and no process value (kReducedPcgApplyFineAuto or a factor
+// from 1 to 8; 1 = the blocks of 2.34.2), and the CUDA variant of the tier for
+// a fit with no request and no process value (false = off, as in 2.34.2).
+// Changing one is a one-line edit here plus the documentation (xhdfe.sthlp, the
+// Python and R documentation). The third built-in value, the first touch of the
+// pages the Stata plugin reads, is kParallelReadPretouchBuiltIn in
+// stata/src/xhdfe_plugin.cpp.
+constexpr int kReducedPcgApplyFineBuiltIn = 1;
+constexpr bool kReducedPcgCudaBuiltIn = false;
+
+// Package D (23nov2026): the finer blocks of one fit. The request in force is
+// the fit's own (HdfeOptions::reduced_pcg_apply_fine) when it has one, else the
+// process value: XHDFE_REDUCED_PCG_APPLY_FINE when it is auto or an integer from
+// 0 to 8 (0 read as 1), else kReducedPcgApplyFineBuiltIn (read once per
+// process). It is kReducedPcgApplyFineAuto or a factor from 1 to 8. Its source:
+// 1 the fit's request, 2 the environment variable, 3 the built-in value.
+int reduced_pcg_apply_fine_request(const HdfeOptions& options);
+int reduced_pcg_apply_fine_source(const HdfeOptions& options);
+// The request in force where it can take effect in this build and process: 1
+// when it is 1, when XHDFE_REDUCED_PCG_PREFETCH=0 keeps the loop, or in a build
+// without the kernel (non-GCC); otherwise the request (automatic or a factor
+// from 2 to 8). The fit's absorption-cache key carries it, with the base blocks
+// of the partition, on every CPU fit the tier can take by its options (package
+// D, 3.1, with rounds 09 and 11: reduced_pcg_partition_keyed() in
+// hdfe_regressor_v11.cpp), the automatic request distinct from every factor.
+int reduced_pcg_apply_fine_effective(const HdfeOptions& options);
+// Package D, 3.1: the signature of the automatic rule (its version, its
+// starting factor and its threshold of cells per finer block), which the
+// absorption-cache key carries for the automatic request, so that a change of
+// the rule invalidates the entries written under the former one.
+std::uint64_t reduced_pcg_apply_fine_auto_rule();
+
 // What one attempt did, for the fit's read-only diagnostics: status 1 when
 // it published the fit (then, and only then, the adapter returns a value), 2
 // when it declined; the reason ("none" when accepted), a static string so that
@@ -45,6 +80,21 @@ struct ReducedPcgOutcome {
     int status = 0;
     const char* reason = "";
     int iterations = 0;
+    // Package D (23nov2026), the finer blocks of the attempt that ran its
+    // solver (all zero or false when none did): the factor it chose (1 = the
+    // coarse blocks) and their number, the applications of the operator that
+    // went through the kernel of the segment pass, whether the reservation of
+    // the finer blocks failed so that the coarse ones ran, and whether the
+    // attempt was repeated on the coarse blocks after a memory decline (then
+    // the factor, blocks and iterations of the discarded first attempt).
+    int fine_used = 0;
+    int fine_parts = 0;
+    long long hinted_applies = 0;
+    bool fine_alloc_failed = false;
+    bool fine_retry = false;
+    int fine_retry_factor = 0;
+    int fine_retry_parts = 0;
+    int fine_retry_iterations = 0;
 };
 
 // XHDFE_REDUCED_PCG_TRACE (stderr): 1 prints plan, phase, column and final
@@ -113,8 +163,9 @@ void reduced_pcg_record_cuda_observation(int team, int workers) noexcept;
 bool reduced_pcg_cuda_enabled() noexcept;
 // The CUDA variant's request of one fit: on when the fit requests it
 // (HdfeOptions::reduced_pcg_cuda == On), off when it requests Off, otherwise
-// the process switch above (XHDFE_REDUCED_PCG_CUDA exactly 1, read once per
-// process). Only the regressor's entry to the tier reads it, for a
+// the process switch above (XHDFE_REDUCED_PCG_CUDA exactly 1 on, exactly 0 off,
+// otherwise kReducedPcgCudaBuiltIn; read once per process). Only the
+// regressor's entry to the tier reads it, for a
 // reghdfe-comparable fit that requests CUDA; the tier's effective switch
 // (reduced_pcg_effective) must be on as well.
 inline bool reduced_pcg_cuda_effective(const HdfeOptions& options) noexcept {

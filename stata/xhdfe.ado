@@ -1,4 +1,4 @@
-*! version 2.34.2 22nov2026
+*! version 2.35.0 25nov2026
 program define xhdfe, eclass
     version 16.0
 
@@ -56,7 +56,7 @@ end
 
 program define _xhdfe_package_version, rclass
     version 16.0
-    return local package_version "2.34.2 22nov2026"
+    return local package_version "2.35.0 25nov2026"
 end
 
 program define _xhdfe_estimate, eclass
@@ -240,6 +240,11 @@ program define _xhdfe_estimate, eclass
         ABSORPTIONMethod(string) ///
         REDUCEDPCG(string) ///
         REDUCEDPCGCUDA(string) ///
+        REDUCEDPCGFINE(string) ///
+        SLOPESOLVER(passthru) ///
+        SLOPESCORES(passthru) ///
+        SLOPECSROWNER(passthru) ///
+        READPRETOUCH(string) ///
         WEIGHTEDCPUROUTE(string) ///
         JACOBIRelaxation(real 0) ///
         LEVEL(real 95) ///
@@ -289,6 +294,73 @@ program define _xhdfe_estimate, eclass
     }
     else if (`"${XHDFE_REDUCED_PCG_CUDA}"' == "0") local reduced_pcg_cuda_request "off"
     else if (`"${XHDFE_REDUCED_PCG_CUDA}"' == "1") local reduced_pcg_cuda_request "on"
+    // The finer blocks of the tier's segment pass for this fit:
+    // reducedpcgfine(auto|#), # from 1 to 8 (1: the blocks of 2.34.2), else the
+    // Stata global XHDFE_REDUCED_PCG_APPLY_FINE (auto or 1 to 8; anything else
+    // is no request). Undecided leaves the plugin's process value (the
+    // environment variable XHDFE_REDUCED_PCG_APPLY_FINE, else the built-in
+    // value). Validated here, like reducedpcg().
+    local reduced_pcg_fine_request ""
+    local reduced_pcg_fine_from ""
+    if (`"`reducedpcgfine'"' != "") {
+        local reduced_pcg_fine_request = lower(strtrim(`"`reducedpcgfine'"'))
+        if (!regexm(`"`reduced_pcg_fine_request'"', "^(auto|[1-8])$")) {
+            di as err "reducedpcgfine() must be auto or an integer from 1 to 8"
+            exit 198
+        }
+        local reduced_pcg_fine_from "option"
+    }
+    else if (regexm(`"${XHDFE_REDUCED_PCG_APPLY_FINE}"', "^(auto|[1-8])$")) {
+        local reduced_pcg_fine_request `"${XHDFE_REDUCED_PCG_APPLY_FINE}"'
+        local reduced_pcg_fine_from "global"
+    }
+    // Retain the distinction between an omitted option and an empty argument.
+    foreach opt in slopesolver slopescores slopecsrowner {
+        local `opt'_request ""
+        if (`"``opt''"' == "") continue
+        local value = substr(`"``opt''"', strlen("`opt'") + 2, ///
+            strlen(`"``opt''"') - strlen("`opt'") - 2)
+        local value = strtrim(`"`value'"')
+        if (substr(`"`value'"', 1, 1) == char(34) & substr(`"`value'"', -1, 1) == char(34)) {
+            local value = substr(`"`value'"', 2, strlen(`"`value'"') - 2)
+        }
+        local value = lower(strtrim(`"`value'"'))
+        local choices "on|off"
+        if ("`opt'" == "slopesolver") local choices "off|schur|network|direct"
+        if (!regexm(`"`value'"', "^(`choices')$")) {
+            di as err "`opt'() must be `choices'"
+            exit 198
+        }
+        local `opt'_request "`value'"
+    }
+    local slope_solver_global 0
+    if ("`slopesolver_request'" == "" & regexm(`"${XHDFE_SLOPE_SOLVER}"', "^(off|schur|network|direct)$")) {
+        local slopesolver_request `"${XHDFE_SLOPE_SOLVER}"'
+        local slope_solver_global 1
+    }
+    // Who touches first the pages the parallel read writes: readpretouch(on)
+    // the calling thread, before the parallel pass (2.34.2); readpretouch(off)
+    // the readers. Else the Stata global XHDFE_PARALLEL_READ_PRETOUCH (1 on, 0
+    // off); undecided leaves the plugin's process value (the environment
+    // variable XHDFE_PARALLEL_READ_PRETOUCH, else the built-in value).
+    local read_pretouch_request ""
+    local read_pretouch_from ""
+    if (`"`readpretouch'"' != "") {
+        local read_pretouch_request = lower(strtrim(`"`readpretouch'"'))
+        if (!inlist(`"`read_pretouch_request'"', "on", "off")) {
+            di as err "readpretouch() must be on or off"
+            exit 198
+        }
+        local read_pretouch_from "option"
+    }
+    else if (`"${XHDFE_PARALLEL_READ_PRETOUCH}"' == "1") {
+        local read_pretouch_request "on"
+        local read_pretouch_from "global"
+    }
+    else if (`"${XHDFE_PARALLEL_READ_PRETOUCH}"' == "0") {
+        local read_pretouch_request "off"
+        local read_pretouch_from "global"
+    }
 
     local weightedcpuroute = lower(strtrim(`"`weightedcpuroute'"'))
     if ("`weightedcpuroute'" != "" & !inlist("`weightedcpuroute'", "on", "off")) {
@@ -1997,7 +2069,10 @@ program define _xhdfe_estimate, eclass
         sThr sThrReq sThrEff sThrActive sThrCap sOmpEnabled sThrLimitCode ///
         sGpuUsed sGpuStatus sCudaTail ///
         sGpuAttempted sGpuAbsConv sGpuAbsIter sMeth sNclust sClustScale sVcvFix ///
-        sFeRecConv sFeRecIter sFeRecMaxDelta sRpcgStatus sRpcgDisc
+        sFeRecConv sFeRecIter sFeRecMaxDelta sRpcgStatus sRpcgDisc ///
+        sRpcgFineUsed sRpcgFineParts sRpcgHinted sRpcgFineAllocFail sRpcgFineRetry ///
+        sRpcgFineRetryFactor sRpcgFineRetryParts sRpcgFineRetryIter sRpcgCacheHit ///
+        sReadParallel sReadFallback sReadPretouch sSlopeSolverDiscard sSlopeSolverScores sSlopeSolverCsr
     scalar `sGpuUsed' = 0
     scalar `sGpuStatus' = 0
     scalar `sSat' = 0
@@ -2024,6 +2099,20 @@ program define _xhdfe_estimate, eclass
     scalar `sRpcgStatus' = .
     scalar `sRpcgDisc' = .
     local xhdfe_rpcg_reason ""
+    // The finer blocks and the read (package D); missing/empty means the
+    // plugin did not report (a plugin older than this ado).
+    foreach s in sRpcgFineUsed sRpcgFineParts sRpcgHinted sRpcgFineAllocFail sRpcgFineRetry ///
+        sRpcgFineRetryFactor sRpcgFineRetryParts sRpcgFineRetryIter sRpcgCacheHit ///
+        sReadParallel sReadFallback sReadPretouch sSlopeSolverDiscard sSlopeSolverScores sSlopeSolverCsr {
+        scalar ``s'' = .
+    }
+    foreach field in request source used status reason {
+        local xhdfe_slope_solver_`field' ""
+    }
+    local xhdfe_rpcg_fine_request ""
+    local xhdfe_rpcg_fine_source ""
+    local xhdfe_read_pretouch_source ""
+    local xhdfe_read_parallel_reason ""
 
     local have_dof_table 0
     tempname dof_table
@@ -2056,6 +2145,12 @@ program define _xhdfe_estimate, eclass
     local cfg "`cfg'absorption_method=`absorptionmethod';jacobi_relaxation=`jacobirelaxation';level=`level';"
     if ("`reduced_pcg_request'" != "") local cfg "`cfg'reduced_pcg=`reduced_pcg_request';"
     if ("`reduced_pcg_cuda_request'" != "") local cfg "`cfg'reduced_pcg_cuda=`reduced_pcg_cuda_request';"
+    if ("`reduced_pcg_fine_request'" != "") local cfg "`cfg'reduced_pcg_fine=`reduced_pcg_fine_request';"
+    if ("`slopesolver_request'" != "") local cfg "`cfg'slope_solver=`slopesolver_request';"
+    if (`slope_solver_global') local cfg "`cfg'slope_solver_from_global=1;"
+    if ("`slopescores_request'" != "") local cfg "`cfg'slope_scores=`slopescores_request';"
+    if ("`slopecsrowner_request'" != "") local cfg "`cfg'slope_csr_owner=`slopecsrowner_request';"
+    if ("`read_pretouch_request'" != "") local cfg "`cfg'read_pretouch=`read_pretouch_request';"
     if ("`weightedcpuroute'" == "on") local cfg "`cfg'weighted_cpu_route=1;"
     local cfg "`cfg's_N=`sN';s_N_full=`sNfull';s_num_singletons=`sNsng';s_df_r=`sDFr';"
     local cfg "`cfg's_df_r_unadj=`sDFRUnadj';s_df_m=`sDFm';s_df_a=`sDFa';"
@@ -2085,6 +2180,19 @@ program define _xhdfe_estimate, eclass
     local cfg "`cfg's_gpu_used=`sGpuUsed';s_method_used=`sMeth';"
     local cfg "`cfg's_reduced_pcg_status=`sRpcgStatus';m_reduced_pcg_reason=xhdfe_rpcg_reason;"
     local cfg "`cfg's_reduced_pcg_discarded_iterations=`sRpcgDisc';"
+    local cfg "`cfg's_reduced_pcg_fine_used=`sRpcgFineUsed';s_reduced_pcg_fine_parts=`sRpcgFineParts';"
+    local cfg "`cfg's_reduced_pcg_hinted_applies=`sRpcgHinted';s_reduced_pcg_fine_alloc_failed=`sRpcgFineAllocFail';"
+    local cfg "`cfg's_reduced_pcg_fine_retry=`sRpcgFineRetry';s_reduced_pcg_fine_retry_factor=`sRpcgFineRetryFactor';"
+    local cfg "`cfg's_reduced_pcg_fine_retry_parts=`sRpcgFineRetryParts';s_reduced_pcg_fine_retry_iterations=`sRpcgFineRetryIter';"
+    local cfg "`cfg's_reduced_pcg_cache_hit=`sRpcgCacheHit';"
+    local cfg "`cfg'm_reduced_pcg_fine_request=xhdfe_rpcg_fine_request;m_reduced_pcg_fine_source=xhdfe_rpcg_fine_source;"
+    foreach field in request source used status reason {
+        local cfg "`cfg'm_slope_solver_`field'=xhdfe_slope_solver_`field';"
+    }
+    local cfg "`cfg's_slope_solver_discarded_iters=`sSlopeSolverDiscard';s_slope_solver_scores_used=`sSlopeSolverScores';"
+    local cfg "`cfg's_slope_solver_csr_owner_used=`sSlopeSolverCsr';"
+    local cfg "`cfg's_read_parallel=`sReadParallel';s_read_fallback=`sReadFallback';s_read_pretouch=`sReadPretouch';"
+    local cfg "`cfg'm_read_pretouch_source=xhdfe_read_pretouch_source;m_read_parallel_reason=xhdfe_read_parallel_reason;"
     local cfg "`cfg's_gpu_status_code=`sGpuStatus';s_gpu_attempted=`sGpuAttempted';"
     local cfg "`cfg's_gpu_absorption_converged=`sGpuAbsConv';s_gpu_absorption_iterations=`sGpuAbsIter';"
     local cfg "`cfg's_cuda_tail_code=`sCudaTail';"
@@ -2860,6 +2968,32 @@ program define _xhdfe_estimate, eclass
     ereturn scalar reduced_pcg_status = scalar(`sRpcgStatus')
     ereturn local reduced_pcg_reason "`xhdfe_rpcg_reason'"
     ereturn scalar reduced_pcg_discarded_iterations = scalar(`sRpcgDisc')
+    // The finer blocks of the tier's segment pass and the read (package D).
+    // The source of a request the plugin received is the option or the global.
+    if ("`xhdfe_rpcg_fine_source'" == "request") local xhdfe_rpcg_fine_source "`reduced_pcg_fine_from'"
+    if ("`xhdfe_read_pretouch_source'" == "request") local xhdfe_read_pretouch_source "`read_pretouch_from'"
+    ereturn local reduced_pcg_fine_request "`xhdfe_rpcg_fine_request'"
+    ereturn local reduced_pcg_fine_source "`xhdfe_rpcg_fine_source'"
+    ereturn scalar reduced_pcg_fine_used = scalar(`sRpcgFineUsed')
+    ereturn scalar reduced_pcg_fine_parts = scalar(`sRpcgFineParts')
+    ereturn scalar reduced_pcg_hinted_applies = scalar(`sRpcgHinted')
+    ereturn scalar reduced_pcg_fine_alloc_failed = scalar(`sRpcgFineAllocFail')
+    ereturn scalar reduced_pcg_fine_retry = scalar(`sRpcgFineRetry')
+    ereturn scalar reduced_pcg_fine_retry_factor = scalar(`sRpcgFineRetryFactor')
+    ereturn scalar reduced_pcg_fine_retry_parts = scalar(`sRpcgFineRetryParts')
+    ereturn scalar reduced_pcg_fine_retry_iters = scalar(`sRpcgFineRetryIter')
+    ereturn scalar reduced_pcg_cache_hit = scalar(`sRpcgCacheHit')
+    foreach field in request source used status reason {
+        ereturn local slope_solver_`field' "`xhdfe_slope_solver_`field''"
+    }
+    ereturn scalar slope_solver_discarded_iters = scalar(`sSlopeSolverDiscard')
+    ereturn scalar slope_solver_scores_used = scalar(`sSlopeSolverScores')
+    ereturn scalar slope_solver_csr_owner_used = scalar(`sSlopeSolverCsr')
+    ereturn scalar read_parallel = scalar(`sReadParallel')
+    ereturn scalar read_fallback = scalar(`sReadFallback')
+    ereturn scalar read_pretouch = scalar(`sReadPretouch')
+    ereturn local read_pretouch_source "`xhdfe_read_pretouch_source'"
+    ereturn local read_parallel_reason "`xhdfe_read_parallel_reason'"
     // Only a clustered fit posts e(N_clust). The plugin reports zero when no
     // cluster variable was given, and posting that made `!missing(e(N_clust))`
     // — the usual way to detect clustering — answer yes for every fit.

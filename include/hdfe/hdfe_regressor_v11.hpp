@@ -23,6 +23,34 @@ class BindingAttemptGuard;
 
 enum class GroupAggregation { Mean, Sum };
 
+// Package D (23nov2026): the finer blocks of the reduced-system tier's segment
+// pass in one fit, read-only, reset at the start of every fit and restored when
+// a projection with saved effects is abandoned. request: the request in force
+// (kReducedPcgApplyFineAuto or a factor from 1 to 8; the fit's own, else the
+// process value); source: 1 the fit's request, 2 the environment variable, 3
+// the built-in value. The rest describe the CPU tier's attempt that ran its
+// solver (0 or false when none did, a CUDA tier attempt and an absorption read
+// from the cache included): the factor it chose (1 = the coarse blocks), their
+// number, the applications of the operator that went through the kernel of the
+// segment pass, whether the reservation of the finer blocks failed so that the
+// coarse ones ran, and whether the attempt was repeated on the coarse blocks
+// after a memory decline (then the factor, blocks and iterations of the
+// discarded first attempt). cache_hit: the fit's absorption came from the
+// absorption cache.
+struct ReducedPcgFineDiagnostics {
+    int request = 1;
+    int source = 0;
+    int used = 0;
+    int parts = 0;
+    long long hinted_applies = 0;
+    bool alloc_failed = false;
+    bool retry = false;
+    int retry_factor = 0;
+    int retry_parts = 0;
+    int retry_iterations = 0;
+    bool cache_hit = false;
+};
+
 struct ThreadingOptions {
     int default_threads = 0;       // 0 = hardware concurrency
     int max_threads = 0;           // 0 = no cap
@@ -137,6 +165,17 @@ public:
     // every fit call, so a previous fweight fit cannot leak into a later call.
     void set_weights_are_frequencies(bool value) noexcept;
 
+    // Package D (round 09, E.4): the request of the finer blocks of the reduced
+    // tier for the following fits of this regressor (kReducedPcgApplyFineUnset,
+    // kReducedPcgApplyFineAuto, or 1 to 8; std::invalid_argument otherwise, as in
+    // the constructor), so that a binding can reuse one regressor across
+    // requests; call it between fits.
+    void set_reduced_pcg_apply_fine(int request);
+    int reduced_pcg_apply_fine_request() const noexcept { return options_.reduced_pcg_apply_fine; }
+    void set_slope_solver(SlopeSolverRequest request);
+    SlopeSolverRequest slope_solver_request() const noexcept { return options_.slope_solver; }
+    const SlopeSolverDiagnostics& slope_solver_diagnostics() const noexcept { return slope_solver_diagnostics_; }
+
     // Language adapters call this with the exact weights of the completed fit
     // to apply Stata's importance-weight reporting and inference convention.
     void apply_importance_weights(const Eigen::Ref<const Eigen::VectorXd>& weights);
@@ -180,6 +219,8 @@ public:
     int reduced_pcg_status() const noexcept { return reduced_pcg_status_; }
     const std::string& reduced_pcg_reason() const noexcept { return reduced_pcg_reason_; }
     int reduced_pcg_discarded_iterations() const noexcept { return reduced_pcg_discarded_iterations_; }
+    // Package D: the finer blocks of the fit (ReducedPcgFineDiagnostics).
+    const ReducedPcgFineDiagnostics& reduced_pcg_fine() const noexcept { return reduced_pcg_fine_; }
     bool gpu_used() const noexcept { return gpu_used_; }
     int gpu_status_code() const noexcept { return gpu_status_code_; }
     bool gpu_attempted() const noexcept { return gpu_attempted_; }
@@ -299,10 +340,20 @@ private:
     int reduced_pcg_status_ = 0;
     std::string reduced_pcg_reason_ = "not_reached";
     int reduced_pcg_discarded_iterations_ = 0;
+    ReducedPcgFineDiagnostics reduced_pcg_fine_;
+    // Package D: a transient memory fallback of the tier ran in this fit (the
+    // finer blocks not allocated, the repetition on the coarse blocks, or a
+    // decline for memory that left the fit to the chain), so the fit writes no
+    // absorption-cache entry. Reset with every fit; not restored with the
+    // diagnostics.
+    bool reduced_pcg_transient_fallback_ = false;
     // Point 14 (17nov2026): the published transform came from the Krylov-PCG
     // absorber under a forced Krylov route (absorption_method_used reports
     // KrylovPcg). Reset with every fit; read by nothing else.
     bool krylov_pcg_published_ = false;
+    SlopeSolverDiagnostics slope_solver_diagnostics_;
+    bool slope_scores_enabled_ = false;
+    bool slope_csr_owner_enabled_ = false;
 };
 
 }  // namespace v11

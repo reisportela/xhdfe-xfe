@@ -10,7 +10,8 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
                        level, dof, ssc, tolerance_mode, fe_tolerance,
                        fe_recovery_method, stats_style, weights_type,
                        groupvar, reduced_pcg = NULL, reduced_pcg_cuda = NULL,
-                       weighted_cpu_route = FALSE) {
+                       weighted_cpu_route = FALSE, reduced_pcg_apply_fine = NULL,
+                       slope_solver = NULL, slope_scores = NULL, slope_csr_owner = NULL) {
   thread_values <- c(threads, default_threads, max_threads)
   if (any(lengths(list(threads, default_threads, max_threads)) != 1L) ||
       any(!is.finite(thread_values)) || any(thread_values < 0) ||
@@ -73,11 +74,54 @@ build_opts <- function(se_type, tol, maxiter, check_interval, convergence,
     }
     opts$reduced_pcg_cuda <- reduced_pcg_cuda
   }
+  # The finer blocks of the tier's segment pass for this fit (package D): NULL
+  # follows the process value (XHDFE_REDUCED_PCG_APPLY_FINE, else the built-in
+  # value), "auto" the automatic rule of the data, an integer from 1 to 8 that
+  # factor (1: the blocks of 2.34.2). Passed as -1 for "auto".
+  if (!is.null(reduced_pcg_apply_fine)) {
+    fine_message <- "reduced_pcg_apply_fine must be NULL, \"auto\" or an integer from 1 to 8"
+    if (is.character(reduced_pcg_apply_fine)) {
+      if (length(reduced_pcg_apply_fine) != 1L || is.na(reduced_pcg_apply_fine) ||
+          reduced_pcg_apply_fine != "auto") {
+        stop(fine_message, call. = FALSE)
+      }
+      opts$reduced_pcg_apply_fine <- -1L
+    } else if (is.numeric(reduced_pcg_apply_fine) && length(reduced_pcg_apply_fine) == 1L) {
+      # Convert first, then validate the integer that will be passed (round 11):
+      # an object whose as.integer() method returns another value is judged by
+      # that value, and its plain number must equal it (no fraction).
+      fine <- suppressWarnings(as.integer(reduced_pcg_apply_fine))
+      raw <- unclass(reduced_pcg_apply_fine)
+      if (!is.integer(fine) || length(fine) != 1L || is.na(fine) || fine < 1L || fine > 8L ||
+          !is.numeric(raw) || length(raw) != 1L || is.na(raw) || raw != fine) {
+        stop(fine_message, call. = FALSE)
+      }
+      opts$reduced_pcg_apply_fine <- fine
+    } else {
+      stop(fine_message, call. = FALSE)
+    }
+  }
   if (!is.logical(weighted_cpu_route) || length(weighted_cpu_route) != 1L ||
       is.na(weighted_cpu_route)) {
     stop("weighted_cpu_route must be TRUE or FALSE", call. = FALSE)
   }
   if (weighted_cpu_route) opts$weighted_cpu_route <- TRUE
+  if (!is.null(slope_solver)) {
+    if (!is.character(slope_solver) || length(slope_solver) != 1L || !is.null(dim(slope_solver)) ||
+        is.na(slope_solver) || !(slope_solver %in% c("off", "schur", "network", "direct"))) {
+      stop("slope_solver must be NULL, 'off', 'schur', 'network' or 'direct'", call. = FALSE)
+    }
+    opts$slope_solver <- slope_solver
+  }
+  slope_helpers <- list(slope_scores = slope_scores, slope_csr_owner = slope_csr_owner)
+  for (name in names(slope_helpers)) {
+    value <- slope_helpers[[name]]
+    if (is.null(value)) next
+    if (!is.logical(value) || length(value) != 1L || !is.null(dim(value)) || is.na(value)) {
+      stop(name, " must be NULL, TRUE or FALSE", call. = FALSE)
+    }
+    opts[[name]] <- value
+  }
   if (!is.null(keep_singletons)) opts$keepsingletons <- isTRUE(keep_singletons)
   if (!is.null(dof)) opts$dofadjustments <- as.character(dof)
   opts[names(ssc)] <- ssc
@@ -415,6 +459,25 @@ finalize_xhdfe <- function(res, coef_names, n_input, rows_used, call, level,
     reduced_pcg_status = res$reduced_pcg_status,
     reduced_pcg_reason = res$reduced_pcg_reason,
     reduced_pcg_discarded_iterations = res$reduced_pcg_discarded_iterations,
+    reduced_pcg_fine_request = res$reduced_pcg_fine_request,
+    reduced_pcg_fine_source = res$reduced_pcg_fine_source,
+    slope_solver_request = res$slope_solver_request,
+    slope_solver_source = res$slope_solver_source,
+    slope_solver_used = res$slope_solver_used,
+    slope_solver_status = res$slope_solver_status,
+    slope_solver_reason = res$slope_solver_reason,
+    slope_solver_discarded_iters = res$slope_solver_discarded_iters,
+    slope_solver_scores_used = res$slope_solver_scores_used,
+    slope_solver_csr_owner_used = res$slope_solver_csr_owner_used,
+    reduced_pcg_fine_used = res$reduced_pcg_fine_used,
+    reduced_pcg_fine_parts = res$reduced_pcg_fine_parts,
+    reduced_pcg_hinted_applies = res$reduced_pcg_hinted_applies,
+    reduced_pcg_fine_alloc_failed = res$reduced_pcg_fine_alloc_failed,
+    reduced_pcg_fine_retry = res$reduced_pcg_fine_retry,
+    reduced_pcg_fine_retry_factor = res$reduced_pcg_fine_retry_factor,
+    reduced_pcg_fine_retry_parts = res$reduced_pcg_fine_retry_parts,
+    reduced_pcg_fine_retry_iters = res$reduced_pcg_fine_retry_iters,
+    reduced_pcg_cache_hit = res$reduced_pcg_cache_hit,
     threads_used = res$threads_used,
     threads_requested = res$threads_requested,
     threads_effective = res$threads_effective,

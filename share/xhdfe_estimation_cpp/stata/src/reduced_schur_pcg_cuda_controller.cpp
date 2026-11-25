@@ -1441,8 +1441,15 @@ std::optional<AbsorptionResult> attempt_reduced_pcg_cuda(
 
 
 } // namespace
+// The process switch: XHDFE_REDUCED_PCG_CUDA exactly 1 (on) or exactly 0 (off),
+// otherwise the built-in value kReducedPcgCudaBuiltIn (package D). Read once.
 bool reduced_pcg_cuda_enabled() noexcept {
-    static const bool on=[] {const char* e=std::getenv("XHDFE_REDUCED_PCG_CUDA");return e&&e[0]=='1'&&e[1]=='\0';}();
+    static const bool on=[] {
+        const char* e=std::getenv("XHDFE_REDUCED_PCG_CUDA");
+        if(e&&e[0]=='1'&&e[1]=='\0')return true;
+        if(e&&e[0]=='0'&&e[1]=='\0')return false;
+        return kReducedPcgCudaBuiltIn;
+    }();
     return on;
 }
 std::optional<AbsorptionResult> absorb_reduced_pcg_cuda(

@@ -493,7 +493,14 @@ template<class IterativeOperator>
 inline Report solve(const Problem& p, const Config& cfg, IterativeOperator& iterative_operator,
                     SolveStamps* stamps = nullptr) {
     Report rep;
-    rep.columns.assign(static_cast<std::size_t>(std::max(0, p.cols)), ColumnReport{});
+    // Package E, E4 (23nov2026): as in the CPU solve(), a failure of this one
+    // allocation before the try declines the attempt for memory.
+    try {
+        rep.columns.assign(static_cast<std::size_t>(std::max(0, p.cols)), ColumnReport{});
+    } catch (const std::bad_alloc&) {
+        rep.decline = Decline::Memory;
+        return rep;
+    }
     bool valid = p.n > 0 && p.k >= 2 && p.k <= 5 && p.cols > 0 && p.codes != nullptr &&
                  p.levels != nullptr && p.columns != nullptr && p.residuals != nullptr &&
                  p.eliminated >= 0 && p.eliminated < p.k;

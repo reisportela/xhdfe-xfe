@@ -1,6 +1,6 @@
 # xhdfe Gelbach decomposition help
 
-Package version: xhdfe 2.34.2.20261122 (`xhdfegelbach` 1.6.2). This version
+Package version: xhdfe 2.35.0.20261125 (`xhdfegelbach` 1.6.2). This version
 includes the bootstrap, table and waterfall interfaces documented below.
 Inspect the installed package version with `python -m xhdfe --version`.
 
@@ -53,38 +53,14 @@ coefficient is imposed at zero and labelled `imposed_zero`; it is not an
 estimated within-FE coefficient. Every undeclared omission and generic rank
 failure remains an error.
 
-## Standard example: focal plus common controls
+## Public example
 
-```python
-import numpy as np
-from xhdfe import gelbach
-
-result = gelbach.decompose(
-    y,
-    np.column_stack([target, age, baseline_score]),
-    x2_groups={
-        "human_capital": np.column_stack([education, education_sq]),
-        "job": np.column_stack([tenure, experience]),
-    },
-    common_fes={"year": year_id},
-    fes={"firm": firm_id, "occupation": occupation_id},
-    vce="cluster",
-    cluster=worker_id,
-    x1_names=["target", "age", "baseline_score"],
-    focal="target",
-)
-
-table = gelbach.tidy(result, share="movement")
-observed_total = gelbach.contrast(
-    result, "target", ["human_capital", "job"]
-)
-```
-
-`focal` is reporting metadata only. Here `age` and `baseline_score` remain in
-X1 and therefore remain in both specifications; the high-dimensional year
-effect is absorbed in both through `common_fes`. Moving a common control to
-`x2_groups` or moving a common FE to `fes` would change the base model and the
-decomposition.
+Open `python -m xhdfe examples` and run the Gelbach decomposition block.
+It downloads the Grunfeld panel and keeps year effects common to both models.
+Supply `x1_names` when using coefficient names as focal selectors. The
+`focal` selector controls reporting. Every X1 column remains in both models.
+Pass finite integer FE codes. Cluster identifiers also accept string labels.
+The example codes firm names with `pandas.factorize()`.
 
 ## `decompose`
 
@@ -168,8 +144,10 @@ Arguments:
   work. The request is opt-in and a non-use/fallback is reported truthfully in
   the returned diagnostics.
 - `weighted_cpu_route`: when `True`, request CPU for an eligible weighted
-  CUDA fit and report GPU status 7 (`weighted_cpu_route`). The default is
-  `False`. Bootstrap forwards this option to the point estimate and refits.
+  CUDA fit. The routed fit reports GPU status 7 (`weighted_cpu_route`).
+  If FE recovery requires a full refit, the diagnostics report that refit,
+  which can have status 0. The default is `False`. Bootstrap forwards
+  this option to the point estimate and refits.
 - `connected`: `"diagnose"` (default) reports the connectivity contract without
   changing the fit. `"require"` fails closed unless there are no common FEs and
   exactly two retained added-FE dimensions form one mobility component. It
@@ -563,12 +541,10 @@ FE recovery, connectivity diagnostics and the coefficient-movement identity
 are therefore recomputed on every draw.
 
 Python uses `SeedSequence` plus one independent PCG64 child stream per
-replication. The result is invariant to NumPy's global RNG state and repeated
-calls with the same seed are bitwise reproducible on the same estimator
-build. RNG algorithms deliberately differ across frontends: Stata uses its
-native sequential RNG and R uses L'Ecuyer-CMRG streams, so an equal integer
-seed is reproducible within a frontend but does not imply identical resamples
-across Python, R and Stata. Every attempted draw appears in
+replication. The same seed repeats the resampling sequence independently of
+NumPy's global RNG state. Numerical output can depend on the backend and
+floating-point reduction order. Stata uses its native RNG and R uses
+L'Ecuyer-CMRG streams. Every attempted draw appears in
 `result["bootstrap"]["ledger"]` with
 status, reason, sampled/retained row counts, singleton count, identity gap,
 GPU use and RNG spawn key; aggregated reasons are in `failure_counts`. The
@@ -598,8 +574,8 @@ Frequency-weight bootstrap is deliberately rejected. Resampling one
 compressed row is not the same empirical distribution as resampling its
 expanded copies; expand the data explicitly before bootstrapping. Analytic
 weights remain attached to sampled observations. `require_gpu_used=True`
-turns any requested-CUDA fallback in the point or a valid replication into a
-failure instead of accepting silent CPU execution.
+requires `gpu=True`. CPU use stops the point fit and invalidates any
+replication that falls back.
 
 These intervals are resampling-based diagnostics. They do not automatically
 solve a product-nonregularity, weak-identification, few-cluster or
@@ -675,7 +651,8 @@ labels are applied after selection. In both `etable()` and
 `waterfall_data()`, filtering hides no accounting mass by default: omitted
 components are summed into `Other (filtered)`. In `etable()` the aggregate is
 present in every panel, and its SE uses the summed sub-block of the joint
-component covariance, including cross-component terms.
+component covariance, including cross-component terms. Its inference stays
+analytic when individual rows use bootstrap intervals.
 `include_other=False` restores the former filtered shape and warns that the
 displayed rows no longer preserve the accounting identity.
 `waterfall_data()` is dependency-free, and the residual step makes the plotted
@@ -685,22 +662,9 @@ specification on `axis._xhdfe_gelbach_waterfall`.
 
 ## Absorbed-target example
 
-```python
-result = gelbach.decompose(
-    y,
-    np.column_stack([group, experience]),
-    x2_groups={"job": job_controls},
-    fes={"worker": worker_id, "firm": firm_id},
-    vce="cluster",
-    cluster=worker_id,
-    absorbed_targets=[0],
-    x1_names=["group", "experience"],
-    focal="group",
-)
-
-assert result["b_full_status"][0] == "imposed_zero"
-assert result["absorbed_target_inference_valid"]
-```
+The absorbed-target block in `python -m xhdfe examples` uses an indicator
+that is constant within firm. The firm effects absorb it and the full model
+labels its imposed zero as `imposed_zero`.
 
 ## CPU, CUDA and frontends
 

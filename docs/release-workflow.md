@@ -46,6 +46,71 @@ when needed, use uppercase `G`. Self-contained Windows Stata plugins do not
 need DLL entries. CPU plugins are the net-install default; Linux CUDA bundles
 are separate assets. See the version's validation record for numerical limits.
 
+## SSC submission
+
+Use the authenticated version-tag CI assets. The SSC ZIP takes `xhdfe.pkg`,
+`xfepout.pkg`, `stata.toc` and the union of the files declared in both package
+descriptors from `xhdfe_xfe-stata-netinstall-site.zip`. All members are at the
+ZIP root and retain their source names and bytes. They include the runtimes,
+notices, licences and the two `.do` examples. CI checks the catalogue, both
+package versions, the complete file lists and the plug-in mappings. Verify
+`xhdfe-ssc-<full-version>.zip` against `SHA256SUMS.txt`.
+
+To reproduce the assembly, run the builder from the repository root with the
+authenticated site ZIP and a new output path. Set `EXPECTED_VERSION` to the
+dated package version of the new tag, omitting the leading `v`.
+[SSC ZIP builder](../tools/build_stata_ssc_zip.py)
+
+```bash
+python3 -B tools/build_stata_ssc_zip.py \
+  release_assets/xhdfe_xfe-stata-netinstall-site.zip "$EXPECTED_VERSION" \
+  "release_assets/xhdfe-ssc-${EXPECTED_VERSION}.zip"
+```
+
+The `xhdfe` descriptor maps both plug-ins. The `xfepout` descriptor maps its
+own plug-in and carries its own version. Each `g <selector> <source> <alias>`
+mapping installs one of `xhdfe.plugin` and `xfepout.plugin`.
+
+| Stata selectors | xhdfe source | xfepout source |
+| --- | --- | --- |
+| `LINUX64`, `LINUX64P` | `xhdfe.linux64.plugin` | `xfepout.linux64.plugin` |
+| `MACARM64`, `OSX.ARM64`, `MACINTEL64`, `OSX.X8664` | `xhdfe.macos-universal.plugin` | `xfepout.macos-universal.plugin` |
+| `WIN64` | `xhdfe.win64.plugin` | `xfepout.win64.plugin` |
+
+Each descriptor requires its mapped aliases through `h xhdfe.plugin` or
+`h xfepout.plugin` entries as applicable. Both descriptors use
+`G <selector> xhdfe_libomp.dylib xhdfe_libomp.dylib` for each macOS selector.
+Any Windows runtime DLL declared in the CI manifest uses an uppercase
+`G WIN64` mapping with the same source and destination name.
+[Stata package directives](https://www.stata.com/manuals/rnet.pdf)
+
+Extract the ZIP and test each package in a fresh isolated PLUS. Start a new
+Stata session in a separate working directory so Stata resolves the installed
+ado-files and plug-ins. Use the extracted root as the installation source.
+
+```stata
+net install xhdfe, from("/path/to/unpacked-directory") replace
+net install xfepout, from("/path/to/unpacked-directory") replace
+```
+
+Repeat the install in an isolated PLUS seeded with older plug-in aliases. Check
+that both aliases resolve beside the installed `.ado` files and match their
+platform members by SHA-256. Run the regression and
+partialling-out check on the official Grunfeld data.
+
+```stata
+use "https://www.stata-press.com/data/r19/grunfeld.dta", clear
+xhdfe invest mvalue kstock, absorb(company year) vce(cluster company)
+xfepout invest mvalue kstock, absorb(company year) generate(within_)
+```
+
+Use `net get xhdfe, from("/path/to/unpacked-directory")` to download the examples.
+Then run `do xhdfe_example_cluster.do` and `do xhdfe_example_partial_out.do` from
+the download directory. Send Kit Baum the single ZIP or its versioned release URL,
+with the archive SHA-256. After SSC publishes the update, check the live
+descriptor, repeat the isolated install with `ssc install xhdfe` and verify
+the aliases and both examples again.
+
 ## Autonomous source and offline bundles
 
 The release workflow publishes `xhdfe-src.zip` and

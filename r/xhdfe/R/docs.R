@@ -148,7 +148,7 @@
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.34.2.
+#' effects regression via a C++ backend." Version 2.35.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Cornelissen, Thomas. 2008. "The Stata command felsdvreg to fit a linear
@@ -295,7 +295,8 @@ NULL
 #'       backend = c("default", "cpu", "cuda", "metal"),
 #'       na.action = c("omit", "fail"),
 #'       reduced_pcg = NULL, reduced_pcg_cuda = NULL,
-#'       weighted_cpu_route = FALSE)
+#'       weighted_cpu_route = FALSE, reduced_pcg_apply_fine = NULL,
+#'       slope_solver = NULL, slope_scores = NULL, slope_csr_owner = NULL)
 #'
 #' @param fml a model formula with up to three \code{|}-separated parts:
 #'   \code{y ~ regressors | fixed effects | endogenous ~ instruments}.
@@ -365,9 +366,9 @@ NULL
 #'     \item a one-sided formula such as \code{~ id1 + id2} -- shorthand for
 #'       \code{vcov = "cluster", cluster = ~ id1 + id2}.
 #'   }
-#'   Stata's \code{pweight} has no direct R analogue: use analytic weights
-#'   together with \code{vcov = "robust"} (which is exactly what Stata's
-#'   \code{xhdfe} does by default under \code{pweight}).
+#'   For Stata-style probability weights use \code{weights_type = "probability"}.
+#'   With \code{vcov = NULL}, inference is robust unless clusters are supplied.
+#'   Probability weights require robust or clustered inference.
 #' @param cluster the cluster dimensions, in any of the equivalent forms:
 #'   a one-sided formula (\code{~ firm} or \code{~ firm + year}; terms are
 #'   evaluated in \code{data} and \code{a^b} combines ids as in the
@@ -814,6 +815,46 @@ NULL
 #'   unchanged. \code{reduced_pcg = FALSE} keeps
 #'   both the tier and its CUDA variant off; on the CPU the argument has no
 #'   effect.
+#' @param reduced_pcg_apply_fine the finer blocks of the segment pass of the
+#'   reduced-system tier's operator for this fit, where the tier's kernel for
+#'   that pass runs (builds compiled with GCC; an absorbed effect whose rows of
+#'   the reduced system take at least 2 MiB): an integer from 1 to 8 asks for
+#'   that factor, which is then halved while the private sums of the small
+#'   effects would take more than 4 MiB and kept only if its extra bytes fit the
+#'   attempt's memory budget; \code{1} keeps the blocks of 2.34.2;
+#'   \code{"auto"} starts from 8 and halves the factor while the cells of the
+#'   operator's segments per finer block stay below 16 384, then applies the
+#'   same rules (a rule of the data only, never of the threads); \code{NULL}
+#'   (default) the process value, the environment variable
+#'   \code{XHDFE_REDUCED_PCG_APPLY_FINE} (read once per process; \code{auto} or
+#'   an integer from 0 to 8, 0 read as 1) and otherwise the built-in value,
+#'   \code{1}. A factor above 1 changes the last bits of the fits the kernel
+#'   takes, within the precision contract. When an attempt that took finer
+#'   blocks declines because an allocation failed, the tier repeats it once on
+#'   the coarse blocks and publishes that second result, and the fit writes no
+#'   absorption-cache entry. The \code{reduced_pcg_fine_*} result fields report
+#'   what happened.
+#' @param slope_solver optional reduced solver for eligible unweighted OLS
+#'   with two ordinary fixed effects and two slope dimensions on the same
+#'   identifiers, at least one with an intercept. \code{"schur"} selects the
+#'   diagonal preconditioner (CPU and CUDA); \code{"network"} selects the
+#'   forest preconditioner and \code{"direct"} the sparse direct solve (CPU).
+#'   Enable the reduced-system tier and use automatic absorption and convergence
+#'   in Comparable mode without saved effects or a saved group variable. Turn off
+#'   the absorption cache, FE-structure cache and mobility profile for these fits.
+#'   CUDA also requires \code{reduced_pcg_cuda = TRUE} or its environment default.
+#'   \code{"off"} disables the solver and both
+#'   helpers. \code{NULL} follows the per-fit environment switches
+#'   \code{XHDFE_EXPERIMENT_SLOPE_DIRECT},
+#'   \code{XHDFE_EXPERIMENT_SLOPE_NETWORK}, \code{XHDFE_EXPERIMENT_SLOPE_SCHUR}
+#'   in that order, each with value \code{1}, otherwise off.
+#' @param slope_scores optional logical for eligible two-way cluster score
+#'   reuse, when the partitions match the ordinary effects. \code{NULL}
+#'   enables it with an explicit solver mode, or follows
+#'   \code{XHDFE_EXPERIMENT_NETWORK_SCORES=1} for an environment solver request.
+#' @param slope_csr_owner optional logical for parallel sparse assembly.
+#'   \code{NULL} enables it with an explicit solver mode, or follows
+#'   \code{XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1} for an environment solver request.
 #'
 #' @section Absorbing fixed effects:
 #' The second formula part lists the fixed effects to absorb; each term is
@@ -848,16 +889,12 @@ NULL
 #'     absorbed dimension per slope variable, with the intercept (if
 #'     requested) riding on the first -- exactly like Stata expands
 #'     \code{absorb(fe##c.x1 fe#c.x2)}.
-#'   \item \emph{Optional secondreg solver.} Set
-#'     \code{XHDFE_EXPERIMENT_SLOPE_SCHUR=1} for eligible unweighted OLS with
-#'     two ordinary fixed effects and two slopes on the same carrier with
-#'     an intercept. It applies to automatic absorption and convergence
-#'     in \code{"reghdfe-comparable"} mode without saved effects.
-#'     Accepted fits report method code 9 and pass the original slope
-#'     certificate. \code{XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1} enables
-#'     parallel sparse matrix assembly. \code{XHDFE_EXPERIMENT_NETWORK_SCORES=1}
-#'     enables eligible two-way cluster score reuse when the cluster
-#'     partitions match the worker and firm effects.
+#'   \item \emph{Optional reduced slope solver.}
+#'     \code{slope_solver = "schur"} requests the reduced equation solver for
+#'     eligible fits. See \code{slope_solver} for mode precedence and the
+#'     two assembly and inference controls. Accepted fits report method 9 and
+#'     pass the slope certificate; the diagnostics also describe a declined
+#'     attempt or an ineligible request.
 #'   \item \emph{Id encoding.} Integer id vectors are passed to the core
 #'     verbatim (level handling is the core's job); factors use their level
 #'     codes; character, logical, and non-integral numeric vectors are
@@ -1181,8 +1218,9 @@ NULL
 #' The C++ core reads the following runtime knobs:
 #' \describe{
 #'   \item{\code{XHDFE_GPU_BACKEND}}{backend request
-#'     (\code{cpu}|\code{cuda}|\code{metal}); the \code{backend} argument
-#'     sets it temporarily around the fit and restores the previous value.}
+#'     (\code{cpu}|\code{cuda}|\code{metal}) when \code{backend = "default"}.
+#'     An explicit \code{backend} argument overrides it for that fit through
+#'     a scoped native selection.}
 #'   \item{\code{XHDFE_AUTO_MLSMR_DEFAULT_MAX_FES}}{raises the default cap
 #'     (3) on the number of fixed-effect dimensions eligible for the
 #'     probe-based auto-MLSMR selector under
@@ -1237,7 +1275,9 @@ NULL
 #'     \code{XHDFE_ABSORPTION_CACHE_MODE}}{path and mode of the absorption
 #'     cache that stores transformed outcome/regressors for reuse across
 #'     identical specifications (Stata \code{absorptioncache()} /
-#'     \code{absorptioncachemode()}); can be large.}
+#'     \code{absorptioncachemode()}). Both cache types accept \code{off},
+#'     \code{read}, \code{write}, and \code{auto}. Mode \code{read} leaves
+#'     the file untouched. Mode \code{auto} can refresh an invalid entry.}
 #'   \item{\code{XHDFE_FE_STRUCTURE_CACHE},
 #'     \code{XHDFE_FE_STRUCTURE_MODE}}{path and mode of the fixed-effect
 #'     structure cache (normalized group ids and singleton filters) reused
@@ -1253,7 +1293,7 @@ NULL
 #'     cached-hybrid reconstruction and checks, MAP-fallback stages);
 #'     disabled by default with no output or behavior change when unset.}
 #'   \item{\code{XHDFE_PROFILE_CPU}}{nonzero enables CPU-stage timing traces
-#'     (absorption and OLS stage profiling) on stderr.}
+#'     on stderr. Some reduced-system routes are ineligible with profiling on.}
 #'   \item{\code{XHDFE_FE_NORMALIZE}}{normalization style of recovered
 #'     fixed-effect contributions: \code{component} (default; per-component
 #'     normalization) or \code{reghdfe} (aliases \code{mean},
@@ -1464,6 +1504,37 @@ NULL
 #'     those of a normal-equation correction, should one follow)
 #'     (\code{e(reduced_pcg_status)}, \code{e(reduced_pcg_reason)},
 #'     \code{e(reduced_pcg_discarded_iterations)}).}
+#'   \item{\code{reduced_pcg_fine_request}, \code{reduced_pcg_fine_source},
+#'     \code{reduced_pcg_fine_used}, \code{reduced_pcg_fine_parts},
+#'     \code{reduced_pcg_hinted_applies}, \code{reduced_pcg_fine_alloc_failed},
+#'     \code{reduced_pcg_fine_retry}, \code{reduced_pcg_fine_retry_factor},
+#'     \code{reduced_pcg_fine_retry_parts},
+#'     \code{reduced_pcg_fine_retry_iters},
+#'     \code{reduced_pcg_cache_hit}}{the finer blocks of the tier's segment
+#'     pass (see \code{reduced_pcg_apply_fine}): the request in force
+#'     (\code{"auto"} or \code{"1"} to \code{"8"}) and its source
+#'     (\code{"request"}, \code{"environment"} or \code{"built-in"}); the
+#'     factor the attempt chose (1 the coarse blocks; 0 when no attempt on the
+#'     CPU reached that choice) and its blocks; the applications of the
+#'     operator through the kernel; whether the finer blocks could not be
+#'     allocated; whether the attempt was repeated on the coarse blocks after a
+#'     memory decline, with the factor, blocks and iterations of the discarded
+#'     first attempt; and whether the absorption came from the absorption cache
+#'     (\code{e(reduced_pcg_fine_request)} and the other \code{e()} results of
+#'     the same names). Read the factor and the applications together: the
+#'     factor and its blocks say which blocks the attempt chose, not that the
+#'     kernel ran on them; \code{reduced_pcg_hinted_applies} is 0 when the chosen
+#'     blocks were applied in none.}
+#'   \item{\code{slope_solver_request}, \code{slope_solver_source},
+#'     \code{slope_solver_status}, \code{slope_solver_reason},
+#'     \code{slope_solver_used}}{effective request, origin, outcome, reason and
+#'     mode of the published slope solver (\code{"none"} when unused). The
+#'     status is \code{"off"}, \code{"ineligible"}, \code{"declined"} or
+#'     \code{"accepted"}.}
+#'   \item{\code{slope_solver_discarded_iters}, \code{slope_solver_scores_used},
+#'     \code{slope_solver_csr_owner_used}}{discarded iterations, whether the
+#'     published inference used the scores, and whether the owner assembly
+#'     ran successfully (including before a subsequent solver decline).}
 #'   \item{\code{threads_requested}, \code{threads_effective}}{raw request
 #'     (0 means auto) and the request after runtime/automatic limits.}
 #'   \item{\code{threads_used}}{largest OpenMP team observed executing a real
@@ -1571,7 +1642,7 @@ NULL
 #'
 #' @references
 #' Portela, Miguel, and Tiago Tavares. 2026. "xhdfe: High-dimensional fixed
-#' effects regression via a C++ backend." Version 2.34.2.
+#' effects regression via a C++ backend." Version 2.35.0.
 #' \url{https://github.com/reisportela/xhdfe-xfe}
 #'
 #' Correia, Sergio. 2016. "reghdfe: Estimating linear models with multi-way
@@ -1596,6 +1667,7 @@ NULL
 #' See \code{\link{xhdfe-package}} for the complete reference list.
 #'
 #' @seealso \code{\link{xhdfe_fit}} for the matrix interface;
+#'   \code{\link{xhdfe_examples}} for public-data examples;
 #'   \code{xhdfe_demean()} for stand-alone demeaning;
 #'   \code{xhdfe_group_fes()} for group-level fixed-effect aggregation;
 #'   \code{xhdfe_info()} for version/build information; \code{fixef()} for
@@ -1743,7 +1815,8 @@ NULL
 #'           min_parallel_rows = 20000, target_rows_per_thread = 0,
 #'           backend = c("default", "cpu", "cuda", "metal"),
 #'           reduced_pcg = NULL, reduced_pcg_cuda = NULL,
-#'           weighted_cpu_route = FALSE)
+#'           weighted_cpu_route = FALSE, reduced_pcg_apply_fine = NULL,
+#'           slope_solver = NULL, slope_scores = NULL, slope_csr_owner = NULL)
 #'
 #' @param y numeric outcome vector (no \code{NA}s).
 #' @param X numeric design matrix (or \code{data.frame}/vector coerced to
@@ -1859,6 +1932,15 @@ NULL
 #' @param reduced_pcg_cuda \code{NULL} (default), \code{TRUE} or \code{FALSE}:
 #'   the experimental CUDA variant of that tier for this fit, on CUDA fits
 #'   only; see \code{\link{xhdfe}}.
+#' @param reduced_pcg_apply_fine \code{NULL} (default), \code{"auto"} or an
+#'   integer from 1 to 8: the finer blocks of that tier's segment pass for this
+#'   fit; see \code{\link{xhdfe}}.
+#' @param slope_solver \code{NULL}, \code{"off"}, \code{"schur"},
+#'   \code{"network"} or \code{"direct"}; see \code{\link{xhdfe}}.
+#' @param slope_scores optional logical for cluster score reuse;
+#'   see \code{\link{xhdfe}}.
+#' @param slope_csr_owner optional logical for parallel sparse assembly;
+#'   see \code{\link{xhdfe}}.
 #'
 #' @return The same \code{"xhdfe"} object documented in
 #'   \code{\link{xhdfe}} (see its \emph{Value} section for every field),

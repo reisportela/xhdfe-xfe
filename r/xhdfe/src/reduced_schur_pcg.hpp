@@ -165,6 +165,20 @@ struct Config {
     // order, so the bits do not depend on this field: checked by the unit
     // test (21nov2026, Verifications/fereg_liu_study_20261121/).
     int prefetch_cells = 48;
+    // Package A, item A1 (22nov2026): the partition of the segment pass that
+    // solve() chooses has this many times the blocks of the other passes (2 to
+    // kMaxApplyFine), as far as the private blocks of the small effects stay
+    // within internal::kFinePrivateBytes and the bytes the finer blocks need at
+    // their peak fit memory_budget beside memory_bound(), and only where the
+    // kernel of that pass is eligible (internal::hinted_effects); otherwise it
+    // has the blocks of the other passes. The kernel may then apply the chosen
+    // partition in none of the applications (Report::hinted_applies). The sums of the
+    // small effects are grouped by block, so a factor above 1 changes their last
+    // bits (the number of threads still does not). Any other value keeps the
+    // blocks, the bits and the admission of 2.34.2. kApplyFineAuto (package D,
+    // 23nov2026) asks for the factor of the automatic rule of the data
+    // (internal::automatic_apply_fine), to which the rules above then apply.
+    int apply_fine = 1;
     // Admission: an attempt whose memory_bound() exceeds this is declined
     // (Decline::Memory) before it allocates; the adapter sets admission_budget().
     std::size_t memory_budget = std::numeric_limits<std::size_t>::max();
@@ -179,6 +193,17 @@ struct Config {
     // Tests: called for every active column after every iteration.
     void* iteration_context = nullptr;
     void (*on_iteration)(void*, int column, int iteration, double tau, double chat) = nullptr;
+    // Tests (package D, 23nov2026): the reservation of the finer blocks fails,
+    // so the coarse blocks run (Report::apply_fine_alloc_failed); an attempt that
+    // took the finer blocks declines for memory before its first group of
+    // columns (Decline::Memory, with Report::apply_fine_used above 1).
+    bool test_fail_fine_alloc = false;
+    bool test_fine_memory = false;
+    // Tests (package D, round 09, A): solve_with_coarse_retry throws
+    // std::bad_alloc where the repetition starts, after `fresh` (the failure of
+    // the repetition's first allocation as it was before E4), so that a test sees
+    // the record of the repetition survive an exception.
+    bool test_throw_retry_start = false;
 };
 
 struct Problem {
@@ -223,6 +248,11 @@ struct Report {
     double recover_seconds = 0.0;
     double residual_seconds = 0.0;
     long long hinted_applies = 0;  // applies of the operator that went through internal::hinted_segment_part
+    int apply_parts = 0;           // blocks of the partition solve() chose for the operator's segment pass (Config::apply_fine)
+    int apply_fine_used = 1;       // the factor of those blocks (1: the coarse blocks)
+    std::size_t apply_extra = 0;   // bytes the finer blocks took at their peak beside memory_bound() (0: none)
+    int apply_fine_rule = 0;       // package D: the factor the automatic rule chose (0: an explicit request)
+    bool apply_fine_alloc_failed = false;  // package D: the reservation of the finer blocks failed; the coarse ones ran
 };
 
 // Admission budget of one attempt (2.32): 16 bytes per row for every numeric
@@ -238,6 +268,34 @@ inline std::size_t admission_budget(int n, int cols, int fixed_effects) noexcept
     if (per_row != 0 && rows > std::numeric_limits<std::size_t>::max() / per_row)
         return std::numeric_limits<std::size_t>::max();
     return std::max(std::size_t{1} << 30, rows * per_row);
+}
+
+// The finest Config::apply_fine (package A, correction M8): the team hands out
+// the units of a pass in 8 * blocks chunks (internal::Team), so above 8 the
+// dispatch is no finer and only the grouping of the sums would change.
+constexpr int kMaxApplyFine = 8;
+
+// Config::apply_fine for the automatic request (package D, 23nov2026); the same
+// value as hdfe::kReducedPcgApplyFineAuto, which the adapter passes through.
+constexpr int kApplyFineAuto = -1;
+
+// XHDFE_REDUCED_PCG_APPLY_FINE as a request (package D, 23nov2026): "auto"
+// gives kApplyFineAuto; the decimal digits of an integer from 0 to
+// kMaxApplyFine and nothing else give that factor, 0 read as 1 (as before
+// package D); anything else (no value, empty, a sign, a space, other
+// characters, 9 and above) gives 0: no request, so the caller applies its
+// built-in value.
+inline int parse_apply_fine_request(const char* text) noexcept {
+    if (text == nullptr) return 0;
+    if (std::strcmp(text, "auto") == 0) return kApplyFineAuto;
+    int value = 0;
+    const char* c = text;
+    for (; *c >= '0' && *c <= '9'; ++c) {
+        value = value * 10 + (*c - '0');
+        if (value > kMaxApplyFine) return 0;
+    }
+    if (c == text || *c != '\0') return 0;
+    return value < 1 ? 1 : value;
 }
 
 namespace internal {
@@ -257,6 +315,31 @@ constexpr int kStats = 5;  // sum v^2, sum (v - mean_l)^2, sum v, sum (v - v0), 
 constexpr std::size_t kPrefetchMinBytes = std::size_t{2} << 20;
 constexpr int kMaxRemaining = 4;  // the tier takes at most 5 effects: 4 remain
 constexpr bool kHintedSegmentKernel = RPCG_HINTED_SEGMENT_KERNEL != 0;
+// Config::apply_fine is halved until the private blocks of the small effects
+// (blocks * small levels * lanes * 8 bytes, zeroed and added at every
+// application) fit in this many bytes: the accumulators stay near the cores.
+// A rule of the data and the columns only.
+constexpr std::size_t kFinePrivateBytes = std::size_t{4} << 20;
+// The automatic request of the finer blocks (package D, 23nov2026), a rule of
+// the data only, never of the threads: from kMaxApplyFine, the factor is halved
+// while the cells of the operator's segments per finer block, C_op / (B *
+// factor) with B the base blocks of the operator, stay below this many. A
+// performance hypothesis fixed before any measurement of the binary that
+// carries it. An explicit factor never goes through it.
+constexpr long long kAutoApplyFineMinCells = 16384;
+// The version of the rule's form (package D, 3.1): the absorption-cache key of
+// an automatic request carries it with the threshold and the starting factor
+// (reduced_pcg_apply_fine_auto_rule), so that entries written under another
+// rule are not read. Bump it with any change of automatic_apply_fine() other
+// than those two constants.
+constexpr int kAutoApplyFineRuleVersion = 1;
+
+inline int automatic_apply_fine(long long operator_cells, int base_blocks) noexcept {
+    if (base_blocks < 1 || operator_cells < 1) return 1;
+    int factor = kMaxApplyFine;
+    while (factor > 1 && operator_cells < kAutoApplyFineMinCells * base_blocks * factor) factor /= 2;
+    return factor;
+}
 
 inline bool finite(double value) noexcept {
     std::uint64_t bits = 0;
@@ -995,6 +1078,12 @@ struct Work {
     Buffer<double> stats;    // row parts * kStats * W
     int prefetch_cells = 0;  // Config::prefetch_cells of the solve (0: the loop of 2.34.1)
     long long hinted_applies = 0;  // applies whose segment pass went through hinted_segment_part
+    // Blocks of hinted_segment_part when the CPU solve() chose finer ones
+    // (Config::apply_fine) and sized `priv` for them; null: g.op_bounds. Kept
+    // here and not in the Geometry, which the CUDA controller shares and counts:
+    // the controller never sets them.
+    const int* apply_bounds = nullptr;
+    int apply_parts = 0;
 };
 
 template <int W>
@@ -1042,8 +1131,8 @@ struct LaneRow<8> {
 // cells have a cell `ahead` positions on, which leaves out only the last cells
 // of the codes.
 template <int W>
-RPCG_EXACT_FP inline void hinted_segment_part(const Geometry& g, const double* in, double* T, double* mine, int b,
-                                              const int* hinted, int hints, int ahead) {
+RPCG_EXACT_FP inline void hinted_segment_part(const Geometry& g, const int* bounds, const double* in, double* T,
+                                              double* mine, int b, const int* hinted, int hints, int ahead) {
     RPCG_EXACT_FP_BODY
     typedef typename LaneRow<W>::type Row;
     const int nb = g.nb;
@@ -1067,7 +1156,7 @@ RPCG_EXACT_FP inline void hinted_segment_part(const Geometry& g, const double* i
         small_code[q] = code[g.small_list[static_cast<std::size_t>(q)]];
     }
     const long long ahead_end = g.C - ahead;
-    for (int s = g.op_bounds[static_cast<std::size_t>(b)]; s < g.op_bounds[static_cast<std::size_t>(b) + 1U]; ++s) {
+    for (int s = bounds[b]; s < bounds[b + 1]; ++s) {
         const int l = g.op_seg[static_cast<std::size_t>(s)];
         const int c0 = g.cell_ptr[l], c1 = g.cell_ptr[l + 1];
         const bool look = c1 <= ahead_end;
@@ -1096,6 +1185,54 @@ RPCG_EXACT_FP inline void hinted_segment_part(const Geometry& g, const double* i
 }
 #endif
 
+// The bounds balanced_bounds() gives over the cells of the operator segments
+// (their prefix ends at g.C_op), with the cells read as the bounds are placed
+// instead of from a prefix of L_op + 1 ints: building the bounds of the finer
+// blocks of the segment pass (Config::apply_fine) then costs those bounds and
+// no other allocation (their private blocks are counted apart, in solve()).
+inline std::vector<int> operator_cell_bounds(const Geometry& g, int parts) {
+    parts = std::max(1, parts);
+    const int count = g.L_op;
+    std::vector<int> bounds(static_cast<std::size_t>(parts) + 1U, count);
+    bounds[0] = 0;
+    const long long total = count > 0 ? g.C_op : 0;
+    long long reached = 0;  // the prefix at index `at`
+    int at = 0;
+    for (int b = 1; b < parts; ++b) {
+        const long long target = part_begin(total, b, parts);
+        while (at < count && reached < target) {
+            const int l = g.op_seg[static_cast<std::size_t>(at)];
+            reached += g.cell_ptr[l + 1] - g.cell_ptr[l];
+            ++at;
+        }
+        bounds[static_cast<std::size_t>(b)] = std::max(bounds[static_cast<std::size_t>(b) - 1U], at);
+    }
+    return bounds;
+}
+
+// The remaining effects whose rows hinted_segment_part requests ahead, into
+// hinted[], and their number; 0 where the segment pass keeps the loop (a build
+// without the kernel, Config::prefetch_cells 0, cells with multiplicities, more
+// than kMaxRemaining remaining effects, or none large enough). The rule of
+// apply_operator, shared with solve(), which sizes the blocks of that pass.
+inline int hinted_effects(const Geometry& g, int ahead, std::size_t lanes, int* hinted) noexcept {
+    int hints = 0;
+#if RPCG_HINTED_SEGMENT_KERNEL
+    if (ahead > 0 && ahead < g.C && g.mult == nullptr && g.nb <= kMaxRemaining)
+        for (int j = 0; j < g.nb; ++j) {
+            const std::size_t levels = static_cast<std::size_t>(g.offset[static_cast<std::size_t>(j) + 1U] -
+                                                                g.offset[static_cast<std::size_t>(j)]);
+            if (levels * lanes * sizeof(double) >= kPrefetchMinBytes) hinted[hints++] = j;
+        }
+#else
+    (void)g;
+    (void)ahead;
+    (void)lanes;
+    (void)hinted;
+#endif
+    return hints;
+}
+
 // out = S in. Phase A by segment (means of D2 in, private blocks of the small
 // effects); phase B by level of each large effect, with an owner per item.
 template <int W>
@@ -1104,23 +1241,23 @@ inline void apply_operator(const Geometry& g, const Team& team, const double* in
     const int op_parts = static_cast<int>(g.op_bounds.size()) - 1;
     const std::size_t small_width = static_cast<std::size_t>(g.small_levels) * W;
     double* priv = work.priv.data();
+    int priv_parts = op_parts;  // the blocks whose private sums the combination below adds
 #if RPCG_HINTED_SEGMENT_KERNEL
     // The shapes of Config::prefetch_cells go through hinted_segment_part.
     const int ahead = work.prefetch_cells;
     int hinted[kMaxRemaining];
-    int hints = 0;
-    if (ahead > 0 && ahead < g.C && g.mult == nullptr && g.nb <= kMaxRemaining)
-        for (int j = 0; j < g.nb; ++j) {
-            const std::size_t levels = static_cast<std::size_t>(g.offset[static_cast<std::size_t>(j) + 1U] -
-                                                                g.offset[static_cast<std::size_t>(j)]);
-            if (levels * W * sizeof(double) >= kPrefetchMinBytes) hinted[hints++] = j;
-        }
+    const int hints = hinted_effects(g, ahead, static_cast<std::size_t>(W), hinted);
     if (hints > 0) {
         ++work.hinted_applies;
-        team.run(op_parts, [&](int b) {
+        const int* bounds = g.op_bounds.data();
+        if (work.apply_bounds != nullptr) {
+            bounds = work.apply_bounds;
+            priv_parts = work.apply_parts;
+        }
+        team.run(priv_parts, [&](int b) {
             double* mine = small_width > 0 ? priv + static_cast<std::size_t>(b) * small_width : nullptr;
             if (mine != nullptr) std::fill(mine, mine + small_width, 0.0);
-            hinted_segment_part<W>(g, in, T, mine, b, hinted, hints, ahead);
+            hinted_segment_part<W>(g, bounds, in, T, mine, b, hinted, hints, ahead);
         });
     } else
 #endif
@@ -1164,7 +1301,7 @@ inline void apply_operator(const Geometry& g, const Team& team, const double* in
             for (int idx = unit * kVectorUnit; idx < i1; ++idx) {
                 double acc[W];
                 for (int w = 0; w < W; ++w) acc[w] = 0.0;
-                for (int b = 0; b < op_parts; ++b) {
+                for (int b = 0; b < priv_parts; ++b) {
                     const double* src = priv + static_cast<std::size_t>(b) * small_width + static_cast<std::size_t>(idx) * W;
                     for (int w = 0; w < W; ++w) acc[w] += src[w];
                 }
@@ -1845,7 +1982,15 @@ inline std::vector<double> schur_diagonal(const Problem& p, const Config& cfg) {
 
 inline Report solve(const Problem& p, const Config& cfg) {
     Report rep;
-    rep.columns.assign(static_cast<std::size_t>(std::max(0, p.cols)), ColumnReport{});
+    // Package E, E4 (23nov2026): the reports of the columns are the one
+    // allocation before the try below; its failure declines the attempt for
+    // memory, like any other, instead of leaving solve() as an exception.
+    try {
+        rep.columns.assign(static_cast<std::size_t>(std::max(0, p.cols)), ColumnReport{});
+    } catch (const std::bad_alloc&) {
+        rep.decline = Decline::Memory;
+        return rep;
+    }
     bool valid = p.n > 0 && p.k >= 2 && p.k <= 5 && p.cols > 0 && p.codes != nullptr &&
                  p.levels != nullptr && p.columns != nullptr && p.residuals != nullptr &&
                  p.eliminated >= 0 && p.eliminated < p.k;
@@ -1895,6 +2040,61 @@ inline Report solve(const Problem& p, const Config& cfg) {
                 work.partials[static_cast<std::size_t>(j)].allocate(static_cast<std::size_t>(g.tr[static_cast<std::size_t>(j)].items) * W);
         work.units.allocate((m / internal::kVectorUnit + 1U) * 8U * W);
         work.stats.allocate((g.row_bounds.size() + 1U) * internal::kStats * W);
+        // Config::apply_fine: finer blocks for the kernel of the segment pass,
+        // where the kernel runs and under the 4 MiB rule. (i) Every allocation up
+        // to here is made as in 2.34.2, in its order. (ii) A failure of an
+        // allocation the factor adds (its bounds, its private blocks) costs
+        // nothing: the coarse blocks run with their buffers untouched and the
+        // bounds released. (iii) Once the finer private blocks replace the coarse
+        // ones, the attempt holds more bytes than the coarse blocks would: 4 per
+        // bound (parts + 1 of them) and (parts - op_parts) * small levels * lanes
+        // doubles; an allocation that fails later (the bounds of each group's
+        // right-hand side, anything inside the iterations) declines the attempt as
+        // in the release, also where the coarse blocks would have had room.
+        // Admission charges the peak of the replacement, where the finer private
+        // blocks, as Buffer reserves them (at least one double), coexist with the
+        // coarse ones and the bounds: those bytes must fit the budget beside
+        // memory_bound().
+        std::vector<int> fine_bounds;
+        rep.apply_parts = op_parts;
+        int asked = cfg.apply_fine >= 2 && cfg.apply_fine <= kMaxApplyFine ? cfg.apply_fine : 1;
+        if (cfg.apply_fine == kApplyFineAuto) {
+            // Package D: the automatic request; the rules below apply to its factor.
+            asked = internal::automatic_apply_fine(g.C_op, op_parts);
+            rep.apply_fine_rule = asked;
+        }
+        if (asked > 1 && g.L_op > 0) {
+            int hinted[internal::kMaxRemaining];
+            int fine = asked;
+            const std::size_t width = static_cast<std::size_t>(g.small_levels) * W * sizeof(double);
+            while (fine > 1 && static_cast<std::size_t>(fine) * static_cast<std::size_t>(op_parts) * width >
+                                   internal::kFinePrivateBytes)
+                fine /= 2;
+            const int parts = fine * op_parts;
+            const std::size_t fine_doubles =
+                std::max<std::size_t>(1U, static_cast<std::size_t>(parts) * static_cast<std::size_t>(g.small_levels) * W);
+            const std::size_t extra = fine_doubles * sizeof(double) +
+                                      sizeof(int) * (static_cast<std::size_t>(parts) + 1U);
+            if (fine > 1 && internal::hinted_effects(g, work.prefetch_cells, W, hinted) > 0 &&
+                rep.bytes <= cfg.memory_budget && extra <= cfg.memory_budget - rep.bytes) {
+                try {
+                    if (cfg.test_fail_fine_alloc) throw std::bad_alloc();
+                    fine_bounds = internal::operator_cell_bounds(g, parts);
+                    internal::Buffer<double> fine_priv;
+                    fine_priv.allocate(static_cast<std::size_t>(parts) * static_cast<std::size_t>(g.small_levels) * W);
+                    work.priv = std::move(fine_priv);  // releases the coarse blocks
+                    work.apply_bounds = fine_bounds.data();
+                    work.apply_parts = parts;
+                    rep.apply_parts = parts;
+                    rep.apply_fine_used = fine;
+                    rep.apply_extra = extra;
+                } catch (const std::bad_alloc&) {
+                    std::vector<int>().swap(fine_bounds);
+                    rep.apply_fine_alloc_failed = true;
+                }
+            }
+        }
+        if (cfg.test_fine_memory && rep.apply_fine_used > 1) throw std::bad_alloc();
         for (int group = 0; group < groups; ++group) {
             const int col0 = group * per_group;
             const int width = std::min(per_group, p.cols - col0);
@@ -1917,6 +2117,45 @@ inline Report solve(const Problem& p, const Config& cfg) {
         rep.decline = Decline::Memory;
     }
     return rep;
+}
+
+// What the first attempt did when solve_with_coarse_retry() repeated it.
+struct CoarseRetry {
+    bool ran = false;
+    int first_factor = 0;                    // its Report::apply_fine_used
+    int first_parts = 0;                     // its Report::apply_parts
+    int first_rule = 0;                      // its Report::apply_fine_rule (the automatic rule's factor, else 0)
+    int discarded_iterations = 0;            // its Report::iterations
+    long long discarded_hinted_applies = 0;  // its Report::hinted_applies
+};
+
+// Package D, 2.5 (23nov2026; pre-registered in round 05): the one repetition on
+// the coarse blocks. When the attempt had taken a factor above 1
+// (Report::apply_fine_used > 1) and declined for memory, solve() runs once more
+// with factor 1: the first Report, its columns included, is released first,
+// then `fresh` is called (the adapter gives the repetition a fresh observer),
+// and the repetition starts from group zero and writes every column again from
+// the problem's columns. Only the repetition's Report is returned; what the
+// first attempt did is kept in `retry`, filled before `fresh` is called, so
+// that the caller can publish the repetition where it starts and the record
+// survives an exception inside it (round 09, A). Never more than once, never
+// after another decline; a declined repetition is returned as such.
+template <class Fresh>
+inline Report solve_with_coarse_retry(const Problem& p, const Config& cfg, CoarseRetry& retry, Fresh&& fresh) {
+    Report rep = solve(p, cfg);
+    if (rep.solved || rep.decline != Decline::Memory || rep.apply_fine_used <= 1) return rep;
+    retry.ran = true;
+    retry.first_factor = rep.apply_fine_used;
+    retry.first_parts = rep.apply_parts;
+    retry.first_rule = rep.apply_fine_rule;
+    retry.discarded_iterations = rep.iterations;
+    retry.discarded_hinted_applies = rep.hinted_applies;
+    rep = Report{};  // the first report, its columns included, released before the repetition
+    fresh();
+    if (cfg.test_throw_retry_start) throw std::bad_alloc();
+    Config coarse = cfg;
+    coarse.apply_fine = 1;
+    return solve(p, coarse);
 }
 
 }  // namespace reduced_pcg

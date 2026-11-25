@@ -356,6 +356,18 @@ bool savefe_accurate_projection_enabled() {
     return enabled;
 }
 
+// XHDFE_TEST_SAVEFE_PROJECTION_ABANDON=1 (tests only, package D, round 09 E.2;
+// read once per process): E1's projection is computed and then treated as not
+// published, so that a test sees the fit publish the capturing primary with the
+// tier's diagnostics, the finer blocks' included, restored.
+bool savefe_projection_abandon_test() {
+    static const bool on = [] {
+        const char* e = std::getenv("XHDFE_TEST_SAVEFE_PROJECTION_ABANDON");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return on;
+}
+
 // Package B (17nov2026; Verifications/corrigir_erros_20261117/briefs/B_STRICT_CUDA.md,
 // b/RESPOSTA_DESENHO_B.md): a strict-residual fit on CUDA with the automatic
 // method and criterion, no weights, no saved effects and no group() takes the
@@ -442,10 +454,26 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
+// XHDFE_TEST_DETERMINISTIC_CAPACITY=k (tests only, package D, 3.1; read once per
+// process; off when unset or not an integer from 1 to 4096): the processors the
+// deterministic partitions of a fit follow, in place of those visible to the
+// process, so that a test on this host can give two processes base blocks that
+// differ beyond the floor of 48. It changes no thread count.
+int test_deterministic_capacity(int runtime_capacity) {
+    static const int forced = [] {
+        const char* e = std::getenv("XHDFE_TEST_DETERMINISTIC_CAPACITY");
+        if (e == nullptr || e[0] == '\0') return 0;
+        char* end = nullptr;
+        const long value = std::strtol(e, &end, 10);
+        return end != e && *end == '\0' && value >= 1 && value <= 4096 ? static_cast<int>(value) : 0;
+    }();
+    return forced > 0 ? forced : runtime_capacity;
+}
+
 class ScopedParallelRuntime {
 public:
     ScopedParallelRuntime(int threads, int runtime_capacity)
-        : deterministic_capacity_(runtime_capacity) {
+        : deterministic_capacity_(test_deterministic_capacity(runtime_capacity)) {
 #ifdef HDFE_USE_OPENMP
         previous_dynamic_ = omp_get_dynamic();
         previous_threads_ = omp_get_max_threads();
@@ -2459,9 +2487,11 @@ struct FeDofInfo {
     std::vector<int> redundant;
     std::vector<int> num_coefs;
     std::vector<int> inexact;
-    int df_a = 0;
-    int df_a_levels = 0;
-    int df_a_exact = 0;
+    // Package E, E3: sums over the effects, in 64 bits (each term fits an int,
+    // the sum need not), down to their consumers, which publish them as doubles.
+    std::int64_t df_a = 0;
+    std::int64_t df_a_levels = 0;
+    std::int64_t df_a_exact = 0;
 };
 
 FeDofInfo compute_grouped_dof_exact(
@@ -2535,7 +2565,7 @@ FeDofInfo compute_grouped_dof_exact(
         info.inexact.push_back(0);
         previous_rank = rank;
     }
-    info.df_a_levels = static_cast<int>(columns);
+    info.df_a_levels = columns;
     info.df_a_exact = previous_rank;
     info.df_a = previous_rank;
     return info;
@@ -3216,7 +3246,8 @@ FeStructureDigest hash_fe_structure_cache_signature(const std::vector<Eigen::Vec
     return hash.finish(threads, observer);
 }
 
-constexpr const char* kAbsorptionCacheMagic = "xhdfe_absorption_cache_v5";
+constexpr const char* kAbsorptionCacheMagicV5 = "xhdfe_absorption_cache_v5";
+constexpr const char* kAbsorptionCacheMagicV6 = "xhdfe_absorption_cache_v6";
 constexpr std::size_t kAbsorptionCacheMagicSize = 32;
 constexpr std::uint64_t kAbsorptionCacheSalt = 0x9e3779b97f4a7c15ULL;
 // Invalidate transforms certified before the xhdfe-fast CUDA CG restart and the
@@ -3252,6 +3283,14 @@ constexpr std::uint64_t kReducedPcgCacheTag = 0x433233325f525043ULL;
 // (switch off, or a tolerance whose certificate is stricter than the trigger)
 // the key is the key before D10, word for word.
 constexpr std::uint64_t kReducedPcgChatStopCacheTag = 0x4431305f43484154ULL;
+// Package D, 3.1 (23nov2026): the partition of the CPU tier's segment pass
+// ("PARTITN1"), then the policy (the effective factor from 1 to 8, or "AUTO_APP"
+// and the signature of the automatic rule) and the base blocks, wherever the
+// CPU tier is effective for the fit. It replaces package A's "FINE_APP" word
+// (0x46494e455f415050), so that no entry written by package A or by 2.34.2
+// with the tier on, whose partition the key cannot identify, is ever read.
+constexpr std::uint64_t kReducedPcgPartitionCacheTag = 0x5041525449544e31ULL;
+constexpr std::uint64_t kReducedPcgApplyFineAutoCacheWord = 0x4155544f5f415050ULL;
 
 struct AbsorptionCacheKey {
     std::uint64_t sig1 = 0;
@@ -3259,7 +3298,42 @@ struct AbsorptionCacheKey {
     std::array<std::uint64_t,2> tail{};
     int hash_threads = 1;
     detail::ParallelWorkObserver* hash_observer = nullptr;
+    bool legacy_v5 = false;
+    bool capture = false;
+    bool require_cpu_refined = false;
 };
+
+struct CachedSavefeEffect {
+    // The first occurrence identifies the level without depending on its raw
+    // or recoded label. An empty index vector denotes exact per-row values.
+    std::vector<int> first_rows;
+    Eigen::VectorXd values;
+};
+
+struct CachedSavefePublication {
+    // The coefficients at the recovery entry, including the pre-recovery
+    // intercept if present, and the structural columns in their fitted order.
+    Eigen::VectorXd beta;
+    std::vector<int> kept_columns;
+    FeStructureDigest ols_residual_digest{};
+    double intercept = 0.0;
+    Eigen::VectorXd residuals;
+    std::vector<CachedSavefeEffect> effects;
+    int recovery_iterations = 0;
+    double recovery_max_delta = 0.0;
+    int hybrid_recovery = 0;
+    int internal_method = 0;
+    int tuned_method = 0;
+    unsigned int route_flags = 0;
+    int tier_status = 0;
+    std::string tier_reason;
+    int tier_discarded = 0;
+    ReducedPcgFineDiagnostics tier_fine;
+    double abs_residual = 0.0;
+    double abs_residual_rel = 0.0;
+};
+
+struct SavefeCacheMiss {};
 
 struct AbsorptionCacheRecord {
     AbsorptionMethod method = AbsorptionMethod::Auto;
@@ -3288,6 +3362,7 @@ struct AbsorptionCacheRecord {
     std::vector<int> sweep_order;
     Eigen::VectorXd y_tilde;
     Eigen::MatrixXd X_tilde;
+    std::optional<CachedSavefePublication> savefe;
 };
 
 std::uint64_t hash_double_bits(double value) {
@@ -3311,13 +3386,42 @@ void hash_update_double(std::uint64_t& hash, double value) {
     hash = cache_hash_update(hash, hash_double_bits(value));
 }
 
+// Package D, round 09 (B) and round 11: the fits whose key carries the
+// partition of the CPU tier's segment pass are those the tier can take by their
+// options: the conditions of the tier's entry in fit() that both key sites know
+// for certain ("method", "criterion", "tolerance_mode", "tol", "gpu", "weights",
+// "groupvar", "fe_count", "parity_floor", "forced_solver"), and "iv", which fit()
+// states and partial_out() (no instruments) passes as false. At the snapshot both
+// sites hash (the tuned options before the solve) these fields equal what the
+// entry reads: nothing writes them between the snapshot and the entry. The set
+// errs on the side of the words: a fit the tier then refuses for a reason known
+// only later (slopes, whose fits use no cache; saved effects without a
+// projection; the group retry; a profile write; a nested region) keeps them,
+// which can only cost a miss; a fit outside the set (the fast mode, a weighted
+// fit, a GPU fit, an IV fit, a forced solver, the parity floor off, the tier off)
+// keeps the key of 2.34.2 word for word.
+bool reduced_pcg_partition_keyed(const HdfeOptions& options, const Eigen::VectorXd* weights,
+                                 std::size_t effects, bool instrumented) {
+    return detail::reduced_pcg_effective(options) && !gpu_backend_env_requested() &&
+           options.absorption_method == AbsorptionMethod::Auto &&
+           options.convergence_criterion == ConvergenceCriterion::Auto &&
+           options.tolerance_mode == ToleranceMode::ReghdfeComparable && options.tol > 0.0 &&
+           weights == nullptr && !options.save_groupvar && effects >= 2 && effects <= 5 &&
+           options.ordinary_krylov_parity_floor && !options.use_krylov && !options.use_sparse_solver &&
+           !instrumented;
+}
+
 AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::VectorXd>& y,
                                              const Eigen::Ref<const Eigen::MatrixXd>& X,
                                              const std::vector<Eigen::VectorXi>& fes,
                                              const Eigen::VectorXd* weights,
                                              const HdfeOptions& options,
                                              std::uint64_t solve_contract_generation,
-                                             const FeStructureDigest* input_fe_structure = nullptr) {
+                                             const FeStructureDigest* input_fe_structure = nullptr,
+                                             bool instrumented = false,
+                                             bool capture = false,
+                                             bool e1_enabled = false,
+                                             bool require_cpu_refined = false) {
     // Separate the combined-cache key from historical keys that hash each FE.
     detail::CacheDigestBuilder hash(input_fe_structure ? UINT64_C(0x5848444645434f4d)
                                                        : UINT64_C(0x5848444645494e50));
@@ -3330,6 +3434,28 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     update(static_cast<std::uint64_t>(X.cols()));
     update(static_cast<std::uint64_t>(fes.size()));
     update(solve_contract_generation);
+    // These historical generations could only be written by the commands'
+    // no-capture branches. Keep their v5 keys and bodies interoperable.
+    const bool legacy_v5 = !capture &&
+        (require_cpu_refined || solve_contract_generation == kWeightedFourFeCpuCacheGeneration ||
+         solve_contract_generation == kWeightedThreeFeIvCpuCacheGeneration ||
+         solve_contract_generation == kCpuStrictRepairCacheGeneration ||
+         solve_contract_generation == kWeightedPartialOutRepairCacheGeneration);
+    if (!legacy_v5) {
+        update(UINT64_C(0x5848444645563600));  // "XHDFEV6"
+        update(capture);
+        update(e1_enabled);
+        if (capture) {
+            update(hash_double_bits(options.fe_tolerance));
+            update(static_cast<std::uint64_t>(options.fe_recovery_method));
+            update(static_cast<std::uint64_t>(options.savefe_fastpath_max_cols));
+            update(static_cast<std::uint64_t>(resolve_fe_normalize_style(options.stats_style)));
+            update(options.weights_are_frequencies);
+            update(detail::reduced_pcg_apply_fine_request(options));
+            update(detail::reduced_pcg_apply_fine_source(options));
+            update(detail::deterministic_parallel_chunk_count(std::max<Eigen::Index>(1, y.size())));
+        }
+    }
     update(hdfe::detail::ordinary_audit_enabled() ? 1ULL : 0ULL);
     update(options.ordinary_krylov_parity_floor ? 1ULL : 0ULL);
     update(kOrdinaryAutoRoutingRetryPolicyVersion);
@@ -3342,6 +3468,29 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     if (detail::reduced_pcg_effective(options) &&
         detail::reduced_pcg_chat_stop_applies(options, kOrdinaryAutoRoutingRetryTrigger))
         update(kReducedPcgChatStopCacheTag);
+    // Package D, 3.1 (23nov2026) and round 09 (B): for a fit the CPU tier can
+    // take by its options (reduced_pcg_partition_keyed: its switch on, no GPU
+    // requested, the comparable mode, unweighted, ...), the key identifies the
+    // partition of the tier's segment pass: the policy in force (the effective
+    // request of the fit, its own or the process value, where it can take
+    // effect, else 1; or the automatic rule with its version) and the base
+    // blocks that partition is built from (the deterministic chunks of the rows,
+    // which follow the processors visible to the process above the floor of 48).
+    // No entry written without these words is read by such a fit: those of
+    // 2.34.2 and of package A among them. Every other fit (the fast mode, a
+    // weighted fit, a GPU fit, the tier off) keeps the key of 2.34.2, word for word.
+    if (reduced_pcg_partition_keyed(options, weights, fes.size(), instrumented)) {
+        const int apply_fine = detail::reduced_pcg_apply_fine_effective(options);
+        update(kReducedPcgPartitionCacheTag);
+        if (apply_fine == kReducedPcgApplyFineAuto) {
+            update(kReducedPcgApplyFineAutoCacheWord);
+            update(detail::reduced_pcg_apply_fine_auto_rule());
+        } else {
+            update(static_cast<std::uint64_t>(apply_fine));
+        }
+        update(static_cast<std::uint64_t>(
+            detail::deterministic_parallel_chunk_count(std::max<Eigen::Index>(1, y.size()))));
+    }
     // P8: the switches of the weighted CPU retry and of its accounting, which
     // change a weighted transform; constant within a process, so a process with
     // one of them off never shares an entry with one that has it on.
@@ -3404,6 +3553,9 @@ AbsorptionCacheKey hash_absorption_signature(const Eigen::Ref<const Eigen::Vecto
     }
 
     AbsorptionCacheKey key;
+    key.legacy_v5 = legacy_v5;
+    key.capture = capture;
+    key.require_cpu_refined = require_cpu_refined;
     key.hash_threads = std::max(1, options.num_threads);
     key.hash_observer = options.parallel_observer;
     const auto digest = hash.finish(key.hash_threads, key.hash_observer);
@@ -3534,6 +3686,21 @@ bool read_binary(std::ifstream& in, T& value) {
     return static_cast<bool>(in);
 }
 
+bool may_read_refined_v5(const std::string& path, const AbsorptionCacheKey& key) {
+    if (key.legacy_v5 || key.capture) return false;
+    // Refined v5 records are from the explicit weighted Gauss-Seidel or
+    // strict CPU repairs, both requiring a writer without capture. Inspect
+    // their header before computing the extra historical input signature.
+    std::ifstream in(path, std::ios::binary);
+    char magic[kAbsorptionCacheMagicSize] = {};
+    in.read(magic, sizeof(magic));
+    if (!in || std::strncmp(magic, kAbsorptionCacheMagicV5, sizeof(magic)) != 0) return false;
+    in.seekg(4 * sizeof(std::uint64_t) + 5 * sizeof(std::int32_t), std::ios::cur);
+    std::int32_t flags = 0;
+    return read_binary(in, flags) &&
+           flags == (kAbsorptionCacheConverged | kAbsorptionCacheCpuRefined);
+}
+
 template <typename Output>
 bool write_int_vector(Output& out, const std::vector<int>& values) {
     const std::int32_t count = static_cast<std::int32_t>(values.size());
@@ -3572,6 +3739,203 @@ bool read_int_vector(std::ifstream& in,
     return true;
 }
 
+enum SavefeRouteFlag : unsigned int {
+    kSavefeSymmetric = 1U,
+    kSavefeUseSparse = 2U,
+    kSavefeUseKrylov = 4U,
+    kSavefeFromAuto = 8U,
+    kSavefeMlsmr = 16U,
+    kSavefeSchwarz = 32U,
+    kSavefeKrylovPcg = 64U,
+};
+constexpr unsigned int kSavefeRouteMask = 127U;
+
+bool savefe_cache_fault(const char* stage) {
+    // Test the complete-fit fallback without exhausting the machine's memory.
+    const char* configured = std::getenv("XHDFE_TEST_SAVEFE_CACHE_FAILURE");
+    return configured && std::strcmp(configured, stage) == 0;
+}
+
+template <class Publication, class Field>
+bool savefe_cache_fields(Publication& p, Field field) {
+    // A common field order for the decoder, encoder and digest.
+    return field(p.intercept) && field(p.recovery_iterations) &&
+           field(p.recovery_max_delta) && field(p.hybrid_recovery) &&
+           field(p.internal_method) && field(p.tuned_method) &&
+           field(p.route_flags) && field(p.tier_status) && field(p.tier_discarded) &&
+           field(p.tier_fine.request) && field(p.tier_fine.source) &&
+           field(p.tier_fine.used) && field(p.tier_fine.parts) && field(p.tier_fine.hinted_applies) &&
+           field(p.abs_residual) && field(p.abs_residual_rel);
+}
+
+bool write_cache_doubles(AtomicAbsorptionCacheFile& out, const Eigen::VectorXd& values) {
+    if (values.size() > 0) {
+        out.write(reinterpret_cast<const char*>(values.data()),
+                  static_cast<std::streamsize>(values.size()) * sizeof(double));
+    }
+    return static_cast<bool>(out);
+}
+
+bool read_cache_doubles(std::istream& in, Eigen::Index count, Eigen::VectorXd& values) {
+    values.resize(count);
+    if (count > 0) {
+        in.read(reinterpret_cast<char*>(values.data()),
+                static_cast<std::streamsize>(count) * sizeof(double));
+    }
+    return in && detail::ieee_all_finite(values);
+}
+
+bool write_savefe_publication(AtomicAbsorptionCacheFile& out,
+                              const CachedSavefePublication& p, const Eigen::VectorXd& residuals) {
+    const auto reason_size = static_cast<std::int32_t>(p.tier_reason.size());
+    const auto beta_size = static_cast<std::int32_t>(p.beta.size());
+    if (!savefe_cache_fields(p, [&](const auto& x) { return write_binary(out, x); }) ||
+        !write_binary(out, reason_size)) {
+        return false;
+    }
+    out.write(p.tier_reason.data(), reason_size);
+    if (!out || !write_binary(out, p.ols_residual_digest) ||
+        !write_int_vector(out, p.kept_columns) || !write_binary(out, beta_size) ||
+        !write_cache_doubles(out, p.beta) || !write_cache_doubles(out, residuals)) {
+        return false;
+    }
+    for (const auto& effect : p.effects) {
+        if (!write_int_vector(out, effect.first_rows) || !write_cache_doubles(out, effect.values)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool read_savefe_publication(std::ifstream& in, int nobs, int design_cols,
+                             const std::vector<int>& fe_levels, CachedSavefePublication& p) {
+    auto valid_method = [](int method) {
+        return method >= static_cast<int>(AbsorptionMethod::Auto) &&
+               method <= static_cast<int>(AbsorptionMethod::ReducedPcg);
+    };
+    std::int32_t reason_size = 0;
+    if (!savefe_cache_fields(p, [&](auto& x) { return read_binary(in, x); }) ||
+        !valid_method(p.internal_method) || !valid_method(p.tuned_method) ||
+        (p.route_flags & ~kSavefeRouteMask) != 0 ||
+        p.recovery_iterations < 0 || p.hybrid_recovery < 0 || p.hybrid_recovery > 1 ||
+        !detail::ieee_finite(p.recovery_max_delta) || p.recovery_max_delta < 0 ||
+        !detail::ieee_finite(p.intercept) ||
+        !detail::ieee_finite(p.abs_residual) || p.abs_residual < 0 ||
+        !detail::ieee_finite(p.abs_residual_rel) || p.abs_residual_rel < 0 ||
+        p.tier_status < 0 || p.tier_status > 2 || p.tier_discarded < 0 ||
+        p.tier_fine.request < -1 || p.tier_fine.request > 8 || p.tier_fine.source < 0 ||
+        p.tier_fine.source > 3 || p.tier_fine.used < 0 || p.tier_fine.used > 8 ||
+        p.tier_fine.parts < 0 || p.tier_fine.hinted_applies < 0 ||
+        !read_binary(in, reason_size) || reason_size <= 0 || reason_size > 64) {
+        return false;
+    }
+    p.tier_reason.resize(static_cast<std::size_t>(reason_size));
+    in.read(p.tier_reason.data(), reason_size);
+    std::int32_t beta_size = 0;
+    if (!in || !read_binary(in, p.ols_residual_digest) ||
+        !read_int_vector(in, p.kept_columns, design_cols) ||
+        !read_binary(in, beta_size) || beta_size < 0 ||
+        static_cast<std::int64_t>(beta_size) > static_cast<std::int64_t>(design_cols) + 1 ||
+        !read_cache_doubles(in, beta_size, p.beta) || !read_cache_doubles(in, nobs, p.residuals)) {
+        return false;
+    }
+    p.effects.resize(fe_levels.size());
+    for (std::size_t d = 0; d < p.effects.size(); ++d) {
+        auto& effect = p.effects[d];
+        const int levels = fe_levels[d];
+        if (levels <= 0 || levels > nobs || !read_int_vector(in, effect.first_rows, levels)) {
+            return false;
+        }
+        if (!effect.first_rows.empty() && static_cast<int>(effect.first_rows.size()) != levels) {
+            return false;
+        }
+        if (!read_cache_doubles(in, effect.first_rows.empty() ? nobs : levels, effect.values)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+FeStructureDigest hash_savefe_ols_residuals(const AbsorptionCacheKey& key,
+                                          const Eigen::VectorXd& residuals) {
+    detail::CacheDigestBuilder hash(UINT64_C(0x5341564546454f4c));  // "SAVEFEOL"
+    hash.word(residuals.size());
+    hash.data(residuals.data(), static_cast<std::size_t>(residuals.size()) * sizeof(double));
+    return hash.finish(key.hash_threads, key.hash_observer);
+}
+
+bool compact_savefe_effects(const std::vector<Eigen::VectorXi>& fes,
+                            const std::vector<int>& fe_levels,
+                            const std::vector<Eigen::VectorXd>& published,
+                            std::vector<CachedSavefeEffect>& stored) {
+    if (fes.size() != published.size() || fes.size() != fe_levels.size()) {
+        return false;
+    }
+    stored.resize(fes.size());
+    for (std::size_t d = 0; d < fes.size(); ++d) {
+        if (d == 1 && savefe_cache_fault("compact")) throw std::bad_alloc{};
+        const auto& values = published[d];
+        if (values.size() != fes[d].size() || !detail::ieee_all_finite(values)) {
+            return false;
+        }
+        auto& effect = stored[d];
+        const auto index = build_indexer_lite(fes[d]);
+        if (index.num_groups <= 0 || index.num_groups != fe_levels[d]) {
+            return false;
+        }
+        effect.first_rows.assign(static_cast<std::size_t>(index.num_groups), -1);
+        effect.values.resize(index.num_groups);
+        for (Eigen::Index i = 0; i < values.size(); ++i) {
+            const int group = index.group_ids[static_cast<std::size_t>(i)];
+            int& first_row = effect.first_rows[static_cast<std::size_t>(group)];
+            if (first_row < 0) {
+                first_row = static_cast<int>(i);
+                effect.values[group] = values[i];
+            } else if (hash_double_bits(effect.values[group]) != hash_double_bits(values[i])) {
+                // A contribution that varies within a level still has an
+                // exact representation. Never drop its row differences.
+                effect.first_rows.clear();
+                effect.values = values;
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+bool expand_savefe_effects(std::vector<CachedSavefeEffect>& stored,
+                            const std::vector<Eigen::VectorXi>& fes,
+                            std::vector<Eigen::VectorXd>& published) {
+    published.resize(fes.size());
+    for (std::size_t d = 0; d < fes.size(); ++d) {
+        if (d == 1 && savefe_cache_fault("expand")) throw std::bad_alloc{};
+        auto& effect = stored[d];
+        if (effect.first_rows.empty()) {
+            published[d] = std::move(effect.values);
+            continue;
+        }
+        const auto index = build_indexer_lite(fes[d]);
+        if (static_cast<std::size_t>(index.num_groups) != effect.first_rows.size()) {
+            return false;
+        }
+        // Validate first occurrence and coverage as the values are expanded.
+        auto& values = published[d];
+        values.resize(fes[d].size());
+        int next = 0;
+        for (Eigen::Index i = 0; i < values.size(); ++i) {
+            const int group = index.group_ids[static_cast<std::size_t>(i)];
+            if (group == next) {
+                if (effect.first_rows[static_cast<std::size_t>(group)] != i) {
+                    return false;
+                }
+                ++next;
+            }
+            values[i] = effect.values[group];
+        }
+    }
+    return true;
+}
+
 struct AbsorptionCacheDigest {
     std::uint64_t first = 0;
     std::uint64_t second = 0;
@@ -3604,7 +3968,9 @@ AbsorptionCacheDigest absorption_cache_digest(
     const std::vector<int>& fe_levels,
     const std::vector<int>& sweep_order,
     const Eigen::VectorXd& y_tilde,
-    const Eigen::MatrixXd& X_tilde) {
+    const Eigen::MatrixXd& X_tilde,
+    const CachedSavefePublication* publication,
+    const Eigen::VectorXd* published_residuals) {
     detail::CacheDigestBuilder hash(UINT64_C(0x58484446454f5554));
     auto update = [&](std::uint64_t value) {
         hash.word(value);
@@ -3651,6 +4017,40 @@ AbsorptionCacheDigest absorption_cache_digest(
     update(static_cast<std::uint64_t>(X_tilde.cols()));
     update(static_cast<std::uint64_t>(X_tilde.size()));
     hash.data(X_tilde.data(), static_cast<std::size_t>(X_tilde.size()) * sizeof(double));
+    if (!key.legacy_v5) {
+        update(UINT64_C(0x5848444645563600));
+        update(publication != nullptr);
+    }
+    if (publication) {
+        const auto& p = *publication;
+        savefe_cache_fields(p, [&](auto value) {
+            if constexpr (std::is_same_v<decltype(value), double>) {
+                update(hash_double_bits(value));
+            } else {
+                update(static_cast<std::uint64_t>(value));
+            }
+            return true;
+        });
+        auto hash_values = [&](const Eigen::VectorXd& values) {
+            update(static_cast<std::uint64_t>(values.size()));
+            hash.data(values.data(), static_cast<std::size_t>(values.size()) * sizeof(double));
+        };
+        auto hash_indices = [&](const std::vector<int>& values) {
+            update(static_cast<std::uint64_t>(values.size()));
+            for (const int value : values) update(static_cast<std::uint64_t>(value));
+        };
+        update(static_cast<std::uint64_t>(p.tier_reason.size()));
+        hash.data(p.tier_reason.data(), p.tier_reason.size());
+        hash.data(p.ols_residual_digest.data(), p.ols_residual_digest.size());
+        hash_indices(p.kept_columns);
+        hash_values(p.beta);
+        hash_values(*published_residuals);
+        update(static_cast<std::uint64_t>(p.effects.size()));
+        for (const auto& effect : p.effects) {
+            hash_indices(effect.first_rows);
+            hash_values(effect.values);
+        }
+    }
     const auto bytes = hash.finish(key.hash_threads, key.hash_observer);
     AbsorptionCacheDigest digest;
     std::memcpy(&digest.first, bytes.data(), 8);
@@ -3676,8 +4076,12 @@ bool write_absorption_cache(const std::string& path,
                             double krylov_max_condition_times_backward_error,
                             const detail::AbsorptionResult& retry_diagnostics,
                             bool savefe_projection_published = false,
-                            bool cpu_projection_refined = false) {
-    if (path.empty()) {
+                            bool cpu_projection_refined = false,
+                            const CachedSavefePublication* publication = nullptr,
+                            const Eigen::VectorXd* published_residuals = nullptr) {
+    if (path.empty() || (publication != nullptr) != key.capture ||
+        (publication != nullptr) != (published_residuals != nullptr) ||
+        (publication && cpu_projection_refined) || (savefe_projection_published && !publication)) {
         return false;
     }
     AtomicAbsorptionCacheFile out(path);
@@ -3686,7 +4090,8 @@ bool write_absorption_cache(const std::string& path,
     }
 
     char magic[kAbsorptionCacheMagicSize] = {};
-    std::strncpy(magic, kAbsorptionCacheMagic, kAbsorptionCacheMagicSize - 1);
+    std::strncpy(magic, key.legacy_v5 ? kAbsorptionCacheMagicV5 : kAbsorptionCacheMagicV6,
+                 kAbsorptionCacheMagicSize - 1);
     out.write(magic, sizeof(magic));
     if (!write_binary(out, key.sig1) || !write_binary(out, key.sig2) ||
         !write_binary(out, key.tail[0]) || !write_binary(out, key.tail[1])) {
@@ -3731,7 +4136,6 @@ bool write_absorption_cache(const std::string& path,
     if (!out) {
         return false;
     }
-
     const std::size_t x_size =
         static_cast<std::size_t>(X_tilde.size());
     if (!write_binary(out, x_size)) {
@@ -3740,6 +4144,9 @@ bool write_absorption_cache(const std::string& path,
     out.write(reinterpret_cast<const char*>(X_tilde.data()),
               static_cast<std::streamsize>(x_size * sizeof(double)));
     if (!out) {
+        return false;
+    }
+    if (publication && !write_savefe_publication(out, *publication, *published_residuals)) {
         return false;
     }
     const AbsorptionCacheDigest digest = absorption_cache_digest(
@@ -3758,9 +4165,10 @@ bool write_absorption_cache(const std::string& path,
         retry_diagnostics.auto_routing_retry_abs_residual_rel,
         retry_diagnostics.auto_routing_retry_elapsed_seconds,
         fe_levels, sweep_order,
-        y_tilde, X_tilde);
+        y_tilde, X_tilde, publication, published_residuals);
     return write_binary(out, digest.first) && write_binary(out, digest.second) &&
-           write_binary(out, digest.third) && write_binary(out, digest.fourth) && out.commit();
+           write_binary(out, digest.third) && write_binary(out, digest.fourth) &&
+           !(publication && savefe_cache_fault("commit")) && out.commit();
 }
 
 bool read_absorption_cache(const std::string& path,
@@ -3769,7 +4177,7 @@ bool read_absorption_cache(const std::string& path,
                            int expected_cols,
                            int expected_design_cols,
                            int expected_fe_count,
-                           AbsorptionCacheRecord& record) {
+                           AbsorptionCacheRecord& record) try {
     if (path.empty()) {
         return false;
     }
@@ -3783,7 +4191,8 @@ bool read_absorption_cache(const std::string& path,
     if (!in) {
         return false;
     }
-    if (std::strncmp(magic, kAbsorptionCacheMagic, std::strlen(kAbsorptionCacheMagic)) != 0) {
+    const char* expected_magic = key.legacy_v5 ? kAbsorptionCacheMagicV5 : kAbsorptionCacheMagicV6;
+    if (std::strncmp(magic, expected_magic, sizeof(magic)) != 0) {
         return false;
     }
 
@@ -3827,9 +4236,11 @@ bool read_absorption_cache(const std::string& path,
         design_cols != expected_design_cols || expected_fe_count < 0 ||
         method < static_cast<std::int32_t>(AbsorptionMethod::Auto) ||
         method > static_cast<std::int32_t>(AbsorptionMethod::ReducedPcg) ||
-        iterations < 0 || (flags != 0 && flags != kAbsorptionCacheConverged &&
-        flags != (kAbsorptionCacheConverged | kAbsorptionCachePublishedSavefe) &&
-        flags != (kAbsorptionCacheConverged | kAbsorptionCacheCpuRefined))) {
+        iterations < 0 || (key.require_cpu_refined &&
+            flags != (kAbsorptionCacheConverged | kAbsorptionCacheCpuRefined)) ||
+        (flags != kAbsorptionCacheConverged &&
+        flags != (kAbsorptionCacheConverged |
+            (key.capture ? kAbsorptionCachePublishedSavefe : kAbsorptionCacheCpuRefined)))) {
         return false;
     }
     const double diagnostics[] = {
@@ -3908,6 +4319,12 @@ bool read_absorption_cache(const std::string& path,
         }
     }
 
+    if (key.capture) {
+        record.savefe.emplace();
+        if (!read_savefe_publication(in, nobs, design_cols, record.fe_levels, *record.savefe)) {
+            return false;
+        }
+    }
     std::uint64_t stored_first = 0;
     std::uint64_t stored_second = 0;
     std::uint64_t stored_third = 0;
@@ -3932,7 +4349,9 @@ bool read_absorption_cache(const std::string& path,
         record.auto_routing_retry_iterations,
         record.auto_routing_retry_abs_residual_rel,
         record.auto_routing_retry_elapsed_seconds, record.fe_levels,
-        record.sweep_order, record.y_tilde, record.X_tilde);
+        record.sweep_order, record.y_tilde, record.X_tilde,
+        record.savefe ? &*record.savefe : nullptr,
+        record.savefe ? &record.savefe->residuals : nullptr);
     if (stored_first != expected_digest.first ||
         stored_second != expected_digest.second ||
         stored_third != expected_digest.third || stored_fourth != expected_digest.fourth) {
@@ -3948,6 +4367,9 @@ bool read_absorption_cache(const std::string& path,
     record.savefe_projection_published = (flags & kAbsorptionCachePublishedSavefe) != 0;
     record.cpu_projection_refined = (flags & kAbsorptionCacheCpuRefined) != 0;
     return true;
+} catch (const std::bad_alloc&) {
+    // An optional cache that does not fit in memory is an ordinary miss.
+    return false;
 }
 
 constexpr const char* kFeStructureCacheMagic = "xhdfe_fe_structure_cache_v2";
@@ -5641,12 +6063,14 @@ MobilityProfile compute_mobility_profile(const std::vector<Eigen::VectorXi>& fes
         return profile;
     }
 
-    int total_nodes = 0;
+    const int total_nodes = detail::sparse_rank::checked_component_node_count(
+        detail::sparse_rank::level_sum(profile.fe_levels));
+    std::int64_t offset = 0;
     std::vector<int> offsets;
     offsets.reserve(indexers.size());
     for (const auto& idx : indexers) {
-        offsets.push_back(total_nodes);
-        total_nodes += idx.num_groups;
+        offsets.push_back(static_cast<int>(offset));
+        offset += idx.num_groups;
     }
     if (total_nodes <= 0) {
         profile.num_components = 0;
@@ -5755,7 +6179,13 @@ int count_bipartite_components_impl(const Eigen::VectorXi& base_raw,
         *component_stats = FeComponentStats{};
     }
     const auto components_t0 = std::chrono::steady_clock::now();
-    const int total_nodes = base.num_groups + other.num_groups;
+    // Round 11 (E3): the sum of the levels of the pair in 64 bits; a pair above
+    // INT_MAX nodes cannot be numbered by this union-find, and is refused.
+    const std::int64_t wide_nodes = detail::sparse_rank::pair_node_count(base.num_groups, other.num_groups);
+    if (wide_nodes > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+        throw std::length_error("xhdfe: the levels of a pair of absorbed effects exceed the range of int");
+    }
+    const int total_nodes = static_cast<int>(wide_nodes);
     UnionFind uf(total_nodes);
     // The components depend on the set of pairs of levels, not on the rows
     // that carry them nor on their order. When one bit per pair fits, the
@@ -6104,6 +6534,370 @@ bool fe_is_function_of_refined_fe(const Eigen::VectorXi& coarse,
     return refined_function_by_hash(coarse, refined);
 }
 
+#ifdef HDFE_USE_OPENMP
+// The root of x in a forest whose links always go to a smaller index, read
+// while other threads link roots (team_unite). Halving is a plain store: it
+// only ever moves a link of a node that is no longer a root to an ancestor of
+// that node, so it neither creates a cycle nor undoes a link.
+int team_root(std::atomic<int>* up, int x) {
+    for (;;) {
+        const int p = up[x].load(std::memory_order_relaxed);
+        if (p == x) {
+            return x;
+        }
+        const int gp = up[p].load(std::memory_order_relaxed);
+        if (gp != p) {
+            up[x].store(gp, std::memory_order_relaxed);
+        }
+        x = gp;
+    }
+}
+
+// Unites the trees of x and y; true when it linked two roots. A root is
+// linked under the smaller root by a compare-and-swap that fails only if
+// another thread linked it first, and then the roots are read again.
+bool team_unite(std::atomic<int>* up, int x, int y) {
+    for (;;) {
+        x = team_root(up, x);
+        y = team_root(up, y);
+        if (x == y) {
+            return false;
+        }
+        if (x < y) {
+            std::swap(x, y);
+        }
+        int expected = x;
+        if (up[x].compare_exchange_strong(expected, y, std::memory_order_relaxed)) {
+            return true;
+        }
+    }
+}
+
+// XHDFE_TEST_DOF_TEAM_ALLOC_FAIL=k (tests only; read once per process; off when
+// unset or not an integer from 1 to 1000, or pairs): the k-th allocation of
+// every team pass of the components (count_pairs_on_team) throws
+// std::bad_alloc, so that a test sees each allocation of the pass fall back to
+// today's loop; pairs (package E, E2) is k = 1 and dof_pairs_fail_test().
+int dof_team_alloc_fail_at() {
+    static const int at = [] {
+        const char* e = std::getenv("XHDFE_TEST_DOF_TEAM_ALLOC_FAIL");
+        if (e == nullptr || e[0] == '\0') {
+            return 0;
+        }
+        if (std::strcmp(e, "pairs") == 0) {
+            return 1;  // package E, E2: see dof_pairs_fail_test()
+        }
+        char* end = nullptr;
+        const long value = std::strtol(e, &end, 10);
+        return end != e && *end == '\0' && value >= 1 && value <= 1000 ? static_cast<int>(value) : 0;
+    }();
+    return at;
+}
+
+// XHDFE_TEST_DOF_TEAM_ALLOC_FAIL=pairs (tests only, package E, E2; read once per
+// process): the team pass falls back at its first allocation, and in the loop
+// that then counts the pairs on the team the thread of the second pair throws
+// std::bad_alloc, as a UnionFind that cannot get its memory would there.
+bool dof_pairs_fail_test() {
+    static const bool on = [] {
+        const char* e = std::getenv("XHDFE_TEST_DOF_TEAM_ALLOC_FAIL");
+        return e != nullptr && std::strcmp(e, "pairs") == 0;
+    }();
+    return on;
+}
+
+// The pairwise loop of compute_fe_dof_reghdfe() with two or more pairs, on the
+// fit's team (package A, item A3, 22nov2026). That loop gives each pair to one
+// thread of its region, where count_bipartite_components_impl() can only scan
+// the rows serially (omp_in_parallel()): on simulated_panel three pairs of
+// 173 M rows took 2.0 to 2.5 s each, side by side. Here every thread scans its
+// blocks of rows for every pair. Each level of the larger effect of a pair
+// keeps the first level of the smaller effect that a row gives it (a
+// compare-and-swap from -1), and every later partner is united with that one
+// in a lock-free union-find over the smaller effect (team_unite). The pair
+// then has as many components as the smaller effect has roots plus the levels
+// of the larger effect that no row carries: the components of the graph that
+// today's loop builds, which do not depend on the order of the unions. A pair
+// whose count has fallen to 1 cannot change any more, and the rest of its rows
+// are skipped. Integer results, whatever the team and the schedule.
+// Memory: 4 bytes per level of the two effects of every pair, at most 8 bytes
+// per row in all, plus the plan, one counter per pair and thread, and the
+// counts. Pairs: any sequence of elements with members a and b (the caller's
+// own), so that the pass copies nothing before it may fall back.
+// Returns false, with `groups` untouched, wherever today's loop is to count
+// instead: an active parallel region; fewer than two pairs or threads; fewer
+// than 2^20 rows (the threshold of the marking path); a Sparse lookup; a lookup
+// or vector of another length; an empty effect; more than 8 bytes per row of
+// state; any failed allocation of the pass (every one is inside its try, the
+// counts included, and they are published by a swap at the end); or a row whose
+// level a lookup does not know, among the rows the pass reads. It does not read
+// every row: once a pair's count is 1, the rest of that pair's rows are
+// skipped, so such a row there goes unseen. The pass rests on its caller for
+// that: compute_fe_dof_reghdfe() builds each lookup from the vector itself, or
+// takes a Rows lookup of the same rows, so every row's level is known. (Where
+// it replaces today's loop, on such a row that loop would: with a DenseMap
+// lookup, compute raw - min_id before its range test (an int that overflows
+// for extreme identifiers) and otherwise throw "FE lookup missing key" inside
+// its parallel region; with a Dense lookup, take raw - min_id without a range
+// check, an index outside the lookup; with a Rows lookup, read the row's own
+// code, as the pass does.) Like today's loop, the region reports to no observer, so
+// e(threads_used) and e(parallel_workers_active) are what the release publishes.
+template <typename Pairs>
+bool count_pairs_on_team(const std::vector<Eigen::VectorXi>& fes,
+                         const std::vector<std::reference_wrapper<const FeLookup>>& lookups,
+                         const Pairs& pairs,
+                         int threads,
+                         std::vector<int>& groups) {
+    constexpr int kMinRows = 1048576;
+    constexpr int kBlockRows = 16384;
+    // Round 11 (E3): the count of pairs is an int index only where it fits one;
+    // above INT_MAX the pass declines (today's loop counts the pairs).
+    if (!detail::sparse_rank::pair_count_fits_int(pairs.size())) {
+        return false;
+    }
+    const int npairs = static_cast<int>(pairs.size());
+    if (npairs < 2 || threads < 2 || fes.empty() || omp_in_parallel()) {
+        return false;
+    }
+    const int n = static_cast<int>(fes[0].size());
+    if (n < kMinRows) {
+        return false;
+    }
+    auto lookup_of = [&lookups](int d) -> const FeLookup& {
+        return lookups[static_cast<std::size_t>(d)].get();
+    };
+    for (const auto& pair : pairs) {
+        for (const int d : {pair.a, pair.b}) {
+            const FeLookup& lookup = lookup_of(d);
+            if (fes[static_cast<std::size_t>(d)].size() != n || lookup.num_groups <= 0 ||
+                lookup.mode == FeLookupMode::Sparse ||
+                (lookup.mode == FeLookupMode::Rows &&
+                 lookup.row_codes.size() != static_cast<std::size_t>(n))) {
+                return false;
+            }
+        }
+    }
+    int allocation = 0;
+    const int fail_at = dof_team_alloc_fail_at();
+    const auto allocating = [&allocation, fail_at]() {
+        if (++allocation == fail_at) {
+            throw std::bad_alloc();
+        }
+    };
+    try {
+        struct Plan {
+            int big = 0;
+            int small = 0;
+            int big_levels = 0;
+            int small_levels = 0;
+            std::size_t first = 0;   // offset of the larger effect's partners
+            std::size_t up = 0;      // offset of the smaller effect's forest
+        };
+        allocating();
+        std::vector<Plan> plan(static_cast<std::size_t>(npairs));
+        std::size_t firsts = 0;
+        std::size_t ups = 0;
+        for (int k = 0; k < npairs; ++k) {
+            const int a = pairs[static_cast<std::size_t>(k)].a;
+            const int b = pairs[static_cast<std::size_t>(k)].b;
+            Plan& q = plan[static_cast<std::size_t>(k)];
+            const bool a_big = lookup_of(a).num_groups >= lookup_of(b).num_groups;
+            q.big = a_big ? a : b;
+            q.small = a_big ? b : a;
+            q.big_levels = lookup_of(q.big).num_groups;
+            q.small_levels = lookup_of(q.small).num_groups;
+            if (static_cast<long long>(q.big_levels) + q.small_levels >
+                static_cast<long long>(std::numeric_limits<int>::max())) {
+                return false;
+            }
+            q.first = firsts;
+            q.up = ups;
+            firsts += static_cast<std::size_t>(q.big_levels);
+            ups += static_cast<std::size_t>(q.small_levels);
+        }
+        if (firsts + ups > 2U * static_cast<std::size_t>(n)) {
+            return false;
+        }
+        allocating();
+        std::unique_ptr<std::atomic<int>[]> first(new std::atomic<int>[firsts]);
+        allocating();
+        std::unique_ptr<std::atomic<int>[]> up(new std::atomic<int>[ups]);
+        allocating();
+        std::unique_ptr<std::atomic<long long>[]> open(
+            new std::atomic<long long>[static_cast<std::size_t>(npairs)]);
+        allocating();
+        std::unique_ptr<std::atomic<int>[]> done(new std::atomic<int>[static_cast<std::size_t>(npairs)]);
+        allocating();
+        std::vector<long long> partial(static_cast<std::size_t>(threads) * static_cast<std::size_t>(npairs), 0);
+        allocating();
+        std::vector<int> counts(static_cast<std::size_t>(npairs), 0);
+        for (int k = 0; k < npairs; ++k) {
+            const Plan& q = plan[static_cast<std::size_t>(k)];
+            open[static_cast<std::size_t>(k)].store(
+                static_cast<long long>(q.big_levels) + q.small_levels, std::memory_order_relaxed);
+            done[static_cast<std::size_t>(k)].store(0, std::memory_order_relaxed);
+        }
+        std::atomic<int> unknown{0};
+        // The code of row `row` (raw = its identifier), or -1 when the lookup has none.
+        const auto level = [](const FeLookup& lookup, const int* raw, int row) {
+            if (lookup.mode == FeLookupMode::Rows) {
+                return lookup.row_codes[static_cast<std::size_t>(row)];
+            }
+            const long long index =
+                static_cast<long long>(raw[row]) - static_cast<long long>(lookup.min_id);
+            if (lookup.mode == FeLookupMode::Dense) {
+                return index >= 0 && index < lookup.num_groups ? static_cast<int>(index) : -1;
+            }
+            return index >= 0 && index < static_cast<long long>(lookup.dense_map.size())
+                       ? lookup.dense_map[static_cast<std::size_t>(index)]
+                       : -1;
+        };
+        const int blocks = detail::sparse_rank::row_block_count(n, kBlockRows);
+        const auto t0 = std::chrono::steady_clock::now();
+#pragma omp parallel num_threads(threads)
+        {
+#pragma omp for schedule(static)
+            for (std::ptrdiff_t x = 0; x < static_cast<std::ptrdiff_t>(firsts); ++x) {
+                first[static_cast<std::size_t>(x)].store(-1, std::memory_order_relaxed);
+            }
+            for (int k = 0; k < npairs; ++k) {
+                const Plan& q = plan[static_cast<std::size_t>(k)];
+#pragma omp for schedule(static) nowait
+                for (int x = 0; x < q.small_levels; ++x) {
+                    up[q.up + static_cast<std::size_t>(x)].store(x, std::memory_order_relaxed);
+                }
+            }
+#pragma omp barrier
+#pragma omp for schedule(static)
+            for (int block = 0; block < blocks; ++block) {
+                if (unknown.load(std::memory_order_relaxed) != 0) {
+                    continue;
+                }
+                int i0 = 0;
+                int i1 = 0;
+                detail::sparse_rank::row_block_range(block, n, kBlockRows, &i0, &i1);
+                for (int k = 0; k < npairs; ++k) {
+                    if (done[static_cast<std::size_t>(k)].load(std::memory_order_relaxed) != 0) {
+                        continue;
+                    }
+                    const Plan& q = plan[static_cast<std::size_t>(k)];
+                    const FeLookup& big = lookup_of(q.big);
+                    const FeLookup& small = lookup_of(q.small);
+                    const int* big_raw = fes[static_cast<std::size_t>(q.big)].data();
+                    const int* small_raw = fes[static_cast<std::size_t>(q.small)].data();
+                    std::atomic<int>* partner = first.get() + q.first;
+                    std::atomic<int>* forest = up.get() + q.up;
+                    int last_a = -1;
+                    int last_b = -1;
+                    long long closed = 0;
+                    for (int i = i0; i < i1; ++i) {
+                        const int a = level(big, big_raw, i);
+                        const int b = level(small, small_raw, i);
+                        if (a < 0 || b < 0) {
+                            unknown.store(1, std::memory_order_relaxed);
+                            break;
+                        }
+                        if (a == last_a && b == last_b) {
+                            continue;
+                        }
+                        last_a = a;
+                        last_b = b;
+                        int r = partner[a].load(std::memory_order_relaxed);
+                        if (r == b) {
+                            continue;
+                        }
+                        if (r < 0) {
+                            if (partner[a].compare_exchange_strong(r, b, std::memory_order_relaxed)) {
+                                ++closed;
+                                continue;
+                            }
+                            if (r == b) {
+                                continue;
+                            }
+                        }
+                        if (team_unite(forest, r, b)) {
+                            ++closed;
+                        }
+                    }
+                    // The count is roots plus unseen levels; once it is 1 it is final.
+                    if (closed != 0 &&
+                        open[static_cast<std::size_t>(k)].fetch_sub(closed, std::memory_order_relaxed) -
+                                closed == 1) {
+                        done[static_cast<std::size_t>(k)].store(1, std::memory_order_relaxed);
+                    }
+                }
+            }
+            long long* mine = partial.data() +
+                              static_cast<std::size_t>(omp_get_thread_num()) * static_cast<std::size_t>(npairs);
+            for (int k = 0; k < npairs; ++k) {
+                const Plan& q = plan[static_cast<std::size_t>(k)];
+#pragma omp for schedule(static) nowait
+                for (int x = 0; x < q.small_levels; ++x) {
+                    mine[k] += up[q.up + static_cast<std::size_t>(x)].load(std::memory_order_relaxed) == x;
+                }
+#pragma omp for schedule(static) nowait
+                for (int x = 0; x < q.big_levels; ++x) {
+                    mine[k] += first[q.first + static_cast<std::size_t>(x)].load(std::memory_order_relaxed) < 0;
+                }
+            }
+        }
+        if (unknown.load(std::memory_order_relaxed) != 0) {
+            return false;
+        }
+        for (int k = 0; k < npairs; ++k) {
+            long long components = 0;
+            for (int t = 0; t < threads; ++t) {
+                components += partial[static_cast<std::size_t>(t) * static_cast<std::size_t>(npairs) +
+                                      static_cast<std::size_t>(k)];
+            }
+            counts[static_cast<std::size_t>(k)] = static_cast<int>(components);
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        // The recount first and the profile after, so that the components_pass
+        // line is written only when nothing but the swap is left: it marks a pass
+        // that counted.
+        // XHDFE_SPARSE_RANK_VERIFY: every pair counted again by today's function,
+        // outside the region, and the two counts must agree (a difference throws,
+        // and is not a fallback).
+        if (detail::sparse_rank::verify_enabled()) {
+            for (int k = 0; k < npairs; ++k) {
+                const int a = pairs[static_cast<std::size_t>(k)].a;
+                const int b = pairs[static_cast<std::size_t>(k)].b;
+                const int today = count_bipartite_components(
+                    fes[static_cast<std::size_t>(a)], fes[static_cast<std::size_t>(b)],
+                    lookup_of(a), lookup_of(b), nullptr);
+                detail::sparse_rank::verify_check(today == counts[static_cast<std::size_t>(k)],
+                                                  "components", "team_count");
+            }
+            detail::sparse_rank::verify_ok("components");
+        }
+        if (detail::sparse_rank::profile_enabled()) {
+            auto mode_name = [](FeLookupMode mode) {
+                switch (mode) {
+                    case FeLookupMode::Dense: return "dense";
+                    case FeLookupMode::DenseMap: return "densemap";
+                    case FeLookupMode::Rows: return "rows";
+                    case FeLookupMode::Sparse:
+                    default: return "sparse";
+                }
+            };
+            for (const auto& pair : pairs) {
+                detail::sparse_rank::components_team_line(
+                    mode_name(lookup_of(pair.a).mode), mode_name(lookup_of(pair.b).mode),
+                    static_cast<long long>(n),
+                    static_cast<long long>(lookup_of(pair.a).num_groups) *
+                        static_cast<long long>(lookup_of(pair.b).num_groups));
+            }
+            detail::sparse_rank::components_pass_line(npairs, static_cast<long long>(n), t0, t1);
+        }
+        groups.swap(counts);
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+}
+#endif
+
 // reuse (phase 1 of the Stata-path plan): lookups of the caller for the same
 // vectors, position by position. Only Rows lookups are taken from it; they do
 // not depend on fe_levels, so a rebuild would give the same codes. Every other
@@ -6248,15 +7042,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
                     info.inexact[static_cast<std::size_t>(orig)] = effective.inexact[pos];
                 }
 
-                int df_a_levels = 0;
-                int df_a_exact = 0;
-                for (int d = 0; d < dims; ++d) {
-                    df_a_levels += info.levels[static_cast<std::size_t>(d)];
-                    df_a_exact += info.num_coefs[static_cast<std::size_t>(d)];
-                }
-                info.df_a_levels = df_a_levels;
-                info.df_a_exact = df_a_exact;
-                info.df_a = df_a_exact;
+                info.df_a_levels = detail::sparse_rank::level_sum(info.levels);
+                info.df_a_exact = detail::sparse_rank::level_sum(info.num_coefs);
+                info.df_a = info.df_a_exact;
                 return info;
             }
         }
@@ -6321,7 +7109,7 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
             int b = 0;
         };
         std::vector<PairIdx> pairs;
-        pairs.reserve(static_cast<std::size_t>(dims * (dims - 1) / 2));
+        pairs.reserve(detail::sparse_rank::effect_pair_count(dims));  // E3: widened before the product
         for (int a = 0; a < dims; ++a) {
             for (int b = a + 1; b < dims; ++b) {
                 if (groupvar && a == 0 && b == 1) {
@@ -6335,27 +7123,83 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
 #ifdef HDFE_USE_OPENMP
         use_threads = std::max(1, threads);
 #endif
+        bool counted = false;
+#ifdef HDFE_USE_OPENMP
+        // Two or more pairs: one pass over the rows on the team
+        // (count_pairs_on_team). Not when the first pair carries the
+        // first-pair statistics, whose weighted sums follow the rows' order,
+        // nor when today's function would reject the weights. Every lookup
+        // above was built from its own vector or is a Rows lookup of the same
+        // rows, so every row's level is known: the guarantee the pass rests on
+        // for the rows it skips once a pair has closed.
+        const bool stats_in_loop = first_pair_stats != nullptr && !pairs.empty() &&
+                                   pairs.front().a == 0 && pairs.front().b == 1;
+        if (pairs.size() > 1 && use_threads > 1 && !stats_in_loop &&
+            (weights == nullptr || weights->size() == fes[0].size())) {
+            std::vector<int> team_groups;
+            if (count_pairs_on_team(fes, lookups, pairs, use_threads, team_groups)) {
+                for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+                    pair_groups[static_cast<std::size_t>(pairs[idx].a)]
+                               [static_cast<std::size_t>(pairs[idx].b)] = team_groups[idx];
+                }
+                counted = true;
+            }
+        }
+#endif
         // One pair alone keeps the team for its own rows.
-        if (pairs.size() > 1 && use_threads > 1) {
+        if (!counted && pairs.size() > 1 && use_threads > 1) {
+            // Package E, E2 (23nov2026): an exception inside the region (a
+            // UnionFind that cannot get its memory, a lookup that throws) is
+            // caught in its thread; the pairs not yet started are skipped, the
+            // region ends, and the first exception is rethrown here. No count of
+            // the region is published: they go to region_groups first.
+            std::vector<int> region_groups(pairs.size(), 0);
+            std::exception_ptr region_error;
+            std::atomic<bool> region_failed{false};
+            const bool fail_second_pair = dof_pairs_fail_test();
 #ifdef HDFE_USE_OPENMP
 #pragma omp parallel for schedule(static) num_threads(use_threads)
 #endif
             for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
-                const int a = pairs[idx].a;
-                const int b = pairs[idx].b;
-                const int groups = count_bipartite_components(
-                    fes[static_cast<std::size_t>(a)],
-                    fes[static_cast<std::size_t>(b)],
-                    lookups[static_cast<std::size_t>(a)],
-                    lookups[static_cast<std::size_t>(b)],
-                    nullptr,
-                    (a == 0 && b == 1) ? first_pair_stats : nullptr,
-                    (a == 0 && b == 1) ? weights : nullptr);
-                pair_groups[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] = groups;
+                if (region_failed.load(std::memory_order_relaxed)) {
+                    continue;
+                }
+                try {
+                    const int a = pairs[idx].a;
+                    const int b = pairs[idx].b;
+                    if (fail_second_pair && idx == 1) {
+                        throw std::bad_alloc();  // XHDFE_TEST_DOF_TEAM_ALLOC_FAIL=pairs
+                    }
+                    region_groups[idx] = count_bipartite_components(
+                        fes[static_cast<std::size_t>(a)],
+                        fes[static_cast<std::size_t>(b)],
+                        lookups[static_cast<std::size_t>(a)],
+                        lookups[static_cast<std::size_t>(b)],
+                        nullptr,
+                        (a == 0 && b == 1) ? first_pair_stats : nullptr,
+                        (a == 0 && b == 1) ? weights : nullptr);
+                } catch (...) {
+#ifdef HDFE_USE_OPENMP
+#pragma omp critical(xhdfe_dof_pairs_error)
+#endif
+                    {
+                        if (!region_error) {
+                            region_error = std::current_exception();
+                        }
+                    }
+                    region_failed.store(true, std::memory_order_relaxed);
+                }
+            }
+            if (region_error) {
+                std::rethrow_exception(region_error);
+            }
+            for (std::size_t idx = 0; idx < pairs.size(); ++idx) {
+                pair_groups[static_cast<std::size_t>(pairs[idx].a)]
+                           [static_cast<std::size_t>(pairs[idx].b)] = region_groups[idx];
             }
             // XHDFE_SPARSE_RANK_VERIFY: a difference found inside the region.
             detail::sparse_rank::verify_rethrow();
-        } else {
+        } else if (!counted) {
             for (const auto& pair : pairs) {
                 const int groups = count_bipartite_components(
                     fes[static_cast<std::size_t>(pair.a)],
@@ -6383,15 +7227,9 @@ FeDofInfo compute_fe_dof_reghdfe(const std::vector<Eigen::VectorXi>& fes,
         }
     }
 
-    int df_a_levels = 0;
-    int df_a_exact = 0;
-    for (int d = 0; d < dims; ++d) {
-        df_a_levels += info.levels[static_cast<std::size_t>(d)];
-        df_a_exact += info.num_coefs[static_cast<std::size_t>(d)];
-    }
-    info.df_a_levels = df_a_levels;
-    info.df_a_exact = df_a_exact;
-    info.df_a = df_a_exact;
+    info.df_a_levels = detail::sparse_rank::level_sum(info.levels);
+    info.df_a_exact = detail::sparse_rank::level_sum(info.num_coefs);
+    info.df_a = info.df_a_exact;
     return info;
 }
 
@@ -10632,6 +11470,22 @@ detail::AbsorptionResult refine_n1_absorption(
     return next;
 }
 
+// Package D: what the tier's attempt did with the finer blocks, into the fit's
+// diagnostics (the request, its source and the cache flag stay); an outcome of
+// nullptr (no attempt: ineligible, another route) clears the attempt's fields.
+void record_reduced_pcg_fine(ReducedPcgFineDiagnostics& fine, const detail::ReducedPcgOutcome* outcome) noexcept {
+    const detail::ReducedPcgOutcome none;
+    const detail::ReducedPcgOutcome& o = outcome != nullptr ? *outcome : none;
+    fine.used = o.fine_used;
+    fine.parts = o.fine_parts;
+    fine.hinted_applies = o.hinted_applies;
+    fine.alloc_failed = o.fine_alloc_failed;
+    fine.retry = o.fine_retry;
+    fine.retry_factor = o.fine_retry_factor;
+    fine.retry_parts = o.fine_retry_parts;
+    fine.retry_iterations = o.fine_retry_iterations;
+}
+
 }  // namespace
 
 FeComponentStats compute_first_pair_component_stats(
@@ -10655,11 +11509,11 @@ FeComponentStats compute_first_pair_component_stats(
 
     const FeIndexerLite first = build_indexer_lite(first_fe);
     const FeIndexerLite second = build_indexer_lite(second_fe);
-    const int total_nodes = first.num_groups + second.num_groups;
-    if (first.num_groups <= 0 || second.num_groups <= 0 ||
-        total_nodes <= 0) {
+    if (first.num_groups <= 0 || second.num_groups <= 0) {
         return stats;
     }
+    const int total_nodes = detail::sparse_rank::checked_component_node_count(
+        detail::sparse_rank::pair_node_count(first.num_groups, second.num_groups));
 
     UnionFind uf(total_nodes);
     for (Eigen::Index i = 0; i < n; ++i) {
@@ -10761,7 +11615,14 @@ void HdfeRegressorV11::clear_consumable_state() noexcept {
     reduced_pcg_status_ = 0;
     reduced_pcg_reason_ = detail::reduced_pcg_effective(options_) ? "not_reached" : "off";
     reduced_pcg_discarded_iterations_ = 0;
+    reduced_pcg_fine_ = ReducedPcgFineDiagnostics{};
+    reduced_pcg_fine_.request = detail::reduced_pcg_apply_fine_request(options_);
+    reduced_pcg_fine_.source = detail::reduced_pcg_apply_fine_source(options_);
+    reduced_pcg_transient_fallback_ = false;
     krylov_pcg_published_ = false;
+    slope_solver_diagnostics_ = {};
+    slope_scores_enabled_ = false;
+    slope_csr_owner_enabled_ = false;
     threads_used_ = 0;
     threads_requested_ = 0;
     threads_effective_ = 0;
@@ -10778,6 +11639,7 @@ void HdfeRegressorV11::clear_consumable_state() noexcept {
 
 void HdfeRegressorV11::begin_attempt() {
     clear_consumable_state();
+    slope_solver_diagnostics_ = detail::resolve_slope_solver(options_, slope_scores_enabled_, slope_csr_owner_enabled_);
     lifecycle_state_ = LifecycleState::InProgress;
     generation_ = generation_ == std::numeric_limits<std::uint64_t>::max()
                       ? 1
@@ -10828,6 +11690,23 @@ bool HdfeRegressorV11::has_partial_result() const noexcept {
     return lifecycle_state_ == LifecycleState::PartialReady;
 }
 
+void HdfeRegressorV11::set_reduced_pcg_apply_fine(int request) {
+    // Package D (round 09, E.4): the constructor's rule.
+    if (request != kReducedPcgApplyFineUnset && request != kReducedPcgApplyFineAuto &&
+        (request < 1 || request > 8)) {
+        throw std::invalid_argument(
+            "reduced_pcg_apply_fine must be unset, automatic, or an integer from 1 to 8");
+    }
+    options_.reduced_pcg_apply_fine = request;
+}
+
+void HdfeRegressorV11::set_slope_solver(SlopeSolverRequest request) {
+    if (request < SlopeSolverRequest::Unset || request > SlopeSolverRequest::Direct)
+        throw std::invalid_argument("slope_solver must be unset, off, schur, network or direct");
+    options_.slope_solver = request;
+    options_.slope_solver_from_global = false;
+}
+
 void HdfeRegressorV11::set_weights_are_frequencies(bool value) noexcept {
     if (options_.weights_are_frequencies != value) {
         options_.weights_are_frequencies = value;
@@ -10849,6 +11728,15 @@ HdfeRegressorV11::HdfeRegressorV11(HdfeOptions options, ThreadingOptions threadi
             "absorption method krylov-pcg is reported when the Krylov-PCG route is forced; "
             "it cannot be requested (use auto)");
     }
+    // Package D: no request, the automatic rule, or an explicit factor from 1 to 8.
+    if (options_.reduced_pcg_apply_fine != kReducedPcgApplyFineUnset &&
+        options_.reduced_pcg_apply_fine != kReducedPcgApplyFineAuto &&
+        (options_.reduced_pcg_apply_fine < 1 || options_.reduced_pcg_apply_fine > 8)) {
+        throw std::invalid_argument(
+            "reduced_pcg_apply_fine must be unset, automatic, or an integer from 1 to 8");
+    }
+    if (options_.slope_solver < SlopeSolverRequest::Unset || options_.slope_solver > SlopeSolverRequest::Direct)
+        throw std::invalid_argument("slope_solver must be unset, off, schur, network or direct");
     if (!options_.symmetric_sweep) {
         options_.symmetric_sweep = threading_.symmetric_sweep;
     }
@@ -10885,7 +11773,12 @@ HdfeRegressorV11::HdfeRegressorV11(const HdfeRegressorV11& other)
       reduced_pcg_status_(other.reduced_pcg_status_),
       reduced_pcg_reason_(other.reduced_pcg_reason_),
       reduced_pcg_discarded_iterations_(other.reduced_pcg_discarded_iterations_),
-      krylov_pcg_published_(other.krylov_pcg_published_) {
+      reduced_pcg_fine_(other.reduced_pcg_fine_),
+      reduced_pcg_transient_fallback_(other.reduced_pcg_transient_fallback_),
+      krylov_pcg_published_(other.krylov_pcg_published_),
+      slope_solver_diagnostics_(other.slope_solver_diagnostics_),
+      slope_scores_enabled_(other.slope_scores_enabled_),
+      slope_csr_owner_enabled_(other.slope_csr_owner_enabled_) {
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
     }
@@ -10924,7 +11817,12 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(
     reduced_pcg_status_ = other.reduced_pcg_status_;
     reduced_pcg_reason_ = other.reduced_pcg_reason_;
     reduced_pcg_discarded_iterations_ = other.reduced_pcg_discarded_iterations_;
+    reduced_pcg_fine_ = other.reduced_pcg_fine_;
+    reduced_pcg_transient_fallback_ = other.reduced_pcg_transient_fallback_;
     krylov_pcg_published_ = other.krylov_pcg_published_;
+    slope_solver_diagnostics_ = other.slope_solver_diagnostics_;
+    slope_scores_enabled_ = other.slope_scores_enabled_;
+    slope_csr_owner_enabled_ = other.slope_csr_owner_enabled_;
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
     }
@@ -10960,7 +11858,12 @@ HdfeRegressorV11::HdfeRegressorV11(HdfeRegressorV11&& other) noexcept
       reduced_pcg_status_(other.reduced_pcg_status_),
       reduced_pcg_reason_(std::move(other.reduced_pcg_reason_)),
       reduced_pcg_discarded_iterations_(other.reduced_pcg_discarded_iterations_),
-      krylov_pcg_published_(other.krylov_pcg_published_) {
+      reduced_pcg_fine_(other.reduced_pcg_fine_),
+      reduced_pcg_transient_fallback_(other.reduced_pcg_transient_fallback_),
+      krylov_pcg_published_(other.krylov_pcg_published_),
+      slope_solver_diagnostics_(other.slope_solver_diagnostics_),
+      slope_scores_enabled_(other.slope_scores_enabled_),
+      slope_csr_owner_enabled_(other.slope_csr_owner_enabled_) {
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
     }
@@ -10999,7 +11902,12 @@ HdfeRegressorV11& HdfeRegressorV11::operator=(HdfeRegressorV11&& other) noexcept
     reduced_pcg_status_ = other.reduced_pcg_status_;
     reduced_pcg_reason_ = std::move(other.reduced_pcg_reason_);
     reduced_pcg_discarded_iterations_ = other.reduced_pcg_discarded_iterations_;
+    reduced_pcg_fine_ = other.reduced_pcg_fine_;
+    reduced_pcg_transient_fallback_ = other.reduced_pcg_transient_fallback_;
     krylov_pcg_published_ = other.krylov_pcg_published_;
+    slope_solver_diagnostics_ = other.slope_solver_diagnostics_;
+    slope_scores_enabled_ = other.slope_scores_enabled_;
+    slope_csr_owner_enabled_ = other.slope_csr_owner_enabled_;
     if (lifecycle_state_ == LifecycleState::InProgress) {
         fail_attempt();
     }
@@ -11483,13 +12391,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
     };
 
-    auto run_fit = [&](const Eigen::Ref<const Eigen::VectorXd>& y_use,
+    auto run_fit_once = [&](const Eigen::Ref<const Eigen::VectorXd>& y_use,
                        const Eigen::Ref<const Eigen::MatrixXd>& X_use,
                        const std::vector<Eigen::VectorXi>& fes_use,
                        const Eigen::VectorXd* w_ptr,
                        const std::vector<Eigen::VectorXi>* c_ptr,
                        const Eigen::MatrixXd* inst_use,
-                       const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) {
+                       const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use,
+                       bool skip_cache_read, bool& provisional_cache_hit) {
         detail::additive_cell_projection::ScopedPublicAutoRequest additive_request(
             options_.absorption_method==AbsorptionMethod::Auto);
         detail::ScopedN1Capture n1_capture(detail::ordinary_audit_enabled());
@@ -11538,6 +12447,10 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const std::vector<detail::HeterogeneousSlopeTerm>& slope_terms =
             slopes_use ? *slopes_use : empty_slopes;
         const bool has_slopes_use = !slope_terms.empty();
+        if (!has_slopes_use && slope_solver_diagnostics_.request != SlopeSolverRequest::Off) {
+            slope_solver_diagnostics_.reason = (suppress_auto_routing_retry_ || grouped_call_mark_)
+                ? "group" : "no_slopes";
+        }
         tuned.certify_weighted_gauss_seidel =
             options_.absorption_method == AbsorptionMethod::GaussSeidel &&
             tuned.tolerance_mode == ToleranceMode::ReghdfeComparable &&
@@ -11687,9 +12600,13 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             allow_cache_write = false;
             cache_path.clear();
         }
+        if (skip_cache_read) {
+            allow_cache_read = false;
+        }
         AbsorptionCacheKey abs_cache_key;
         bool abs_cache_key_ready = false;
         bool cache_hit = false;
+        std::optional<CachedSavefePublication> cached_savefe;
 
         // PF3_CANDIDATE2_PROTOTYPE_BEGIN
         // Accuracy-only opt-in for the standard CUDA Auto/comparable path.
@@ -12141,6 +13058,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             const Eigen::Ref<const Eigen::MatrixXd>& design,
             AbsorptionMethod requested_method) {
             network_scores.reset();
+            auto& slope = slope_solver_diagnostics_;
+            const bool slope_requested = slope.request != SlopeSolverRequest::Off;
+            if (slope_requested) {
+                const char* reason = (suppress_auto_routing_retry_ || grouped_call_mark_) ? "group"
+                    : !has_slopes_use ? "no_slopes"
+                    : !detail::reduced_pcg_effective(options_) ? "tier_off" : "not_reached";
+                slope.reset_outcome(reason);
+            }
             int mixed_network_spent = 0;
             int mixed_network_gpu_spent = 0;
             std::optional<detail::ScopedCudaForwardProbeRequest>
@@ -12576,18 +13501,27 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     : (tuned.use_krylov || tuned.use_sparse_solver) ? "forced_solver"
                     : allow_profile_write ? "profile_write"
                     : nested_region ? "nested" : nullptr;
-                if (ineligible && std::strcmp(ineligible, "slopes") == 0 &&
-                    !options_.retain_fixed_effects && !tuned.retain_fixed_effects &&
-                    !options_.save_groupvar && !wants_iv && !has_instruments &&
-                    !suppress_auto_routing_retry_ && !grouped_call_mark_ &&
-                    !tuned.use_sparse_solver && !tuned.use_krylov && !nested_region &&
-                    !allow_profile_write && !allow_cache_read && !allow_cache_write &&
-                    fe_cache_cfg.mode == "off" && mobility_cfg.mode == "off") {
-                    const auto network_mode = detail::mixed_network_mode();
-                    if (network_mode != detail::MixedNetworkMode::Off &&
-                        detail::mixed_network_shape(fes_use, slope_terms)) {
-                        const char* scores_env = std::getenv("XHDFE_EXPERIMENT_NETWORK_SCORES");
-                        auto* capture = scores_env && std::strcmp(scores_env, "1") == 0 &&
+                if (slope_requested) {
+                    // The leading tier vetoes reach "slopes" before the
+                    // ordinary parity floor, which slopes explicitly disable.
+                    const char* reason = (suppress_auto_routing_retry_ || grouped_call_mark_) ? "group"
+                        : !has_slopes_use ? "no_slopes"
+                        : ineligible == nullptr ? "not_reached"
+                        : std::strcmp(ineligible, "slopes") != 0 ? ineligible
+                        : (options_.retain_fixed_effects || tuned.retain_fixed_effects) ? "savefe"
+                        : options_.save_groupvar ? "groupvar"
+                        : (wants_iv || has_instruments) ? "iv"
+                        : (tuned.use_sparse_solver || tuned.use_krylov) ? "forced_solver"
+                        : nested_region ? "nested"
+                        : allow_profile_write ? "profile_write"
+                        : (allow_cache_read || allow_cache_write) ? "absorption_cache"
+                        : fe_cache_cfg.mode != "off" ? "fe_structure_cache"
+                        : mobility_cfg.mode != "off" ? "mobility_profile"
+                        : !detail::mixed_network_shape(fes_use, slope_terms) ? "shape" : nullptr;
+                    if (reason != nullptr) {
+                        slope.reason = reason;
+                    } else {
+                        auto* capture = slope_scores_enabled_ &&
                             drop_intercept && options_.fit_intercept && c_ptr && c_ptr->size() == 2 &&
                             tuned.se_type == StandardErrorType::Cluster &&
                             detail::cluster_shared_passes_enabled() &&
@@ -12595,18 +13529,28 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                             ? &network_scores : nullptr;
                         try {
                             auto network = detail::absorb_mixed_network(
-                                y_use, design, fes_use, slope_terms, tuned, network_mode,
-                                cuda_reduced, c_ptr, capture);
+                                y_use, design, fes_use, slope_terms, tuned,
+                                detail::mixed_network_mode(slope.request), cuda_reduced,
+                                c_ptr, capture, slope_csr_owner_enabled_, slope.csr_owner_used);
+                            slope.used = slope.request;
+                            slope.status = SlopeSolverStatus::Accepted;
+                            slope.reason = "none";
                             method_used_ = AbsorptionMethod::KrylovPcg;
                             reduced_pcg_status_ = 0;
                             reduced_pcg_reason_ = "separate_mixed_network";
                             reduced_pcg_discarded_iterations_ = 0;
+                            record_reduced_pcg_fine(reduced_pcg_fine_, nullptr);
                             return network;
                         } catch (const detail::MixedNetworkDecline& decline) {
                             mixed_network_spent = decline.iterations;
                             mixed_network_gpu_spent = cuda_reduced ? mixed_network_spent : 0;
-                            std::fprintf(stderr, "mixed_network_decline reason=%s spent=%d\n",
-                                         decline.what(), mixed_network_spent);
+                            slope.status = SlopeSolverStatus::Declined;
+                            slope.reason = decline.reason;
+                            slope.discarded_iters = mixed_network_spent;
+                            if (detail::mixed_network_trace_enabled()) {
+                                std::fprintf(stderr, "mixed_network_decline reason=%s spent=%d\n",
+                                             decline.what(), mixed_network_spent);
+                            }
                             if (mixed_network_spent >= tuned.max_iter) throw;
                         }
                     }
@@ -12615,6 +13559,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     reduced_pcg_status_ = 0;
                     reduced_pcg_reason_ = ineligible;
                     reduced_pcg_discarded_iterations_ = 0;
+                    record_reduced_pcg_fine(reduced_pcg_fine_, nullptr);
                     if (savefe_final_line_owable && std::strcmp(ineligible, "savefe") == 0) {
                         savefe_final_line_owed = true;  // point 13: printed once E1 decides
                     } else {
@@ -12639,6 +13584,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     reduced_pcg_status_ = outcome.status;
                     reduced_pcg_reason_ = outcome.reason;
                     reduced_pcg_discarded_iterations_ = reduced ? 0 : outcome.iterations;
+                    // Package D: the finer blocks of the attempt. After a transient
+                    // memory fallback (the finer blocks not allocated, the repetition
+                    // on the coarse blocks, or a decline for memory that leaves the
+                    // fit to the chain) the fit writes no absorption-cache entry (3.1).
+                    record_reduced_pcg_fine(reduced_pcg_fine_, &outcome);
+                    if (outcome.fine_retry || outcome.fine_alloc_failed ||
+                        (outcome.status == 2 && std::strcmp(outcome.reason, "memory") == 0))
+                        reduced_pcg_transient_fallback_ = true;
                     if (reduced) {
                         reduced->auto_routing_retry_policy_enabled = tuned.ordinary_auto_routing_retry;
                         return std::move(*reduced);
@@ -13469,6 +14422,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             const int tier_status_before = reduced_pcg_status_;
             const std::string tier_reason_before = reduced_pcg_reason_;
             const int tier_discarded_before = reduced_pcg_discarded_iterations_;
+            const ReducedPcgFineDiagnostics tier_fine_before = reduced_pcg_fine_;
             const AbsorptionMethod tuned_method_before = tuned.absorption_method;
             detail::AbsorptionResult projection;
             bool thrown = false;
@@ -13509,6 +14463,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             tuned.retain_fixed_effects = true;
             tuned.absorption_method = tuned_method_before;
             savefe_projection_tier_eligible = false;
+            if (savefe_projection_abandon_test()) thrown = true;  // tests only (round 09, E.2)
             const bool certified =
                 !thrown && projection.converged && projection.precision_certified &&
                 projection.cuda_projection_moments_met;
@@ -13532,13 +14487,12 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             if (!published) {
                 // A transient projection failure must not make the capturing
                 // primary bypass the next attempt through a cache hit.
-                if (reselect_weighted_savefe_projection) {
-                    allow_cache_write = false;
-                }
+                allow_cache_write = false;
                 method_used_ = method_before;
                 reduced_pcg_status_ = tier_status_before;
                 reduced_pcg_reason_ = tier_reason_before;
                 reduced_pcg_discarded_iterations_ = tier_discarded_before;
+                reduced_pcg_fine_ = tier_fine_before;
                 return primary;
             }
             projection.fe_alpha_y = std::move(primary.fe_alpha_y);
@@ -13696,10 +14650,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         cpu_profile_log_elapsed("fit_prep", fit_t0);
         const auto absorption_t0 = std::chrono::steady_clock::now();
         bool absorption_ready = false;
-        auto ensure_cache_key = [&](const Eigen::Ref<const Eigen::MatrixXd>& design) {
-            if (abs_cache_key_ready) {
-                return;
-            }
+        auto make_cache_key = [&](const Eigen::Ref<const Eigen::MatrixXd>& design,
+                                  bool require_cpu_refined) {
             std::uint64_t generation = bound_cpu_strict_repair ? kCpuStrictRepairCacheGeneration
                                                                : kAbsorptionSolveContractGeneration;
             if (!tuned.strict_cpu_absolute_check) {
@@ -13719,9 +14671,17 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 ensure_fe_cache_signature();
                 input_fe_structure = &fe_cache_signature;
             }
-            abs_cache_key = hash_absorption_signature(
-                y_use, design, fes_use, w_ptr, cache_key_options, generation, input_fe_structure);
-            abs_cache_key_ready = true;
+            // Round 11 (B): an IV fit (the tier's "iv") keeps the key of 2.34.2.
+            return hash_absorption_signature(
+                y_use, design, fes_use, w_ptr, cache_key_options, generation, input_fe_structure,
+                wants_iv || has_instruments, options_.retain_fixed_effects && !fes_use.empty(),
+                savefe_accurate_projection, require_cpu_refined);
+        };
+        auto ensure_cache_key = [&](const Eigen::Ref<const Eigen::MatrixXd>& design) {
+            if (!abs_cache_key_ready) {
+                abs_cache_key = make_cache_key(design, false);
+                abs_cache_key_ready = true;
+            }
         };
         auto try_load_cache = [&](const Eigen::Ref<const Eigen::MatrixXd>& design,
                                   int design_cols) -> bool {
@@ -13731,16 +14691,26 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             ensure_cache_key(design);
             AbsorptionCacheRecord cached;
-            if (!read_absorption_cache(
-                    cache_path, abs_cache_key, static_cast<int>(y_use.size()),
+            std::optional<SavefeTimer> read_timer;
+            if (abs_cache_key.capture) read_timer.emplace("savefe_cache_read");
+            auto decode = [&](const AbsorptionCacheKey& key) {
+                return read_absorption_cache(cache_path, key, static_cast<int>(y_use.size()),
                     static_cast<int>(design.cols()), design_cols,
-                    static_cast<int>(fes_use.size()), cached)) {
+                    static_cast<int>(fes_use.size()), cached);
+            };
+            bool decoded = decode(abs_cache_key);
+            if (!decoded && may_read_refined_v5(cache_path, abs_cache_key)) {
+                try {
+                    decoded = decode(make_cache_key(design, true));
+                } catch (const std::bad_alloc&) {
+                    // An inability to hash a historical candidate means a miss.
+                }
+            }
+            read_timer.reset();
+            if (!decoded) {
                 return false;
             }
             if (!cached.converged || (bound_cpu_strict_repair && cached.iterations > tuned.max_iter)) {
-                return false;
-            }
-            if (cached.savefe_projection_published && !reselect_weighted_savefe_projection) {
                 return false;
             }
             if (cached.nobs != y_use.size() ||
@@ -13794,7 +14764,22 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             // The N1 continuation and the legacy residual refinement read it.
             // (The call sites' slope adjustment cannot apply: no read with slopes.)
             const bool tier_record = method_used_ == AbsorptionMethod::ReducedPcg;
-            if (tier_record) {
+            if (cached.savefe) {
+                provisional_cache_hit = true;
+                auto& p = *cached.savefe;
+                if ((p.tier_status == 1) != tier_record) {
+                    throw SavefeCacheMiss{};
+                }
+                method_used_ = static_cast<AbsorptionMethod>(p.internal_method);
+                tuned.absorption_method = static_cast<AbsorptionMethod>(p.tuned_method);
+                tuned.symmetric_sweep = (p.route_flags & kSavefeSymmetric) != 0;
+                tuned.use_sparse_solver = (p.route_flags & kSavefeUseSparse) != 0;
+                tuned.use_krylov = (p.route_flags & kSavefeUseKrylov) != 0;
+                tuned.from_auto = (p.route_flags & kSavefeFromAuto) != 0;
+                absorption.mlsmr_used = (p.route_flags & kSavefeMlsmr) != 0;
+                absorption.schwarz_used = (p.route_flags & kSavefeSchwarz) != 0;
+                absorption.krylov_pcg_used = (p.route_flags & kSavefeKrylovPcg) != 0;
+            } else if (tier_record) {
                 if (selected_method == AbsorptionMethod::Auto) {
                     selected_method = select_method(fes_use.size());
                 }
@@ -13818,8 +14803,16 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 !absorption.weighted_gs_moments_met ||
                 absorption.strict_cpu_max_abs_mean > tuned.tol ||
                 bounded_auto_gate_failed(absorption)) {
+                if (cached.savefe) throw SavefeCacheMiss{};
                 absorption = detail::AbsorptionResult{};
                 return false;
+            }
+            savefe_projection_published = cached.savefe_projection_published;
+            cpu_projection_refined = cached.cpu_projection_refined;
+            cache_hit = true;
+            if (cached.savefe) {
+                cached_savefe = std::move(cached.savefe);
+                return true;
             }
             // An accepted transform read back reports what the fresh fit
             // reported (status 1, reason none); any other hit says where the
@@ -13831,12 +14824,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     std::string("status=cache method=") + method_name(absorption_method_used()) +
                     " iterations=" + std::to_string(absorption.iterations));
             }
-            savefe_projection_published = cached.savefe_projection_published;
-            cpu_projection_refined = cached.cpu_projection_refined;
-            if (savefe_projection_published) {
-                tuned.absorption_method = method_used_;
-            }
-            cache_hit = true;
+            reduced_pcg_fine_.cache_hit = true;  // package D
             return true;
         };
         auto benchmark_absorption = [&](const Eigen::Ref<const Eigen::MatrixXd>& design,
@@ -14204,7 +15192,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             within_tss = total_tss;
         }
         cpu_profile_log_elapsed("fit_stats", stats_t0);
-        if (read_env_bool("XHDFE_DEBUG_SOLVER").value_or(false)) {
+        if (!cached_savefe && read_env_bool("XHDFE_DEBUG_SOLVER").value_or(false)) {
             std::cerr << "xhdfe solver: use_krylov=" << (tuned.use_krylov ? 1 : 0)
                       << " use_sparse=" << (tuned.use_sparse_solver ? 1 : 0)
                       << " method=" << static_cast<int>(method_used_)
@@ -14640,6 +15628,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                                              tuned.parallel_observer, score_low, means_ptr, intercept_ptr);
             }
         }
+        bool covariance_uses_network_scores = network_scores_for_pass && network_scores_for_pass->consumed;
         if (network_scores_for_pass) network_scores_for_pass->geometry.reset();
         cpu_profile_log_elapsed("ols", ols_t0);
 
@@ -14840,7 +15829,62 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         Eigen::VectorXd n1_partial;
         detail::N1ReconstructionEvidence n1_reconstruction;
         const bool capture_fe_reconstruction = detail::n1_capture_active;
-        if (options_.retain_fixed_effects && has_fes) {
+        Eigen::VectorXd recovery_beta;
+        if (cached_savefe) {
+            auto& publication = *cached_savefe;
+            if (publication.beta.size() != results_.coefficients.size() ||
+                publication.kept_columns != kept_slope_cols ||
+                (publication.beta.size() > 0 &&
+                 std::memcmp(publication.beta.data(), results_.coefficients.data(),
+                             static_cast<std::size_t>(publication.beta.size()) * sizeof(double)) != 0) ||
+                publication.ols_residual_digest != hash_savefe_ols_residuals(abs_cache_key, ols_result.residuals)) {
+                throw SavefeCacheMiss{};
+            }
+            {
+                SavefeTimer timer("savefe_cache_expand");
+                if (!expand_savefe_effects(publication.effects, fes_use, results_.fe_effects))
+                    throw SavefeCacheMiss{};
+            }
+            publication.effects.clear();
+            if (options_.fit_intercept && results_.coefficients.size() > 0) {
+                results_.coefficients[results_.coefficients.size() - 1] = publication.intercept;
+            }
+            results_.residuals = std::move(publication.residuals);
+            results_.fe_recovery_converged = true;
+            results_.fe_recovery_iterations = publication.recovery_iterations;
+            results_.fe_recovery_max_delta = publication.recovery_max_delta;
+            results_.abs_residual = publication.abs_residual;
+            results_.abs_residual_rel = publication.abs_residual_rel;
+            fe_recovery_method = publication.hybrid_recovery ? "hybrid_cached" : "map";
+            if (capture_fe_reconstruction) {
+                n1_partial = y_use;
+                const int slope_cols = static_cast<int>(publication.beta.size()) -
+                    (options_.fit_intercept ? 1 : 0);
+                if (slope_cols > 0) {
+                    n1_partial.noalias() -= X_use * publication.beta.head(slope_cols);
+                }
+                Eigen::VectorXd fe_total = Eigen::VectorXd::Zero(y_use.size());
+                for (const auto& effect : results_.fe_effects) fe_total.noalias() += effect;
+                const int ops = 2 * static_cast<int>(publication.beta.size()) +
+                    static_cast<int>(results_.fe_effects.size()) + 8;
+                const bool with_intercept = options_.fit_intercept;
+                const bool recentered = with_intercept && !savefe_projection_published;
+                const double shift = publication.intercept - n1_reference_intercept;
+                for (Eigen::Index i = 0; i < y_use.size(); ++i) {
+                    n1_reconstruction.add(
+                        with_intercept ? n1_partial[i] - n1_reference_intercept : n1_partial[i],
+                        recentered ? fe_total[i] + shift : fe_total[i], results_.residuals[i],
+                        ols_result.residuals[i], w_ptr ? (*w_ptr)[i] : 1.0, ops);
+                }
+            }
+        } else if (options_.retain_fixed_effects && has_fes) {
+            if (allow_cache_write && abs_cache_key_ready && abs_cache_key.capture) {
+                try {
+                    recovery_beta = results_.coefficients;
+                } catch (const std::bad_alloc&) {
+                    allow_cache_write = false;
+                }
+            }
             const bool profile_savefe = savefe_profile_enabled();
             const int slope_cols =
                 options_.fit_intercept ? static_cast<int>(results_.coefficients.size()) - 1
@@ -15109,7 +16153,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     << ". No estimates or fixed effects returned. Check scaling and the iteration limit.";
             throw std::runtime_error(message.str());
         }
-        if (!used_mixed_savefe && !results_.fe_effects.empty()) {
+        if (!cached_savefe && !used_mixed_savefe && !results_.fe_effects.empty()) {
             const std::size_t dims = results_.fe_effects.size();
             const FeNormalizeStyle normalize_style =
                 resolve_fe_normalize_style(options_.stats_style);
@@ -15178,7 +16222,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
         }
 
-        if (savefe_projection_published && !results_.fe_effects.empty()) {
+        if (!cached_savefe && savefe_projection_published && !results_.fe_effects.empty()) {
             // E1: the residuals and the constant stay those of the published
             // projection, that is of the same fit without saved effects; the
             // identity y = Xb + constant + effects + residual then holds to the
@@ -15196,7 +16240,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         static_cast<int>(results_.fe_effects.size()) + 8);
                 }
             }
-        } else if (!results_.fe_effects.empty()) {
+        } else if (!cached_savefe && !results_.fe_effects.empty()) {
             Eigen::VectorXd fe_total = Eigen::VectorXd::Zero(static_cast<int>(y_use.size()));
             for (const auto& fe_vec : results_.fe_effects) {
                 fe_total.noalias() += fe_vec;
@@ -15456,10 +16500,11 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         const int df_intercept_dof =
             (use_reghdfe_stats && !has_fes) ? 0 : df_intercept;
 
-        int df_a_levels = (use_reghdfe_stats && !has_fes) ? df_intercept : 0;
-        int df_a_exact = df_a_levels;
-        int nested_dof_levels = 0;
-        int nested_dof_coefs = 0;
+        // E3: the sums of levels and coefficients in 64 bits, to their doubles below.
+        std::int64_t df_a_levels = (use_reghdfe_stats && !has_fes) ? df_intercept : 0;
+        std::int64_t df_a_exact = df_a_levels;
+        std::int64_t nested_dof_levels = 0;  // round 11 (E3): 64 bits, to their doubles
+        std::int64_t nested_dof_coefs = 0;
         if (has_fes) {
             post_phase_t0 = std::chrono::steady_clock::now();
             Eigen::VectorXi groupvar;
@@ -15592,7 +16637,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     }
                 }
             }
-            int nested_total = 0;
+            std::int64_t nested_total = 0;  // round 11 (E3): a sum of levels, in 64 bits
             if (options_.dof_method != DofAdjustmentMethod::None) {
                 for (std::size_t d = 0; d < dof.levels.size(); ++d) {
                     if (nested_flags[d]) {
@@ -15685,12 +16730,14 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
                 !c_ptr->empty()) {
+                nested_dof_coefs += detail::sparse_rank::flagged_sum(nested_flags, [&](std::size_t d) {
+                    return nested_coefs_for_heterogeneous_dim(d, slope_terms, dof.num_coefs);
+                });
+                nested_dof_levels += detail::sparse_rank::flagged_sum(nested_flags, [&](std::size_t d) {
+                    return nested_levels_for_heterogeneous_dim(d, slope_terms, absorption.fe_levels, dof.levels);
+                });
                 for (std::size_t d = 0; d < nested_flags.size(); ++d) {
                     if (nested_flags[d]) {
-                        nested_dof_coefs += nested_coefs_for_heterogeneous_dim(
-                            d, slope_terms, dof.num_coefs);
-                        nested_dof_levels += nested_levels_for_heterogeneous_dim(
-                            d, slope_terms, absorption.fe_levels, dof.levels);
                         results_.fe_nested[d] = 1;
                     }
                 }
@@ -15701,19 +16748,19 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             results_.df_a_exact = static_cast<double>(df_a_exact);
         }
 
-        const int df_a_report = df_a_exact;
-        const int nested_report = nested_dof_levels;
+        const std::int64_t df_a_report = df_a_exact;
+        const std::int64_t nested_report = nested_dof_levels;
         results_.df_a = static_cast<double>(df_a_report);
         results_.df_a_nested = static_cast<double>(nested_report);
 
-        int df_a_used = df_a_report;
-        int nested_dof_used = nested_dof_levels;
+        std::int64_t df_a_used = df_a_report;
+        std::int64_t nested_dof_used = nested_dof_levels;
         int nested_adj = (nested_dof_levels > 0) ? 1 : 0;
         if (!use_reghdfe_stats) {
             df_a_used = 0;
             nested_dof_used = 0;
-            const int df_a_base = tuned.ssc_k_exact ? df_a_exact : df_a_levels;
-            const int nested_base = tuned.ssc_k_exact ? nested_dof_coefs : nested_dof_levels;
+            const std::int64_t df_a_base = tuned.ssc_k_exact ? df_a_exact : df_a_levels;
+            const std::int64_t nested_base = tuned.ssc_k_exact ? nested_dof_coefs : nested_dof_levels;
             nested_adj = (nested_base > 0) ? 1 : 0;
             if (tuned.ssc_k_fixef == FixefDofMethod::None) {
                 df_a_used = 0;
@@ -15721,7 +16768,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             } else {
                 if (tuned.ssc_k_fixef == FixefDofMethod::Nonnested &&
                     tuned.se_type == StandardErrorType::Cluster) {
-                    df_a_used = std::max(0, df_a_base - nested_base);
+                    df_a_used = std::max<std::int64_t>(0, df_a_base - nested_base);
                     nested_dof_used = 0;
                 } else {
                     df_a_used = df_a_base;
@@ -16012,6 +17059,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                     bread.topLeftCorner(slope_cols_aug, slope_cols_aug) =
                         ols_result.xtx_inv;
                     bread(slope_cols_aug, slope_cols_aug) = 1.0 / n_bread;
+                    if (network_scores_for_pass) network_scores_for_pass->consumed = false;
                     Eigen::MatrixXd cov_aug = scores_copy
                         ? detail::multiway_cluster_sandwich(
                               bread, scores, ols_result.residuals, w_ptr, *c_ptr,
@@ -16045,6 +17093,8 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                         results_.std_errors =
                             results_.covariance.diagonal().cwiseMax(0.0).cwiseSqrt();
                         intercept_cov_updated = true;
+                        covariance_uses_network_scores =
+                            network_scores_for_pass && network_scores_for_pass->consumed;
                     }
                 }
             }
@@ -16292,6 +17342,7 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
         } catch (const detail::N1Failure& failure) {
+            if (cached_savefe) throw SavefeCacheMiss{};
             int remaining = 0;
             try {
                 remaining = n1_budget.remaining(absorption.iterations, failure);
@@ -16454,10 +17505,29 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             }
             audit.emit();
         }
-        // Point 14: the published transform is final here (no N1 re-entry
-        // follows); it declares krylov-pcg when the Krylov-PCG absorber made it
-        // under a forced Krylov route.
+        provisional_cache_hit = false;
+        // The published transform is final after the last N1 check.
         krylov_pcg_published_ = tuned.use_krylov && absorption.krylov_pcg_used;
+        if (cached_savefe) {
+            reduced_pcg_status_ = cached_savefe->tier_status;
+            reduced_pcg_reason_ = std::move(cached_savefe->tier_reason);
+            reduced_pcg_discarded_iterations_ = cached_savefe->tier_discarded;
+            reduced_pcg_fine_ = cached_savefe->tier_fine;
+            reduced_pcg_fine_.cache_hit = true;
+            if (detail::reduced_pcg_effective(options_)) {
+                detail::reduced_pcg_final_line(
+                    std::string("status=cache method=") + method_name(absorption_method_used()) +
+                    " iterations=" + std::to_string(absorption.iterations));
+            }
+            if (read_env_bool("XHDFE_DEBUG_SOLVER").value_or(false)) {
+                std::cerr << "xhdfe solver: use_krylov=" << (tuned.use_krylov ? 1 : 0)
+                          << " use_sparse=" << (tuned.use_sparse_solver ? 1 : 0)
+                          << " method=" << static_cast<int>(method_used_)
+                          << " iterations=" << absorption.iterations << " cache_hit=1\n";
+            }
+        }
+        slope_solver_diagnostics_.scores_used = covariance_uses_network_scores &&
+            !saturated_model && !fewer_than_two_clusters;
         // Package B: the deferred suggestion of a fit in scope, written once it
         // is accepted (the same profile as the write above, which it skipped).
         if (strict_cuda_scope && allow_profile_write && absorption.converged &&
@@ -16475,18 +17545,61 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
             profile.suggest_use_krylov = tuned.use_krylov;
             write_mobility_profile(mobility_cfg.path, profile);
         }
+        // Package D: no entry after a transient memory fallback of the tier (the
+        // finer blocks not allocated, the repetition on the coarse blocks, a
+        // decline for memory), as after an abandoned projection.
         if (allow_cache_write && !cache_hit && absorption.converged &&
-            absorption.precision_certified && !cache_path.empty()) {
+            absorption.precision_certified && !cache_path.empty() &&
+            !reduced_pcg_transient_fallback_) {
             // The published method: a transform of the tier is stored as
             // reduced-pcg, so that a later hit reports it truthfully; the
             // krylov-pcg label is reported only (cached_method_used).
-            write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
-                absorption.X_tilde, absorption.fe_levels, absorption.sweep_order_used,
-                design_cols, cached_method_used(), absorption.iterations, absorption.converged,
-                absorption.krylov_internal_tolerance, absorption.krylov_max_final_backward_error,
-                absorption.krylov_max_condition, absorption.krylov_max_condition_times_backward_error,
-                absorption, reselect_weighted_savefe_projection && savefe_projection_published,
-                cpu_projection_refined);
+            try {
+                std::optional<SavefeTimer> write_timer;
+                if (abs_cache_key.capture) write_timer.emplace("savefe_cache_write");
+                std::optional<CachedSavefePublication> publication;
+                if (abs_cache_key.capture) {
+                    publication.emplace();
+                    auto& p = *publication;
+                    if (compact_savefe_effects(fes_use, absorption.fe_levels, results_.fe_effects, p.effects)) {
+                        p.beta = std::move(recovery_beta);
+                        p.kept_columns = kept_slope_cols;
+                        p.ols_residual_digest = hash_savefe_ols_residuals(abs_cache_key, ols_result.residuals);
+                        if (options_.fit_intercept && results_.coefficients.size() > 0) {
+                            p.intercept = results_.coefficients[results_.coefficients.size() - 1];
+                        }
+                        p.recovery_iterations = results_.fe_recovery_iterations;
+                        p.recovery_max_delta = results_.fe_recovery_max_delta;
+                        p.hybrid_recovery = std::strcmp(fe_recovery_method, "hybrid_cached") == 0 ? 1 : 0;
+                        p.internal_method = static_cast<int>(method_used_);
+                        p.tuned_method = static_cast<int>(tuned.absorption_method);
+                        p.route_flags = (tuned.symmetric_sweep ? kSavefeSymmetric : 0U) |
+                            (tuned.use_sparse_solver ? kSavefeUseSparse : 0U) |
+                            (tuned.use_krylov ? kSavefeUseKrylov : 0U) |
+                            (tuned.from_auto ? kSavefeFromAuto : 0U) |
+                            (absorption.mlsmr_used ? kSavefeMlsmr : 0U) |
+                            (absorption.schwarz_used ? kSavefeSchwarz : 0U) |
+                            (absorption.krylov_pcg_used ? kSavefeKrylovPcg : 0U);
+                        p.tier_status = reduced_pcg_status_;
+                        p.tier_reason = reduced_pcg_reason_;
+                        p.tier_discarded = reduced_pcg_discarded_iterations_;
+                        p.tier_fine = reduced_pcg_fine_;
+                        p.abs_residual = results_.abs_residual;
+                        p.abs_residual_rel = results_.abs_residual_rel;
+                    } else {
+                        publication.reset();
+                    }
+                }
+                write_absorption_cache(cache_path, abs_cache_key, absorption.y_tilde,
+                    absorption.X_tilde, absorption.fe_levels, absorption.sweep_order_used,
+                    design_cols, cached_method_used(), absorption.iterations, absorption.converged,
+                    absorption.krylov_internal_tolerance, absorption.krylov_max_final_backward_error,
+                    absorption.krylov_max_condition, absorption.krylov_max_condition_times_backward_error,
+                    absorption, savefe_projection_published, cpu_projection_refined,
+                    publication ? &*publication : nullptr, publication ? &results_.residuals : nullptr);
+            } catch (const std::bad_alloc&) {
+                // Cache preparation is optional and the result is already final.
+            }
         }
         cpu_profile_log_elapsed("post_inference", post_phase_t0);
         cpu_profile_log_elapsed("postprocess", post_t0);
@@ -16494,6 +17607,38 @@ void HdfeRegressorV11::fit(const Eigen::Ref<const Eigen::VectorXd>& y,
         end_parallel_observation();
         break;
         }
+    };
+
+    auto run_fit = [&](const Eigen::Ref<const Eigen::VectorXd>& y_use,
+                       const Eigen::Ref<const Eigen::MatrixXd>& X_use,
+                       const std::vector<Eigen::VectorXi>& fes_use,
+                       const Eigen::VectorXd* w_ptr,
+                       const std::vector<Eigen::VectorXi>* c_ptr,
+                       const Eigen::MatrixXd* inst_use,
+                       const std::vector<detail::HeterogeneousSlopeTerm>* slopes_use) {
+        // One snapshot per fit, including a cold restart after a provisional hit.
+        const auto slope_request = slope_solver_diagnostics_.request;
+        const auto slope_source = slope_solver_diagnostics_.source;
+        const bool slope_scores = slope_scores_enabled_;
+        const bool slope_csr_owner = slope_csr_owner_enabled_;
+        bool provisional_cache_hit = false;
+        try {
+            run_fit_once(y_use, X_use, fes_use, w_ptr, c_ptr, inst_use, slopes_use,
+                         false, provisional_cache_hit);
+            return;
+        } catch (const SavefeCacheMiss&) {
+        } catch (const std::bad_alloc&) {
+            if (!provisional_cache_hit) throw;
+        }
+        clear_consumable_state();
+        // Keep configuration, while discarding the provisional fit's outcomes.
+        slope_solver_diagnostics_.request = slope_request;
+        slope_solver_diagnostics_.source = slope_source;
+        slope_solver_diagnostics_.reset_outcome();
+        slope_scores_enabled_ = slope_scores;
+        slope_csr_owner_enabled_ = slope_csr_owner;
+        run_fit_once(y_use, X_use, fes_use, w_ptr, c_ptr, inst_use, slopes_use,
+                     true, provisional_cache_hit);
     };
 
     if (!has_slopes && fe_cache_cfg.mode != "off" && has_fes) {
@@ -17218,33 +18363,40 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 cache_path = absorption_cache_path(mobility_cfg.path);
             }
 
+            // The native partial-out result may contain captured alphas.
+            // A transform-only entry cannot supply them.
+            if (tuned.retain_fixed_effects) {
+                allow_cache_read = false;
+                allow_cache_write = false;
+            }
             AbsorptionCacheKey cache_key;
             bool cache_key_ready = false;
             const HdfeOptions cache_key_options = tuned;
+            auto make_cache_key = [&](bool require_cpu_refined) {
+                // Structure hits expose canonical group IDs. Hash the same
+                // representation on a cold call with arbitrary labels.
+                std::vector<Eigen::VectorXi> canonical_fes;
+                canonical_fes.reserve(fes_use.size());
+                for (const auto& fe : fes_use) {
+                    FeIndexerLite indexer = build_indexer_lite(fe);
+                    Eigen::VectorXi ids(
+                        static_cast<int>(indexer.group_ids.size()));
+                    for (int i = 0; i < ids.size(); ++i) {
+                        ids(i) = indexer.group_ids[
+                            static_cast<std::size_t>(i)];
+                    }
+                    canonical_fes.push_back(std::move(ids));
+                }
+                return hash_absorption_signature(
+                    y_use, X_use, canonical_fes, w_ptr, cache_key_options,
+                    allow_weighted_repair ? kWeightedPartialOutRepairCacheGeneration
+                                          : kAbsorptionSolveContractGeneration,
+                    nullptr, /*instrumented=*/false, /*capture=*/false,
+                    /*e1_enabled=*/false, require_cpu_refined);
+            };
             auto ensure_cache_key = [&]() {
                 if (!cache_key_ready) {
-                    // FE-structure-cache hits expose canonical 0-based group
-                    // ids, while a cold call may still carry arbitrary raw
-                    // labels. Hash the common canonical representation so the
-                    // absorption and FE caches compose without weakening any
-                    // outcome/X/weight/solver identity field.
-                    std::vector<Eigen::VectorXi> canonical_fes;
-                    canonical_fes.reserve(fes_use.size());
-                    for (const auto& fe : fes_use) {
-                        FeIndexerLite indexer = build_indexer_lite(fe);
-                        Eigen::VectorXi ids(
-                            static_cast<int>(indexer.group_ids.size()));
-                        for (int i = 0; i < ids.size(); ++i) {
-                            ids(i) = indexer.group_ids[
-                                static_cast<std::size_t>(i)];
-                        }
-                        canonical_fes.push_back(std::move(ids));
-                    }
-                    cache_key = hash_absorption_signature(
-                        y_use, X_use, canonical_fes, w_ptr,
-                        cache_key_options,
-                        allow_weighted_repair ? kWeightedPartialOutRepairCacheGeneration
-                                              : kAbsorptionSolveContractGeneration);
+                    cache_key = make_cache_key(false);
                     cache_key_ready = true;
                 }
             };
@@ -17253,13 +18405,23 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                 !mobility_gpu_backend_selected()) {
                 ensure_cache_key();
                 AbsorptionCacheRecord cached;
-                if (read_absorption_cache(
-                        cache_path, cache_key,
+                auto decode = [&](const AbsorptionCacheKey& key) {
+                    return read_absorption_cache(
+                        cache_path, key,
                         static_cast<int>(y_use.size()),
                         static_cast<int>(X_use.cols()),
                         static_cast<int>(X_use.cols()),
-                        static_cast<int>(fes_use.size()), cached) &&
-                    cached.converged) {
+                        static_cast<int>(fes_use.size()), cached);
+                };
+                bool decoded = decode(cache_key);
+                if (!decoded && may_read_refined_v5(cache_path, cache_key)) {
+                    try {
+                        decoded = decode(make_cache_key(true));
+                    } catch (const std::bad_alloc&) {
+                        // An inability to hash a historical candidate means a miss.
+                    }
+                }
+                if (decoded && cached.converged) {
                     absorption.y_tilde = std::move(cached.y_tilde);
                     absorption.X_tilde = std::move(cached.X_tilde);
                     absorption.fe_levels = std::move(cached.fe_levels);
@@ -17301,6 +18463,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                         absorption);
                     if (absorption.precision_certified) {
                         cache_hit = true;
+                        reduced_pcg_fine_.cache_hit = true;  // package D
                         allow_profile_write = false;
                         // As in fit(): a transform the tier published keeps its
                         // public name; this call, which never enters the tier,
@@ -17470,10 +18633,10 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
         results_.cluster_scale = 1.0;
 
         // Degrees-of-freedom adjustments (hdfe-style; mirrors the reghdfe logic in fit()).
-        int df_a_levels = 0;
-        int df_a_exact = 0;
-        int nested_dof_levels = 0;
-        int nested_dof_coefs = 0;
+        std::int64_t df_a_levels = 0;  // E3: 64 bits, as in fit()
+        std::int64_t df_a_exact = 0;
+        std::int64_t nested_dof_levels = 0;  // round 11 (E3): 64 bits, to their doubles
+        std::int64_t nested_dof_coefs = 0;
         if (!fes_use.empty()) {
             Eigen::VectorXi groupvar;
             Eigen::VectorXi* groupvar_ptr = options_.save_groupvar ? &groupvar : nullptr;
@@ -17555,7 +18718,7 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
                     }
                 }
             }
-            int nested_total = 0;
+            std::int64_t nested_total = 0;  // round 11 (E3): a sum of levels, in 64 bits
             if (options_.dof_method != DofAdjustmentMethod::None) {
                 for (std::size_t d = 0; d < dof.levels.size(); ++d) {
                     if (nested_flags[d]) {
@@ -17645,20 +18808,22 @@ detail::AbsorptionResult HdfeRegressorV11::partial_out(
             }
             if (options_.dof_adjust_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
                 !c_ptr->empty()) {
+                nested_dof_coefs += detail::sparse_rank::flagged_sum(nested_flags, [&](std::size_t d) {
+                    return nested_coefs_for_heterogeneous_dim(d, slope_terms, dof.num_coefs);
+                });
+                nested_dof_levels += detail::sparse_rank::flagged_sum(nested_flags, [&](std::size_t d) {
+                    return nested_levels_for_heterogeneous_dim(d, slope_terms, absorption.fe_levels, dof.levels);
+                });
                 for (std::size_t d = 0; d < nested_flags.size(); ++d) {
                     if (nested_flags[d]) {
-                        nested_dof_coefs += nested_coefs_for_heterogeneous_dim(
-                            d, slope_terms, dof.num_coefs);
-                        nested_dof_levels += nested_levels_for_heterogeneous_dim(
-                            d, slope_terms, absorption.fe_levels, dof.levels);
                         results_.fe_nested[d] = 1;
                     }
                 }
             }
         }
 
-        const int df_a_report = df_a_exact;
-        const int nested_report = nested_dof_levels;
+        const std::int64_t df_a_report = df_a_exact;
+        const std::int64_t nested_report = nested_dof_levels;
         results_.df_a = static_cast<double>(df_a_report);
         results_.df_a_nested = static_cast<double>(nested_report);
 
@@ -17891,6 +19056,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                                   const Eigen::VectorXd* weights,
                                   const std::vector<Eigen::VectorXi>* clusters) {
     AttemptTransaction attempt(*this);
+    slope_solver_diagnostics_.reset_outcome("group");
     detail::ReducedPcgFitScope reduced_pcg_fit_scope(detail::reduced_pcg_effective(options_));
     detail::ScopedN1Capture n1_capture(detail::ordinary_audit_enabled());
     const bool exact_group_dof = options_.dof_method == DofAdjustmentMethod::Exact;
@@ -18706,10 +19872,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     const int df_m = df_m_effective;  // excludes constant
     results_.df_m = static_cast<double>(df_m);
 
-    int df_a_levels = gi_work.num_individuals;
-    int df_a_exact = gi_work.num_individuals;
-    int nested_dof_levels = 0;
-    int nested_dof_coefs = 0;
+    std::int64_t df_a_levels = gi_work.num_individuals;  // E3: 64 bits, as in fit()
+    std::int64_t df_a_exact = gi_work.num_individuals;
+    std::int64_t nested_dof_levels = 0;  // round 11 (E3): 64 bits, to their doubles
+    std::int64_t nested_dof_coefs = 0;
     if (!standard_fes_work.empty()) {
         std::vector<int> standard_levels;
         if (absorption.fe_levels.size() >= 1) {
@@ -18785,7 +19951,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
                 }
             }
         }
-        int nested_total = 0;
+        std::int64_t nested_total = 0;  // round 11 (E3): a sum of levels, in 64 bits
         if (options_.dof_method != DofAdjustmentMethod::None) {
             for (std::size_t d = 0; d < dof.levels.size(); ++d) {
                 if (nested_flags[d]) {
@@ -18857,12 +20023,10 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         }
         if (adjust_group_clusters && tuned.se_type == StandardErrorType::Cluster && c_ptr &&
             !c_ptr->empty()) {
-            for (std::size_t d = 0; d < nested_flags.size(); ++d) {
-                if (nested_flags[d]) {
-                    nested_dof_coefs += dof.num_coefs[d];
-                    nested_dof_levels += dof.levels[d];
-                }
-            }
+            nested_dof_coefs += detail::sparse_rank::flagged_sum(
+                nested_flags, [&](std::size_t d) { return dof.num_coefs[d]; });
+            nested_dof_levels += detail::sparse_rank::flagged_sum(
+                nested_flags, [&](std::size_t d) { return dof.levels[d]; });
         }
         results_.fe_num_levels = dof.levels;
         results_.fe_base_levels = dof.levels;
@@ -18937,21 +20101,21 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
     results_.df_a_levels = static_cast<double>(df_a_levels);
     results_.df_a_exact = static_cast<double>(df_a_exact);
 
-    const int df_a_report = df_a_exact;
-    const int nested_report = nested_dof_levels;
+    const std::int64_t df_a_report = df_a_exact;
+    const std::int64_t nested_report = nested_dof_levels;
     results_.df_a = static_cast<double>(df_a_report);
     results_.df_a_nested = static_cast<double>(nested_report);
     results_.model_has_constant = constant_in_span;
 
     const bool use_reghdfe_stats = (options_.stats_style == StatsStyle::Reghdfe);
-    int df_a_used = df_a_report;
-    int nested_dof_used = nested_dof_levels;
+    std::int64_t df_a_used = df_a_report;
+    std::int64_t nested_dof_used = nested_dof_levels;
     int nested_adj = (nested_dof_levels > 0) ? 1 : 0;
     if (!use_reghdfe_stats) {
         df_a_used = 0;
         nested_dof_used = 0;
-        const int df_a_base = (tuned.ssc_k_exact || exact_group_dof) ? df_a_exact : df_a_levels;
-        const int nested_base = tuned.ssc_k_exact ? nested_dof_coefs : nested_dof_levels;
+        const std::int64_t df_a_base = (tuned.ssc_k_exact || exact_group_dof) ? df_a_exact : df_a_levels;
+        const std::int64_t nested_base = tuned.ssc_k_exact ? nested_dof_coefs : nested_dof_levels;
         nested_adj = (nested_base > 0) ? 1 : 0;
         if (tuned.ssc_k_fixef == FixefDofMethod::None) {
             df_a_used = 0;
@@ -18959,7 +20123,7 @@ void HdfeRegressorV11::fit_grouped(const Eigen::Ref<const Eigen::VectorXd>& y,
         } else {
             if (tuned.ssc_k_fixef == FixefDofMethod::Nonnested &&
                 tuned.se_type == StandardErrorType::Cluster) {
-                df_a_used = std::max(0, df_a_base - nested_base);
+                df_a_used = std::max<std::int64_t>(0, df_a_base - nested_base);
                 nested_dof_used = 0;
             } else {
                 df_a_used = df_a_base;

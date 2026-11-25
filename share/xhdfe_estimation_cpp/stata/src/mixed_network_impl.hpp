@@ -521,7 +521,8 @@ bool same_bounded_integer_direction(const Data &d, int firm) {
     return pivot_s != 0 || pivot_h != 0;
 }
 
-System assemble(const Data &d, const Team &team, int blocks, bool forest) {
+System assemble(const Data &d, const Team &team, int blocks, bool forest,
+                bool use_owner, bool& csr_owner_used) {
     if (std::uint64_t(d.nf) * 3 * d.ny * sizeof(double) > 6ULL * 1024 * 1024 * 1024)
         throw MixedNetworkDecline("period_budget");
     Matrix cross(3 * d.nf, d.ny), brhs(3 * d.nf, d.k);
@@ -666,7 +667,6 @@ System assemble(const Data &d, const Team &team, int blocks, bool forest) {
             }
     }
     const auto csr_start = Clock::now();
-    const bool use_owner = enabled("XHDFE_EXPERIMENT_NETWORK_CSR_OWNER");
     const bool compare = use_owner && enabled("XHDFE_EXPERIMENT_NETWORK_CSR_COMPARE");
     RowSparse reference;
     std::vector<CsrProduct> reference_envelope;
@@ -691,7 +691,8 @@ System assemble(const Data &d, const Team &team, int blocks, bool forest) {
         verify_firm_csr(g.H, reference, reference_envelope);
     if (!owner)
         legacy_firm_csr(g, diag, edges, team, false, g.H);
-    if (std::getenv("XHDFE_EXPERIMENT_SLOPE_TRACE")) {
+    csr_owner_used = owner;
+    if (mixed_network_trace_enabled()) {
         const double seconds = std::chrono::duration<double>(Clock::now() - csr_start).count();
         std::fprintf(stderr, "mixed_network_csr owner=%d requested=%d nnz=%ld workspace=%llu seconds=%.5f\n",
                      int(bool(owner)), int(use_owner), long(g.H.nonZeros()),
@@ -1221,15 +1222,21 @@ bool MixedNetworkScores::form(const Eigen::Ref<const Eigen::MatrixXd> &x, const 
     columns = x.cols();
     design_data = x.data();
     residual_data = u.data();
-    std::fprintf(stderr,
-                 "mixed_network_scores width=%d clusters_worker=%d clusters_firm=%d matches=%d\n",
-                 q, nw, nf, nm);
+    if (mixed_network_trace_enabled()) {
+        std::fprintf(stderr,
+                     "mixed_network_scores width=%d clusters_worker=%d clusters_firm=%d matches=%d\n",
+                     q, nw, nf, nm);
+    }
     return true;
 } catch (const std::bad_alloc &) {
     return false;
 }
 
-MixedNetworkMode mixed_network_mode() {
+bool mixed_network_trace_enabled() noexcept {
+    return std::getenv("XHDFE_EXPERIMENT_SLOPE_TRACE") != nullptr;
+}
+
+MixedNetworkMode mixed_network_mode() noexcept {
     auto on = [](const char *k) {
         const char *v = std::getenv(k);
         return v && std::strcmp(v, "1") == 0;
@@ -1241,6 +1248,41 @@ MixedNetworkMode mixed_network_mode() {
     if (on("XHDFE_EXPERIMENT_SLOPE_SCHUR"))
         return MixedNetworkMode::Diagonal;
     return MixedNetworkMode::Off;
+}
+
+MixedNetworkMode mixed_network_mode(SlopeSolverRequest request) noexcept {
+    switch (request) {
+    case SlopeSolverRequest::Schur: return MixedNetworkMode::Diagonal;
+    case SlopeSolverRequest::Network: return MixedNetworkMode::Forest;
+    case SlopeSolverRequest::Direct: return MixedNetworkMode::Direct;
+    default: return MixedNetworkMode::Off;
+    }
+}
+
+SlopeSolverDiagnostics resolve_slope_solver(const HdfeOptions& options, bool& scores, bool& csr_owner) noexcept {
+    SlopeSolverDiagnostics resolved;
+    const bool explicit_request = options.slope_solver != SlopeSolverRequest::Unset;
+    if (explicit_request) {
+        resolved.request = options.slope_solver;
+        resolved.source = options.slope_solver_from_global ? SlopeSolverSource::Global : SlopeSolverSource::Option;
+    } else {
+        const MixedNetworkMode legacy = mixed_network_mode();
+        switch (legacy) {
+        case MixedNetworkMode::Direct: resolved.request = SlopeSolverRequest::Direct; break;
+        case MixedNetworkMode::Forest: resolved.request = SlopeSolverRequest::Network; break;
+        case MixedNetworkMode::Diagonal: resolved.request = SlopeSolverRequest::Schur; break;
+        case MixedNetworkMode::Off: break;
+        }
+        if (legacy != MixedNetworkMode::Off) resolved.source = SlopeSolverSource::Environment;
+    }
+    scores = false;
+    csr_owner = false;
+    if (resolved.request != SlopeSolverRequest::Off) {
+        scores = options.slope_scores.value_or(explicit_request || mixed_network::enabled("XHDFE_EXPERIMENT_NETWORK_SCORES"));
+        csr_owner = options.slope_csr_owner.value_or(explicit_request || mixed_network::enabled("XHDFE_EXPERIMENT_NETWORK_CSR_OWNER"));
+    }
+    resolved.reset_outcome();
+    return resolved;
 }
 
 bool mixed_network_shape(const std::vector<Eigen::VectorXi> &fes,
@@ -1259,7 +1301,8 @@ AbsorptionResult absorb_mixed_network(const Eigen::Ref<const Eigen::VectorXd> &y
                                       const std::vector<HeterogeneousSlopeTerm> &slopes,
                                       const HdfeOptions &options, MixedNetworkMode mode, bool cuda,
                                       const std::vector<Eigen::VectorXi> *clusters,
-                                      std::unique_ptr<MixedNetworkScores> *capture) {
+                                      std::unique_ptr<MixedNetworkScores> *capture,
+                                      bool csr_owner_requested, bool& csr_owner_used) {
     using namespace mixed_network;
     if (cuda && mode != MixedNetworkMode::Diagonal)
         throw MixedNetworkDecline("device_preconditioner");
@@ -1273,10 +1316,11 @@ AbsorptionResult absorb_mixed_network(const Eigen::Ref<const Eigen::VectorXd> &y
     hooks.end = observer_end;
     Team team(std::max(1, options.num_threads), hooks, 8 * blocks);
     std::vector<int> levels;
-    const bool trace = std::getenv("XHDFE_EXPERIMENT_SLOPE_TRACE") != nullptr;
+    const bool trace = mixed_network_trace_enabled();
     Data data = prepare(y, X, fes, slopes, team, blocks, levels);
     const auto coded = Clock::now();
-    System g = assemble(data, team, blocks, mode == MixedNetworkMode::Forest);
+    System g = assemble(data, team, blocks, mode == MixedNetworkMode::Forest,
+                        csr_owner_requested, csr_owner_used);
     const auto assembled = Clock::now();
     if (g.dim == 0)
         throw MixedNetworkDecline("no_firm_contrasts");
@@ -1325,7 +1369,7 @@ AbsorptionResult absorb_mixed_network(const Eigen::Ref<const Eigen::VectorXd> &y
             out.gpu_absorption_iterations = it;
             out.gpu_status_code = 1;
         }
-        std::fprintf(stderr,
+        if (trace) std::fprintf(stderr,
                      "mixed_network_accept mode=%d cuda=%d n=%d workers=%d firms=%d periods=%d "
                      "matches=%zu coeff=%d nnz=%ld iterations=%d passes=%d codes=%.5f "
                      "assembly=%.5f preconditioner=%.5f iterate=%.5f checks=%.5f\n",

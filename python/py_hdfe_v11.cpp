@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -79,6 +80,60 @@ private:
 }  // namespace hdfe
 
 namespace {
+
+// Package D (23nov2026; round 09, D): the request of the finer blocks of the
+// reduced tier from Python, for the constructor and for the property that lets
+// one regressor change it between fits: None (no request: the process value
+// decides), "auto", or an integer from 1 to 8 read through __index__
+// (operator.index), never through __int__, so an object whose two differ asks
+// for its index; bool and numpy.bool_ are refused.
+int apply_fine_from_python(const py::object& value) {
+    const char* message = "reduced_pcg_apply_fine must be None, \"auto\" or an integer from 1 to 8";
+    if (value.is_none()) {
+        return hdfe::kReducedPcgApplyFineUnset;
+    }
+    if (py::isinstance<py::str>(value)) {
+        if (value.cast<std::string>() != "auto") {
+            throw py::value_error(message);
+        }
+        return hdfe::kReducedPcgApplyFineAuto;
+    }
+    PyObject* raw = value.ptr();
+    const char* type_name = Py_TYPE(raw)->tp_name;
+    if (PyBool_Check(raw) || std::strcmp(type_name, "numpy.bool_") == 0 || std::strcmp(type_name, "numpy.bool") == 0 ||
+        !PyIndex_Check(raw)) {
+        throw py::type_error(message);
+    }
+    py::object index = py::reinterpret_steal<py::object>(PyNumber_Index(raw));
+    if (!index) {
+        throw py::error_already_set();
+    }
+    long long factor = 0;
+    try {
+        factor = index.cast<long long>();
+    } catch (const py::cast_error&) {
+        factor = 0;
+    }
+    if (factor < 1 || factor > 8) {
+        throw py::value_error(message);
+    }
+    return static_cast<int>(factor);
+}
+
+hdfe::SlopeSolverRequest slope_solver_from_python(const py::object& value) {
+    if (value.is_none()) return hdfe::SlopeSolverRequest::Unset;
+    const char* message = "slope_solver must be None, 'off', 'schur', 'network' or 'direct'";
+    if (!py::isinstance<py::str>(value)) throw py::type_error(message);
+    hdfe::SlopeSolverRequest request;
+    if (!hdfe::parse_slope_solver_request(value.cast<std::string>(), request)) throw py::value_error(message);
+    return request;
+}
+
+std::optional<bool> slope_helper_from_python(const py::object& value, const char* name) {
+    if (value.is_none()) return std::nullopt;
+    if (!py::isinstance<py::bool_>(value)) throw py::type_error(std::string(name) + " must be None, True or False");
+    return value.cast<bool>();
+}
 
 // Observation counts are integral row counts unless frequency weights are
 // active, in which case the effective count is a weighted total that can
@@ -837,7 +892,11 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                          const std::string& stats_style,
                          py::object reduced_pcg,
                          py::object reduced_pcg_cuda,
-                         bool weighted_cpu_route) {
+                         bool weighted_cpu_route,
+                         py::object reduced_pcg_apply_fine,
+                         py::object slope_solver,
+                         py::object slope_scores,
+                         py::object slope_csr_owner) {
                  if (num_threads < 0 || default_threads < 0 ||
                      max_threads < 0) {
                      throw std::invalid_argument(
@@ -938,6 +997,15 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
                                                  ? hdfe::ReducedPcgRequest::On
                                                  : hdfe::ReducedPcgRequest::Off;
                  }
+                 // Package D (23nov2026): the finer blocks of the tier's segment
+                 // pass for the fits of this regressor: None follows the process
+                 // value (XHDFE_REDUCED_PCG_APPLY_FINE, else the built-in value),
+                 // "auto" the automatic rule, an integer from 1 to 8 that factor
+                 // (1: the blocks of 2.34.2).
+                 opts.reduced_pcg_apply_fine = apply_fine_from_python(reduced_pcg_apply_fine);
+                 opts.slope_solver = slope_solver_from_python(slope_solver);
+                 opts.slope_scores = slope_helper_from_python(slope_scores, "slope_scores");
+                 opts.slope_csr_owner = slope_helper_from_python(slope_csr_owner, "slope_csr_owner");
 
                  opts.weighted_cpu_route = weighted_cpu_route;
 
@@ -982,7 +1050,28 @@ Adds reghdfe-style defaults: singleton dropping + DoF adjustments for robust/clu
              py::arg("stats_style") = "reghdfe",
              py::arg("reduced_pcg") = py::none(),
              py::arg("reduced_pcg_cuda") = py::none(),
-             py::arg("weighted_cpu_route").noconvert() = false)
+             py::arg("weighted_cpu_route").noconvert() = false,
+             py::arg("reduced_pcg_apply_fine") = py::none(),
+             py::arg("slope_solver") = py::none(),
+             py::arg("slope_scores") = py::none(),
+             py::arg("slope_csr_owner") = py::none(),
+             R"pbdoc(The high-dimensional fixed-effects regressor (every argument: xhdfe/help/xhdfe.md).
+
+reduced_pcg_apply_fine: the finer blocks of the segment pass of the reduced-system tier's operator, for the
+fits of this regressor, where the tier's kernel for that pass runs (builds compiled with GCC; an absorbed
+effect whose rows of the reduced system take at least 2 MiB). None (default) follows the process value:
+the environment variable XHDFE_REDUCED_PCG_APPLY_FINE, read once per process ("auto" or an integer from 0
+to 8, 0 read as 1), else the built-in value, 1. "auto" starts from 8 and halves the factor while the cells
+of the operator's segments per finer block stay below 16 384 (a rule of the data only, never of the
+threads). An integer from 1 to 8 asks for that factor (1: the blocks of 2.34.2), read through __index__;
+bool and numpy.bool_ are refused. A factor above 1 changes the last bits of the fits the kernel takes,
+within the precision contract. The property of the same name reads and sets the request between fits;
+reduced_pcg_fine_used_, reduced_pcg_fine_parts_ and reduced_pcg_hinted_applies_ report what the attempt
+chose and how often the kernel ran on it (read them together).
+
+slope_solver: optional "schur" (CPU and CUDA), "network"/"direct" (CPU) or "off" for eligible
+heterogeneous-slope fits. None follows the per-fit environment switches or defaults to off.
+slope_scores and slope_csr_owner optionally override cluster-score reuse and sparse assembly.)pbdoc")
         .def(
             "fit",
             [precision_warning](HdfeRegressorV11& self,
@@ -1739,6 +1828,96 @@ for this call.
         })
         .def_property_readonly("reduced_pcg_discarded_iterations_", [](const HdfeRegressorV11& self) {
             return self.reduced_pcg_discarded_iterations();
+        })
+        // Package D (23nov2026): the finer blocks of the tier's segment pass in the
+        // last fit. The request in force ("auto" or "1" to "8") and its source
+        // ("request", "environment", "built-in"); the factor the CPU tier's
+        // attempt chose (1: the coarse blocks; 0: no attempt reached the choice),
+        // its blocks, the applications of the operator through the kernel, a failed
+        // reservation of the finer blocks, the repetition on the coarse blocks after
+        // a memory decline (and the factor, blocks and iterations of the discarded
+        // first attempt), and whether the absorption came from the absorption cache.
+        // Package D (round 09, E.4): the request itself, readable and settable
+        // between fits, so that one regressor can fit under several requests
+        // (None, "auto" or 1 to 8, validated as in the constructor).
+        .def_property(
+            "reduced_pcg_apply_fine",
+            [](const HdfeRegressorV11& self) -> py::object {
+                const int request = self.reduced_pcg_apply_fine_request();
+                if (request == hdfe::kReducedPcgApplyFineUnset) return py::none();
+                if (request == hdfe::kReducedPcgApplyFineAuto) return py::str("auto");
+                return py::int_(request);
+            },
+            [](HdfeRegressorV11& self, const py::object& value) {
+                self.set_reduced_pcg_apply_fine(apply_fine_from_python(value));
+            },
+            "The request of the finer blocks of the reduced tier for the next fits: None, \"auto\" or an "
+            "integer from 1 to 8 (see the constructor).")
+        .def_property_readonly("reduced_pcg_fine_request_", [](const HdfeRegressorV11& self) {
+            const int request = self.reduced_pcg_fine().request;
+            return request == hdfe::kReducedPcgApplyFineAuto ? std::string("auto") : std::to_string(request);
+        })
+        .def_property("slope_solver", [](const HdfeRegressorV11& self) -> py::object {
+            const auto request = self.slope_solver_request();
+            if (request == hdfe::SlopeSolverRequest::Unset) return py::none();
+            return py::str(hdfe::slope_solver_request_name(request));
+        }, [](HdfeRegressorV11& self, const py::object& value) {
+            self.set_slope_solver(slope_solver_from_python(value));
+        }, "Mixed-network slope solver request for subsequent fits.")
+        .def_property_readonly("slope_solver_request_", [](const HdfeRegressorV11& self) {
+            return hdfe::slope_solver_request_name(self.slope_solver_diagnostics().request);
+        })
+        .def_property_readonly("slope_solver_source_", [](const HdfeRegressorV11& self) {
+            return hdfe::slope_solver_source_name(self.slope_solver_diagnostics().source);
+        })
+        .def_property_readonly("slope_solver_used_", [](const HdfeRegressorV11& self) {
+            return hdfe::slope_solver_request_name(self.slope_solver_diagnostics().used);
+        })
+        .def_property_readonly("slope_solver_status_", [](const HdfeRegressorV11& self) {
+            return hdfe::slope_solver_status_name(self.slope_solver_diagnostics().status);
+        })
+        .def_property_readonly("slope_solver_reason_", [](const HdfeRegressorV11& self) {
+            return self.slope_solver_diagnostics().reason;
+        })
+        .def_property_readonly("slope_solver_discarded_iters_", [](const HdfeRegressorV11& self) {
+            return self.slope_solver_diagnostics().discarded_iters;
+        })
+        .def_property_readonly("slope_solver_scores_used_", [](const HdfeRegressorV11& self) {
+            return self.slope_solver_diagnostics().scores_used;
+        })
+        .def_property_readonly("slope_solver_csr_owner_used_", [](const HdfeRegressorV11& self) {
+            return self.slope_solver_diagnostics().csr_owner_used;
+        })
+        .def_property_readonly("reduced_pcg_fine_source_", [](const HdfeRegressorV11& self) {
+            const int source = self.reduced_pcg_fine().source;
+            return std::string(source == 1 ? "request" : source == 2 ? "environment" : "built-in");
+        })
+        .def_property_readonly("reduced_pcg_fine_used_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().used;
+        })
+        .def_property_readonly("reduced_pcg_fine_parts_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().parts;
+        })
+        .def_property_readonly("reduced_pcg_hinted_applies_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().hinted_applies;
+        })
+        .def_property_readonly("reduced_pcg_fine_alloc_failed_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().alloc_failed;
+        })
+        .def_property_readonly("reduced_pcg_fine_retry_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().retry;
+        })
+        .def_property_readonly("reduced_pcg_fine_retry_factor_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().retry_factor;
+        })
+        .def_property_readonly("reduced_pcg_fine_retry_parts_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().retry_parts;
+        })
+        .def_property_readonly("reduced_pcg_fine_retry_iters_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().retry_iterations;
+        })
+        .def_property_readonly("reduced_pcg_cache_hit_", [](const HdfeRegressorV11& self) {
+            return self.reduced_pcg_fine().cache_hit;
         })
         .def_property_readonly("lifecycle_state_", [](const HdfeRegressorV11& self) {
             return std::string(self.lifecycle_state_name());

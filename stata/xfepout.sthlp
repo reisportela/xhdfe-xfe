@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.14.5 22nov2026}{...}
+{* *! version 1.14.6 25nov2026}{...}
 {vieweralsosee "hdfe" "help hdfe"}{...}
 {vieweralsosee "reghdfe" "help reghdfe"}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
@@ -196,6 +196,9 @@ only after convergence and certification.{p_end}
 {opt absorptioncachemode()} is an alias. Active caching needs an explicit
 cache path or a profile path from which the companion cache path is derived.
 Reuse requires matching input, FE structure, weights and solver contract.
+Version-6 entries written by a fit with saved effects have a distinct
+signature. A version-5 entry is eligible only where its solver signature
+or recorded CPU refinement identifies a writer without captured effects.
 {it:read} leaves the file untouched, {it:write} writes a fresh certified
 result, and {it:auto} reads valid entries and can replace misses.
 CUDA absorption skips reads from this cache.{p_end}

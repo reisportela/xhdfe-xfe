@@ -24,7 +24,9 @@ xhdfe_fit(y, X, fes = NULL,
           threads = 0, default_threads = 0, max_threads = 0,
           min_parallel_rows = 20000, target_rows_per_thread = 0,
           backend = c("default", "cpu", "cuda", "metal"),
-          reduced_pcg = NULL, reduced_pcg_cuda = NULL, weighted_cpu_route = FALSE)
+          reduced_pcg = NULL, reduced_pcg_cuda = NULL, weighted_cpu_route = FALSE,
+          reduced_pcg_apply_fine = NULL,
+          slope_solver = NULL, slope_scores = NULL, slope_csr_owner = NULL)
 }
 \arguments{
 \item{y}{numeric outcome vector (no \code{NA}s).}
@@ -174,6 +176,19 @@ reduced-system tier for this fit; see \code{\link{xhdfe}}.}
 \item{reduced_pcg_cuda}{\code{NULL} (default), \code{TRUE} or \code{FALSE}:
 the experimental CUDA variant of that tier for this fit, on CUDA fits
 only; see \code{\link{xhdfe}}.}
+
+\item{reduced_pcg_apply_fine}{\code{NULL} (default), \code{"auto"} or an
+integer from 1 to 8: the finer blocks of that tier's segment pass for this
+fit; see \code{\link{xhdfe}}.}
+
+\item{slope_solver}{\code{NULL}, \code{"off"}, \code{"schur"},
+\code{"network"} or \code{"direct"}; see \code{\link{xhdfe}}.}
+
+\item{slope_scores}{optional logical for cluster score reuse;
+see \code{\link{xhdfe}}.}
+
+\item{slope_csr_owner}{optional logical for parallel sparse assembly;
+see \code{\link{xhdfe}}.}
 }
 \value{
 The same \code{"xhdfe"} object documented in

@@ -300,8 +300,10 @@ def decompose(y, x1, x2_groups=None, fes=None, vce="unadjusted", cluster=None,
         opt-in; CPU remains the reference and any fallback is reported in the
         returned GPU diagnostics.
     weighted_cpu_route : bool, default False.
-        Request CPU for eligible weighted CUDA fits and report status 7
-        (``weighted_cpu_route``). Bootstrap callers can pass this option
+        Request CPU for eligible weighted CUDA fits. The routed fit reports
+        status 7 (``weighted_cpu_route``). If fixed-effect recovery needs a
+        full refit, diagnostics describe that refit, which can report status
+        0. Bootstrap callers can pass this option
         through ``decompose_kwargs``.
     weights : optional positive analytic or frequency weights.
     fweights : interpret ``weights`` as positive integer frequency weights.

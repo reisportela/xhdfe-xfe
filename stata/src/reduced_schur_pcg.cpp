@@ -88,9 +88,52 @@ int prefetch_cells_switch(int fallback) {
     return value >= 0 ? value : fallback;
 }
 
+// XHDFE_REDUCED_PCG_APPLY_FINE (package A, item A1, 22nov2026; package D,
+// 23nov2026): the process value of the finer blocks of the segment pass
+// (rp::Config::apply_fine), for a fit that makes no request of its own
+// (HdfeOptions::reduced_pcg_apply_fine): "auto" or an integer from 0 to 8, 0
+// read as 1 (rp::parse_apply_fine_request), otherwise the built-in value
+// kReducedPcgApplyFineBuiltIn. A factor above 1 changes the last bits of the
+// fits the kernel takes; 1 keeps the blocks and the bits of 2.34.2 (the key of a
+// fit the tier can take carries the partition since package D, 3.1, at 1 too).
+// Read once per process.
+struct ApplyFineProcess {
+    int value = kReducedPcgApplyFineBuiltIn;
+    bool from_environment = false;
+};
+
+const ApplyFineProcess& apply_fine_process() {
+    static const ApplyFineProcess process = [] {
+        ApplyFineProcess p;
+        const int parsed = rp::parse_apply_fine_request(std::getenv("XHDFE_REDUCED_PCG_APPLY_FINE"));
+        if (parsed != 0) {
+            p.value = parsed;
+            p.from_environment = true;
+        }
+        return p;
+    }();
+    return process;
+}
+
+static_assert(rp::kApplyFineAuto == kReducedPcgApplyFineAuto,
+              "the automatic request has one value in the kernel and in HdfeOptions");
+static_assert(kReducedPcgApplyFineBuiltIn == kReducedPcgApplyFineAuto ||
+                  (kReducedPcgApplyFineBuiltIn >= 1 && kReducedPcgApplyFineBuiltIn <= rp::kMaxApplyFine),
+              "the built-in value of the finer blocks is automatic or a factor from 1 to 8");
+
+// A request of the fit itself: automatic or an explicit factor from 1 to 8.
+bool fit_requests_apply_fine(const HdfeOptions& options) {
+    const int asked = options.reduced_pcg_apply_fine;
+    return asked == kReducedPcgApplyFineAuto || (asked >= 1 && asked <= rp::kMaxApplyFine);
+}
+
 // XHDFE_TEST_REDUCED_PCG_DECLINE: decline at a fixed stage (tests only);
 // bad_alloc throws std::bad_alloc during the adapter's setup, which only the
-// last-resort exit below can turn into a decline.
+// last-resort exit below can turn into a decline. Package D: fine_alloc makes
+// the reservation of the finer blocks fail (the coarse blocks run), fine_memory
+// makes an attempt that took the finer blocks decline for memory (the
+// repetition on the coarse blocks follows), fine_retry_throw does the same and
+// then throws std::bad_alloc where the repetition starts (round 09, A).
 int forced_decline_stage() {
     static const int stage = [] {
         const char* e = std::getenv("XHDFE_TEST_REDUCED_PCG_DECLINE");
@@ -101,6 +144,9 @@ int forced_decline_stage() {
         if (value == "residuals") return 3;
         if (value == "certificate") return 4;
         if (value == "bad_alloc") return 5;
+        if (value == "fine_alloc") return 6;
+        if (value == "fine_memory") return 7;
+        if (value == "fine_retry_throw") return 8;  // round 09, A: fine_memory, then a throw where the repetition starts
         return 0;
     }();
     return stage;
@@ -319,6 +365,29 @@ bool reduced_pcg_chat_stop_applies(const HdfeOptions& options, double accept_tri
     return accept_trigger > 0.0 && certificate_limit >= accept_trigger;
 }
 
+int reduced_pcg_apply_fine_request(const HdfeOptions& options) {
+    return fit_requests_apply_fine(options) ? options.reduced_pcg_apply_fine : apply_fine_process().value;
+}
+
+int reduced_pcg_apply_fine_source(const HdfeOptions& options) {
+    if (fit_requests_apply_fine(options)) return 1;
+    return apply_fine_process().from_environment ? 2 : 3;
+}
+
+int reduced_pcg_apply_fine_effective(const HdfeOptions& options) {
+    const int fine = reduced_pcg_apply_fine_request(options);
+    if (fine == 1 || !rp::internal::kHintedSegmentKernel ||
+        prefetch_cells_switch(rp::Config().prefetch_cells) <= 0)
+        return 1;
+    return fine;
+}
+
+std::uint64_t reduced_pcg_apply_fine_auto_rule() {
+    return (static_cast<std::uint64_t>(rp::internal::kAutoApplyFineRuleVersion) << 56) ^
+           (static_cast<std::uint64_t>(rp::kMaxApplyFine) << 48) ^
+           static_cast<std::uint64_t>(rp::internal::kAutoApplyFineMinCells);
+}
+
 ReducedPcgFitScope::ReducedPcgFitScope() : ReducedPcgFitScope(reduced_pcg_enabled()) {}
 
 ReducedPcgFitScope::ReducedPcgFitScope(bool enabled) {
@@ -459,6 +528,10 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
     std::ostringstream lines;
     lines.precision(10);
     rp::Report report;
+    // Package D: the finer blocks this fit asks for (automatic or a factor from 1
+    // to 8), and the repetition on the coarse blocks after a memory decline.
+    const int fine_request = reduced_pcg_apply_fine_request(options);
+    rp::CoarseRetry retry;
     std::size_t budget = 0;  // the admission budget, for the plan line
     // D10's target for this attempt (0: the rule before D10), one decade below
     // the trigger, when the switch is on and the trigger is the threshold in force.
@@ -488,6 +561,31 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
               << " budget=" << budget
               << " team=" << threads << " blocks=" << blocks << " companion=" << (companion_enabled() ? 1 : 0);
         if (chat_stop > 0.0) lines << " chat_stop=" << chat_stop;
+        // Only when the fit's request is not 1: with it at 1 the line is that of
+        // 2.34.2. The factor asked for ("auto", then the factor the automatic
+        // rule chose), the one in force, its blocks and the bytes the finer
+        // blocks took beside the bound; a failed reservation of the finer blocks;
+        // the repetition on the coarse blocks and what the first attempt did.
+        if (fine_request != 1) {
+            lines << " apply_fine=";
+            if (fine_request == kReducedPcgApplyFineAuto) {
+                // After a repetition the rule's factor is the first attempt's
+                // (the repetition ran with factor 1 and no rule; round 09, A).
+                lines << "auto apply_fine_rule=" << (retry.ran ? retry.first_rule : report.apply_fine_rule);
+            } else {
+                lines << fine_request;
+            }
+            // Round 11: what the fit reports (e(reduced_pcg_fine_used)): 0 when the
+            // attempt never chose a partition (a decline or an exception before it,
+            // whose Report keeps its default factor 1 with no blocks).
+            lines << " apply_fine_used=" << (report.apply_parts > 0 ? report.apply_fine_used : 0)
+                  << " apply_parts=" << report.apply_parts << " apply_extra=" << report.apply_extra;
+            if (report.apply_fine_alloc_failed) lines << " apply_fine_alloc_failed=1";
+        }
+        if (retry.ran)
+            lines << " fine_retry=1 fine_retry_reason=memory fine_retry_factor=" << retry.first_factor
+                  << " fine_retry_parts=" << retry.first_parts << " fine_retry_iterations=" << retry.discarded_iterations
+                  << " fine_retry_hinted_applies=" << retry.discarded_hinted_applies;
         lines << '\n';
     };
     auto column_lines = [&](const std::vector<double>* rel) {
@@ -575,6 +673,7 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
         config.companion = companion_enabled();
         config.chat_stop = chat_stop;
         config.prefetch_cells = prefetch_cells_switch(config.prefetch_cells);
+        config.apply_fine = fine_request;  // rp::kApplyFineAuto for the automatic request
         config.max_iter = std::max(1, std::min(1500, options.max_iter));
         // The columns and the identifiers of the fit (rp::admission_budget).
         config.memory_budget = rp::admission_budget(n, cols, k);
@@ -582,8 +681,39 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
         config.hooks = hooks;
         config.force_decline_geometry = stage == 1;
         config.force_decline_iterate = stage == 2;
+        config.test_fail_fine_alloc = stage == 6;
+        config.test_fine_memory = stage == 7 || stage == 8;
+        config.test_throw_retry_start = stage == 8;
 
-        report = rp::solve(problem, config);
+        // Package D, 2.5: one repetition on the coarse blocks when an attempt
+        // that took a factor above 1 declines for memory, with the observation
+        // of the attempt forgotten (a fresh observer for the repetition; what the
+        // compaction of the codes observed is kept apart and folded back below).
+        const int compact_team = observer.max_team_size();
+        const int compact_workers = observer.active_workers();
+        // Round 09, A: the repetition is published to the outcome where it
+        // starts (`retry` is filled by then), so that an exception inside it
+        // still reports it: the fit writes no cache entry, and e() and the trace
+        // agree. The copies after the call repeat the same values.
+        report = rp::solve_with_coarse_retry(problem, config, retry, [&observer, &retry, outcome]() {
+            if (outcome != nullptr) {
+                outcome->fine_retry = true;
+                outcome->fine_retry_factor = retry.first_factor;
+                outcome->fine_retry_parts = retry.first_parts;
+                outcome->fine_retry_iterations = retry.discarded_iterations;
+            }
+            observer.reset();
+        });
+        if (outcome != nullptr) {
+            outcome->fine_used = report.apply_parts > 0 ? report.apply_fine_used : 0;
+            outcome->fine_parts = report.apply_parts;
+            outcome->hinted_applies = report.hinted_applies;
+            outcome->fine_alloc_failed = report.apply_fine_alloc_failed;
+            outcome->fine_retry = retry.ran;
+            outcome->fine_retry_factor = retry.first_factor;
+            outcome->fine_retry_parts = retry.first_parts;
+            outcome->fine_retry_iterations = retry.discarded_iterations;
+        }
         if (!report.solved) return decline(rp::decline_name(report.decline), -1.0);
         if (stage == 3) return decline("forced", -1.0);
 
@@ -617,8 +747,10 @@ std::optional<AbsorptionResult> attempt_reduced_pcg(
         // The attempt's team as it stands at the decision, before the
         // trace-only work below; published last, to the fit through
         // reduced_pcg_fold_observation.
-        const int decided_team = observer.max_team_size();
-        const int decided_workers = observer.active_workers();
+        const int decided_team = retry.ran ? std::max(compact_team, observer.max_team_size())
+                                           : observer.max_team_size();
+        const int decided_workers = retry.ran ? std::max(compact_workers, observer.active_workers())
+                                              : observer.active_workers();
         std::vector<double> per_column;
         if (trace >= 2) {
             // The unchanged certificate on each column alone, after the decision.

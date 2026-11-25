@@ -1,4 +1,15 @@
-# OpenMP release checklist — 2.31.1.20261112
+# OpenMP release checklist
+
+## 2.35.0.20261125 gates
+
+- [ ] Preflight and version-tag jobs pass in Linux, Windows and on both native macOS architectures.
+- [ ] Final Stata plugin bytes pass compile/link, real-worker and numerical checks for both plugins on every platform.
+- [ ] Installed Linux and Windows wheels and the R package pass worker and numerical checks.
+- [ ] The authenticated draft passes licensed Stata CPU/H100 runtime checks and installation from its net-install snapshot.
+- [ ] Licensed Stata/MP host validation on native macOS arm64 and x86_64 and Windows is recorded with its actual scope.
+- [ ] Publication reads back the same asset hashes and net-install bytes, and canonical checkout reconciliation is verified.
+
+[2.35.0 validation scope](../docs/releases/VALIDATION_2.35.0.20261125.md)
 
 ## 2.31.1 release gates
 

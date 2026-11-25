@@ -1,7 +1,7 @@
 Package: xhdfe
 Type: Package
 Title: Linear Regression with Multiple High-Dimensional Fixed Effects via a C++ Backend
-Version: 2.34.2.20261122
+Version: 2.35.0.20261125
 Authors@R: c(
     person("Miguel", "Portela", email = "miguel.portela@eeg.uminho.pt", role = c("aut", "cre")),
     person("Tiago", "Tavares", email = "tgstavares@eeg.uminho.pt", role = "aut"))
@@ -33,6 +33,6 @@ SystemRequirements: C++17 compiler (GCC, Clang/AppleClang, or Rtools/MinGW),
 Depends: R (>= 4.0.0)
 Imports: Rcpp (>= 1.0.0), graphics, parallel, stats, utils
 LinkingTo: Rcpp
-Suggests: testthat (>= 3.0.0), fixest, jsonlite, haven, nanoparquet, knitr, gt
+Suggests: testthat (>= 3.0.0), fixest, jsonlite, haven, foreign, nanoparquet, knitr, gt
 Config/testthat/edition: 3
 RoxygenNote: 8.0.0

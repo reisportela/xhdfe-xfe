@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <optional>
@@ -455,6 +456,44 @@ void parse_options(const Rcpp::List& opts, hdfe::HdfeOptions& out,
     if (opt_has<bool>(opts, "weighted_cpu_route")) {
         out.weighted_cpu_route = Rcpp::as<bool>(opts["weighted_cpu_route"]);
     }
+    // The finer blocks of the tier's segment pass for this fit (package D):
+    // absent follows the process value (XHDFE_REDUCED_PCG_APPLY_FINE, else the
+    // built-in value); -1 the automatic rule, 1 to 8 that factor (validated in
+    // R; the regressor's constructor refuses any other value).
+    if (opt_has<int>(opts, "reduced_pcg_apply_fine")) {
+        const char* message = "reduced_pcg_apply_fine must be -1 (automatic) or an integer from 1 to 8";
+        SEXP value = opts["reduced_pcg_apply_fine"];
+        if ((TYPEOF(value) != INTSXP && TYPEOF(value) != REALSXP) ||
+            Rf_inherits(value, "factor") || Rf_xlength(value) != 1) {
+            Rcpp::stop(message);
+        }
+        const double fine = Rcpp::as<double>(value);
+        if (!hdfe::detail::ieee_finite(fine) ||
+            (fine != -1.0 && (fine < 1.0 || fine > 8.0 || std::trunc(fine) != fine))) {
+            Rcpp::stop(message);
+        }
+        out.reduced_pcg_apply_fine = fine == -1.0
+            ? hdfe::kReducedPcgApplyFineAuto : static_cast<int>(fine);
+    }
+    if (opt_has<std::string>(opts, "slope_solver")) {
+        SEXP value = opts["slope_solver"];
+        if (TYPEOF(value) != STRSXP || XLENGTH(value) != 1 || Rf_isArray(value) ||
+            STRING_ELT(value, 0) == NA_STRING ||
+            !hdfe::parse_slope_solver_request(Rcpp::as<std::string>(value), out.slope_solver)) {
+            Rcpp::stop("slope_solver must be NULL, 'off', 'schur', 'network' or 'direct'");
+        }
+    }
+    auto optional_slope_helper = [&](const char* name) -> std::optional<bool> {
+        if (!opt_has<bool>(opts, name)) return std::nullopt;
+        SEXP value = opts[name];
+        if (TYPEOF(value) != LGLSXP || XLENGTH(value) != 1 || Rf_isArray(value) ||
+            LOGICAL_ELT(value, 0) == NA_LOGICAL) {
+            Rcpp::stop(std::string(name) + " must be NULL, TRUE or FALSE");
+        }
+        return LOGICAL_ELT(value, 0) != 0;
+    };
+    out.slope_scores = optional_slope_helper("slope_scores");
+    out.slope_csr_owner = optional_slope_helper("slope_csr_owner");
 
     if (opt_has<bool>(opts, "ssc_k_adj")) out.ssc_k_adj = Rcpp::as<bool>(opts["ssc_k_adj"]);
     if (opt_has<std::string>(opts, "ssc_k_fixef")) {
@@ -594,6 +633,32 @@ Rcpp::List build_results(const hdfe::v11::HdfeRegressorV11& reg) {
     out["reduced_pcg_status"] = reg.reduced_pcg_status();
     out["reduced_pcg_reason"] = reg.reduced_pcg_reason();
     out["reduced_pcg_discarded_iterations"] = reg.reduced_pcg_discarded_iterations();
+    const auto& slope = reg.slope_solver_diagnostics();
+    out["slope_solver_request"] = std::string(hdfe::slope_solver_request_name(slope.request));
+    out["slope_solver_source"] = std::string(hdfe::slope_solver_source_name(slope.source));
+    out["slope_solver_used"] = std::string(hdfe::slope_solver_request_name(slope.used));
+    out["slope_solver_status"] = std::string(hdfe::slope_solver_status_name(slope.status));
+    out["slope_solver_reason"] = std::string(slope.reason);
+    out["slope_solver_discarded_iters"] = slope.discarded_iters;
+    out["slope_solver_scores_used"] = slope.scores_used;
+    out["slope_solver_csr_owner_used"] = slope.csr_owner_used;
+    {
+        // Package D: the finer blocks of the tier's segment pass in this fit.
+        const hdfe::v11::ReducedPcgFineDiagnostics& fine = reg.reduced_pcg_fine();
+        out["reduced_pcg_fine_request"] =
+            fine.request == hdfe::kReducedPcgApplyFineAuto ? std::string("auto") : std::to_string(fine.request);
+        out["reduced_pcg_fine_source"] =
+            std::string(fine.source == 1 ? "request" : fine.source == 2 ? "environment" : "built-in");
+        out["reduced_pcg_fine_used"] = fine.used;
+        out["reduced_pcg_fine_parts"] = fine.parts;
+        out["reduced_pcg_hinted_applies"] = static_cast<double>(fine.hinted_applies);
+        out["reduced_pcg_fine_alloc_failed"] = fine.alloc_failed;
+        out["reduced_pcg_fine_retry"] = fine.retry;
+        out["reduced_pcg_fine_retry_factor"] = fine.retry_factor;
+        out["reduced_pcg_fine_retry_parts"] = fine.retry_parts;
+        out["reduced_pcg_fine_retry_iters"] = fine.retry_iterations;
+        out["reduced_pcg_cache_hit"] = fine.cache_hit;
+    }
     out["gpu_used"] = reg.gpu_used();
     out["gpu_status_code"] = reg.gpu_status_code();
     out["gpu_attempted"] = reg.gpu_attempted();

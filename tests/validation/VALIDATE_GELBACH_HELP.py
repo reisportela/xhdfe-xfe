@@ -146,8 +146,23 @@ def validate_python_help() -> None:
     stream = io.StringIO()
     with contextlib.redirect_stdout(stream):
         require(_help.main(["--topics"]) == 0, "--topics returned nonzero")
-    require(stream.getvalue().splitlines() == ["gelbach", "xhdfe"],
-            "--topics did not expose both help topics")
+    require(stream.getvalue().splitlines() ==
+            ["akm", "akm-inference", "examples", "gelbach", "xhdfe"],
+            "--topics did not expose the documented help topics")
+
+    for topic, heading in [
+        ("akm", "# AKM/KSS and the leave-out connected sample"),
+        ("akm-inference", "# Invariant AKM components and worker projection inference"),
+        ("examples", "# xhdfe examples with public data"),
+    ]:
+        require(xhdfe.help_text(topic).startswith(heading),
+                f"{topic} help did not load the documented resource")
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            require(_help.main([topic, "--path"]) == 0,
+                    f"{topic} CLI path returned nonzero")
+        require(Path(stream.getvalue().strip()).read_text(encoding="utf-8") ==
+                xhdfe.help_text(topic), f"{topic} CLI and Python resources differ")
 
     stream = io.StringIO()
     with contextlib.redirect_stdout(stream):

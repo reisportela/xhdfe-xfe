@@ -1,6 +1,6 @@
 # xhdfe Python help
 
-Package documentation version: 2.34.2.20261122. Use `python -m xhdfe --version`
+Package documentation version: 2.35.0.20261125. Use `python -m xhdfe --version`
 to inspect the installed package rather than relying on this static document.
 
 Version 2.32.0 adds the reduced-system tier, on by default for eligible CPU
@@ -27,11 +27,6 @@ help.
 The package is a proof of concept. Estimates, standard errors, and recovered
 fixed effects should be validated for the user's research design, just as with
 the Stata package.
-
-When using the absorption and FE-structure caches together on CPU, give
-each a distinct path. Use `auto` or `write` to refresh an older
-combined absorption entry. The fit keys the two-cache entry on the original
-FE identifiers and singleton policy.
 
 ## Installation
 
@@ -116,6 +111,10 @@ reporting, signed shares and contrasts, run:
 python -m xhdfe gelbach
 xhdfe-help gelbach
 ```
+
+Open `python -m xhdfe akm` for the connected-set and AKM/KSS arguments,
+`python -m xhdfe akm-inference` for the inference guide, or
+`python -m xhdfe examples` for public-data examples.
 
 ## Minimal example
 
@@ -370,14 +369,23 @@ xhdfe.HdfeRegressor(
     ssc_g_df=None,
     ssc_t_df=None,
     tolerance_mode="reghdfe-comparable",
+    fe_tolerance=1e-6,
+    fe_recovery_method="hybrid",
+    stats_style="reghdfe",
     reduced_pcg=None,
     reduced_pcg_cuda=None,
+    weighted_cpu_route=False,
+    reduced_pcg_apply_fine=None,
+    slope_solver=None,
+    slope_scores=None,
+    slope_csr_owner=None,
 )
 ```
 
 Main options:
 
 - `se_type`: `unadjusted`, `homoskedastic`, `robust`, or `cluster`.
+  Driscoll–Kraay covariance is available in Stata through `vce(dkraay ...)`.
 - `tol`: fixed-effect absorber convergence tolerance.
 - `max_iter`: maximum absorber iterations.
 - `convergence`: `auto`, `normchange`, `reghdfe`, or `both`.
@@ -426,6 +434,15 @@ Main options:
   of this regressor that run on CUDA: `True` requests it, `False` does not,
   `None` (default) the process default (see "Reduced-system tier" below). It
   has no effect on CPU fits. Any other value raises `TypeError`.
+- `reduced_pcg_apply_fine`: the finer blocks of the segment pass of the tier's
+  operator for the fits of this regressor: an integer from 1 to 8 (1 keeps the
+  blocks of 2.34.2), `"auto"` (the automatic rule of the data), or `None`
+  (default) the process value (see "Finer blocks of the segment pass" below).
+  An integer is read through `__index__` (numpy integers are accepted; `bool`
+  and `numpy.bool_` are not). Any other integer or string raises `ValueError`,
+  any other type `TypeError`. It is the last argument, after
+  `weighted_cpu_route`; the property of the same name reads it and sets it
+  between fits, so that one regressor can fit under several requests.
 - `tolerance_mode`: `reghdfe-comparable` (default), `xhdfe-fast`, or
   `strict-residual`. `strict-residual` treats a final absolute check as
   authoritative, may use additional iterations up to `max_iter`, and raises a
@@ -481,6 +498,10 @@ reg.fit(
     individual=None,
     aggregation="mean",
     slopes=None,
+    fweights=False,
+    iweights=False,
+    pweights=False,
+    weighted_cpu_route=None,
 )
 ```
 
@@ -512,6 +533,17 @@ Arguments:
 - `fweights`: set `True` to read `weights` as positive-integer frequency
   weights (literal row replication) instead of analytic weights. The flag
   applies to that call only.
+- `iweights`: importance weights. With unadjusted VCE, the reported
+  observation count uses `floor(sum(weights))` and weights are unnormalised.
+  Robust and clustered inference use the analytic-weight convention.
+- `pweights`: probability weights. Use a robust or clustered VCE with
+  `reg.fit()`. `feols(..., pweights=True)` defaults to robust inference
+  without clusters and clustered inference with clusters.
+- `weighted_cpu_route`: per-call override for the weighted CUDA route.
+  `None` uses the constructor value.
+
+Supply `weights` with any of the three weight flags and choose at most one
+flag. The default weight convention is analytic.
 
 ### Input validation
 
@@ -576,14 +608,38 @@ reg.fit(
 )
 ```
 
-Set `XHDFE_EXPERIMENT_SLOPE_SCHUR=1` to enable the optional secondreg solver
-for eligible unweighted OLS with two ordinary fixed effects and two slopes on
-the same carrier with an intercept. It applies to automatic absorption and
-convergence in `reghdfe-comparable` mode without retained effects. Accepted
-fits report method code 9 and pass the original slope certificate.
-`XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1` enables parallel sparse matrix assembly.
-`XHDFE_EXPERIMENT_NETWORK_SCORES=1` enables eligible two-way cluster score reuse
-when the cluster partitions match the worker and firm effects.
+`slope_solver="schur"` requests the reduced solver with a diagonal preconditioner
+for eligible unweighted OLS with two ordinary effects and two slope dimensions
+on the same identifiers, at least one with an intercept. `"network"` requests
+the forest preconditioner and `"direct"` sparse direct factorisation, both CPU
+only. The route requires the reduced-system tier to be on, automatic absorption
+and convergence in `reghdfe-comparable` mode, and no retained effects or saved
+group variable. Turn off the absorption cache, FE-structure cache and mobility
+profile for these fits. CUDA also needs `reduced_pcg_cuda=True` or its environment
+setting. Accepted fits report method code 9 and pass the slope certificate.
+
+Set the option in the `HdfeRegressor` constructor or set its `slope_solver`
+property between fits. Supply slope terms to the array `fit` method as above.
+The `feols` formula interface accepts ordinary fixed-effect terms.
+`"off"` disables the route and its helpers. `None` (the default)
+checks the per-fit environment switches `XHDFE_EXPERIMENT_SLOPE_DIRECT=1`,
+`XHDFE_EXPERIMENT_SLOPE_NETWORK=1`, then `XHDFE_EXPERIMENT_SLOPE_SCHUR=1`, and
+otherwise leaves the solver off.
+
+`slope_scores` and `slope_csr_owner` are optional booleans for two-way cluster
+score reuse (when the cluster partitions match the ordinary effects) and
+parallel sparse assembly. Both default to enabled when an active mode is chosen
+explicitly. When the mode comes from the environment they follow
+`XHDFE_EXPERIMENT_NETWORK_SCORES=1` and `XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1`
+respectively.
+
+After a fit, read `slope_solver_request_`, `slope_solver_source_`,
+`slope_solver_used_`, `slope_solver_status_`, and `slope_solver_reason_`
+for the request and outcome. `slope_solver_discarded_iters_` counts iterations
+lost in a declined attempt. `slope_solver_scores_used_` identifies covariance
+that consumed the scores and `slope_solver_csr_owner_used_` identifies successful
+parallel assembly even when a later step declined. Set
+`XHDFE_EXPERIMENT_SLOPE_TRACE=1` in the environment for the optional trace.
 
 ## Group and individual fixed effects
 
@@ -665,6 +721,41 @@ results of the tier switched off for the whole process. The formula interface
 passes the argument through (`xhdfe.feols(..., reduced_pcg=False)`).
 `XHDFE_REDUCED_PCG_TRACE=1` writes the tier's plan and decision to standard
 error, and `2` adds the verified residual of each column of a published fit.
+
+Finer blocks of the segment pass. Where the tier's kernel for the segment pass
+of its operator runs (builds compiled with GCC; an absorbed effect whose rows of
+the reduced system take at least 2 MiB), that pass can run over blocks finer
+than those of the tier's other passes. The constructor argument
+`reduced_pcg_apply_fine` sets the factor for the fits of one regressor: an
+integer from 1 to 8 asks for that factor, which is then halved while the
+private sums of the small effects would take more than 4 MiB and kept only if
+its extra bytes fit the attempt's memory budget (otherwise the coarse blocks
+run); `1` keeps the blocks of 2.34.2; `"auto"` starts from 8 and halves the
+factor while the cells of the operator's segments per finer block stay below
+16 384, then applies the same rules (a rule of the data only, never of the
+threads). A factor above 1 changes the last bits of the fits the kernel takes,
+within the precision contract. When an attempt that took finer blocks
+declines because an allocation failed, the tier repeats it once on the coarse
+blocks and publishes that second result, and the fit writes no absorption-cache
+entry. `None` follows the process value: the environment variable
+`XHDFE_REDUCED_PCG_APPLY_FINE`, read once per process (`auto` or an integer
+from 0 to 8, `0` read as 1), otherwise the built-in value, `1`. The fit
+reports the request in force (`reduced_pcg_fine_request_`, `"auto"` or `"1"`
+to `"8"`), its source (`reduced_pcg_fine_source_`: `"request"`,
+`"environment"` or `"built-in"`), the factor the attempt chose and its blocks
+(`reduced_pcg_fine_used_`, `reduced_pcg_fine_parts_`; 0 when no attempt on the
+CPU reached that choice), the applications of the operator through the kernel
+(`reduced_pcg_hinted_applies_`), a failed reservation of the finer blocks
+(`reduced_pcg_fine_alloc_failed_`), the repetition and the factor, blocks and
+iterations of the discarded first attempt (`reduced_pcg_fine_retry_`,
+`reduced_pcg_fine_retry_factor_`, `reduced_pcg_fine_retry_parts_`,
+`reduced_pcg_fine_retry_iters_`), and whether the absorption came from
+the absorption cache (`reduced_pcg_cache_hit_`). Read the factor and the
+applications together: `reduced_pcg_fine_used_` and `reduced_pcg_fine_parts_`
+say which blocks the attempt chose, not that the kernel ran on them;
+`reduced_pcg_hinted_applies_` counts the applications of the operator that
+went through the kernel, and it is 0 when the chosen blocks were applied in
+none.
 
 The tier has an experimental CUDA variant, off by default and the one
 exception to the condition of no CUDA request above. A fit that runs on CUDA
@@ -1073,6 +1164,18 @@ LSMR only after safe CPU LSMR and otherwise records Auto, so an explicit GS/SGS
 diagnostic run cannot promote that method later. CPU-only LSMR hints are not
 forced on CUDA runs.
 
+The CPU absorption cache uses `XHDFE_ABSORPTION_CACHE` for the file path and
+`XHDFE_ABSORPTION_CACHE_MODE` for the mode. It stores transformed columns
+and checks the sample, input values, weights and solver settings before reuse.
+The FE-structure cache uses `XHDFE_FE_STRUCTURE_CACHE` and
+`XHDFE_FE_STRUCTURE_MODE` for its own file and mode. It stores the
+identifiers and singleton selection for a matching FE structure. Both modes
+accept `off`, `read`, `write` and `auto`. `read` leaves the file
+untouched. With `auto`, the fit can refresh an invalid or outdated entry.
+Use distinct files when combining the two caches. The combined absorption
+key uses the original FE identifiers and singleton policy. Use `auto` or
+`write` to refresh an older combined absorption entry.
+
 For combined group/individual CUDA fits, `xhdfe-fast` uses an internal
 `min(tol, 1e-12)` floor before certification. Fast mode therefore cannot
 re-enable the materially inaccurate early GS stop fixed in version 2.26.0.
@@ -1170,6 +1273,9 @@ List or open companion topics:
 
 ```bash
 xhdfe-help --topics
+xhdfe-help examples
+xhdfe-help akm
+xhdfe-help akm-inference
 xhdfe-help gelbach
 python -m xhdfe gelbach
 ```

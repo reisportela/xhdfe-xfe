@@ -20,7 +20,8 @@ xhdfe <- function(fml, data = NULL,
                   backend = c("default", "cpu", "cuda", "metal"),
                   na.action = c("omit", "fail"),
                   reduced_pcg = NULL, reduced_pcg_cuda = NULL,
-                  weighted_cpu_route = FALSE) {
+                  weighted_cpu_route = FALSE, reduced_pcg_apply_fine = NULL,
+                  slope_solver = NULL, slope_scores = NULL, slope_csr_owner = NULL) {
   cl <- match.call()
   subset_expr <- substitute(subset)
   backend <- match.arg(backend)
@@ -251,7 +252,10 @@ xhdfe <- function(fml, data = NULL,
                      level, dof, ssc, tolerance_mode, fe_tolerance,
                      fe_recovery_method, stats_style, weights_type, groupvar,
                      reduced_pcg = reduced_pcg, reduced_pcg_cuda = reduced_pcg_cuda,
-                     weighted_cpu_route = weighted_cpu_route)
+                     weighted_cpu_route = weighted_cpu_route,
+                     reduced_pcg_apply_fine = reduced_pcg_apply_fine,
+                     slope_solver = slope_solver, slope_scores = slope_scores,
+                     slope_csr_owner = slope_csr_owner)
 
   res <- run_with_backend(backend, function() {
     .xhdfe_cpp_fit(y_use, X_use, fes_use, weights_use, clusters_use,

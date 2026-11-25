@@ -9,7 +9,10 @@ from ._version import __version__
 _HELP_PACKAGE = "xhdfe.help"
 _HELP_FILES = {
     "xhdfe": "xhdfe.md",
+    "akm": "akm_api.md",
+    "akm-inference": "akm.md",
     "gelbach": "gelbach.md",
+    "examples": "examples.md",
 }
 
 
@@ -23,7 +26,7 @@ def _help_resource(topic: str = "xhdfe"):
 
 
 def help_text(topic: str = "xhdfe") -> str:
-    """Return packaged help for ``xhdfe`` or the ``gelbach`` companion."""
+    """Return the packaged text for an xhdfe help topic."""
     return _help_resource(topic).read_text(encoding="utf-8")
 
 

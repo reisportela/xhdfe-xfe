@@ -1873,6 +1873,7 @@ Eigen::MatrixXd compute_covariance_multiway(const Eigen::MatrixXd& xtx_inv,
     Eigen::MatrixXd cov = xtx_inv * meat_total * xtx_inv;
     cov *= scale;
     if (!ieee_all_finite(cov)) throw OlsInferenceRangeError("multiway covariance scaling overflow");
+    if (captured) produce->network->consumed = true;
     if (producing) {
         // Published only now, after the last check: ownership moves, nothing is copied.
         produce->mask_counts = std::move(pending_counts);
@@ -3202,7 +3203,10 @@ Eigen::MatrixXd multiway_cluster_sandwich_impl(
         passes->network->matches(scores, residuals, clusters, g_df, g_adj) &&
         !inference_sandwich_needs_wide(bread, passes->network->raw)) {
         Eigen::MatrixXd result = bread * passes->network->raw * bread;
-        if (ieee_all_finite(result)) return result;
+        if (ieee_all_finite(result)) {
+            passes->network->consumed = true;
+            return result;
+        }
     }
     // C1 (L3.1-C): the scaled copy only with weights (or XHDFE_MULTIWAY_INPUT_COPY=1);
     // without them the meats read the scores themselves. With append_constant the copy

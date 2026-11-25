@@ -13,7 +13,7 @@ concurrency:
 env:
   XHDFE_RELEASE_BUILD: '1'
   XHDFE_CUDA_ARCHS: '75,80,86,89,90'
-  EXPECTED_VERSION: '2.34.2.20261122'
+  EXPECTED_VERSION: '2.35.0.20261125'
 
 jobs:
   # Linux CPU/CUDA Stata plugins plus Linux Python and R packages.
@@ -468,11 +468,11 @@ jobs:
     permissions:
       contents: read
 
-  # New reusable workflow is integrated separately with its portable probe.
+  # The release uses the same native loader on the packaged plugin pair.
   build-windows-native:
-    name: Build and validate native Windows OpenMP plugins
-    uses: ./.github/workflows/windows-native.yml
+    name: Build and validate Windows plugins in Stata installation layout
+    uses: ./.github/workflows/windows-stata-loader.yml
     with:
-      expected_version: '2.34.2.20261122'
+      artifact_name: ''
     permissions:
       contents: read

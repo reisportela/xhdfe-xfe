@@ -271,6 +271,37 @@ void plugin_cpu_profile_log_elapsed(
     plugin_cpu_profile_log_elapsed(label.c_str(), start);
 }
 
+// The stretches of a standard fit in stata_call() that no other label covers
+// (package A, item A2, 22nov2026), so that the labels add up to plugin_total:
+// each lap runs from the end of the previous one, or from restart(), to the
+// call that names it, and the time spent printing a lap belongs to the next.
+// With the profile off nothing is read and nothing is printed.
+class PluginProfileLaps {
+public:
+    explicit PluginProfileLaps(const std::chrono::steady_clock::time_point& start)
+        : on_(plugin_cpu_profile_enabled()), start_(start) {}
+
+    void lap(const char* label) {
+        if (!on_) {
+            return;
+        }
+        const auto end = std::chrono::steady_clock::now();
+        const std::chrono::duration<double, std::milli> elapsed = end - start_;
+        std::cerr << "plugin_profile label=" << label << " ms=" << elapsed.count() << '\n';
+        start_ = end;
+    }
+
+    void restart() {
+        if (on_) {
+            start_ = std::chrono::steady_clock::now();
+        }
+    }
+
+private:
+    bool on_;
+    std::chrono::steady_clock::time_point start_;
+};
+
 // P7 (2.31.0): residuals() stores the fit's own within residuals, the state behind e(b), e(V) and e(rss)
 // (the vector Python returns as residuals_ and R as residuals). Up to 2.30.1 the core re-absorbed y - Xb
 // with the fit's tuned options and method (HdfeOptions::refine_stored_residuals): on CUDA that vector was
@@ -1192,17 +1223,30 @@ long long parallel_read_min_values() {
     return cached;
 }
 
-// 1 (default): the calling thread touches every destination page before the
-// parallel pass, so the pages sit where the serial reader places them. 0: the
-// workers touch them first. Internal switch for the end-to-end comparison of
-// the two policies.
-bool parallel_read_pretouch() {
+// The first touch of the pages the parallel read writes (package D, 23nov2026).
+// On: the calling thread touches every destination page before the parallel
+// pass, so the pages sit where the serial reader places them (2.34.2). Off: the
+// readers touch the pages first. The built-in value, one place, read by the code
+// and by the tests; changing it is a one-line edit here plus the documentation.
+constexpr bool kParallelReadPretouchBuiltIn = true;
+
+// The process value: XHDFE_PARALLEL_READ_PRETOUCH exactly 1 (on) or exactly 0
+// (off), otherwise the built-in value. Read once per process. `source` receives
+// 2 when the environment decided, 3 for the built-in value.
+bool parallel_read_pretouch(int& source) {
     static int cached = -1;
-    if (cached >= 0) {
-        return cached == 1;
+    static int cached_source = 3;
+    if (cached < 0) {
+        const char* raw = std::getenv("XHDFE_PARALLEL_READ_PRETOUCH");
+        if (raw && (raw[0] == '0' || raw[0] == '1') && raw[1] == '\0') {
+            cached = raw[0] == '1' ? 1 : 0;
+            cached_source = 2;
+        } else {
+            cached = kParallelReadPretouchBuiltIn ? 1 : 0;
+            cached_source = 3;
+        }
     }
-    const char* raw = std::getenv("XHDFE_PARALLEL_READ_PRETOUCH");
-    cached = (raw && raw[0] == '0' && raw[1] == '\0') ? 0 : 1;
+    source = cached_source;
     return cached == 1;
 }
 
@@ -1277,6 +1321,7 @@ struct ParallelReadPlan {
     long long variables = 0;  // read by the fused pass
     long long min_values = kParallelReadMinValues;
     bool pretouch = true;
+    int pretouch_source = 3;       // 1 the fit's request (read_pretouch), 2 the environment, 3 built-in
     bool select_parallel = false;  // the parallel selection ran, kept or not
     int select_team = 1;           // team observed in the selection; 1 when serial
     int select_workers = 0;        // threads of that team that scanned a block
@@ -1296,16 +1341,34 @@ struct ParallelReadPlan {
     int wide_workers = 0;
 };
 
+long long& pretouch_stores();  // round 09, E.5 (defined with the touch helpers below)
+
 ParallelReadPlan plan_parallel_read(const ParsedArgs& args, int marker_var,
                                     int requested_threads, int num_fes,
                                     long long variables) {
     ParallelReadPlan plan;
+    pretouch_stores() = 0;  // round 09, E.5: the touches of this fit's reads from here
     plan.marker_var = marker_var;
     plan.requested_threads = requested_threads;
     plan.num_fes = num_fes;
     plan.variables = variables;
     plan.min_values = parallel_read_min_values();
-    plan.pretouch = parallel_read_pretouch();
+    // Package D: the first touch, resolved once for the fused read and the read
+    // of the wide identifiers: the fit's request (read_pretouch=on|off, passed
+    // by the ado only when readpretouch() or the Stata global decided), else the
+    // process value. It is not part of any numerical key.
+    if (const std::optional<std::string> request = args.get_optional("read_pretouch")) {
+        if (*request == "on") {
+            plan.pretouch = true;
+        } else if (*request == "off") {
+            plan.pretouch = false;
+        } else {
+            throw_with_prefix("xhdfe plugin: ", "read_pretouch must be on or off");
+        }
+        plan.pretouch_source = 1;
+    } else {
+        plan.pretouch = parallel_read_pretouch(plan.pretouch_source);
+    }
     const int forced = parallel_read_switch();
     const std::optional<std::string> alias = args.get_optional("alias_vars");
     if (!fused_read_enabled()) {
@@ -1361,6 +1424,16 @@ int parallel_read_team(const ParallelReadPlan& plan, long long rows, long long b
     return static_cast<int>(std::max<long long>(1, team));
 }
 
+// Package D (round 09, E.5): the stores the calling thread made to touch the
+// destination pages of this fit's parallel reads, counted by the two touch
+// helpers themselves (reset when the read is planned) and printed in the
+// profile lines read_parallel_mode and wide_id_read (XHDFE_PROFILE_CPU=1), so
+// that a test sees the touch, not only the policy (e(read_pretouch)).
+long long& pretouch_stores() {
+    static thread_local long long stores = 0;
+    return stores;
+}
+
 // One store per 4 KiB page, and one in the last element.
 template <class T>
 void touch_destination_pages(T* data, int count) {
@@ -1373,6 +1446,9 @@ void touch_destination_pages(T* data, int count) {
         p[k] = T();
     }
     p[static_cast<std::size_t>(count) - 1] = T();
+    // The stores above, added once after the loop (round 11: the loop does no
+    // work of its own beyond the stores of 2.34.2).
+    pretouch_stores() += static_cast<long long>((static_cast<std::size_t>(count) + kStride - 1) / kStride) + 1;
 }
 
 // Sample selection from the marker read as data over SF_in1()..SF_in2(): count
@@ -1746,6 +1822,7 @@ void touch_destination_bytes(void* data, std::size_t bytes) {
         p[k] = 0;
     }
     p[bytes - 1] = 0;
+    pretouch_stores() += static_cast<long long>((bytes + 4095) / 4096) + 1;  // the stores above, added once
 }
 
 // True when pairs[0..n) are already in ascending order of value, which is what
@@ -1982,7 +2059,8 @@ bool read_wide_id_on_team(ParallelReadPlan& plan, bool parallel_pass_done,
                   << " sort_team=" << sort_team << " sort_workers=" << sort_workers
                   << " rank_team=" << (ok ? ranked.team : 0)
                   << " rank_workers=" << (ok ? ranked.workers : 0) << " rows=" << n
-                  << " distinct=" << (ok ? ranked.distinct : 0) << '\n';
+                  << " distinct=" << (ok ? ranked.distinct : 0)
+                  << " pretouch_stores=" << pretouch_stores() << '\n';
     }
     return ok;
 }
@@ -1997,8 +2075,98 @@ void log_parallel_read_mode(const ParallelReadPlan& plan) {
               << " core_threads=" << plan.read_core_threads << " blocks=" << plan.read_blocks
               << " values=" << plan.read_values << " min_values=" << plan.min_values
               << " pretouch=" << (plan.pretouch ? 1 : 0)
+              << " pretouch_stores=" << pretouch_stores()
               << " select_workers=" << plan.select_workers
               << " requested=" << plan.requested_threads << '\n';
+}
+
+// Package D (23nov2026): what the fit did with the finer blocks and with the
+// read, in the scalars (s_...) and locals (m_...) the ado names; absent names
+// are skipped, so an ado of 2.34.2 and this plugin work together.
+struct FineReadResults {
+    std::optional<std::string> fine_used, fine_parts, hinted_applies, fine_alloc_failed, fine_retry,
+        fine_retry_factor, fine_retry_parts, fine_retry_iterations, cache_hit, m_fine_request, m_fine_source,
+        read_parallel, read_fallback, read_pretouch, m_read_pretouch_source, m_read_parallel_reason;
+    explicit FineReadResults(const ParsedArgs& args)
+        : fine_used(args.get_optional("s_reduced_pcg_fine_used")),
+          fine_parts(args.get_optional("s_reduced_pcg_fine_parts")),
+          hinted_applies(args.get_optional("s_reduced_pcg_hinted_applies")),
+          fine_alloc_failed(args.get_optional("s_reduced_pcg_fine_alloc_failed")),
+          fine_retry(args.get_optional("s_reduced_pcg_fine_retry")),
+          fine_retry_factor(args.get_optional("s_reduced_pcg_fine_retry_factor")),
+          fine_retry_parts(args.get_optional("s_reduced_pcg_fine_retry_parts")),
+          fine_retry_iterations(args.get_optional("s_reduced_pcg_fine_retry_iterations")),
+          cache_hit(args.get_optional("s_reduced_pcg_cache_hit")),
+          m_fine_request(args.get_optional("m_reduced_pcg_fine_request")),
+          m_fine_source(args.get_optional("m_reduced_pcg_fine_source")),
+          read_parallel(args.get_optional("s_read_parallel")),
+          read_fallback(args.get_optional("s_read_fallback")),
+          read_pretouch(args.get_optional("s_read_pretouch")),
+          m_read_pretouch_source(args.get_optional("m_read_pretouch_source")),
+          m_read_parallel_reason(args.get_optional("m_read_parallel_reason")) {}
+};
+
+void maybe_save_local(const std::optional<std::string>& name, const std::string& value) {
+    if (!name || name->empty()) {
+        return;
+    }
+    const std::string local = "_" + *name;
+    if (SF_macro_save(const_cast<char*>(local.c_str()), const_cast<char*>(value.c_str()))) {
+        throw_with_prefix("xhdfe plugin: ", "failed to save macro: " + *name);
+    }
+}
+
+struct SlopeSolverOutputs {
+    std::optional<std::string> request, source, used, status, reason;
+    std::optional<std::string> discarded_iters, scores_used, csr_owner_used;
+
+    explicit SlopeSolverOutputs(const ParsedArgs& args)
+        : request(args.get_optional("m_slope_solver_request")),
+          source(args.get_optional("m_slope_solver_source")),
+          used(args.get_optional("m_slope_solver_used")),
+          status(args.get_optional("m_slope_solver_status")),
+          reason(args.get_optional("m_slope_solver_reason")),
+          discarded_iters(args.get_optional("s_slope_solver_discarded_iters")),
+          scores_used(args.get_optional("s_slope_solver_scores_used")),
+          csr_owner_used(args.get_optional("s_slope_solver_csr_owner_used")) {}
+
+    void save(const HdfeRegressorV11& reg) const {
+        const auto& result = reg.slope_solver_diagnostics();
+        maybe_save_local(request, hdfe::slope_solver_request_name(result.request));
+        maybe_save_local(source, hdfe::slope_solver_source_name(result.source));
+        maybe_save_local(used, hdfe::slope_solver_request_name(result.used));
+        maybe_save_local(status, hdfe::slope_solver_status_name(result.status));
+        maybe_save_local(reason, result.reason);
+        maybe_save_scalar(discarded_iters, static_cast<double>(result.discarded_iters));
+        maybe_save_scalar(scores_used, result.scores_used ? 1.0 : 0.0);
+        maybe_save_scalar(csr_owner_used, result.csr_owner_used ? 1.0 : 0.0);
+    }
+};
+
+const char* source_name(int source) {
+    return source == 1 ? "request" : source == 2 ? "environment" : "built-in";
+}
+
+void maybe_save_fine_and_read(const FineReadResults& names, const HdfeRegressorV11& reg,
+                              const ParallelReadPlan& plan) {
+    const hdfe::v11::ReducedPcgFineDiagnostics& fine = reg.reduced_pcg_fine();
+    maybe_save_scalar(names.fine_used, static_cast<double>(fine.used));
+    maybe_save_scalar(names.fine_parts, static_cast<double>(fine.parts));
+    maybe_save_scalar(names.hinted_applies, static_cast<double>(fine.hinted_applies));
+    maybe_save_scalar(names.fine_alloc_failed, fine.alloc_failed ? 1.0 : 0.0);
+    maybe_save_scalar(names.fine_retry, fine.retry ? 1.0 : 0.0);
+    maybe_save_scalar(names.fine_retry_factor, static_cast<double>(fine.retry_factor));
+    maybe_save_scalar(names.fine_retry_parts, static_cast<double>(fine.retry_parts));
+    maybe_save_scalar(names.fine_retry_iterations, static_cast<double>(fine.retry_iterations));
+    maybe_save_scalar(names.cache_hit, fine.cache_hit ? 1.0 : 0.0);
+    maybe_save_local(names.m_fine_request,
+                     fine.request == hdfe::kReducedPcgApplyFineAuto ? std::string("auto") : std::to_string(fine.request));
+    maybe_save_local(names.m_fine_source, source_name(fine.source));
+    maybe_save_scalar(names.read_parallel, plan.read_used ? 1.0 : 0.0);
+    maybe_save_scalar(names.read_fallback, plan.read_fallback ? 1.0 : 0.0);
+    maybe_save_scalar(names.read_pretouch, plan.pretouch ? 1.0 : 0.0);
+    maybe_save_local(names.m_read_pretouch_source, source_name(plan.pretouch_source));
+    maybe_save_local(names.m_read_parallel_reason, plan.reason);
 }
 
 // --- Write-back of e(sample) when nothing else is stored -----------------------
@@ -3414,6 +3582,7 @@ STDLL stata_call(int argc, char* argv[]) {
             }
             throw_with_prefix("xhdfe plugin: ", "unknown task: " + *task);
         }
+        PluginProfileLaps laps(plugin_total_t0);
 
         const std::string bmat = args.get_required("b");
         const std::string Vmat = args.get_required("V");
@@ -3489,6 +3658,36 @@ STDLL stata_call(int argc, char* argv[]) {
                 throw_with_prefix("xhdfe plugin: ", "reduced_pcg_cuda must be on or off");
             }
         }
+        // Package D (23nov2026): the finer blocks of the tier's segment pass for
+        // this fit; the ado passes reduced_pcg_fine only when reducedpcgfine() or
+        // the Stata global XHDFE_REDUCED_PCG_APPLY_FINE decided; otherwise the
+        // process value (the environment variable, else the built-in value) applies.
+        if (auto val = args.get_optional("reduced_pcg_fine")) {
+            if (*val == "auto") {
+                opts.reduced_pcg_apply_fine = hdfe::kReducedPcgApplyFineAuto;
+            } else if (val->size() == 1 && (*val)[0] >= '1' && (*val)[0] <= '8') {
+                opts.reduced_pcg_apply_fine = (*val)[0] - '0';
+            } else {
+                throw_with_prefix("xhdfe plugin: ", "reduced_pcg_fine must be auto or an integer from 1 to 8");
+            }
+        }
+        if (auto val = args.get_optional("slope_solver")) {
+            if (!hdfe::parse_slope_solver_request(*val, opts.slope_solver)) {
+                throw_with_prefix("xhdfe plugin: ", "slope_solver must be off, schur, network or direct");
+            }
+            if (auto global = args.get_optional("slope_solver_from_global")) {
+                opts.slope_solver_from_global = parse_bool(*global, "slope_solver_from_global");
+            }
+        }
+        const auto slope_helper = [&args](const char* name) -> std::optional<bool> {
+            const auto value = args.get_optional(name);
+            if (!value) return std::nullopt;
+            if (*value == "on") return true;
+            if (*value == "off") return false;
+            throw_with_prefix("xhdfe plugin: ", std::string(name) + " must be on or off");
+        };
+        opts.slope_scores = slope_helper("slope_scores");
+        opts.slope_csr_owner = slope_helper("slope_csr_owner");
         if (auto val = args.get_optional("weighted_cpu_route")) {
             opts.weighted_cpu_route = parse_bool(*val, "weighted_cpu_route");
         }
@@ -3673,6 +3872,7 @@ STDLL stata_call(int argc, char* argv[]) {
             throw_with_prefix("xhdfe plugin: ", "sample_marker must index the last variable");
         }
 
+        laps.lap("options");
         ParallelReadPlan parallel_read = plan_parallel_read(
             args, idx_sample_marker, opts.num_threads, nfe,
             fused_read_variable_count(args, p, nfe, nslope, nclust, has_weight, ninst));
@@ -3689,6 +3889,7 @@ STDLL stata_call(int argc, char* argv[]) {
                 parallel_read.core = nullptr;
             }
         }
+        laps.lap("read_plan");
         const auto select_t0 = std::chrono::steady_clock::now();
         const ObservationMap obs = select_observations_for_read(parallel_read);
         plugin_cpu_profile_log_elapsed("select_observations", select_t0);
@@ -3697,6 +3898,7 @@ STDLL stata_call(int argc, char* argv[]) {
                       << (obs.contiguous ? 1 : 0)
                       << " n=" << obs.n << '\n';
         }
+        laps.restart();
         const int n = obs.n;
         if (n <= 0) {
             if (plugin_cpu_profile_enabled() && fused_read_enabled()) {
@@ -3802,6 +4004,7 @@ STDLL stata_call(int argc, char* argv[]) {
             return ids;
         };
 
+        laps.lap("read_setup");
         const auto read_total_t0 = std::chrono::steady_clock::now();
         Eigen::VectorXd y(n);
         Eigen::MatrixXd X(n, p);
@@ -4151,6 +4354,7 @@ STDLL stata_call(int argc, char* argv[]) {
         }
         const Eigen::MatrixXd* inst_ptr = instruments ? &(*instruments) : nullptr;
         plugin_cpu_profile_log_elapsed("read_total", read_total_t0);
+        laps.restart();
         if (plugin_cpu_profile_enabled()) {
             // Order-sensitive fingerprint of every input as read, so that the
             // fused pass and the column readers can be compared on real data
@@ -4194,6 +4398,8 @@ STDLL stata_call(int argc, char* argv[]) {
             std::cerr << "plugin_profile label=input_digest value=" << digest
                       << " fused=" << (fused.done ? 1 : 0) << '\n';
         }
+        // The digest above exists only under the profile: its time has its own label.
+        laps.lap("input_digest_profile_only");
 
         std::vector<int> endogenous_idx;
         if (args.has("endogenous_idx")) {
@@ -4318,6 +4524,8 @@ STDLL stata_call(int argc, char* argv[]) {
             args.get_optional("m_reduced_pcg_reason");
         const std::optional<std::string> s_reduced_pcg_discarded_iterations =
             args.get_optional("s_reduced_pcg_discarded_iterations");
+        const FineReadResults fine_read_results(args);
+        const SlopeSolverOutputs slope_outputs(args);
         const std::optional<std::string> s_num_clusters = args.get_optional("s_num_clusters");
         const std::optional<std::string> s_cluster_scale = args.get_optional("s_cluster_scale");
         const std::optional<std::string> s_vcv_psd_fixed = args.get_optional("s_vcv_psd_fixed");
@@ -4554,6 +4762,8 @@ STDLL stata_call(int argc, char* argv[]) {
                 maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
                 maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
                                        s_reduced_pcg_discarded_iterations, reg);
+                maybe_save_fine_and_read(fine_read_results, reg, parallel_read);
+                slope_outputs.save(reg);
                 maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
                 maybe_save_scalar(s_cluster_scale, r.cluster_scale);
                 maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4709,6 +4919,8 @@ STDLL stata_call(int argc, char* argv[]) {
             maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
             maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
                                    s_reduced_pcg_discarded_iterations, reg);
+            maybe_save_fine_and_read(fine_read_results, reg, parallel_read);
+            slope_outputs.save(reg);
             maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
             maybe_save_scalar(s_cluster_scale, r.cluster_scale);
             maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4750,11 +4962,13 @@ STDLL stata_call(int argc, char* argv[]) {
         }
 
         // Standard HDFE mode (observation-level).
+        laps.lap("fit_setup");
         const auto fit_standard_t0 = std::chrono::steady_clock::now();
         reg.fit(y, X, fes, w_ptr, c_ptr, inst_ptr, endogenous_idx,
                 slopes.empty() ? nullptr : &slopes);
         if (importance_weights) reg.apply_importance_weights(*w_ptr);
         plugin_cpu_profile_log_elapsed("fit_standard", fit_standard_t0);
+        laps.restart();
         const hdfe::HdfeResults& r = reg.results();
 
         if (r.coefficients.size() > 0) {
@@ -4825,6 +5039,8 @@ STDLL stata_call(int argc, char* argv[]) {
         maybe_save_scalar(s_method_used, static_cast<double>(static_cast<int>(reg.absorption_method_used())));
         maybe_save_reduced_pcg(s_reduced_pcg_status, m_reduced_pcg_reason,
                                s_reduced_pcg_discarded_iterations, reg);
+        maybe_save_fine_and_read(fine_read_results, reg, parallel_read);
+        slope_outputs.save(reg);
         maybe_save_scalar(s_num_clusters, static_cast<double>(r.num_clusters));
         maybe_save_scalar(s_cluster_scale, r.cluster_scale);
         maybe_save_scalar(s_vcv_psd_fixed, r.vcv_psd_fixed ? 1.0 : 0.0);
@@ -4852,6 +5068,7 @@ STDLL stata_call(int argc, char* argv[]) {
         if (store_fes) {
             writeback_timer.emplace("plugin_writeback_standard");
         }
+        laps.lap("results_store");
         const auto writeback_standard_t0 = std::chrono::steady_clock::now();
         const int mark_team =
             esample_prefilled && !store_resid && !store_groupvar && !store_fes

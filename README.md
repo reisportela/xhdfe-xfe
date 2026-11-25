@@ -2,11 +2,11 @@
 
 **Linear regression with high-dimensional fixed effects in Stata, Python and R on one C++ core.**
 
-`Version 2.34.2` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.35.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 [Installation and examples](#choose-your-language) ·
-[Release notes](docs/releases/RELEASE_NOTES_2.34.2.20261122.md) ·
-[22 November 2026 validation](docs/releases/VALIDATION_2.34.2.20261122.md)
+[Release notes](docs/releases/RELEASE_NOTES_2.35.0.20261125.md) ·
+[25 November 2026 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
 
 ## When to use xhdfe
 
@@ -44,7 +44,7 @@
 `xhdfe` focuses on linear OLS and 2SLS. These packages provide options for
 other estimators, inference or execution workflows.
 
-| Package | Capabilities outside xhdfe 2.34.2 | Documentation |
+| Package | Capabilities outside xhdfe 2.35.0 | Documentation |
 | --- | --- | --- |
 | `reghdfe` 6.14.1 and the Stata ecosystem | `reghdfe, parallel(#)` runs separate Stata processes using `parallel`. `ivreghdfe` 1.1.4 provides LIML and two-step GMM with absorbed effects. `ppmlhdfe` provides Poisson PML with separation checks. | [reghdfe help](https://scorreia.com/help/reghdfe.html) · [ivreghdfe](https://github.com/sergiocorreia/ivreghdfe#comparison-with-other-commands) · [ppmlhdfe help](https://scorreia.com/help/ppmlhdfe.html) |
 | Johannes F. Schmieder's `fereg` 0.6.8 (Stata) | `feppml` for Poisson PML, `memory(low)` and `poolsize(#)` for low-memory work blocks, and explicit combinatorial multigrid (CMG) preconditioning. `solver(cg, reduce(eliminate) precondition(cmg))` is an experimental route for two categorical intercept effects. | [Tagged README](https://github.com/johannes-schmieder/fereg/blob/v0.6.8/README.md) |
@@ -431,7 +431,7 @@ Run `help xhdfeakm`, `help xhdfegelbach`, `python -m xhdfe gelbach`, or
 - **Release history and certification:** [`docs/releases/`](docs/releases/),
   [`docs/certification/`](docs/certification/).
 - **Stata:** `help xhdfe`, `help xfepout`.
-- **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; feature tour in `r/examples/`.
+- **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; public examples in `?xhdfe_examples` and a feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.
 
 ## Validation, development provenance, and contributions
@@ -440,7 +440,10 @@ Run `help xhdfeakm`, `help xhdfegelbach`, `python -m xhdfe gelbach`, or
 
 The default `reghdfe-comparable` mode is evaluated against independent
 finite-sample oracles and `reghdfe` on the designs covered by the validation
-suite. The 22 November 2026 release compared 2.34.2 with 2.34.1 across 24
+suite. The 25 November 2026 validation covers the new slope solver, savefe cache and CPU block controls and records an inherited CUDA covariance limit.
+[2.35.0 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
+
+The 22 November 2026 release compared 2.34.2 with 2.34.1 across 24
 `core24s1` specifications in Stata and the C++ binding, on CPU and H100, in Fast
 and Comparable modes. The record identifies the timed calls, the sample and
 numerical checks, and the scope of the published-artifact checks. At 16 threads,
@@ -559,7 +562,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.34.2.
+> effects regression via a C++ backend.* Version 2.35.0.
 > https://github.com/reisportela/xhdfe-xfe
 
 ## License

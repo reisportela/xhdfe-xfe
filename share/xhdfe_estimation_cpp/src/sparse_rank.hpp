@@ -581,6 +581,115 @@ inline void components_line(const char* path, const char* base_mode, const char*
     std::cerr << line.str();
 }
 
+// The components' team pass (package A, item A3) counts all its pairs in one
+// pass over the rows, so they share one time: under XHDFE_PROFILE_CPU, one line
+// per pair without a time (the positive control, path=team) and one line for
+// the pass with it, the time from the start of its region to its counts. When
+// the components_pass line is there, the pass counted (its counts were
+// published): it is written last, when nothing but the publication is left.
+// The converse holds only for a stream that took the write: per-pair lines
+// without it belong to a pass that fell back to today's loop, or to a pass that
+// counted while the line could not be written (an error on stderr is not
+// reported), so a missing or truncated line is not read as a fallback.
+inline void components_team_line(const char* base_mode, const char* other_mode, long long rows,
+                                 long long cells) {
+    if (!profile_enabled()) {
+        return;
+    }
+    std::ostringstream line;
+    line << "cpu_profile label=sparse_rank site=components path=team base=" << base_mode
+         << " other=" << other_mode << " n=" << rows << " cells=" << cells << '\n';
+    std::cerr << line.str();
+}
+
+inline void components_pass_line(int pairs, long long rows,
+                                 const std::chrono::steady_clock::time_point& start,
+                                 const std::chrono::steady_clock::time_point& end) {
+    if (!profile_enabled()) {
+        return;
+    }
+    const std::chrono::duration<double, std::milli> elapsed = end - start;
+    std::ostringstream line;
+    line << "cpu_profile label=sparse_rank site=components_pass path=team pairs=" << pairs
+         << " n=" << rows << " ms=" << elapsed.count() << '\n';
+    std::cerr << line.str();
+}
+
+// The blocks of a pass over n rows in blocks of block_rows rows (the team pass
+// of the components; package A, correction M1): how many, and the rows
+// [*begin, *end) of block `block`. In 64 bits, so that every n up to INT_MAX
+// gives blocks that cover [0, n) exactly once, in order, none of them empty.
+inline int row_block_count(int n, int block_rows) noexcept {
+    if (n <= 0 || block_rows <= 0) {
+        return 0;
+    }
+    return static_cast<int>((static_cast<long long>(n) + block_rows - 1) / block_rows);
+}
+
+inline void row_block_range(int block, int n, int block_rows, int* begin, int* end) noexcept {
+    const long long first = static_cast<long long>(block) * block_rows;
+    *begin = static_cast<int>(first);
+    *end = static_cast<int>(std::min<long long>(n, first + block_rows));
+}
+
+// The arithmetic of the degrees-of-freedom caller (package E, E3, 23nov2026),
+// widened before the operation. The pairs of `dims` effects: dims (dims - 1) / 2,
+// whose product overflows int from 46 342 effects on although the count still
+// fits (1 073 767 311 pairs there).
+inline std::size_t effect_pair_count(int dims) noexcept {
+    if (dims < 2) {
+        return 0;
+    }
+    return static_cast<std::size_t>(dims) * static_cast<std::size_t>(dims - 1) / 2U;
+}
+
+// The sum of the levels (or of the coefficients) of the absorbed effects, in 64
+// bits: each term fits an int, their sum need not (INT_MAX + 1 with two terms).
+inline std::int64_t level_sum(const std::vector<int>& values) noexcept {
+    std::int64_t total = 0;
+    for (const int v : values) {
+        total += v;
+    }
+    return total;
+}
+
+// Round 11 (24nov2026), the rest of E3. The nodes of the union-find of a pair of
+// effects, the levels of both: in 64 bits, so that a sum above INT_MAX is seen
+// (count_bipartite_components then refuses the pair instead of sizing a
+// union-find with an overflowed count).
+inline std::int64_t pair_node_count(int base_levels, int other_levels) noexcept {
+    return static_cast<std::int64_t>(base_levels) + static_cast<std::int64_t>(other_levels);
+}
+
+// The component graph stores node IDs and parents as int.
+inline int checked_component_node_count(std::int64_t nodes) {
+    if (nodes < 0 || nodes > std::numeric_limits<int>::max()) {
+        throw std::length_error("xhdfe: absorbed effects exceed the int range of the mobility graph");
+    }
+    return static_cast<int>(nodes);
+}
+
+// Whether a count of pairs can be an int index (the team pass counts the pairs
+// with int indices; above INT_MAX it declines instead of narrowing the count).
+inline bool pair_count_fits_int(std::size_t pairs) noexcept {
+    return pairs <= static_cast<std::size_t>(std::numeric_limits<int>::max());
+}
+
+// The nested degrees of freedom (levels or coefficients of the effects nested
+// in the clusters): the sum of term(d) over the dimensions whose flag is set,
+// in 64 bits; each term fits an int, the sum need not (four nested effects of
+// 2^29 levels give 2^31).
+template <class Term>
+inline std::int64_t flagged_sum(const std::vector<std::uint8_t>& flags, Term term) {
+    std::int64_t total = 0;
+    for (std::size_t d = 0; d < flags.size(); ++d) {
+        if (flags[d] != 0) {
+            total += static_cast<std::int64_t>(term(d));
+        }
+    }
+    return total;
+}
+
 }  // namespace sparse_rank
 }  // namespace detail
 }  // namespace hdfe

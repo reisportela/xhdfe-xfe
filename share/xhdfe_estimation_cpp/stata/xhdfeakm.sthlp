@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.9.0  22nov2026}{...}
+{* *! version 1.9.0  25nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeconnected" "help xhdfeconnected"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -55,7 +55,9 @@
 {synoptline}
 {p2colreset}{...}
 {p 4 6 2}{cmd:fweight}s are allowed (match-level point decomposition only; a
-weighted run equals the row-expanded run exactly).{p_end}
+weighted run equals the row-expanded run exactly). {cmd:r(n_obs_input)},
+{cmd:r(n_obs_connected)} and {cmd:r(n_obs)} are the sums of the weights
+over their respective samples.{p_end}
 
 
 {title:Description}
@@ -328,8 +330,8 @@ overwrites existing such variables.
 {synopt:{cmd:r(var_y)}}person-year variance of {it:y}{p_end}
 {synopt:{cmd:r(sigma2_ho)}}homoskedastic error variance (AGSU){p_end}
 {synopt:{cmd:r(n_obs)}}person-year observations in the leave-out set{p_end}
-{synopt:{cmd:r(n_obs_input)}}input observations{p_end}
-{synopt:{cmd:r(n_obs_connected)}}observations after the largest-CC step{p_end}
+{synopt:{cmd:r(n_obs_input)}}marked input person-years before leave-out pruning{p_end}
+{synopt:{cmd:r(n_obs_connected)}}person-years after the largest-CC step{p_end}
 {synopt:{cmd:r(n_workers)} {cmd:r(n_firms)} {cmd:r(n_matches)}}sample sizes{p_end}
 {synopt:{cmd:r(n_movers)} {cmd:r(n_stayers)}}worker mobility counts{p_end}
 {synopt:{cmd:r(n_rows)}}working rows (matches or observations){p_end}

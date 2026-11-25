@@ -1286,6 +1286,7 @@ jobs:
             "$GITHUB_WORKSPACE/netinstall_site/stata"
           ( cd "$GITHUB_WORKSPACE/netinstall_site" && zip -q -r -X "$GITHUB_WORKSPACE/release_assets/xhdfe_xfe-stata-netinstall-site.zip" . )
           echo "built release_assets/xhdfe_xfe-stata-netinstall-site.zip"
+          python3 -B -m unittest discover -s tests -p 'test_stata_ssc_zip.py' -v
           python3 -B tools/build_stata_ssc_zip.py \
             release_assets/xhdfe_xfe-stata-netinstall-site.zip "$EXPECTED_VERSION" \
             "release_assets/xhdfe-ssc-${EXPECTED_VERSION}.zip"
@@ -1377,8 +1378,12 @@ jobs:
           - \`xhdfe_xfe-stata-netinstall-site.zip\` — the exact \`stata/\` tree published to \`gh-pages\` for online \`net install\`.
 
           ### SSC submission payload
-          - \`xhdfe-ssc-${EXPECTED_VERSION}.zip\` — the flat component files listed
-            by the staged xhdfe package, including its two example do-files.
+          - \`xhdfe-ssc-${EXPECTED_VERSION}.zip\` — one flat, installable archive
+            with \`xhdfe.pkg\`, \`xfepout.pkg\`, \`stata.toc\` and all components
+            declared by both packages. The descriptors include the verified
+            platform aliases and runtime mappings. Install in a fresh Stata
+            session with a separate working directory, using the extracted
+            directory as the \`net install\` source.
 
           ### Integrity
           - \`SHA256SUMS.txt\` — SHA-256 digest for every separately downloadable release asset.

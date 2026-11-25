@@ -4,6 +4,8 @@
 #include <Eigen/Dense>
 
 #include <functional>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 namespace hdfe {
@@ -60,9 +62,89 @@ enum class ToleranceMode { XhdfeFast, ReghdfeComparable, StrictResidual };
  *  process switch (on unless the environment variable XHDFE_REDUCED_PCG is
  *  exactly 0, read once per process); On and Off override it for this fit.
  *  HdfeOptions::reduced_pcg_cuda uses the same three states for the CUDA
- *  variant of the tier, whose process switch is off unless
- *  XHDFE_REDUCED_PCG_CUDA is exactly 1. */
+ *  variant of the tier, whose process switch is the environment variable
+ *  XHDFE_REDUCED_PCG_CUDA when it is exactly 1 (on) or 0 (off), otherwise
+ *  the built-in value (detail::kReducedPcgCudaBuiltIn, off). */
 enum class ReducedPcgRequest { Default, On, Off };
+
+/** \brief The two values of HdfeOptions::reduced_pcg_apply_fine besides an
+ *  explicit factor from 1 to 8 (package D, 23nov2026). Unset: the fit makes no
+ *  request and the process value decides (the environment variable
+ *  XHDFE_REDUCED_PCG_APPLY_FINE when it is auto or an integer from 0 to 8, 0
+ *  read as 1, otherwise the built-in value detail::kReducedPcgApplyFineBuiltIn).
+ *  Auto: the automatic rule of the data (reduced_pcg::internal::automatic_apply_fine). */
+constexpr int kReducedPcgApplyFineUnset = 0;
+constexpr int kReducedPcgApplyFineAuto = -1;
+
+/** \brief Request for the separate mixed-network slope solver. */
+enum class SlopeSolverRequest { Unset, Off, Schur, Network, Direct };
+enum class SlopeSolverSource { Builtin, Environment, Global, Option };
+enum class SlopeSolverStatus { Off, Ineligible, Declined, Accepted };
+
+constexpr SlopeSolverRequest kSlopeSolverBuiltIn = SlopeSolverRequest::Off;
+
+inline const char* slope_solver_request_name(SlopeSolverRequest request) noexcept {
+    switch (request) {
+    case SlopeSolverRequest::Unset: return "none";
+    case SlopeSolverRequest::Off: return "off";
+    case SlopeSolverRequest::Schur: return "schur";
+    case SlopeSolverRequest::Network: return "network";
+    case SlopeSolverRequest::Direct: return "direct";
+    }
+    return "invalid";
+}
+
+inline bool parse_slope_solver_request(std::string_view value, SlopeSolverRequest& request) noexcept {
+    for (auto mode : {SlopeSolverRequest::Off, SlopeSolverRequest::Schur,
+                      SlopeSolverRequest::Network, SlopeSolverRequest::Direct}) {
+        if (value == slope_solver_request_name(mode)) {
+            request = mode;
+            return true;
+        }
+    }
+    return false;
+}
+
+inline const char* slope_solver_source_name(SlopeSolverSource source) noexcept {
+    switch (source) {
+    case SlopeSolverSource::Builtin: return "builtin";
+    case SlopeSolverSource::Environment: return "environment";
+    case SlopeSolverSource::Global: return "global";
+    case SlopeSolverSource::Option: return "option";
+    }
+    return "invalid";
+}
+
+inline const char* slope_solver_status_name(SlopeSolverStatus status) noexcept {
+    switch (status) {
+    case SlopeSolverStatus::Off: return "off";
+    case SlopeSolverStatus::Ineligible: return "ineligible";
+    case SlopeSolverStatus::Declined: return "declined";
+    case SlopeSolverStatus::Accepted: return "accepted";
+    }
+    return "invalid";
+}
+
+struct SlopeSolverDiagnostics {
+    SlopeSolverRequest request = kSlopeSolverBuiltIn;
+    SlopeSolverSource source = SlopeSolverSource::Builtin;
+    SlopeSolverRequest used = SlopeSolverRequest::Unset;
+    SlopeSolverStatus status = SlopeSolverStatus::Off;
+    const char* reason = "off";
+    int discarded_iters = 0;
+    bool scores_used = false;
+    // Actual assembly, even on a subsequently declined attempt.
+    bool csr_owner_used = false;
+
+    void reset_outcome(const char* not_attempted = "not_reached") noexcept {
+        used = SlopeSolverRequest::Unset;
+        status = request == SlopeSolverRequest::Off ? SlopeSolverStatus::Off : SlopeSolverStatus::Ineligible;
+        reason = request == SlopeSolverRequest::Off ? "off" : not_attempted;
+        discarded_iters = 0;
+        scores_used = false;
+        csr_owner_used = false;
+    }
+};
 
 /**
  * \brief Configuration parameters controlling numerical tolerances and options for HDFE estimation.
@@ -146,6 +228,11 @@ struct HdfeOptions {
     bool partial_out_allow_mlsmr_repair = false;            //!< xfepout delegated the solver for an analytically weighted partial-out.
     bool certify_weighted_gauss_seidel = false;             //!< Internal: explicit ordinary three-effect CPU GS in Comparable mode.
     bool strict_cpu_absolute_check = true;                  //!< Internal: AKM's nested FWL uses its scale-invariant projection contract.
+    int reduced_pcg_apply_fine = kReducedPcgApplyFineUnset; //!< Package D (23nov2026): the finer blocks of the reduced-system tier's segment pass for this fit. kReducedPcgApplyFineUnset (no request: the process value decides), kReducedPcgApplyFineAuto (the automatic rule of the data), or an explicit factor from 1 to 8 (1: the blocks of 2.34.2; a factor above 1 changes the last bits of the fits the kernel takes, within the precision contract). Any other value is refused by the regressor's constructor. Read by the CPU tier and by the absorption-cache key (detail::reduced_pcg_apply_fine_request); inert for every other route. Appended so that no existing member moves.
+    SlopeSolverRequest slope_solver = SlopeSolverRequest::Unset;
+    bool slope_solver_from_global = false;                 //!< Stata adapter provenance for a recognised global request.
+    std::optional<bool> slope_scores;                      //!< Per-fit override of eligible cluster score reuse.
+    std::optional<bool> slope_csr_owner;                   //!< Per-fit override of sparse assembly by firm.
 };
 
 /**

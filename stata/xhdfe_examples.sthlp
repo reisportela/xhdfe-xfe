@@ -1,17 +1,27 @@
 {smcl}
-{* *! version 2.34.2 22nov2026}{...}
+{* *! version 2.35.0 25nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xfepout" "help xfepout"}{...}
 {title:xhdfe examples with public data}
 
-{pstd}After installing {cmd:xhdfe}, use {cmd:net get} from the directory
-where you want the two standalone examples. They use datasets supplied
-with Stata, so running the do-files requires no network access.{p_end}
+{pstd}The two standalone examples use datasets supplied with Stata and
+run offline after installation. From SSC, use {cmd:ssc install xhdfe, all}
+in the directory where you want the example files. From the GitHub release,
+install the package first and use {cmd:net get} to download the examples.{p_end}
 {asis}
     net get xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata")
     do xhdfe_example_cluster.do
     do xhdfe_example_partial_out.do
 {smcl}
+
+{pstd}From an extracted release or SSC ZIP, give its package directory
+to {cmd:net install xhdfe, from()} and {cmd:net get xhdfe, from()}.
+Use the directory that contains {cmd:xhdfe.pkg}.{p_end}
+
+{pstd}The clustered example requests the Comparable reduced-system
+route and automatic finer blocks when the fit is eligible. The
+partial-out example shows the regression of residualised columns
+and the corresponding {cmd:xhdfe} fit on the original variables.{p_end}
 
 {pstd}Copy a block into the Do-file Editor and run it on its own.
 Each {cmd:use} loads the dataset from its public URL and replaces
