@@ -6,6 +6,7 @@
 
 [Installation and examples](#choose-your-language) ·
 [Benchmarks](#benchmarks) ·
+[Working paper](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7271338) ·
 [Release notes](docs/releases/RELEASE_NOTES_2.35.0.20261125.md) ·
 [25 November 2026 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
 
@@ -681,6 +682,11 @@ If you use `xhdfe` in academic work, please cite it (see
 > effects regression via a C++ backend.* Version 2.35.0.
 > https://github.com/reisportela/xhdfe-xfe
 
+> Portela, Miguel, and Tiago Tavares. *xhdfe: Fast High-Dimensional
+> Fixed-Effects Estimation in Stata* (August 11, 2026).
+> [SSRN 7271338](https://ssrn.com/abstract=7271338) ·
+> [DOI 10.2139/ssrn.7271338](https://doi.org/10.2139/ssrn.7271338).
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE). `xhdfe` bundles the Eigen 3.4.0 headers
@@ -693,9 +699,22 @@ R package's offline build dependency; see
 ## Authors
 
 - **Miguel Portela** — NIPE / Universidade do Minho and BPLIM / Banco de Portugal.
-- **Tiago Tavares** — NIPE / Universidade do Minho.
+  [Website](https://reisportela.github.io/) ·
+  [miguel.portela@eeg.uminho.pt](mailto:miguel.portela@eeg.uminho.pt)
+- **Tiago Tavares** — Department of Economics, ISEG – Lisbon School of Economics
+  & Management, University of Lisbon.
+  [Website](https://www.tgstavares.com/) ·
+  [tgstavares@iseg.ulisboa.pt](mailto:tgstavares@iseg.ulisboa.pt)
 
 ## Acknowledgements
+
+We are grateful to Paulo Guimarães for encouraging us to develop `xhdfe` and
+for his support throughout its development. We also thank him and Nelson
+Areal for discussions and workshop collaboration on earlier versions.
+
+Miguel Portela thanks the [Banco de Portugal Microdata Research Laboratory
+(BPLIM)](https://bplim.bportugal.pt/) for its support and for the favourable
+research environment in which he worked on `xhdfe`.
 
 `xhdfe` is a high-performance, `reghdfe`-compatible implementation: the
 `reghdfe` estimator, defaults, and reporting conventions remain its reference.
@@ -723,9 +742,6 @@ Fortin, Lemieux and Firpo (2011) for its relation to Oaxaca–Blinder
 decompositions, Cameron, Gelbach and Miller (2008) for bootstrap inference with
 clustered errors, and Acharya, Blackwell and Sen (2016) and Tingley et al.
 (2014) for causal mediation, which the decomposition does not identify.
-
-We thank Paulo Guimaraes and Nelson Areal for discussions and workshop
-collaboration around earlier versions of the project.
 
 We are especially grateful to Marta Silva, whose sustained and rigorous testing
 has been fundamental to the development and validation of `xhdfe`. Her
