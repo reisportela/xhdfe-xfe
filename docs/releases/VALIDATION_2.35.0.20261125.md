@@ -38,3 +38,28 @@ artifact hashes, actual OpenMP worker checks and portable runtime closure.
 Its native SPI fixtures exercise both macOS architectures and the Windows
 Stata installation layout. Licensed Stata execution and H100 fit checks
 require the separate host validation of the exact draft assets.
+
+## Publication and exact artifacts
+
+The release tag identifies `d8e6577d1f7c693564d1380c0821de7f4f248f1c`. Publication retained all
+14 authenticated draft assets. The public reader
+matched 52 Stata site files to the snapshot at
+`daad9d511a6202b27c7f1f7865c0fdb1fda50603`. A fresh installation and ancillary download matched
+40 files, including the two plugin aliases and both
+examples. [Published release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.35.0.20261125)
+
+The OpenMP jobs checked useful workers and numerical agreement for the
+production plugins, the installed Linux and Windows wheels and the R
+package. The macOS jobs checked both native slices and the serial rejection
+controls. The Windows Stata plugin loader used the installed layout. The
+exact Linux artifacts passed the separate licensed Stata CPU and H100
+checks, and both the site and the flat SSC archive passed their Linux
+installation checks. Licensed Stata/MP runs on macOS ARM64, macOS Intel
+and Windows are recorded as **NOT_RUN**.
+
+The full-input Stata matrix passed 144 paired main–release comparisons
+and 72 main CPU/H100 comparisons. The full-input C++ extension recorded 144 passing pairs out of 144.
+
+Nine alternating confirmation pairs covered the three cells initially flagged for timings. The two-order repeatability criterion returned no confirmed material timing loss. In the difficult 10-million-row, three-effect fixture, both versions used CUDA MLSMR with 24 observed threads. The candidate used 492–575 absorption iterations and the release 468–527, with more iterations for the candidate in all six pairs. Fit-time ratios ranged from 0.9856 to 1.0933. The medians were 1.0418 across six pairs and 1.0297 across the three confirmations. They were 1.0541 with the candidate first and 1.0297 with the release first. Three of the six ratios exceeded 1.03.
+
+[Preflight 45595081309](https://github.com/reisportela/xhdfe-xfe/actions/runs/45595081309) · [Version tag 45605311261](https://github.com/reisportela/xhdfe-xfe/actions/runs/45605311261) · [Publication 45628048791](https://github.com/reisportela/xhdfe-xfe/actions/runs/45628048791)

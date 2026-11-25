@@ -2,14 +2,16 @@
 
 ## 2.35.0.20261125 gates
 
-- [ ] Preflight and version-tag jobs pass in Linux, Windows and on both native macOS architectures.
-- [ ] Final Stata plugin bytes pass compile/link, real-worker and numerical checks for both plugins on every platform.
-- [ ] Installed Linux and Windows wheels and the R package pass worker and numerical checks.
-- [ ] The authenticated draft passes licensed Stata CPU/H100 runtime checks and installation from its net-install snapshot.
-- [ ] Licensed Stata/MP host validation on native macOS arm64 and x86_64 and Windows is recorded with its actual scope.
-- [ ] Publication reads back the same asset hashes and net-install bytes, and canonical checkout reconciliation is verified.
+- [x] Preflight and version-tag jobs passed on Linux, Windows and both native macOS architectures.
+- [x] The final Stata plugin bytes passed platform compile/link, useful-worker and numerical checks.
+- [x] Installed Linux and Windows wheels and the R package passed the worker and numerical checks.
+- [x] The authenticated Linux draft passed licensed Stata CPU/H100 runtime and the site and SSC installations.
+- [ ] Licensed Stata/MP runs on native macOS ARM64, macOS Intel and Windows are **NOT_RUN**.
+- [x] All published asset identities and Stata site bytes matched the draft. Both canonical Linux checkouts passed their local runtime gates.
 
-[2.35.0 validation scope](../docs/releases/VALIDATION_2.35.0.20261125.md)
+[Preflight 45595081309](https://github.com/reisportela/xhdfe-xfe/actions/runs/45595081309) · [Version tag 45605311261](https://github.com/reisportela/xhdfe-xfe/actions/runs/45605311261) · [Publication 45628048791](https://github.com/reisportela/xhdfe-xfe/actions/runs/45628048791)
+
+[Validation and scope](../docs/releases/VALIDATION_2.35.0.20261125.md)
 
 ## 2.31.1 release gates
 

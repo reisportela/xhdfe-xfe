@@ -1,6 +1,26 @@
 # Pastas locais ativas do xhdfe
 
-## Release ativa 2.31.1.20261112 — publicada
+## Release ativa 2.35.0.20261125
+
+O tag público aponta para `d8e6577d1f7c693564d1380c0821de7f4f248f1c`. Os 14
+ativos conservaram os hashes do rascunho, e os 52
+ficheiros do site Stata coincidiram com o snapshot atribuído à release.
+[Release](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.35.0.20261125) · [Validação](docs/releases/VALIDATION_2.35.0.20261125.md)
+
+A ativação local verificou os dois checkouts canónicos e as entradas
+Linux em processos novos. O Stata carregou `xhdfe` 2.35.0 e `xfepout`
+1.14.6 dos diretórios `stata/` dos checkouts, em CPU e H100. O Python
+verificou as extensões `build/`, `build_cuda/` e a importação do pacote.
+Os testes locais observaram quatro trabalhadores e uso efetivo da H100.
+
+A instalação Linux dos ativos distribuídos confirmou os dois aliases e
+os exemplos. Stata/MP licenciado nos três destinos Mac ARM64, Mac Intel
+e Windows fica em **NOT_RUN**. Os testes nativos de OpenMP e de workers
+nesses destinos constam das execuções de release.
+
+[Preflight 45595081309](https://github.com/reisportela/xhdfe-xfe/actions/runs/45595081309) · [Version tag 45605311261](https://github.com/reisportela/xhdfe-xfe/actions/runs/45605311261) · [Publication 45628048791](https://github.com/reisportela/xhdfe-xfe/actions/runs/45628048791)
+
+## Histórico: release 2.31.1.20261112 — publicada
 
 [Publicada em 12nov2026, às 06:15:41 UTC](https://github.com/reisportela/xhdfe-xfe/releases/tag/v2.31.1.20261112).
 Os pontos de entrada são os dois checkouts canónicos `xhdfe` e `xhdfe-xfe`,
@@ -89,8 +109,8 @@ fecho documental em `main` preservam os mesmos fontes executáveis e binários.
 Integra os PR #15 e #17 do Tiago, as correções privadas CG/CUDA e o core de
 testes com as adaptações do reghdfe. `xfepout` é 1.13.4, de 20out2026.
 
-Os pontos de entrada locais são `/home/mangelo/Documents/GitHub/xhdfe` e
-`/home/mangelo/Documents/GitHub/xhdfe-xfe`, ambos em `main`. As builds CPU e
+Os pontos de entrada locais são `xhdfe` e
+`xhdfe-xfe`, ambos em `main`. As builds CPU e
 CUDA `sm_90`, os imports Python e os plugins Stata OpenMP/nativos foram
 validados em processos novos. As quatro builds passam 16/16 CTests; os
 pedidos de 1, 2, 8, 16, 24 e 48 trabalhadores foram exercitados. O backend
@@ -164,7 +184,7 @@ Versão local validada: 2.30.1.20261020. As pastas principais xhdfe e xhdfe-xfe 
 
 Antes de uma auditoria, benchmark ou conclusão de publicação, executar:
 
-    python3 /home/mangelo/Documents/GitHub/xhdfe/tools/check_active_checkouts.py --online
+    python3 tools/check_active_checkouts.py --online
 
 O verificador compara commits, ficheiros, binários e configuração das builds. Uma falha deve ser investigada; não se atualizam hashes apenas para silenciar o aviso.
 

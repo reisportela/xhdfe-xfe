@@ -5,6 +5,7 @@
 `Version 2.35.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 [Installation and examples](#choose-your-language) ·
+[Benchmarks](#benchmarks) ·
 [Release notes](docs/releases/RELEASE_NOTES_2.35.0.20261125.md) ·
 [25 November 2026 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
 
@@ -23,7 +24,7 @@
   design. The tagged Stata help for Liu's `fereg` and `reghdfejl` lists it as
   unsupported. In Stata `xhdfe`, `savefe` and `savefes()` are unavailable when
   `group()` and `individual()` are specified together.
-  [xhdfe help](stata/xhdfe.sthlp) · [reghdfe help](https://scorreia.com/help/reghdfe.html#opt_group_fes) · [Liu 0.5.0 help](https://github.com/leoliu0/fereg/blob/v0.5.0/stata/fereg.sthlp) · [reghdfejl 1.1.9 help](https://github.com/droodman/reghdfejl/blob/v1.1.9/reghdfejl.sthlp)
+  [xhdfe help](stata/xhdfe.sthlp) · [reghdfe help](https://scorreia.com/help/reghdfe.html#opt_group_fes) · [Liu 0.5.1 help](https://github.com/leoliu0/fereg/blob/v0.5.1/stata/fereg.sthlp) · [reghdfejl 1.1.9 help](https://github.com/droodman/reghdfejl/blob/v1.1.9/reghdfejl.sthlp)
 - **Prepare a worker–firm sample and compute leave-out variance components.**
   In Stata, use `xhdfeconnected` to construct the leave-one-out sample, then
   `xhdfeakm` for AKM plug-in, AGSU and KSS decompositions and inference for
@@ -48,7 +49,7 @@ other estimators, inference or execution workflows.
 | --- | --- | --- |
 | `reghdfe` 6.14.1 and the Stata ecosystem | `reghdfe, parallel(#)` runs separate Stata processes using `parallel`. `ivreghdfe` 1.1.4 provides LIML and two-step GMM with absorbed effects. `ppmlhdfe` provides Poisson PML with separation checks. | [reghdfe help](https://scorreia.com/help/reghdfe.html) · [ivreghdfe](https://github.com/sergiocorreia/ivreghdfe#comparison-with-other-commands) · [ppmlhdfe help](https://scorreia.com/help/ppmlhdfe.html) |
 | Johannes F. Schmieder's `fereg` 0.6.8 (Stata) | `feppml` for Poisson PML, `memory(low)` and `poolsize(#)` for low-memory work blocks, and explicit combinatorial multigrid (CMG) preconditioning. `solver(cg, reduce(eliminate) precondition(cmg))` is an experimental route for two categorical intercept effects. | [Tagged README](https://github.com/johannes-schmieder/fereg/blob/v0.6.8/README.md) |
-| Leo Liu's `fereg` 0.5.0 (Stata, Python and R) | One Rust core with Poisson PML and fixed-effects logit. The Stata `felogit` provides incidental-parameter bias corrections and average partial effects. The linear estimator offers Conley spatial standard errors. | [Tagged README](https://github.com/leoliu0/fereg/blob/v0.5.0/README.md) |
+| Leo Liu's `fereg` 0.5.1 (Stata, Python and R) | One Rust core with Poisson PML and fixed-effects logit. The Stata `felogit` provides incidental-parameter bias corrections and average partial effects. The linear estimator offers Conley spatial standard errors. | [Tagged README](https://github.com/leoliu0/fereg/blob/v0.5.1/README.md) |
 | `fixest` 0.14.2 (R) | Fixed-effects GLMs via `feglm()`, cohort-specific staggered DiD with `sunab()` and spatial inference with Conley covariance. | [GLMs](https://lrberge.github.io/fixest/reference/feglm.html) · [Staggered DiD](https://lrberge.github.io/fixest/reference/sunab.html) · [Conley covariance](https://lrberge.github.io/fixest/reference/vcov_conley.html) |
 | PyFixest 0.70.0 (Python) | Dedicated difference-in-differences estimators such as `did2s()`, fixed-effects GLMs and wild cluster bootstrap tests for eligible OLS fits. | [0.70.0 documentation](https://pyfixest.org/changelog.html) · [Estimation methods](https://pyfixest.org/reference/) |
 | `FixedEffectModels.jl` 2.2.1 (Julia) and `reghdfejl` 1.1.9 (Stata) | Julia-native model fitting and experimental Apple Metal demeaning in single precision. The Stata wrapper calls Julia and offers parallel pairs-bootstrap standard errors through `vce(bootstrap, ...)`. | [GPU methods in 2.2.1](https://github.com/FixedEffects/FixedEffectModels.jl/blob/v2.2.1/README.md#gpus) · [reghdfejl 1.1.9 help](https://github.com/droodman/reghdfejl/blob/v1.1.9/reghdfejl.sthlp) |
@@ -434,6 +435,124 @@ Run `help xhdfeakm`, `help xhdfegelbach`, `python -m xhdfe gelbach`, or
 - **R:** `?xhdfe`, `?fixef.xhdfe`, `?predict.xhdfe`; public examples in `?xhdfe_examples` and a feature tour in `r/examples/`.
 - **Python:** `python -m xhdfe` or `xhdfe-help` at the shell, or `xhdfe.help_text()` inside Python.
 
+## Benchmarks
+
+These results use the 25 November 2026 measurement snapshot for xhdfe 2.35.0,
+including earlier sealed runs with the same inputs, settings and timing
+boundary. The xhdfe timings use a Linux build of the 2.35.0 source with OpenMP,
+host-native CPU optimisation and CUDA for the H100. Each series uses three
+fresh processes. The host had an NVIDIA H100 NVL and a 16-processor Stata/MP
+licence. xhdfe, both `fereg`
+packages, PyFixest, `fixest` and the Julia engines were configured for 24
+native threads where supported. Stata's native `reghdfe` used its 16 licensed
+processors. Direct Julia CPU used 24 Julia threads and 24 BLAS threads. The
+observer recorded CPU work on up to 48 tasks within a sampling interval
+across the two pools. The xhdfe runs used `reghdfe-comparable` mode.
+
+Times are in seconds. The clock starts with the input in memory and after any
+instrumented start-up or synthetic warm-up. It covers the estimation command
+or estimator-specific preparation, fit and table formatting where applicable.
+The Stata `reghdfejl` clock includes the Stata–Julia interface. PyFixest H100 uses
+Torch CUDA in FP64 with compilation disabled during the measurement. Direct
+`FixedEffectModels.jl` H100 uses CUDA FP64 and warms the kernels on synthetic
+data at the size of the estimation sample. Round numbers identify repetitions
+within each series. Comparisons across separate measurement blocks are unpaired.
+
+**Bold medians** have three completed fits and passed the benchmark's full
+numerical checks. The xhdfe CPU fit supplies the reference for sample, FE
+cardinalities, identified slopes, standard errors, covariance and relevant
+degrees of freedom. The comparison limits are `1e-8` for scaled coefficients
+and `1e-7` for relative standard errors and scaled covariance. The covariance
+error for entry `j,k` is `abs(V[j,k] - Vref[j,k]) / sqrt(Vref[j,j] * Vref[k,k])`
+when the reference diagonal scale is positive.
+**†** marks completed raw timings with a numerical difference. The saturated
+design marked **§** uses a separate check of the identified slopes.
+
+### Ready worker–firm panel
+
+The full source has **47,569,720** rows. The estimation sample has **46,156,187**
+observations and **5,074,679** worker, **610,089** firm and **26** year FE levels.
+
+| Estimator | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| `xhdfe` 2.35.0 (Stata, CPU) | 8.363 | 8.170 | 8.409 | **8.363** |
+| `xhdfe` 2.35.0 (Stata, H100) | 6.015 | 5.910 | 5.894 | **5.910** |
+| Liu `fereg` 0.5.1 (Stata, CPU) | 8.680 | 8.715 | 8.719 | **8.715** |
+| Schmieder `fereg` 0.6.8 (Stata, CPU) | 22.727 | 22.782 | 22.588 | **22.727** |
+| `reghdfe` 6.14.1 (Stata, CPU) | 1,082.798 | 1,068.244 | 1,082.791 | **1,082.791** |
+| PyFixest 0.70.0 (Python, CPU) | 61.735 | 60.333 | 62.405 | **61.735** |
+| PyFixest 0.70.0 (Python, H100) | 39.716 | 40.134 | 39.439 | **39.716** |
+| `fixest` 0.14.2 (R, CPU) | 345.985 | 348.110 | 340.338 | **345.985** |
+| `fixest` 0.14.2 (R, H100) | — | — | — | No GPU backend |
+| `FixedEffectModels.jl` 2.2.1 (Julia, CPU) | 241.222 | 248.194 | 243.924 | **243.924** |
+| `FixedEffectModels.jl` 2.2.1 (Julia, H100 FP64) | 25.272 | 24.705 | 24.414 | **24.705** |
+| `reghdfejl` 1.1.9 (Stata–Julia, CPU) | 445.668 | 446.542 | 447.348 | **446.542** |
+| `reghdfejl` 1.1.9 (Stata–Julia, H100 FP32) | 108.728 † | 112.926 † | 114.527 † | 112.926 † |
+
+The `reghdfejl` H100 row reports three raw clocks for its public FP32 absorption
+path. Its largest relative standard-error difference is **5.07%**, and its
+largest scaled covariance difference is **9.88%**, against xhdfe CPU. It has
+zero qualifying FP64 runs for a comparable median. The documented `fixest`
+0.14.2 `feols()` interface provides a CPU estimator. [fixest API](https://lrberge.github.io/fixest/reference/feols.html)
+
+The Ready xhdfe CPU series used `reducedpcg(on)` and `reducedpcgfine(auto)`,
+with method 8 and an observed fine-block factor of 8 at both 16 and 24 threads.
+At the 16-processor CPU budget, xhdfe took 9.568, 11.145, 10.218 s, a median of
+**10.218 s**. The `reghdfe` median at 16 processors was
+**1,082.791 s**. The two series were measured in separate blocks.
+
+### The 24 core24s1 designs
+
+Each row shows source rows → reference-sample observations, followed by the
+number of unique levels in each absorbed dimension in that estimation sample.
+For the Marta design, the source and retained data are long-format rows and
+the estimation units are groups. The second AKM regression uses the designated
+1% extract. Its employer intercept and heterogeneous slopes share the
+`NPC_FIC` dimension, which is counted once. The columns use xhdfe 2.35.0,
+Liu `fereg` 0.5.1, Schmieder `fereg` 0.6.8, `reghdfe` 6.14.1 and
+PyFixest 0.70.0, with the devices shown.
+
+| Design and estimation sample | xhdfe CPU | xhdfe H100 | Liu | Schmieder | reghdfe | PyFixest CPU | PyFixest H100 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **credit**<br>516,810 → 516,154<br>`id1` 13,290 · `id2` 140 | **0.253** | **0.424** | **0.263** | **0.401** | **0.950** | **1.310** | **0.321** |
+| **credit2**<br>19,094 → 19,075<br>`id1` 582 · `id2` 140 | **0.196** | **0.386** | **0.226** | **0.208** | **0.384** | **0.802** | **0.086** |
+| **directors**<br>525,012 → 31,230<br>`id1` 12,926 · `id2` 12,085 | **0.376** | **0.566** | **0.312** | **0.823** | **1.158** | **1.226** | 0.966 † |
+| **enron**<br>367,662 → 346,494<br>`id1` 25,286 · `id2` 25,286 | **0.332** | **0.575** | **5.824** | **0.568** | **2.185** | **1.760** | **0.470** |
+| **github**<br>548,843 → 540,674<br>`id1` 21,531 · `id2` 21,348 · `id3` 1,847 | **1.171** | **0.781** | **0.569** | **1.710** | **14.797** | 2.741 † | 1.422 † |
+| **patents**<br>500,008 → 176,115<br>`id1` 49,348 · `id2` 67,524 | **0.448** | **0.644** | **1.188** | **1.241** | **2.883** | **2.136** | 0.978 † |
+| **schools**<br>413,444 → 413,248<br>`id1` 206,624 · `id2` 11,861 · `id3` 4 | **0.550** | **0.550** | **0.493** | **0.898** | **5.924** | **2.172** | **0.832** |
+| **soccer**<br>73,487 → 73,487<br>`id1` 528 · `id2` 521 | **0.200** | **0.382** | **0.223** | **0.213** | **0.367** | **1.120** | **0.097** |
+| **synthetic-assortative**<br>499,155 → 465,221<br>`id1` 99,503 · `id2` 78,875 · `year` 10 | **0.572** | **0.675** | **0.784** | **1.036** | **11.714** | **2.860** | 0.980 † |
+| **synthetic-complete**<br>500,000 → 500,000<br>`id1` 1,000 · `id2` 500 | **0.258** | **0.426** | **0.220** | **0.258** | **0.689** | **1.216** | **0.274** |
+| **synthetic-uniform-easy**<br>500,000 → 432,350<br>`id1` 148,357 · `id2` 20 | **0.243** | **0.487** | **0.242** | **0.453** | **0.933** | **1.423** | **0.419** |
+| **synthetic-uniform-hard**<br>500,000 → 480,287<br>`id1` 112,743 · `id2` 112,708 | **0.315** | **0.496** | **0.349** | **0.691** | **1.718** | **1.623** | **0.454** |
+| **synthetic-uniform-harder**<br>500,000 → 317,745<br>`id1` 118,120 · `id2` 118,466 | **0.430** | **0.570** | **0.606** | **0.864** | **2.330** | **2.568** | **0.550** |
+| **synthetic-zigzag** §<br>10,002 → 10,002<br>`id1` 5,000 · `id2` 5,001 | 0.227 § | 0.390 § | 0.208 § | Refused | 3.875 † | Failed | Failed |
+| **workers**<br>504,315 → 451,626<br>`id1` 20,400 · `id2` 169,111 · `id3` 3,814 · `id4` 3 | **1.316** | **0.934** | **1.383** | **1.794** | **32.246** | 5.007 † | 1.557 † |
+| **main_95_21_ready**<br>47,569,720 → 46,156,187<br>`w_id` 5,074,679 · `f_id` 610,089 · `year` 26 | **8.363** | **5.910** | **8.715** | **22.727** | **1,082.791** | **61.735** | **39.716** |
+| **simulated_panel**<br>173,163,263 → 173,163,263<br>`worker_id` 20,000,000 · `firm_id` 1,000,000 · `occupation_id` 500 · `year` 15 | **12.603** | **12.640** | **8.623** | **29.916** | Censored &gt;420 s | **108.622** | GPU OOM |
+| **akm_v02_firstreg**<br>57,821,050 → 55,947,171<br>`idtrab` 5,948,793 · `ano` 36 · `NPC_FIC` 799,265 | **10.733** | **9.170** | **12.988** | **47.108** | Censored &gt;420 s | **94.394** | **54.690** |
+| **pf_difficult_10m_3fe**<br>10,000,000 → 10,000,000<br>`indiv_id` 1,000,000 · `firm_id` 43,478 · `year` 10 | **6.553** | **12.570** | **1.824** | **36.396** | Censored &gt;420 s | 13.175 † | 30.295 † |
+| **pf_simple_10m_2fe**<br>10,000,000 → 10,000,000<br>`indiv_id` 1,000,000 · `year` 10 | **1.251** | **1.659** | **0.623** | **2.436** | **26.448** | **5.851** | **5.101** |
+| **pf_simple_10m_3fe**<br>10,000,000 → 10,000,000<br>`indiv_id` 1,000,000 · `firm_id` 43,478 · `year` 10 | **1.735** | **1.925** | **1.112** | **3.242** | **68.592** | **8.142** | **5.674** |
+| **pf_difficult_10m_2fe**<br>10,000,000 → 10,000,000<br>`indiv_id` 1,000,000 · `year` 10 | **1.249** | **1.622** | **0.605** | **2.488** | **24.731** | **6.341** | **5.883** |
+| **akm_v02_secondreg_small** (1% sample)<br>580,643 → 539,327<br>`idtrab` 57,466 · `ano` 36 · `NPC_FIC` 52,732 | **1.254** | **1.157** | **27.480** | Censored &gt;420 s | 177.782 † | 13.628 † | No support |
+| **marta_group_individual_3m**<br>3,000,000 rows → 1,104,000 groups (2,760,000 retained rows)<br>`p_ntrab` 345,000 · `ntrab` 24,576 | **6.961** | **1.607** | Refused | Refused | **87.637** | No support | No support |
+
+**§** `synthetic-zigzag` is saturated, with zero mathematical residual degrees
+of freedom. Its rational oracle checks the two identified slopes only. The
+default `reghdfe` fits return different slopes from that oracle and their
+completed clocks are marked †. PyFixest fails while computing adjusted R².
+
+**Censored** means the estimation clock reached the recorded 420 s limit.
+**GPU OOM** records the first out-of-memory attempt on the full simulated panel
+and two subsequent repetitions omitted after the failure. **No support** marks
+an unsupported specification or backend. **Refused** marks an explicit
+estimator rejection, and **Failed** marks an unsuccessful fit. Each displayed
+median uses three completed clocks.
+
+[xhdfe 2.35.0 release validation](docs/releases/VALIDATION_2.35.0.20261125.md)
+
 ## Validation, development provenance, and contributions
 
 ### Validation and accuracy
@@ -443,12 +562,9 @@ finite-sample oracles and `reghdfe` on the designs covered by the validation
 suite. The 25 November 2026 validation covers the new slope solver, savefe cache and CPU block controls and records an inherited CUDA covariance limit.
 [2.35.0 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
 
-The 22 November 2026 release compared 2.34.2 with 2.34.1 across 24
-`core24s1` specifications in Stata and the C++ binding, on CPU and H100, in Fast
-and Comparable modes. The record identifies the timed calls, the sample and
-numerical checks, and the scope of the published-artifact checks. At 16 threads,
-the sum of the Stata CPU Comparable median times across those specifications
-was 136.375 s for 2.34.1 and 109.462 s for 2.34.2.
+The 22 November 2026 validation documents the earlier 2.34.2 and 2.34.1
+comparison. The current release's measurement snapshot is in the
+[benchmarks](#benchmarks) above.
 [2.34.2 validation](docs/releases/VALIDATION_2.34.2.20261122.md) ·
 [Certification scope](docs/certification/) · [Disclaimer](DISCLAIMER.md)
 
