@@ -2,6 +2,14 @@
 program define xhdfe, eclass
     version 16.0
 
+    if (`"`0'"' == ", _xhdfegpu_buildinfo") {
+        _xhdfe_plugin_buildinfo
+        foreach key in protocol role cpu cuda sms openmp compiler version {
+            c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+        }
+        exit
+    }
+
     capture syntax, version
     if (!_rc) {
         quietly _xhdfe_package_version
@@ -52,6 +60,13 @@ end
 program define _xhdfe_estimate_sortpreserve, eclass sortpreserve
     version 16.0
     _xhdfe_estimate `0'
+end
+
+program define _xhdfe_plugin_buildinfo
+    plugin call __xhdfe_plugin_dispatch, "task=buildinfo"
+    foreach key in protocol role cpu cuda sms openmp compiler version {
+        c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+    }
 end
 
 program define _xhdfe_package_version, rclass

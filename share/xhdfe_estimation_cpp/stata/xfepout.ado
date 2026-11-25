@@ -7,6 +7,14 @@ program define xfepout, eclass sortpreserve
     // - This is a building block (like hdfe), so it intentionally prints no table by default.
     // - We require explicit numeric variables in varlist (no factor/time-series operators in the varlist).
 
+    if (`"`0'"' == ", _xhdfegpu_buildinfo") {
+        _xfepout_plugin_buildinfo
+        foreach key in protocol role cpu cuda sms openmp compiler version {
+            c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
+        }
+        exit
+    }
+
     capture syntax, version
     if (!_rc) {
         quietly _xfepout_package_version
@@ -1088,6 +1096,13 @@ program define xfepout, eclass sortpreserve
         quietly timer list 99
         di as txt "ado_profile label=xfepout_post_plugin ms=" %12.3f (1000 * r(t99))
         timer clear 99
+    }
+end
+
+program define _xfepout_plugin_buildinfo
+    plugin call __xfepout_plugin_dispatch, "task=buildinfo"
+    foreach key in protocol role cpu cuda sms openmp compiler version {
+        c_local xhdfe_buildinfo_`key' `"`xhdfe_buildinfo_`key''"'
     }
 end
 

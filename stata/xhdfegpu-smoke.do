@@ -11,20 +11,19 @@ adopath ++ `"`stage'"'
 
 program define _xhdfegpu_smoke_info
     args role target arch source_version
-    local cmd "__`role'_plugin_dispatch"
-    plugin call `cmd', "task=buildinfo"
+    `role', _xhdfegpu_buildinfo
     assert "`xhdfe_buildinfo_protocol'" == "1" & "`xhdfe_buildinfo_role'" == "`role'"
     assert "`xhdfe_buildinfo_cpu'" == "`target'" & "`xhdfe_buildinfo_sms'" == "`arch'"
     assert "`xhdfe_buildinfo_cuda'" == "1" & "`xhdfe_buildinfo_openmp'" == "1"
     assert "`xhdfe_buildinfo_version'" == "`source_version'"
 end
 
-* Within every eight rows, the regressor contrasts and error are orthogonal.
+* Full three-way crossing with orthogonal regressor and error contrasts in each cell.
 set obs 240000
 generate long blockid = floor((_n - 1)/8)
-generate long w = mod(blockid, 1500) + 1
-generate int f = mod(17*w + floor(blockid/1500), 317) + 1
-generate byte t = mod(3*w + floor(blockid/600), 12) + 1
+generate long w = floor(blockid/300) + 1
+generate int f = mod(floor(blockid/5), 60) + 1
+generate byte t = mod(blockid, 5) + 1
 generate byte phase = mod(_n - 1, 8)
 generate double x1 = 2*mod(phase, 2) - 1 + mod(w, 11)/16 + mod(f, 3)/8
 generate double x2 = 2*mod(floor(phase/2), 2) - 1 + t/32 - mod(f, 5)/16

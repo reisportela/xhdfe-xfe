@@ -156,11 +156,24 @@ program define _xhdfegpu_status, rclass
     local build_source "missing"
     local call_rc = 199
     if (`"`bound'"' != "") {
-        * program list does not enumerate registered plugins.
-        capture quietly plugin call `dispatch', "task=buildinfo"
-        local call_rc = _rc
-        if (`call_rc' == 199) {
-            local bound ""
+        * Plug-in subprograms are callable only from their owning ado.
+        capture quietly program list `name'._`name'_plugin_buildinfo
+        if (!_rc) {
+            capture quietly `name', _xhdfegpu_buildinfo
+            local call_rc = _rc
+            if (`call_rc' == 199) local bound ""
+        }
+        else {
+            * A top-level dispatcher is directly callable. A legacy active
+            * ado has no bridge, so leave its build metadata unrecorded.
+            capture quietly plugin call `dispatch', "task=buildinfo"
+            local call_rc = _rc
+            if (`call_rc' == 199) {
+                capture quietly program list `name'
+                if (_rc) local bound ""
+            }
+        }
+        if (`"`bound'"' == "") {
             foreach key in protocol role cpu cuda sms openmp compiler version {
                 local xhdfe_buildinfo_`key' ""
             }

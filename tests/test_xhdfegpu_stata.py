@@ -195,5 +195,66 @@ class StataInstallerTests(unittest.TestCase):
             self.assertEqual((installed / alias.name).read_bytes(), alias.read_bytes())
 
 
+    @unittest.skipUnless(ARTIFACTS, "set XHDFE_TEST_PLUGIN_PAIR for actual Stata fits")
+    def test_status_preserves_real_estimations_and_uses_their_plugins(self):
+        roles = ("xhdfe", "xfepout")
+        target = os.environ.get("XHDFE_TEST_CPU_TARGET", "portable")
+        sms = os.environ.get("XHDFE_TEST_SMS", "none")
+        cuda = int(sms != "none")
+        version = re.search(r"project\(xhdfe VERSION ([\d.]+) ",
+                            (ROOT / "CMakeLists.txt").read_text()).group(1)
+        aliases = [Path(ARTIFACTS) / f"{role}.plugin" for role in roles]
+        self.stage_site(aliases)
+        installed = self.plus / "x"
+        relocated = self.root / "relocated xfepout"
+        relocated.mkdir()
+        shutil.copyfile(ROOT / "stata/xfepout.ado", relocated / "xfepout.ado")
+        shutil.copyfile(aliases[1], relocated / "xfepout.plugin")
+
+        def status(paths, sources):
+            checks = ["xhdfegpu, status"]
+            for role, path, source in zip(roles, paths, sources, strict=True):
+                bound = path if source == "memory" else ""
+                for key, value in (("build_source", source), ("plugin", path), ("bound_plugin", bound),
+                                   ("cputarget", target), ("sms", sms), ("build_version", version)):
+                    checks.append(f'assert "`r({role}_{key})\'" == "{value}"')
+                checks.append(f"assert r({role}_cuda) == {cuda} & r({role}_openmp) == 1")
+            return "\n".join(checks)
+
+        first = (installed / "xhdfe.plugin", installed / "xfepout.plugin")
+        second = (first[0], relocated / "xfepout.plugin")
+        self.run_stata(
+            f'net install xhdfe, from("{self.package_site}")\n'
+            'sysuse auto, clear\n'
+            'generate double _xhdfegpu_buildinfo = weight\n'
+            'quietly xhdfe price _xhdfegpu_buildinfo, absorb(rep78) gpubackend(cpu)\n'
+            'local coefficient = _b[_xhdfegpu_buildinfo]\n'
+            'local n = e(N)\n'
+            'generate byte original_sample = e(sample)\n'
+            'quietly datasignature\n'
+            'local signature "`r(datasignature)\'"\n'
+            + status(first, ("memory", "by_path")) + "\n"
+            'assert "`e(cmd)\'" == "xhdfe" & e(N) == `n\' & _b[_xhdfegpu_buildinfo] == `coefficient\'\n'
+            'assert e(sample) == original_sample\n'
+            'quietly datasignature\n'
+            'assert "`r(datasignature)\'" == "`signature\'"\n'
+            f'adopath ++ "{relocated}"\n'
+            'quietly xfepout price weight, absorb(rep78) generate(po_) gpubackend(cpu)\n'
+            'local n = e(N)\n'
+            'replace original_sample = e(sample)\n'
+            'quietly datasignature\n'
+            'local signature "`r(datasignature)\'"\n'
+            + status(second, ("memory", "memory")) + "\n"
+            'assert "`e(cmd)\'" == "xfepout" & e(N) == `n\'\n'
+            'assert e(sample) == original_sample\n'
+            'quietly datasignature\n'
+            'assert "`r(datasignature)\'" == "`signature\'"\n'
+            'discard\n'
+            + status(second, ("by_path", "by_path")) + "\n"
+            'quietly datasignature\n'
+            'assert "`r(datasignature)\'" == "`signature\'"\n'
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
