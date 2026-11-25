@@ -5,6 +5,7 @@ on installation, build, and package metadata.
 
 | Version | Date | Notes |
 | --- | --- | --- |
+| 2.35.1 | 25 November 2026 | [CUDA installer CPU target and plugin status](RELEASE_NOTES_2.35.1.20261125.md) · [validation and scope](VALIDATION_2.35.1.20261125.md) |
 | 2.35.0 | 25 November 2026 | [Reduced-system options, slope solver and savefe cache](RELEASE_NOTES_2.35.0.20261125.md) · [validation and scope](VALIDATION_2.35.0.20261125.md) |
 | 2.34.2 | 22 November 2026 | [CPU reduced-system prefetch, parallel fit post-processing and Stata sample bookkeeping](RELEASE_NOTES_2.34.2.20261122.md) · [validation and scope](VALIDATION_2.34.2.20261122.md) |
 | 2.34.1 | 21 November 2026 | [Reduced-system route for Comparable fits on CPU, corrections to savefe, slopes and weighted projections, CUDA libraries on demand](RELEASE_NOTES_2.34.1.20261121.md); [validation and scope](VALIDATION_2.34.1.20261121.md) |

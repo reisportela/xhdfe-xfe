@@ -34,6 +34,7 @@
 #include "hdfe/ieee_bits.hpp"
 #include "hdfe/parallel_work_observer.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "xhdfe_stata_buildinfo.hpp"
 #include "xhdfe_wide_id_rank.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
@@ -3571,6 +3572,9 @@ STDLL stata_call(int argc, char* argv[]) {
         ParsedArgs args(argc, argv);
 
         if (auto task = args.get_optional("task")) {
+            if (*task == "buildinfo") {
+                return xhdfe_stata::save_buildinfo("xhdfe");
+            }
             if (*task == "akm_kss") {
                 return run_akm_kss(args);
             }

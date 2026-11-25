@@ -2,13 +2,14 @@
 
 **Linear regression with high-dimensional fixed effects in Stata, Python and R on one C++ core.**
 
-`Version 2.35.0` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
+`Version 2.35.1` · `License: MIT` · `Stata + Python + R` · `Optional CUDA GPU`
 
 [Installation and examples](#choose-your-language) ·
 [Benchmarks](#benchmarks) ·
 [Working paper](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=7271338) ·
-[Release notes](docs/releases/RELEASE_NOTES_2.35.0.20261125.md) ·
-[25 November 2026 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
+[Release notes](docs/releases/RELEASE_NOTES_2.35.1.20261125.md) ·
+[2.35.1 validation](docs/releases/VALIDATION_2.35.1.20261125.md) ·
+[2.35.0 validation](docs/releases/VALIDATION_2.35.0.20261125.md)
 
 ## When to use xhdfe
 
@@ -46,7 +47,7 @@
 `xhdfe` focuses on linear OLS and 2SLS. These packages provide options for
 other estimators, inference or execution workflows.
 
-| Package | Capabilities outside xhdfe 2.35.0 | Documentation |
+| Package | Capabilities outside xhdfe 2.35.1 | Documentation |
 | --- | --- | --- |
 | `reghdfe` 6.14.1 and the Stata ecosystem | `reghdfe, parallel(#)` runs separate Stata processes using `parallel`. `ivreghdfe` 1.1.4 provides LIML and two-step GMM with absorbed effects. `ppmlhdfe` provides Poisson PML with separation checks. | [reghdfe help](https://scorreia.com/help/reghdfe.html) · [ivreghdfe](https://github.com/sergiocorreia/ivreghdfe#comparison-with-other-commands) · [ppmlhdfe help](https://scorreia.com/help/ppmlhdfe.html) |
 | Johannes F. Schmieder's `fereg` 0.6.8 (Stata) | `feppml` for Poisson PML, `memory(low)` and `poolsize(#)` for low-memory work blocks, and explicit combinatorial multigrid (CMG) preconditioning. `solver(cg, reduce(eliminate) precondition(cmg))` is an experimental route for two categorical intercept effects. | [Tagged README](https://github.com/johannes-schmieder/fereg/blob/v0.6.8/README.md) |
@@ -94,7 +95,7 @@ selection, and verification, see the [GPU guide](docs/gpu.md).
 
 ### Stata
 
-One command installs the estimator, the CPU plugin for the current OS, and
+One command installs the estimator, the portable CPU plugin for the current OS, and
 every companion command:
 
 ```stata
@@ -117,7 +118,7 @@ The installed commands are:
 | `xhdfegelbachbootstrap` | Full-refit iid- or cluster-pairs bootstrap for Gelbach results (`help xhdfegelbachbootstrap`). |
 | `xhdfegelbachetable` | Publication-oriented Gelbach tables (`help xhdfegelbachetable`). |
 | `xhdfegelbachcoefplot` | Identity-preserving Gelbach waterfall plot (`help xhdfegelbachcoefplot`). |
-| `xhdfegpu` | Builds and installs a CUDA GPU plugin for this machine (`help xhdfegpu`). |
+| `xhdfegpu` | Builds hybrid CPU/CUDA plugins on Linux and reports their build targets (`help xhdfegpu`). |
 
 To install only the standalone partial-out tool after publication:
 
@@ -152,14 +153,32 @@ On Linux with an NVIDIA GPU and the CUDA toolkit, run this once after
 xhdfegpu
 ```
 
-`xhdfegpu` detects the GPU, compiles for its architecture, and replaces the CPU
-plugins in place. Reload Stata, request CUDA, and verify that it was used:
+To optimise the CPU path for this host and target an H100 explicitly, use
+this command in place of the default.
 
 ```stata
-discard
+xhdfegpu, cputarget(native) arch(90)
+```
+
+The default hybrid build uses a portable CPU target with a clean environment.
+`cputarget(native)` optimises for the build host. Keep portable builds in a
+`PLUS` shared across nodes with
+different CPUs. The optional `arch()` selects the CUDA device target
+independently. The installer verifies the staged plugins before replacement.
+
+Open a new Stata session and check the installed build and GPU execution.
+
+```stata
+xhdfegpu, status
+sysuse auto, clear
 xhdfe price weight length, absorb(rep78) gpubackend(cuda)
 display e(gpu_used)          // 1
+display "`e(gpu_status)'"     // used
 ```
+
+Status shows the resolved path on disk and reports separately when metadata
+comes from a module bound in the current session. Legacy plugins may report
+build fields as `unrecorded`.
 
 For an offline machine, copy the release's self-contained `xhdfe-src.zip` and
 pass it directly to the builder:
@@ -679,7 +698,7 @@ If you use `xhdfe` in academic work, please cite it (see
 [`CITATION.cff`](CITATION.cff)):
 
 > Portela, Miguel, and Tiago Tavares. 2026. *xhdfe: High-dimensional fixed
-> effects regression via a C++ backend.* Version 2.35.0.
+> effects regression via a C++ backend.* Version 2.35.1.
 > https://github.com/reisportela/xhdfe-xfe
 
 > Portela, Miguel, and Tiago Tavares. *xhdfe: Fast High-Dimensional

@@ -13,7 +13,7 @@ concurrency:
 env:
   XHDFE_RELEASE_BUILD: '1'
   XHDFE_CUDA_ARCHS: '75,80,86,89,90'
-  EXPECTED_VERSION: '2.35.0.20261125'
+  EXPECTED_VERSION: '2.35.1.20261125'
 
 jobs:
   # Linux CPU/CUDA Stata plugins plus Linux Python and R packages.
@@ -37,6 +37,7 @@ jobs:
           python3 tools/validate_release_metadata.py \
             --expected-version "$EXPECTED_VERSION"
           bash tests/release_lint.sh
+          python3 -B -m unittest discover -s tests -p 'test_xhdfegpu_install.py' -v
 
       - name: Install Linux, Python and R toolchains
         run: |
@@ -182,11 +183,14 @@ jobs:
             exit 1
           fi
           for variant in cpu cuda; do
+            sms=none
+            if [[ "$variant" == cuda ]]; then sms="$XHDFE_CUDA_ARCHS"; fi
             for kind in xhdfe xfepout; do
               python3 tools/run_plugin_openmp_probe.py \
                 --probe "$PROBE" \
                 --plugin "$PWD/artifacts/$kind.plugin.linux-$variant" \
                 --kind "$kind" --arch x86_64 --stage final \
+                --expect-buildinfo portable "$sms" "$EXPECTED_VERSION" \
                 --out "$EVIDENCE/$kind-$variant"
             done
           done

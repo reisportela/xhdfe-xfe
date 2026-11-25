@@ -121,6 +121,8 @@ shared=(
   stata/xhdfegelbachcoefplot.sthlp
   stata/xhdfegpu.ado
   stata/xhdfegpu.sthlp
+  stata/xhdfegpu-install.sh
+  stata/xhdfegpu-smoke.do
   stata/xfepout.ado
   stata/xfepout.sthlp
 )
@@ -418,6 +420,8 @@ f xhdfegelbachcoefplot.ado
 f xhdfegelbachcoefplot.sthlp
 f xhdfegpu.ado
 f xhdfegpu.sthlp
+F xhdfegpu-install.sh
+F xhdfegpu-smoke.do
 f xfepout.ado
 f xfepout.sthlp
 f LICENSE

@@ -22,6 +22,7 @@
 
 #include "hdfe/hdfe_regressor_v11.hpp"
 #include "fe_absorption_cuda.hpp"
+#include "xhdfe_stata_buildinfo.hpp"
 
 // Parallel sort when libstdc++ parallel mode is available (GCC host compiler
 // with OpenMP, as used by the plugin build); otherwise fall back to std::sort.
@@ -543,6 +544,10 @@ std::vector<int> selected_observations() {
 STDLL stata_call(int argc, char* argv[]) {
     try {
         ParsedArgs args(argc, argv);
+
+        if (auto task = args.get_optional("task"); task && *task == "buildinfo") {
+            return xhdfe_stata::save_buildinfo("xfepout");
+        }
 
         const int k = parse_int(args.get_required("k"), "k");
         const int nfe = parse_int(args.get_required("nfe"), "nfe");

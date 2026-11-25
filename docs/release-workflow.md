@@ -105,6 +105,9 @@ xfepout invest mvalue kstock, absorb(company year) generate(within_)
 ```
 
 Use `net get xhdfe, from("/path/to/unpacked-directory")` to download the examples.
+The two example do-files use lowercase `f` in `xhdfe.pkg`. The installer
+helpers use uppercase `F` to install them alongside `xhdfegpu.ado` during
+ordinary `net install`. Their sources are directly in `stata/`.
 Then run `do xhdfe_example_cluster.do` and `do xhdfe_example_partial_out.do` from
 the download directory. Send Kit Baum the single ZIP or its versioned release URL,
 with the archive SHA-256. After SSC publishes the update, check the live

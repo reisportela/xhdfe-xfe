@@ -272,23 +272,25 @@ for cmd in xhdfe xfepout; do
     exit 1
   }
   # The staged manifests must retain the source package files and examples.
-  while IFS= read -r name; do
-    grep -Fxq "f $name" "$site/$cmd.pkg" || {
+  while read -r directive name; do
+    grep -Fxq "$directive $name" "$site/$cmd.pkg" || {
       echo "$cmd.pkg: staged package omits $name, listed in stata/$cmd.pkg" >&2
       exit 1
     }
-    if [[ "$name" == *.do ]]; then
-      cmp "$repo_root/stata/$name" "$site/$name"
-    fi
-  done < <(awk '$1 == "f" && $2 ~ /\.(ado|sthlp|do)$/ { print $2 }' "$repo_root/stata/$cmd.pkg")
+    case "$name" in
+      *.do|xhdfegpu-install.sh)
+        cmp "$repo_root/stata/$name" "$site/$name"
+        ;;
+    esac
+  done < <(awk '($1 == "f" || $1 == "F") && $2 ~ /\.(ado|sthlp|do|sh)$/ { print $1, $2 }' "$repo_root/stata/$cmd.pkg")
 done
 
 for pkg in "$site"/*.pkg; do
   [[ -f "$pkg" ]] || { echo "no package manifests in $site" >&2; exit 1; }
   while read -r kind a b c _; do
     case "$kind" in
-      f)
-        [[ -f "$site/$a" ]] || { echo "$(basename "$pkg"): missing f source $a" >&2; exit 1; }
+      f|F)
+        [[ -f "$site/$a" ]] || { echo "$(basename "$pkg"): missing $kind source $a" >&2; exit 1; }
         ;;
       g)
         [[ -n "${a:-}" && -n "${b:-}" && -n "${c:-}" ]] || {

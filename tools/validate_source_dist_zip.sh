@@ -62,6 +62,8 @@ required_entries=(
   "xhdfe-src/stata/tools/build-xfepout-plugin.sh"
   "xhdfe-src/stata/tools/cuda-common.sh"
   "xhdfe-src/stata/tools/macos-openmp.sh"
+  "xhdfe-src/stata/xhdfegpu-install.sh"
+  "xhdfe-src/stata/xhdfegpu-smoke.do"
   "xhdfe-src/build_macos.sh"
   "xhdfe-src/tools/build_macos_stata.sh"
   "xhdfe-src/stata/tools/_deps/eigen-3.4.0.tar.gz"
@@ -112,6 +114,13 @@ provenance_path="${TMP_DIR}/unpacked/${RCPP_PROVENANCE}"
 offline_doc="${TMP_DIR}/unpacked/xhdfe-src/BUILD_OFFLINE.md"
 notice="${TMP_DIR}/unpacked/xhdfe-src/NOTICE"
 source_root="${TMP_DIR}/unpacked/xhdfe-src"
+bash -n "${source_root}/stata/xhdfegpu-install.sh"
+for helper in xhdfegpu-install.sh xhdfegpu-smoke.do; do
+  grep -Fxq "F ${helper}" "${source_root}/stata/xhdfe.pkg" || {
+    echo "source archive descriptor does not install ${helper} as a runtime file" >&2
+    exit 1
+  }
+done
 
 bash -n \
   "${source_root}/stata/tools/build-plugin.sh" \

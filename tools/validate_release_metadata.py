@@ -42,7 +42,7 @@ def _package_text_files(relative: str) -> set[str]:
 def _package_files(relative: str) -> set[str]:
     files: set[str] = set()
     for line in _read(relative).splitlines():
-        match = re.fullmatch(r"f\s+(\S+)", line.strip())
+        match = re.fullmatch(r"[fF]\s+(\S+)", line.strip())
         if match:
             files.add("stata/" + match.group(1))
     return files
@@ -173,12 +173,12 @@ def validate(expected_version: str) -> None:
         "stata/xhdfe.pkg version is not aligned",
     )
     _require(
-        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.14.6",
-        "stata/xfepout.pkg must record version 1.14.6",
+        _capture("stata/xfepout.pkg", r"^v\s+(\S+)") == "1.14.7",
+        "stata/xfepout.pkg must record version 1.14.7",
     )
     _require(
         _capture("stata/xfepout.ado", r'^\s*return local package_version\s+"([^"]+)"')
-        == f"1.14.6 {stata_date}",
+        == f"1.14.7 {stata_date}",
         "xfepout's shared estimation/version-query identity is stale",
     )
     for retired in (
@@ -224,6 +224,18 @@ def validate(expected_version: str) -> None:
     # remain mandatory here; the staged net-install validator checks the actual
     # CI-built binaries after platform assembly.
     generated_plugins = {"stata/xhdfe.plugin", "stata/xfepout.plugin"}
+    cuda_helpers = ("xhdfegpu-install.sh", "xhdfegpu-smoke.do")
+    xhdfe_manifest = set(_read("stata/xhdfe.pkg").splitlines())
+    for name in cuda_helpers:
+        _require(
+            f"F {name}" in xhdfe_manifest,
+            f"stata/xhdfe.pkg must install {name} with F",
+        )
+        _require(
+            (ROOT / "stata" / name).read_bytes()
+            == (ROOT / "share" / "xhdfe_estimation_cpp" / "stata" / name).read_bytes(),
+            f"share mirror of {name} is not byte-identical",
+        )
     _require(
         generated_plugins.issubset(package_files),
         "Stata package manifests must reference both generated plugins",

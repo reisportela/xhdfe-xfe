@@ -122,6 +122,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           $python = (Get-Command python).Source
+          $version = (& $python -c 'import re; print(re.search(r"^project\(xhdfe VERSION ([0-9.]+) ", open("CMakeLists.txt").read(), re.M).group(1))').Trim()
           $env:PATH = @((Split-Path $python), "$env:SystemRoot\System32", $env:SystemRoot) -join ';'
           $env:XHDFE_NEGATIVE = (Resolve-Path artifacts/plus/x/negative.plugin).Path
           $env:XHDFE_NEGATIVE_DLLS = (Resolve-Path artifacts/plus/l).Path
@@ -131,6 +132,7 @@ jobs:
             $plugin = (Resolve-Path "artifacts/plus/x/$kind.plugin").Path
             & $python tools/run_plugin_openmp_probe.py --probe artifacts/host/plugin_openmp_probe.exe `
               --plugin $plugin --runtime-path $plugin --kind $kind --arch x86_64 --stage final `
+              --expect-buildinfo portable none $version `
               --out "artifacts/windows-native-receipts/$kind"
           }
       - uses: actions/upload-artifact@v4

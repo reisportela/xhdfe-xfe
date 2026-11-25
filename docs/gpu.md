@@ -64,18 +64,40 @@ binary.
 
 ### Stata
 
-The net-install site ships CPU-only plugins. The easiest way to get CUDA is the
-companion command **`xhdfegpu`** — run it once after `net install`:
+The net-install site ships the portable CPU plugins. Install the package and
+then choose the hybrid CPU/CUDA build on a Linux host with the NVIDIA toolkit.
 
 ```stata
+net install xhdfe, from("https://raw.githubusercontent.com/reisportela/xhdfe-xfe/gh-pages/stata") replace
 xhdfegpu
 ```
 
-It gates on `nvidia-smi` (so it only builds when a GPU is present), compiles a
-plugin for the local architecture, and installs it *over* the CPU plugin in
-place (same `xhdfe.plugin` / `xfepout.plugin`). On a machine without internet, fetch
-the source zip elsewhere and pass it in: `xhdfegpu, zip("/path/to/xhdfe-src.zip")`.
-See `help xhdfegpu`. Restart Stata and use `gpubackend(cuda)` (Step 3).
+The default CPU path is portable in a clean environment. Select the native
+CPU path explicitly on the machine that will use it.
+
+```stata
+xhdfegpu, cputarget(native) arch(90)
+```
+
+Use a portable CPU path for a `PLUS` shared across nodes with different CPUs,
+or give the native build a separate `PLUS`. The `arch()` option selects CUDA
+compute capability independently of CPU tuning. The installer detects that
+capability when `arch()` is omitted.
+
+An explicit `cputarget()` overrides the process environment. With the option
+omitted, native requires `XHDFE_ENABLE_MARCH_NATIVE=on` and one of `1`,
+`ON`, `on`, `true` or `yes` for `XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA`.
+For an offline build, use the matching local source archive.
+
+```stata
+xhdfegpu, zip("/path with spaces/xhdfe-src.zip") cputarget(portable)
+```
+
+The installer runs smoke tests on the staged plugins before replacing the
+aliases. Open a new Stata session, run `xhdfegpu, status` and use
+`gpubackend(cuda)` (Step 3). The status report gives the paths, CPU target,
+CUDA capability, architecture and OpenMP support for the available build
+metadata. Legacy metadata may be `unrecorded`. Check a fit for real CUDA use.
 
 To build the plugin by hand instead, from a clone:
 
@@ -183,9 +205,12 @@ device is present, or the GPU path fails), the behavior differs by version:
 
 - **Python / R**: call `xhdfe_info()` — its CUDA-arch field reports e.g. `sm_90`
   for a CUDA build and is empty for a CPU build.
-- **Stata**: run once with `gpubackend(cuda)` and check `e(gpu_used) == 1`, or
-  inspect the plugin (`readelf -S stata/xhdfe.plugin | grep nv_fatb` is present
-  only in a CUDA build).
+- **Stata**: use `xhdfegpu, status` to inspect each plugin's build metadata.
+  `r(xhdfe_build_source)` records how the metadata was queried, including
+  `memory` for a loaded module and `by_path` for a fresh path query. Restart
+  Stata after replacement to associate the query with the file currently
+  on disk. Run a fit with `gpubackend(cuda)` and
+  check `e(gpu_used) == 1` and `e(gpu_status) == "used"`.
 
 ## Troubleshooting
 

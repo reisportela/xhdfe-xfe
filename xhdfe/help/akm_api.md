@@ -1,6 +1,6 @@
 # AKM/KSS and the leave-out connected sample
 
-Package documentation version: 2.35.0.20261125.
+Package documentation version: 2.35.1.20261125.
 
 `xhdfe.akm.leave_out_set()` corresponds to Stata's `xhdfeconnected` and R's
 `xhdfe_akm_leave_out_set()`. `xhdfe.akm.akm_kss()` corresponds to

@@ -61,6 +61,7 @@ jobs:
           python3 tools/validate_release_metadata.py \
             --expected-version "$EXPECTED_VERSION"
           bash tests/release_lint.sh
+          python3 -B -m unittest discover -s tests -p 'test_xhdfegpu_install.py' -v
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             test "$GITHUB_REF_NAME" = "v${EXPECTED_VERSION}" || {
               echo "ERROR: tag $GITHUB_REF_NAME does not match v${EXPECTED_VERSION}" >&2
@@ -216,14 +217,18 @@ jobs:
       - name: Exercise actual workers in the exact Linux plugin pairs
         run: |
           set -euo pipefail
+          VERSION="$(sed -nE 's/^project\(xhdfe VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)"
           g++ -std=c++17 -O2 -Istata/tools/_deps tools/plugin_openmp_probe.cpp -ldl -o /tmp/plugin_openmp_probe
           for variant in linux-cpu linux-cuda; do
+            sms=none
+            if [[ "$variant" == linux-cuda ]]; then sms="$XHDFE_CUDA_ARCHS"; fi
             for kind in xhdfe xfepout; do
               plugin="$GITHUB_WORKSPACE/artifacts/$kind.plugin.$variant"
               runtime="$(ldd "$plugin" | awk '/libgomp.*=>/ {print $3}')"
               test -f "$runtime"
               python3 tools/run_plugin_openmp_probe.py --probe /tmp/plugin_openmp_probe \
                 --plugin "$plugin" --kind "$kind" --arch x86_64 --stage final \
+                --expect-buildinfo portable "$sms" "$VERSION" \
                 --runtime-path "$runtime" --out "artifacts/linux-native-receipts/$kind-$variant"
             done
           done
@@ -985,6 +990,7 @@ jobs:
             stata/xhdfegelbachetable.ado stata/xhdfegelbachetable.sthlp
             stata/xhdfegelbachcoefplot.ado stata/xhdfegelbachcoefplot.sthlp
             stata/xhdfegpu.ado stata/xhdfegpu.sthlp
+            stata/xhdfegpu-install.sh stata/xhdfegpu-smoke.do
             stata/xfepout.ado stata/xfepout.sthlp stata/xfepout.pkg
             stata/stata.toc
           )

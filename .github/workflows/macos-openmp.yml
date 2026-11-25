@@ -62,11 +62,13 @@ jobs:
       - name: Exercise actual workers and numerical agreement
         run: |
           set -euo pipefail
+          VERSION="$(sed -nE 's/^project\(xhdfe VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)"
           for kind in xhdfe xfepout; do
             python3 tools/run_plugin_openmp_probe.py \
               --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
               --plugin "$GITHUB_WORKSPACE/slice/$kind.plugin" --kind "$kind" \
               --arch '${{ matrix.arch }}' --stage thin \
+              --expect-buildinfo portable none "$VERSION" \
               --runtime-path "$GITHUB_WORKSPACE/slice/xhdfe_libomp.dylib" \
               --out "$GITHUB_WORKSPACE/thin-$kind"
             cp "thin-$kind/RESULT.json" "slice/thin-$kind.json"
@@ -77,6 +79,7 @@ jobs:
           XHDFE_MACOS_ARCHS: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          VERSION="$(sed -nE 's/^project\(xhdfe VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)"
           /bin/bash stata/tools/build-plugin.sh --linux --no-openmp 2>&1 | tee slice/xhdfe-serial-build.log
           /bin/bash stata/tools/build-xfepout-plugin.sh --linux --no-openmp 2>&1 | tee slice/xfepout-serial-build.log
           for kind in xhdfe xfepout; do
@@ -84,6 +87,7 @@ jobs:
               --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
               --plugin "$GITHUB_WORKSPACE/stata/$kind.plugin" --kind "$kind" \
               --arch '${{ matrix.arch }}' --stage thin --expect-serial \
+              --expect-buildinfo portable none "$VERSION" \
               --out "$GITHUB_WORKSPACE/serial-$kind"
             cp "serial-$kind/RESULT.json" "slice/serial-$kind.json"
           done
@@ -174,6 +178,7 @@ jobs:
       - name: Test final universal plugins in their installation layout
         run: |
           set -euo pipefail
+          VERSION="$(sed -nE 's/^project\(xhdfe VERSION ([0-9.]+) .*/\1/p' CMakeLists.txt)"
           test "$(uname -m)" = '${{ matrix.arch }}'
           mkdir -p installed/x native-receipts
           tar -C installed/x -xf macos-universal-unvalidated.tar
@@ -184,6 +189,7 @@ jobs:
               --probe "$GITHUB_WORKSPACE/plugin_openmp_probe" \
               --plugin "$GITHUB_WORKSPACE/installed/x/$kind.plugin" --kind "$kind" \
               --arch '${{ matrix.arch }}' --stage final \
+              --expect-buildinfo portable none "$VERSION" \
               --runtime-path "$GITHUB_WORKSPACE/installed/x/xhdfe_libomp.dylib" \
               --out "$GITHUB_WORKSPACE/final-$kind"
             cp "final-$kind/RESULT.json" "native-receipts/final-${{ matrix.arch }}-$kind.json"

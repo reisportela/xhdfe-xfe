@@ -1,5 +1,26 @@
 # OpenMP release checklist
 
+## 2.35.1.20261125 gates
+
+- [x] Local Linux installer protocol, source archive and SSC package tests.
+  Fresh Stata/MP installations put both helpers alongside the ado.
+- [x] On local portable and native Linux CUDA builds, licensed Stata/MP
+  returns the build metadata of both plugins.
+- [ ] Preflight and version-tag receipts for the final Stata plugins.
+  `--expect-buildinfo` must match the portable CPU target, dated build
+  version, CUDA flag, exact SM list and OpenMP. Check the Linux CPU and CUDA
+  pairs, Windows pair, both thin and final macOS slices and the macOS serial
+  negative controls.
+- [ ] Verify the exact Linux CPU and CUDA release assets in licensed Stata/MP,
+  including numerical agreement, useful workers and real CUDA execution on H100.
+- [ ] Licensed native Stata/MP on macOS arm64, macOS x86_64 and Windows is
+  **NOT_RUN**. The native plugin-interface probes cover actual estimator
+  workers, numerical agreement and build metadata on those platforms.
+- [ ] Verify the published asset digests and the fresh installed files in the
+  public Stata site and SSC payload.
+
+[Validation and scope](../docs/releases/VALIDATION_2.35.1.20261125.md)
+
 ## 2.35.0.20261125 gates
 
 - [x] Preflight and version-tag jobs passed on Linux, Windows and both native macOS architectures.

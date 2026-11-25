@@ -309,11 +309,13 @@ if [[ "${TARGET}" != "windows" ]]; then
     "${liveness_source}" -o "${liveness_bin}"
   "${liveness_bin}"
 fi
+buildinfo_cpu="portable"
 if [[ "${MARCH_NATIVE_MODE}" == "on" && "${UNAME_S}" != "Darwin" && "${TARGET}" != "windows" ]]; then
   # NOTE: with CUDA-enabled plugin builds we've observed runtime instability when compiling host
   # code with -march=native. Keep it CPU-only unless explicitly requested by disabling CUDA.
   if [[ ! "${XHDFE_ENABLE_CUDA:-0}" =~ ^(1|ON|on|true|yes)$ || "${FORCE_MARCH_NATIVE_WITH_CUDA}" =~ ^(1|ON|on|true|yes)$ ]]; then
     common_compile_flags+=( -march=native -mtune=native )
+    buildinfo_cpu="native"
   else
     echo "Warning: ignoring --march-native because XHDFE_ENABLE_CUDA=ON. Set XHDFE_FORCE_MARCH_NATIVE_WITH_CUDA=ON to override." >&2
   fi
@@ -353,6 +355,16 @@ elif [[ "${UNAME_S}" == "Darwin" ]]; then
   done
 else
   "${fma_bin}"
+fi
+
+# Record the resolved host flags, not the requested mode. The source version is
+# shared by the two plugins and comes from the package's CMake project.
+common_compile_flags+=( "-DXHDFE_STATA_BUILD_CPU=\"${buildinfo_cpu}\"" )
+if [[ -r "${STATA_DIR}/../CMakeLists.txt" ]]; then
+  source_version="$(awk '/^project\(xhdfe[[:space:]]+VERSION[[:space:]]+/ {print $3; exit}' "${STATA_DIR}/../CMakeLists.txt")"
+  if [[ "${source_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+    common_compile_flags+=( "-DXHDFE_STATA_BUILD_VERSION=\"${source_version}\"" )
+  fi
 fi
 common_link_flags=( "${link_flag}" )
 if [[ "${TARGET}" == "windows" ]]; then
@@ -481,9 +493,21 @@ compile_plugin() {
     done
     cuda_gencode_flags+=( -gencode "arch=compute_${highest_cuda_arch},code=compute_${highest_cuda_arch}" )
 
+    local buildinfo_sms
+    buildinfo_sms="$(IFS=,; printf '%s' "${cuda_archs[*]}")"
+    # NVCC can also take architecture options from its environment, including
+    # a response file. In that case the script's explicit list is incomplete.
+    local nvcc_external_flags="${NVCC_PREPEND_FLAGS:-} ${NVCC_APPEND_FLAGS:-}"
+    nvcc_external_flags="${nvcc_external_flags//\'/ }"
+    nvcc_external_flags="${nvcc_external_flags//\"/ }"
+    if [[ "${nvcc_external_flags}" =~ (^|[[:space:]])(-arch|--gpu-architecture|-code|--gpu-code|-gencode|--generate-code|-optf|--options-file)(=|[[:space:]]|$) ]]; then
+      buildinfo_sms="unrecorded"
+    fi
+
     while true; do
       objs=()
       cxx_flags=( "${common_compile_flags[@]}" "${extra_flags[@]}" -DHDFE_USE_CUDA )
+      cxx_flags+=( "-DXHDFE_STATA_BUILD_SMS=\"${buildinfo_sms}\"" )
       nvcc_flags=( -std=c++17 -O3 -DNDEBUG --expt-relaxed-constexpr -DHDFE_USE_CUDA "-DSYSTEM=${SYSTEM_DEF}" )
       nvcc_flags+=( -I"${STATA_DIR}/include" -I"${EIGEN_DIR}" -I"${DEPS_DIR}" )
       nvcc_flags+=( -Xcompiler "-fPIC" )

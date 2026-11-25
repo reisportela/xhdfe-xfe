@@ -586,6 +586,30 @@ void print_snapshot(const Snapshot& value) {
     }
     std::cout << "}}";
 }
+
+void probe_buildinfo(Call call, const std::string& kind, bool expect_serial,
+                     const std::string& cpu, const std::string& sms,
+                     const std::string& version, std::map<std::string, std::string>& result) {
+    state = SpiState{};
+    std::string config = "task=buildinfo";
+    char* arguments[] = {config.data()};
+    require(call(1, arguments) == 0, "buildinfo SPI task failed");
+    require(state.data.empty() && state.matrices.empty() && state.scalars.empty(),
+            "buildinfo changed fit state");
+    for (const char* field : {"protocol", "role", "cpu", "cuda", "sms", "openmp", "compiler", "version"}) {
+        const auto found = state.macros.find(std::string("_xhdfe_buildinfo_") + field);
+        require(found != state.macros.end() && !found->second.empty(),
+                std::string("missing buildinfo field: ") + field);
+        result[field] = found->second;
+    }
+    require(result.at("protocol") == "1", "buildinfo protocol mismatch");
+    require(result.at("role") == kind, "buildinfo plugin role mismatch");
+    require(result.at("cpu") == cpu, "buildinfo CPU target mismatch");
+    require(result.at("cuda") == (sms == "none" ? "0" : "1"), "buildinfo CUDA state mismatch");
+    require(result.at("sms") == sms, "buildinfo CUDA SM list mismatch");
+    require(result.at("openmp") == (expect_serial ? "0" : "1"), "buildinfo OpenMP state mismatch");
+    require(result.at("version") == version, "buildinfo source version mismatch");
+}
 } // namespace
 
 int probe_main(int argc, char** argv) {
@@ -593,7 +617,9 @@ int probe_main(int argc, char** argv) {
     const std::string process_arch = architecture();
     const std::string native_arch = native_architecture();
     const int translation = translated();
-    bool expect_serial = false, passed = false, serial_rejected = false;
+    bool expect_serial = false, expect_buildinfo = false, passed = false, serial_rejected = false;
+    std::string expected_cpu, expected_sms, expected_version;
+    std::map<std::string, std::string> buildinfo;
     bool numerical_parity = false;
     double parity_error = 0;
     int dkraay_iv_cases = 0;
@@ -602,11 +628,24 @@ int probe_main(int argc, char** argv) {
     double akm_projection_max_error = 0;
     Snapshot one, two;
     try {
-        require(argc == 4 || argc == 5,
-                "usage: plugin_openmp_probe xhdfe|xfepout /absolute/plugin arm64|x86_64 [--expect-serial]");
+        require(argc >= 4,
+                "usage: plugin_openmp_probe xhdfe|xfepout /absolute/plugin arm64|x86_64 "
+                "[--expect-serial] [--expect-buildinfo CPU SMS VERSION]");
         kind = argv[1]; path = argv[2]; expected_arch = argv[3];
-        expect_serial = argc == 5 && std::string(argv[4]) == "--expect-serial";
-        require(argc != 5 || expect_serial, "unknown probe option");
+        for (int i = 4; i < argc; ++i) {
+            const std::string option = argv[i];
+            if (option == "--expect-serial" && !expect_serial) {
+                expect_serial = true;
+            } else if (option == "--expect-buildinfo" && !expect_buildinfo && i + 3 < argc) {
+                expect_buildinfo = true;
+                expected_cpu = argv[++i]; expected_sms = argv[++i]; expected_version = argv[++i];
+                require(expected_cpu == "portable" || expected_cpu == "native" || expected_cpu == "unrecorded",
+                        "invalid expected buildinfo CPU target");
+                require(!expected_sms.empty() && !expected_version.empty(), "missing buildinfo SM list or version");
+            } else {
+                require(false, "unknown or incomplete probe option: " + option);
+            }
+        }
         require(kind == "xhdfe" || kind == "xfepout", "unknown plugin kind");
         require(absolute_path(path), "plugin path must be absolute");
         require(process_arch == expected_arch, "probe is executing the wrong architecture");
@@ -618,6 +657,9 @@ int probe_main(int argc, char** argv) {
         runtime_path = loaded_openmp_runtime(library);
         ST_plugin api = spi();
         require(initialize(&api) == SD_PLUGINVER, "plugin SPI version mismatch");
+        if (expect_buildinfo) {
+            probe_buildinfo(call, kind, expect_serial, expected_cpu, expected_sms, expected_version, buildinfo);
+        }
         one = run(call, kind == "xhdfe", 1);
         require(one.rc == 0 && one.numeric_ok, "one-thread numerical control failed: " + one.error);
         require(scalar(one, "requested") == 1 && scalar(one, "effective") == 1 &&
@@ -688,6 +730,16 @@ int probe_main(int argc, char** argv) {
               << ",\"akm_projection_max_error\":" << akm_projection_max_error
               << ",\"thread1\":";
     print_snapshot(one); std::cout << ",\"thread2\":"; print_snapshot(two);
+    if (expect_buildinfo) {
+        std::cout << ",\"buildinfo\":{";
+        bool first = true;
+        for (const auto& field : buildinfo) {
+            if (!first) std::cout << ',';
+            first = false;
+            std::cout << quote(field.first) << ':' << quote(field.second);
+        }
+        std::cout << '}';
+    }
     std::cout << ",\"scope\":\"Native SPI and estimator work only; not the Stata ado layer or full feature/performance certification\"}\n";
     return passed || serial_rejected ? 0 : 1;
 }

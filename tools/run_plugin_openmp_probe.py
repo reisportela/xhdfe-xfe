@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--stage', choices=['thin', 'final'], required=True)
     parser.add_argument('--runtime-path', type=Path)
     parser.add_argument('--expect-serial', action='store_true')
+    parser.add_argument('--expect-buildinfo', nargs=3, metavar=('CPU', 'SMS', 'VERSION'),
+                        help='require build metadata from the loaded plugin')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     probe = args.probe.resolve(strict=True)
@@ -45,6 +47,12 @@ def main():
     command = [str(probe), args.kind, str(plugin), args.arch]
     if args.expect_serial:
         command.append('--expect-serial')
+    if args.expect_buildinfo:
+        cpu, sms, version = args.expect_buildinfo
+        command.extend(['--expect-buildinfo', cpu, sms, version])
+        receipt['expected_buildinfo'] = dict(protocol='1', role=args.kind, cpu=cpu, sms=sms, version=version,
+                                             cuda='0' if sms == 'none' else '1',
+                                             openmp='0' if args.expect_serial else '1')
     receipt['command'] = command
     env = {key: value for key, value in os.environ.items() if not key.startswith('XHDFE_')}
     for name in ('LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'LD_LIBRARY_PATH',
@@ -69,6 +77,11 @@ def main():
         assert native['process_arch'] == args.arch and native['translated'] == 0
         assert sha(plugin) == receipt['plugin_sha256'], 'plugin changed during execution'
         assert sha(probe) == receipt['probe_sha256'], 'probe changed during execution'
+        if args.expect_buildinfo:
+            info = native['buildinfo']
+            assert all(info[key] == value for key, value in receipt['expected_buildinfo'].items()), 'buildinfo mismatch'
+            assert isinstance(info['compiler'], str) and info['compiler'], 'buildinfo compiler is missing'
+            receipt['buildinfo_pass'] = True
         if args.expect_serial:
             assert native['status'] == 'EXPECTED_SERIAL_REJECTION'
             assert native['serial_negative_pass'] and not native['release_gate_pass']

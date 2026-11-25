@@ -1,4 +1,4 @@
-*! xhdfe example 2.35.0 25nov2026
+*! xhdfe example 2.35.1 25nov2026
 * Requires Stata 16 or later, xhdfe and xfepout. SSC xhdfe includes both.
 * auto ships with Stata. The do-file runs offline and replaces data in memory.
 

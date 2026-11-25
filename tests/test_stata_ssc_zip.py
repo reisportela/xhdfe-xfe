@@ -13,11 +13,14 @@ FILES = (
     "xhdfe.ado", "xfepout.ado", "xhdfe.sthlp", "xfepout.sthlp", "LICENSE", "NOTICE",
     "xhdfe_example_cluster.do", "xhdfe_example_partial_out.do",
 )
+HELPERS = ("xhdfegpu-install.sh", "xhdfegpu-smoke.do")
 BINARIES = (
     "xhdfe.linux64.plugin", "xhdfe.macos-universal.plugin", "xhdfe.win64.plugin",
     "xfepout.linux64.plugin", "xfepout.macos-universal.plugin", "xfepout.win64.plugin",
 )
-BASE = "v 2.34.2\nd SSC test package\n" + "\n".join(f"f {name}" for name in FILES) + "\n"
+BASE = ("v 2.34.2\nd SSC test package\n"
+        + "".join(f"f {name}\n" for name in FILES)
+        + "".join(f"F {name}\n" for name in HELPERS))
 MANIFEST = BASE + """G MACARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
 G OSX.ARM64 xhdfe_libomp.dylib xhdfe_libomp.dylib
 G MACINTEL64 xhdfe_libomp.dylib xhdfe_libomp.dylib
@@ -39,7 +42,7 @@ g WIN64 xfepout.win64.plugin xfepout.plugin
 h xhdfe.plugin
 h xfepout.plugin
 """
-CORE = (*FILES, *BINARIES, "xhdfe_libomp.dylib")
+CORE = (*FILES, *HELPERS, *BINARIES, "xhdfe_libomp.dylib")
 AUXILIARY = ("libgomp-1.dll", "windows-stata-runtime-ledger.json", "other.plugin",
              "SampleNote.txt", "samplenote.txt")
 TOC = "v 3\np xhdfe Main package\np xfepout Companion package\n"

@@ -1,6 +1,6 @@
 # xhdfe examples with public data
 
-Package documentation version: 2.35.0.20261125.
+Package documentation version: 2.35.1.20261125.
 
 Run each block independently. The formula examples require the `formula`
 extra. The Grunfeld blocks use the public statsmodels edition.
