@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 1.3.0  22nov2026}{...}
+{* *! version 1.3.0  25nov2026}{...}
 {vieweralsosee "xhdfe" "help xhdfe"}{...}
 {vieweralsosee "xhdfeakm" "help xhdfeakm"}{...}
 {vieweralsosee "xhdfegelbach" "help xhdfegelbach"}{...}
@@ -47,9 +47,9 @@ generates equals {it:stub}{cmd:_keep} from
 {pstd}
 With {cmd:fweight}, row {it:i} stands for {it:w_i} identical person-year
 observations (the single-observation-worker rule counts person-years, so a
-single row with weight 2 or more is a T>1 worker). Note the units under
-{cmd:fweight}: {cmd:r(n_obs_input)} counts raw data rows, while
-{cmd:r(n_obs_connected)} and {cmd:r(n_obs)} count weighted person-years.
+single row with weight 2 or more is a T>1 worker). With {cmd:fweight},
+{cmd:r(n_obs_input)}, {cmd:r(n_obs_connected)}, and {cmd:r(n_obs)} count
+weighted person-years. The generated flag still marks input rows.
 
 {pstd}
 The result is deterministic: it does not depend on the number of threads,

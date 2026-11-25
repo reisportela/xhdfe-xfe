@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 2.34.2 22nov2026}{...}
+{* *! version 2.35.0 25nov2026}{...}
 {vieweralsosee "[R] areg" "help areg"}{...}
 {vieweralsosee "[R] xtreg" "help xtreg"}{...}
 {vieweralsosee "" "--"}{...}
@@ -144,6 +144,14 @@ or {it:strict-residual}{p_end}
 {synopt :{opt reducedpcg(on|off)}}reduced-system tier for this fit; default: the global, then the environment variable {cmd:XHDFE_REDUCED_PCG}, else on{p_end}
 {synopt :{opt reducedpcgcuda(on|off)}}experimental CUDA variant of the tier for this fit, on CUDA fits only;
 default: the global, then the environment variable {cmd:XHDFE_REDUCED_PCG_CUDA}, else off{p_end}
+{synopt :{opt reducedpcgfine(auto|#)}}finer blocks of the tier's segment pass for this fit, {it:#} from 1 to 8;
+default: the global, then the environment variable {cmd:XHDFE_REDUCED_PCG_APPLY_FINE}, else 1{p_end}
+{synopt :{opt slopesolver(off|schur|network|direct)}}optional reduced solver for {help xhdfe##opt_slopesolver:eligible heterogeneous slopes}{p_end}
+{synopt :{opt slopescores(on|off)}}eligible two-way cluster score reuse for the slope solver{p_end}
+{synopt :{opt slopecsrowner(on|off)}}parallel sparse assembly for the slope solver{p_end}
+{synopt :{opt readpretouch(on|off)}}who touches first the pages of the parallel read: {cmd:on} the calling
+thread, {cmd:off} the readers; default: the global, then the environment variable
+{cmd:XHDFE_PARALLEL_READ_PRETOUCH}, else on{p_end}
 {synopt :{opt sym:metricsweep}}forward + backward sweep per iteration{p_end}
 {synopt :{opt jacobirel:axation(#)}}Jacobi relaxation parameter (0 = default){p_end}
 
@@ -411,15 +419,37 @@ accuracy of the mode (to rounding when both solves stop at the same iteration).
 {cmd:XHDFE_SLOPE_ABSORBED_INPUT_SCALE=0}, read once per process, judges it in its absorbed scale, as every
 other column.
 
+{marker opt_slopesolver}{...}
 {pmore}
-Set {cmd:XHDFE_EXPERIMENT_SLOPE_SCHUR=1} to enable the optional secondreg solver for
-eligible unweighted OLS with two ordinary fixed effects and two slopes on the same
-carrier with an intercept. It applies to automatic absorption and convergence in
-{it:reghdfe-comparable} mode without saved effects. An accepted solve reports method
-code 9 and passes the original slope certificate. Ineligible fits use the standard
-absorber. {cmd:XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1} enables parallel sparse matrix
-assembly. {cmd:XHDFE_EXPERIMENT_NETWORK_SCORES=1} enables eligible two-way cluster
-score reuse when the cluster partitions match the worker and firm effects.
+{cmd:slopesolver(schur)} requests the reduced solver with a diagonal preconditioner
+for eligible unweighted OLS with two ordinary fixed effects and two slope dimensions
+with the same identifiers, at least one with an intercept. {cmd:slopesolver(network)}
+uses a forest preconditioner and {cmd:slopesolver(direct)} selects sparse direct
+factorisation, both CPU only. CUDA requires {cmd:reducedpcgcuda(on)} or its
+equivalent setting. The route requires the reduced-system tier to be on,
+automatic absorption and convergence in {it:reghdfe-comparable} mode,
+and no saved effects or group variable. Turn off the absorption cache,
+FE-structure cache and mobility profile for these fits. An accepted solve reports method code 9 and passes the slope
+certificate. A recoverable decline retains the reason and uses the standard absorber within the remaining iterations.
+
+{pmore}
+The option takes precedence over the global {cmd:XHDFE_SLOPE_SOLVER}. If neither
+requests a mode, each fit checks {cmd:XHDFE_EXPERIMENT_SLOPE_DIRECT=1},
+{cmd:XHDFE_EXPERIMENT_SLOPE_NETWORK=1}, then {cmd:XHDFE_EXPERIMENT_SLOPE_SCHUR=1}.
+The built-in setting is {cmd:off}; an explicit {cmd:slopesolver(off)} disables the
+route and both helpers, including when the global or environment would enable it.
+First-stage auxiliary fits follow the global and environment.
+
+{pmore}
+{cmd:slopescores(on)} requests eligible two-way cluster score reuse when the
+cluster partitions match the ordinary fixed effects. {cmd:slopecsrowner(on)} requests
+parallel sparse assembly. Both default to on for an active mode set by the option
+or global. If only the environment chose the mode, they follow
+{cmd:XHDFE_EXPERIMENT_NETWORK_SCORES=1} and {cmd:XHDFE_EXPERIMENT_NETWORK_CSR_OWNER=1}
+respectively. Specify {cmd:off} in either helper option to disable it for this fit.
+Set {cmd:XHDFE_EXPERIMENT_SLOPE_TRACE=1} in the environment for the optional trace.
+
+{pmore}
 On a CUDA fit this solver opens cuBLAS and cuSPARSE at its first use, from the folders recorded in
 the plugin; loading the plugin does not need them. If they cannot be opened, the fit stops with an
 error and leaves no estimates. The failure is remembered until the Stata session ends, and CPU fits
@@ -989,6 +1019,54 @@ environment variable, off. The auxiliary first-stage regressions of {cmd:first},
 {cmd:estat firststage} follow the global and the environment variable, not the {cmd:reducedpcgcuda()} option of
 the IV command. {helpb xfepout} has no such option.
 
+{marker opt_reducedpcgfine}{...}
+{pmore}
+{opt reducedpcgfine(auto|#)} sets, for this fit, the blocks of the segment pass of the tier's operator, in
+fits where the tier's kernel for that pass runs (builds compiled with GCC, as the Linux plugin; an absorbed
+effect whose rows of the reduced system take at least 2 MiB). {it:#} from 1 to 8 asks for blocks that many
+times finer than those of the tier's other passes; the factor is then halved while the private sums of the
+small effects would take more than 4 MiB, and it is kept only if its extra bytes fit the attempt's memory
+budget (otherwise the attempt runs on the coarse blocks). {cmd:reducedpcgfine(1)} keeps the blocks of
+xhdfe 2.34.2. {cmd:reducedpcgfine(auto)} starts from 8 and halves the factor while the cells of the
+operator's segments per finer block stay below 16 384, then applies the same rules; it depends on the data
+only, never on the number of threads. A factor above 1 changes the last bits of the fits the kernel takes,
+within the precision contract. The sums of the small effects are grouped by block.
+The tier still applies its stopping rule and certificate. The
+partition does not depend on the threads requested; it depends on the processors visible to Stata only
+above 48 of them. When an attempt that took finer blocks declines because an allocation failed, the tier
+repeats it once on the coarse blocks and publishes that second, complete result, and the fit writes no
+absorption-cache entry. Without the option, the Stata global macro {cmd:XHDFE_REDUCED_PCG_APPLY_FINE}
+decides ({cmd:auto} or 1 to 8; {cmd:macro drop XHDFE_REDUCED_PCG_APPLY_FINE} or any other value leaves the
+decision to the process value), then the environment variable {cmd:XHDFE_REDUCED_PCG_APPLY_FINE}, read
+once per Stata session ({cmd:auto} or an integer from 0 to 8, 0 read as 1), then the built-in value, 1.
+The order is therefore: the option, the global, the environment variable, the built-in value. The auxiliary
+first-stage regressions of {cmd:first}, {cmd:ffirst} and {cmd:estat firststage} follow the global and the
+environment variable, not the {cmd:reducedpcgfine()} option of the IV command, as for {cmd:reducedpcg()}.
+{cmd:e(reduced_pcg_fine_request)} and {cmd:e(reduced_pcg_fine_source)} report the request in force and
+where it came from; {cmd:e(reduced_pcg_fine_used)}, {cmd:e(reduced_pcg_fine_parts)} and
+{cmd:e(reduced_pcg_hinted_applies)} what the attempt did ({help xhdfe##results:Stored results}). Read them
+together: the first two say which blocks the attempt chose, not that the kernel ran on them;
+{cmd:e(reduced_pcg_hinted_applies)} counts the applications of the operator that went through the kernel,
+and it is 0 when the chosen blocks were applied in none.
+
+{marker opt_readpretouch}{...}
+{pmore}
+{opt readpretouch(on|off)} chooses, for this fit, who touches first the memory pages that the parallel read
+of the data (Stata 19/StataNow MP on Linux x86-64) writes: {cmd:on} makes the calling thread touch every
+destination page before the parallel pass, as xhdfe 2.34.2 does; {cmd:off} leaves the first access to the
+readers. The estimation results do not depend on this setting.
+Without the option, the Stata global macro {cmd:XHDFE_PARALLEL_READ_PRETOUCH} decides ({cmd:1} on, {cmd:0}
+off; any other value leaves the decision to the process value), then the environment variable
+{cmd:XHDFE_PARALLEL_READ_PRETOUCH}, read once per Stata session ({cmd:1} on, {cmd:0} off), then the
+built-in value, on. The auxiliary first-stage regressions of {cmd:first}, {cmd:ffirst} and
+{cmd:estat firststage} follow the global and the environment variable, not the {cmd:readpretouch()} option of
+the IV command, as for {cmd:reducedpcg()}. {cmd:e(read_pretouch)} and {cmd:e(read_pretouch_source)} report
+the policy the plugin resolved for the fit and its source; they are not a record of which thread touched the
+pages. {cmd:e(read_parallel)} is 1 when the fused parallel read of the estimation variables ran to its end,
+and {cmd:e(read_fallback)} is 1 when that fused read was attempted and fell back to the serial reader; both
+are 0 when it was not attempted ({cmd:e(read_parallel_reason)}, or too few rows), and neither covers the
+selection of the sample or the read of wide identifiers, which have their own paths.
+
 {phang}
 {opt sym:metricsweep} performs a forward + backward sweep per iteration for Gauss-Seidel methods
 and can influence {cmd:absorptionmethod(auto)} selection when multiple FEs are present.
@@ -1117,6 +1195,20 @@ inputs, sample, weights, intercept handling, FE structure and solver contract,
 including backend, requested tolerance, methods and threads. CUDA absorption,
 heterogeneous slopes and combined group/individual fits skip transform-cache
 reuse.
+
+{pmore}
+For fits with saved effects, a matching cache entry restores the saved
+effects in the writer's normalisation, along with its constant and residuals.
+Inference is computed for the current VCE request. Reuse also requires the
+same recovery settings and the same coefficients and OLS residuals before
+recovery. The entry adds eight bytes per observation for the residuals and
+normally twelve bytes per FE level for its index and value, plus metadata.
+
+{pmore}
+Version-6 cache entries record whether the fit captured fixed effects.
+Version-5 entries are still reused where the solver signature or recorded
+CPU refinement proves that the writer did not capture effects. A legacy
+entry with ambiguous provenance is a cache miss.
 
 {phang}
 {opth fescache(filename)} caches only the FE structure and singleton filter.
@@ -1383,6 +1475,32 @@ graphs, and the conjugate-gradient stage that can follow the GPU sweeps{p_end}
 another route's absorption read from the cache), 1 accepted (the tier published this fit, fresh or read back
 from the absorption cache), 2 declined (the route ran from the original data){p_end}
 {synopt:{cmd:e(reduced_pcg_discarded_iterations)}}iterations of a declined tier attempt; 0 otherwise{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_used)}}factor of the blocks of the segment pass that the tier's attempt chose
+({help xhdfe##opt_reducedpcgfine:reducedpcgfine()}): 1 the coarse blocks; 0 when no attempt on the CPU reached
+that choice (the tier not entered, the CUDA variant, an absorption read from the cache){p_end}
+{synopt:{cmd:e(reduced_pcg_fine_parts)}}number of those blocks; 0 as above{p_end}
+{synopt:{cmd:e(reduced_pcg_hinted_applies)}}applications of the tier's operator whose segment pass went through
+the kernel (an attempt can choose finer blocks and apply none: read it with {cmd:e(reduced_pcg_fine_used)}){p_end}
+{synopt:{cmd:e(reduced_pcg_fine_alloc_failed)}}1 when the finer blocks could not be allocated and the attempt
+ran on the coarse blocks; 0 otherwise{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_retry)}}1 when an attempt on finer blocks declined for memory and was repeated
+once on the coarse blocks; 0 otherwise{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_retry_factor)}}factor of the discarded first attempt; 0 without a repetition{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_retry_parts)}}blocks of the discarded first attempt; 0 without a repetition{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_retry_iters)}}iterations of the discarded first attempt; 0 without a
+repetition{p_end}
+{synopt:{cmd:e(reduced_pcg_cache_hit)}}1 when the fit's absorption was read from the absorption cache; 0
+otherwise{p_end}
+{synopt:{cmd:e(slope_solver_discarded_iters)}}iterations spent by a discarded slope solver attempt{p_end}
+{synopt:{cmd:e(slope_solver_scores_used)}}1 if the published covariance consumed the eligible scores{p_end}
+{synopt:{cmd:e(slope_solver_csr_owner_used)}}1 if parallel assembly succeeded, including before a subsequent slope solver decline{p_end}
+{synopt:{cmd:e(read_parallel)}}1 when the fused parallel read of the estimation variables ran to its end; 0
+otherwise (the selection of the sample and the read of wide identifiers are not covered){p_end}
+{synopt:{cmd:e(read_fallback)}}1 when that fused parallel read was attempted and the serial reader took over;
+0 otherwise (it covers the fused read only){p_end}
+{synopt:{cmd:e(read_pretouch)}}first-touch policy the plugin resolved for the parallel reads
+({help xhdfe##opt_readpretouch:readpretouch()}): 1 the calling thread, 0 the readers; the policy, not a record
+of who touched the pages{p_end}
 {synopt:{cmd:e(N_clust)}}minimum number of clusters (if clustered){p_end}
 {synopt:{cmd:e(dkraay_bw)}}effective Driscoll-Kraay bandwidth (lags + 1){p_end}
 {synopt:{cmd:e(dkraay_lags)}}number of Driscoll-Kraay lags; with {cmd:vce(dkraay)}, {cmd:e(N_clust)} counts observed periods{p_end}
@@ -1489,6 +1607,19 @@ ineligibility (e.g. {cmd:weights}, {cmd:iv}, {cmd:gpu}; {cmd:mobility_profile}, 
 {cmd:off} when switched off; {cmd:not_reached} when the fit took a path that never reaches the tier;
 {cmd:cache} when another route's absorption was read from the absorption cache
 (a tier result read back reports {cmd:none}, like the fit that wrote it){p_end}
+{synopt:{cmd:e(slope_solver_request)}}effective slope solver mode for the fit{p_end}
+{synopt:{cmd:e(slope_solver_source)}}source of that mode: {cmd:option}, {cmd:global}, {cmd:environment} or {cmd:builtin}{p_end}
+{synopt:{cmd:e(slope_solver_used)}}published slope solver mode, or {cmd:none}{p_end}
+{synopt:{cmd:e(slope_solver_status)}}{cmd:off}, {cmd:ineligible}, {cmd:declined} or {cmd:accepted}{p_end}
+{synopt:{cmd:e(slope_solver_reason)}}reason for the outcome{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_request)}}finer blocks in force for the fit: {cmd:auto} or a factor from
+{cmd:1} to {cmd:8}{p_end}
+{synopt:{cmd:e(reduced_pcg_fine_source)}}where that request came from: {cmd:option}, {cmd:global},
+{cmd:environment} or {cmd:built-in}{p_end}
+{synopt:{cmd:e(read_pretouch_source)}}where the first-touch policy came from: {cmd:option}, {cmd:global},
+{cmd:environment} or {cmd:built-in}{p_end}
+{synopt:{cmd:e(read_parallel_reason)}}why the parallel read was allowed or not (e.g. {cmd:qualified_host},
+{cmd:host_not_qualified}, {cmd:no_marker}); allowed reads still need enough rows{p_end}
 {synoptline}
 
 {synoptset 24 tabbed}{...}
@@ -1631,7 +1762,7 @@ Selected references for high-dimensional fixed effects and related software incl
 
 {phang}
 Portela, Miguel, and Tiago Tavares. 2026. "{cmd:xhdfe}: High-dimensional fixed effects
-regression via a C++ backend." Version 2.34.2.
+regression via a C++ backend." Version 2.35.0.
 {browse "https://github.com/reisportela/xhdfe-xfe":https://github.com/reisportela/xhdfe-xfe}.{p_end}
 
 {phang}
